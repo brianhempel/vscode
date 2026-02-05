@@ -293,10 +293,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private runFirstItemReceivedMsById: Map<string, number> = new Map(); // When first 'item' message received (frontend)
 	private runFirstRenderMsById: Map<string, number> = new Map();    // When first render completed (frontend)
 
-	// Legacy tracking (kept for backwards compatibility but will be replaced by above)
-	private runStartMsById: Map<string, number> = new Map();
-	private runFirstItemMsById: Map<string, number> = new Map();
-
 
 	constructor(
 		private readonly editor: ICodeEditor,
@@ -852,16 +848,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 						this.runFirstItemReceivedMsById.set(msg.runId, now());
 					}
 
-					// Legacy tracking (kept for backwards compatibility)
-					if (!this.runFirstItemMsById.has(msg.runId)) {
-						const t0 = this.runStartMsById.get(msg.runId);
-						const t1 = now();
-						if (typeof t0 === 'number') {
-							// console.log('SNC timing: first item', { runId: msg.runId, startToFirstItemMs: t1 - t0 });
-						}
-						this.runFirstItemMsById.set(msg.runId, t1);
-					}
-
 					// replace prior items as new ones come in
 					let found = false;
 					this.visualizationItems = this.visualizationItems.map(visItem => {
@@ -907,11 +893,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 					// Comprehensive timing logging
 					this.logVisualizerTiming(msg.runId, msg.timing, tEnd);
 
-					// Legacy timing cleanup
-					this.runStartMsById.delete(msg.runId);
-					this.runFirstItemMsById.delete(msg.runId);
-
-					// New timing cleanup
+					// Timing cleanup
 					this.runTriggerMsById.delete(msg.runId);
 					this.runSpawnTimingById.delete(msg.runId);
 					this.runFirstItemReceivedMsById.delete(msg.runId);
@@ -939,8 +921,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 					this.runSpawnTimingById.delete(msg.runId);
 					this.runFirstItemReceivedMsById.delete(msg.runId);
 					this.runFirstRenderMsById.delete(msg.runId);
-					this.runStartMsById.delete(msg.runId);
-					this.runFirstItemMsById.delete(msg.runId);
 
 					this.currentRunId = null;
 					this.eventsBeingHandledCurrentRun = [];
@@ -965,8 +945,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.currentRunId = runId;
 		const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-		this.runStartMsById.set(runId, nowMs);
-		// Track trigger time for new timing system
+		// Track trigger time for timing measurement
 		this.runTriggerMsById.set(runId, nowMs);
 
 		this.eventsBeingHandledCurrentRun = models_and_events.map(m_e => ({
