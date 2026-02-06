@@ -115,6 +115,12 @@ class DropdownSelect:
 class SearchBoxInput:
     value: str
 
+@dataclass(frozen=True, slots=True)
+class RepetitionInput:
+    dropdown_id: str
+    input_id: str   # 'exact' or 'range-min' or 'range-max'
+    value: str
+
 # attached handlers can be Python code strings that evaluate to functions of type: RawEventJSON -> ModelEvent
 # def mouse_move(i) -> Callable[[dict], MouseMove | MouseDown | MouseUp | KeyDown]:
 #     return lambda _: MouseMove(i)
@@ -142,6 +148,16 @@ FUZZY_PATTERN_OPTIONS = [
     (r"[A-Za-z]", r"[A-Za-z]"),
     (r"[A-Za-z0-9]", r"[A-Za-z0-9]"),
     (r"[\S\s]", r"[\S\s]"),
+]
+
+# Available repetition options for dropdown selection
+# Each tuple is (quantifier_value, display_label)
+# The first 4 are simple click-to-select; {n} and {n,m} use text inputs
+REPETITION_OPTIONS = [
+    ('', '1'),
+    ('?', '?'),
+    ('*', '*'),
+    ('+', '+'),
 ]
 
 # Sentinel characters for regex anchors (ASCII Device Control chars)
@@ -253,6 +269,128 @@ def render_dropdown(
     )
 
 
+def render_repetition_dropdown(
+    dropdown_id: str,
+    is_open: bool,
+    trigger_content: str,
+    trigger_style: str = '',
+    open_dropdown: dict | None = None,
+) -> str:
+    """Render a repetition dropdown with simple options and text input fields.
+
+    The dropdown shows:
+    - Simple click options: 1, ?, *, +
+    - Text input row for {n} (exact count)
+    - Text input row for {n,m} (range)
+
+    Args:
+        dropdown_id: Unique identifier (e.g., 'repetition-0')
+        is_open: Whether the dropdown is currently open
+        trigger_content: HTML content for the trigger element
+        trigger_style: Additional CSS styles for the trigger
+        open_dropdown: The open dropdown model state (has rangeMin/rangeMax values)
+
+    Returns:
+        HTML string for the repetition dropdown
+    """
+    # Trigger element with click handler to toggle
+    trigger_event = repr(DropdownToggle(dropdown_id))
+    trigger_html = (
+        f'<span snc-mouse-down="{html.escape(trigger_event)}" '
+        f'style="cursor: pointer; {trigger_style}">{trigger_content}</span>'
+    )
+
+    if not is_open:
+        return trigger_html
+
+    # Build simple options list (1, ?, *, +)
+    options_html = []
+    for value, label in REPETITION_OPTIONS:
+        select_event = repr(DropdownSelect(dropdown_id, value))
+        option_html = (
+            f'<div snc-mouse-down="{html.escape(select_event)}" '
+            'style="padding: 2px 6px; cursor: pointer; white-space: nowrap;"'
+            f'class="snc-dropdown-option">{html.escape(label)}</div>'
+        )
+        options_html.append(option_html)
+
+    # Text input for {n} (exact count)
+    exact_input_style = (
+        'background: #1e1e1e;'
+        'color: #dcdcaa;'
+        'border: 1px solid #3c3c3c;'
+        'border-radius: 2px;'
+        'padding: 1px 3px;'
+        'font-family: inherit;'
+        'font-size: 11px;'
+        'width: 30px;'
+        'outline: none;'
+    )
+    exact_event = repr(RepetitionInput(dropdown_id, 'exact', ''))
+    exact_input_handler = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', input_id='exact', value=e.get('value', ''))"
+    exact_row = (
+        '<div style="padding: 2px 6px; white-space: nowrap; display: flex; align-items: center; gap: 2px;">'
+        '{'
+        f'<input type="text" spellcheck="false"'
+        f' snc-input="{html.escape(exact_input_handler)}"'
+        f' style="{exact_input_style}"'
+        f' placeholder="n"'
+        f' />'
+        '}'
+        '</div>'
+    )
+    options_html.append(exact_row)
+
+    # Text input for {n,m} (range)
+    range_min_val = (open_dropdown or {}).get('rangeMin', '')
+    range_max_val = (open_dropdown or {}).get('rangeMax', '')
+    range_min_handler = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', input_id='range-min', value=e.get('value', ''))"
+    range_max_handler = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', input_id='range-max', value=e.get('value', ''))"
+    range_row = (
+        '<div style="padding: 2px 6px; white-space: nowrap; display: flex; align-items: center; gap: 2px;">'
+        '{'
+        f'<input type="text" spellcheck="false"'
+        f' snc-input="{html.escape(range_min_handler)}"'
+        f' value="{html.escape(range_min_val)}"'
+        f' style="{exact_input_style}"'
+        f' placeholder="n"'
+        f' />'
+        ','
+        f'<input type="text" spellcheck="false"'
+        f' snc-input="{html.escape(range_max_handler)}"'
+        f' value="{html.escape(range_max_val)}"'
+        f' style="{exact_input_style}"'
+        f' placeholder="m"'
+        f' />'
+        '}'
+        '</div>'
+    )
+    options_html.append(range_row)
+
+    # Dropdown container (absolutely positioned below trigger)
+    dropdown_html = (
+        '<div style="'
+        'position: absolute;'
+        'right: 0;'
+        'top: 100%;'
+        'background: #252526;'
+        'border: 1px solid #3c3c3c;'
+        'border-radius: 3px;'
+        'z-index: 100;'
+        'min-width: 80px;'
+        'box-shadow: 0 2px 8px rgba(0,0,0,0.4);'
+        'font-size: 11px;'
+        'line-height: 1.4;'
+        f'">{"".join(options_html)}</div>'
+    )
+
+    # Wrap trigger and dropdown in a relative container
+    return (
+        f'<span style="position: relative; display: inline-block;">'
+        f'{trigger_html}{dropdown_html}</span>'
+    )
+
+
 def char_span(string, index, is_special, highlight=None, model=None):
     """Render a character span with optional selection highlighting.
 
@@ -328,6 +466,44 @@ def char_span(string, index, is_special, highlight=None, model=None):
             trigger_style=trigger_style,
         )
 
+    def repetition_dropdown_html(rep_str: str, segment_index: int, seg_type: str, color: str) -> str:
+        """Generate a clickable dropdown for repetition/quantifier selection.
+
+        Args:
+            rep_str: Current repetition display string (e.g., '*', '+', '1')
+            segment_index: Index of this segment (for dropdown ID)
+            seg_type: 'literal' or 'fuzzy' - affects vertical positioning
+            color: The color for the trigger text
+        """
+        dropdown_id = f'repetition-{segment_index}'
+        open_dropdown = model.get('openDropdown') if model else None
+        is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
+
+        # Style for the trigger (positioned like overlay_html on the right, but clickable)
+        v_align = 'text-top' if seg_type == 'literal' else 'baseline'
+        top = -7 if seg_type == 'literal' else 3
+
+        trigger_style = (
+            'position: absolute;'
+            'right: 0px;'
+            f'top: {top}px;'
+            'font-size: 5px;'
+            'font-style: normal;'
+            'font-weight: bold;'
+            'padding: 0;'
+            f'color: {color};'
+            'z-index: 10;'
+            'line-height: 6px;'
+        )
+
+        return render_repetition_dropdown(
+            dropdown_id=dropdown_id,
+            is_open=is_open,
+            trigger_content=html.escape(rep_str),
+            trigger_style=trigger_style,
+            open_dropdown=open_dropdown,
+        )
+
     styles = f'color: {GRAY if is_special else STRING}; padding-right: 1px;'
     pat_html = ''
     repetition_html = ''
@@ -360,7 +536,8 @@ def char_span(string, index, is_special, highlight=None, model=None):
                 rep_str = f'≥{min_count}'
             else:
                 rep_str = f'{min_count}-{max_count}'
-            repetition_html = overlay_html(rep_str, 'right', seg_type, color)
+            v_align = 'text-top' if seg_type == 'literal' else 'baseline'
+            repetition_html = f'<span style="position: relative; display: inline-block; vertical-align: {v_align}">{repetition_dropdown_html(rep_str, segment_index, seg_type, color)}</span>'
 
     return f'{pat_html}<span data-snc-idx="{index}" snc-mouse-move="{html.escape(repr(MouseMove(index)))}" snc-mouse-down="{html.escape(repr(MouseDown(index)))}" snc-mouse-up="{html.escape(repr(MouseUp(index)))}" style="{styles}">{html.escape(string)}</span>{repetition_html}'
 
@@ -765,6 +942,52 @@ def replace_segment_pattern(selection_regex: str, segment_index: int, new_char_c
         _, quantifier = extract_quantifier(old_content)
         # Build new segment with new char class + old quantifier
         segments[segment_index] = f"({new_char_class}{quantifier})"
+
+    return f"/{''.join(segments)}/"
+
+
+def replace_segment_repetition(selection_regex: str, segment_index: int, new_quantifier: str) -> str:
+    """
+    Replace the repetition/quantifier of a specific capturing group, preserving its character class.
+
+    Used when selecting a different repetition option from the dropdown.
+
+    Args:
+        selection_regex: Current regex with / delimiters, e.g., "/(hello)(.*)(world)/"
+        segment_index: 0-based index of the segment to replace
+        new_quantifier: The new quantifier (e.g., "", "?", "*", "+", "{3}", "{2,5}")
+                        Note: This should NOT include the character class.
+
+    Returns:
+        New regex pattern with the segment's quantifier replaced,
+        but its character class preserved.
+    """
+    inner_pattern = selection_regex[1:-1]
+
+    # Parse the existing segments (find top-level groups)
+    segments = []
+    depth = 0
+    current_start = 0
+
+    for i, char in enumerate(inner_pattern):
+        if char == '(' and (i == 0 or inner_pattern[i-1] != '\\'):
+            if depth == 0:
+                current_start = i
+            depth += 1
+        elif char == ')' and (i == 0 or inner_pattern[i-1] != '\\'):
+            depth -= 1
+            if depth == 0:
+                segments.append(inner_pattern[current_start:i+1])
+
+    # Replace the specified segment's quantifier, preserving its character class
+    if 0 <= segment_index < len(segments):
+        old_segment = segments[segment_index]
+        # Extract content inside parentheses
+        old_content = old_segment[1:-1]  # Strip ( and )
+        # Extract the character class (base) from the old pattern
+        base, _ = extract_quantifier(old_content)
+        # Build new segment with old char class + new quantifier
+        segments[segment_index] = f"({base}{new_quantifier})"
 
     return f"/{''.join(segments)}/"
 
@@ -1936,8 +2159,8 @@ def update(event, source_code: str, source_line: int, model: dict, value: str) -
                 segment_index = int(parts[-1]) if parts[-1].isdigit() else 0
                 model['openDropdown'] = {'id': did, 'segmentIndex': segment_index}
 
-        case DropdownSelect(dropdown_id=did, option_value=pattern):
-            # Select a pattern from the dropdown
+        case DropdownSelect(dropdown_id=did, option_value=option_val):
+            # Select an option from a dropdown (fuzzy pattern or repetition)
             open_dropdown = model.get('openDropdown')
             if open_dropdown and open_dropdown.get('id') == did:
                 segment_index = open_dropdown.get('segmentIndex', 0)
@@ -1946,10 +2169,80 @@ def update(event, source_code: str, source_line: int, model: dict, value: str) -
                     # Save to undo history
                     model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
                     model['redoHistory'] = []
-                    # Replace the segment pattern
-                    model['selectionRegex'] = replace_segment_pattern(current_regex, segment_index, pattern)
+                    if did.startswith('repetition-'):
+                        # Replace the segment's repetition/quantifier
+                        model['selectionRegex'] = replace_segment_repetition(current_regex, segment_index, option_val)
+                    else:
+                        # Replace the segment's character class pattern
+                        model['selectionRegex'] = replace_segment_pattern(current_regex, segment_index, option_val)
             # Close the dropdown
             model['openDropdown'] = None
+
+        case RepetitionInput(dropdown_id=did, input_id=input_id, value=input_val):
+            # Handle text input in repetition dropdown ({n} or {n,m} fields)
+            open_dropdown = model.get('openDropdown')
+            if open_dropdown and open_dropdown.get('id') == did:
+                segment_index = open_dropdown.get('segmentIndex', 0)
+                current_regex = model.get('selectionRegex')
+
+                if input_id == 'exact':
+                    # {n} exact count
+                    if input_val == '':
+                        # Empty = no quantifier (exactly 1)
+                        new_quantifier = ''
+                    elif input_val.isdigit():
+                        new_quantifier = f'{{{input_val}}}'
+                    else:
+                        # Non-numeric: ignore
+                        return (model, commands)
+
+                    if current_regex:
+                        new_regex = replace_segment_repetition(current_regex, segment_index, new_quantifier)
+                        if new_regex != current_regex:
+                            model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
+                            model['redoHistory'] = []
+                            model['selectionRegex'] = new_regex
+                    # Keep dropdown open (don't close)
+
+                elif input_id in ('range-min', 'range-max'):
+                    # {n,m} range
+                    # Store the input value in the dropdown model state
+                    if input_id == 'range-min':
+                        open_dropdown['rangeMin'] = input_val
+                    else:
+                        open_dropdown['rangeMax'] = input_val
+
+                    range_min = open_dropdown.get('rangeMin', '')
+                    range_max = open_dropdown.get('rangeMax', '')
+
+                    # Validate: at least one must be a non-empty numeric value,
+                    # and non-empty values must be numeric
+                    if range_min and not range_min.isdigit():
+                        return (model, commands)
+                    if range_max and not range_max.isdigit():
+                        return (model, commands)
+
+                    if not range_min and not range_max:
+                        # Both empty = no quantifier (exactly 1)
+                        new_quantifier = ''
+                    elif range_min and not range_max:
+                        # Min only: {n,}
+                        new_quantifier = f'{{{range_min},}}'
+                    elif not range_min and range_max:
+                        # Max only: {0,m}
+                        new_quantifier = f'{{0,{range_max}}}'
+                    else:
+                        # Both: {n,m}
+                        new_quantifier = f'{{{range_min},{range_max}}}'
+
+                    if current_regex:
+                        new_regex = replace_segment_repetition(current_regex, segment_index, new_quantifier)
+                        if new_regex != current_regex:
+                            model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
+                            model['redoHistory'] = []
+                            model['selectionRegex'] = new_regex
+                    # Keep dropdown open (don't close)
+                    model['openDropdown'] = open_dropdown
 
         case SearchBoxInput(value=val):
             # Update selectionRegex directly from search box input.
