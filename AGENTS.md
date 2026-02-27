@@ -19,7 +19,7 @@ If the change is visual and does not require mouse clicks or keyboard input to t
 ### Prerequisites
 
 - **Node.js 20.19.0** (specified in `.nvmrc`). Use `nvm use` in the workspace root.
-- **Python 3** must be on `PATH` for the Sculpt-n-Code visualizers.
+- **Python 3** must be on `PATH` for the Sculpt-n-Code visualizers. The SNC backend spawns `python` (not `python3`), so `python` must resolve to Python 3 (e.g. `sudo ln -s /usr/bin/python3 /usr/bin/python`).
 - **System package `libkrb5-dev`** is required for native `kerberos` module compilation during `npm install`.
 
 ### Key commands
