@@ -159,10 +159,10 @@ def _collect_fields_from_samples(lst, get_visualizer, require_all=False):
             if require_all:
                 return None
             continue
-        for f in fields:
-            if f not in seen:
-                seen.add(f)
-                columns.append(f)
+        for field in fields:
+            if field not in seen:
+                seen.add(field)
+                columns.append(field)
 
     return columns
 
