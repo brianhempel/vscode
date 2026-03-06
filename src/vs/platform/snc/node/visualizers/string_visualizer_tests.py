@@ -8038,6 +8038,850 @@ class TestLenIndicator(unittest.TestCase):
         self.assertIn('draggable="true"', html_output)
         self.assertIn('snc-py-exp="len(x)"', html_output)
 
+# =============================================================================
+# DSL Grammar Tests via Action Rule
+# =============================================================================
+
+class _ActionTestBase(unittest.TestCase):
+    """Base class for all DSL Action grammar tests."""
+
+    def setUp(self):
+        from string_visualizer_grammar import STRING_VIZ_GRAMMAR, generate_action, parse_generated_code
+        from bidirectional_dsl import generate, parse
+        self.grammar = STRING_VIZ_GRAMMAR
+        self.raw_generate = generate
+        self.raw_parse = parse
+        self.generate_action = generate_action
+        self.parse_generated_code = parse_generated_code
+
+    def _gen(self, action, ctx):
+        gen_ctx = {k: v for k, v in ctx.items() if v is not None}
+        gen_ctx['action'] = action
+        gen_ctx.setdefault('has_replace', bool(ctx.get('replace_expr')))
+        if ctx.get('is_slice'):
+            gen_ctx['has_slice_start'] = bool(ctx.get('slice_start'))
+            gen_ctx['has_slice_stop'] = bool(ctx.get('slice_stop'))
+        return self.raw_generate(self.grammar, self.grammar['Action'], gen_ctx)
+
+    # Context keys that the grammar encodes in generated code and should
+    # survive a parse roundtrip (metadata like var_name, suggest_base are not
+    # encoded in the output and are correctly absent from parsed results).
+    _GRAMMAR_KEYS = frozenset({
+        'action', 'is_expr', 'is_ci', 'is_first', 'is_index', 'is_slice',
+        'has_replace', 'regex_pattern', 'var_to_search', 'expr',
+        'replace_expr', 'index_expr', 'slice_start', 'slice_stop',
+        'has_slice_start', 'has_slice_stop',
+    })
+
+    def _roundtrip(self, action, ctx):
+        result = self._gen(action, ctx)
+        self.assertIsNotNone(result, f"Generation failed for {action}")
+        code = result[0]
+        parsed = self.raw_parse(self.grammar, self.grammar['Action'], code)
+        self.assertIsNotNone(parsed, f"Failed to parse: {code}")
+        self.assertEqual(parsed.get('action'), action,
+                         f"Parsed action {parsed.get('action')!r} != {action!r} for: {code}")
+        gen_ctx = {k: v for k, v in ctx.items() if v is not None}
+        gen_ctx['action'] = action
+        gen_ctx.setdefault('has_replace', bool(ctx.get('replace_expr')))
+        for key in self._GRAMMAR_KEYS:
+            if key not in gen_ctx:
+                continue
+            expected = gen_ctx[key]
+            actual = parsed.get(key)
+            # False/None in input is equivalent to absent in parsed output
+            # (the DSL only sets keys when rules that gate on them match)
+            if expected is False and actual is None:
+                continue
+            if key in parsed:
+                self.assertEqual(actual, expected,
+                                 f"Parsed {key}={actual!r} != {expected!r} for: {code}")
+        regen = self._gen(action, parsed)
+        self.assertIsNotNone(regen, f"Regeneration failed from parsed context")
+        self.assertEqual(regen[0], code, f"Roundtrip mismatch")
+
+    def _parse_action(self, code):
+        return self.raw_parse(self.grammar, self.grammar['Action'], code)
+
+
+class TestDSLGetTransformNonReplace(_ActionTestBase):
+    """Test get_transform action in non-replace mode (Get variants) via Action rule."""
+
+    ACTION = 'get_transform'
+
+    def _g(self, ctx):
+        return self._gen(self.ACTION, {**ctx, 'has_replace': False})
+
+    def test_get_list_regex(self):
+        ctx = {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        }
+        result = self._g(ctx)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "list(re.finditer(r'hello', x, flags=re.M))")
+
+    def test_get_list_regex_ci(self):
+        result = self._g({
+            'is_expr': False, 'is_first': False, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "list(re.finditer(r'hello', x, flags=re.M|re.I))")
+
+    def test_get_first_regex(self):
+        result = self._g({
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.search(r'hello', x, flags=re.M)")
+
+    def test_get_list_expr(self):
+        result = self._g({
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "list(re.finditer(re.escape('hello'), x))")
+
+    def test_get_first_expr_ci(self):
+        result = self._g({
+            'is_expr': True, 'is_first': True, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.search(re.escape('hello'), x, flags=re.I)")
+
+    def test_get_index(self):
+        result = self._g({'is_index': True, 'is_slice': False, 'index_expr': '5', 'var_to_search': 'x'})
+        self.assertEqual(result[0], "x[5]")
+
+    def test_get_slice(self):
+        result = self._g({'is_index': False, 'is_slice': True, 'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x'})
+        self.assertEqual(result[0], "x[5:10]")
+
+    def test_roundtrip_get_list_regex(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_get_first_expr(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_get_index(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': True, 'is_slice': False, 'has_replace': False,
+            'index_expr': '5', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_get_slice(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': False, 'is_slice': True, 'has_replace': False,
+            'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
+        })
+
+    def test_parse_known_get_list_regex(self):
+        parsed = self._parse_action("list(re.finditer(r'hello', x, flags=re.M))")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertEqual(parsed['regex_pattern'], 'hello')
+        self.assertFalse(parsed.get('has_replace', False))
+
+    def test_parse_known_get_first_regex(self):
+        parsed = self._parse_action("re.search(r'hello', x, flags=re.M)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertTrue(parsed.get('is_first'))
+
+    def test_parse_known_index(self):
+        parsed = self._parse_action("x[5]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertTrue(parsed.get('is_index'))
+
+    def test_parse_known_slice(self):
+        parsed = self._parse_action("x[5:10]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertTrue(parsed.get('is_slice'))
+
+
+class TestDSLGetTransformReplace(_ActionTestBase):
+    """Test get_transform action in replace mode (Transform variants) via Action rule."""
+
+    ACTION = 'get_transform'
+
+    def _g(self, ctx):
+        return self._gen(self.ACTION, {**ctx, 'has_replace': True})
+
+    def test_transform_list_regex(self):
+        result = self._g({
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().upper()",
+        })
+        self.assertEqual(result[0], "[_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)]")
+
+    def test_transform_first_regex(self):
+        result = self._g({
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().upper()",
+        })
+        self.assertEqual(result[0], "next((_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)), None)")
+
+    def test_transform_list_expr(self):
+        result = self._g({
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "['world' for _mtch in re.finditer(re.escape('hello'), x)]")
+
+    def test_transform_index(self):
+        result = self._g({
+            'is_index': True, 'is_slice': False,
+            'index_expr': '5', 'var_to_search': 'x',
+            'replace_expr': "_mtch.upper()",
+        })
+        self.assertEqual(result[0], "(lambda _mtch: _mtch.upper())(x[5])")
+
+    def test_transform_slice(self):
+        result = self._g({
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
+            'replace_expr': "_mtch.upper()",
+        })
+        self.assertEqual(result[0], "(lambda _mtch: _mtch.upper())(x[5:10])")
+
+    def test_roundtrip_transform_list_regex(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+            'replace_expr': "int(_mtch.group())",
+        })
+
+    def test_roundtrip_transform_first_expr_ci(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': True, 'is_ci': True,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+
+    def test_roundtrip_transform_index(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': True, 'is_slice': False, 'has_replace': True,
+            'index_expr': '5', 'var_to_search': 'x',
+            'replace_expr': "_mtch.upper()",
+        })
+
+    def test_parse_known_transform_list(self):
+        parsed = self._parse_action("[_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertTrue(parsed.get('has_replace'))
+
+    def test_no_replace_expr_falls_to_get(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "list(re.finditer(r'hello', x, flags=re.M))")
+
+
+class TestDSLDeleteAction(_ActionTestBase):
+    """Test delete action via Action rule."""
+
+    ACTION = 'delete'
+
+    def _g(self, ctx):
+        return self._gen(self.ACTION, ctx)
+
+    def test_delete_regex_all(self):
+        result = self._g({
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.sub(r'hello', '', x, flags=re.M)")
+
+    def test_delete_regex_first(self):
+        result = self._g({
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.sub(r'hello', '', x, count=1, flags=re.M)")
+
+    def test_delete_expr_all(self):
+        result = self._g({
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "x.replace('hello', '')")
+
+    def test_delete_expr_first(self):
+        result = self._g({
+            'is_expr': True, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "x.replace('hello', '', 1)")
+
+    def test_delete_index(self):
+        result = self._g({'is_index': True, 'is_slice': False, 'index_expr': '5', 'var_to_search': 'x'})
+        self.assertEqual(result[0], "x[:5] + x[5 + 1:]")
+
+    def test_delete_slice_both(self):
+        result = self._g({
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "x[:5] + x[10:]")
+
+    def test_delete_slice_empty_start(self):
+        result = self._g({
+            'is_index': False, 'is_slice': True,
+            'slice_start': '', 'slice_stop': '10', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "'' + x[10:]")
+
+    def test_delete_slice_empty_stop(self):
+        result = self._g({
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "x[:5] + ''")
+
+    def test_roundtrip_delete_regex(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+        })
+
+    def test_roundtrip_delete_expr_ci(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_delete_index(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': True, 'is_slice': False,
+            'index_expr': '5', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_delete_slice(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_delete_slice_empty_start(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': False, 'is_slice': True,
+            'slice_start': '', 'slice_stop': '10', 'var_to_search': 'x',
+        })
+
+    def test_parse_known_delete_regex(self):
+        parsed = self._parse_action("re.sub(r'hello', '', x, flags=re.M)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'delete')
+
+    def test_parse_known_delete_expr(self):
+        parsed = self._parse_action("x.replace('hello', '')")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'delete')
+
+    def test_parse_known_delete_slice(self):
+        parsed = self._parse_action("x[:5] + x[10:]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'delete')
+        self.assertTrue(parsed.get('is_slice'))
+
+
+class TestDSLLoopAction(_ActionTestBase):
+    """Test loop action via Action rule."""
+
+    ACTION = 'loop'
+
+    def test_loop_non_replace(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "for _i, _mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+
+    def test_loop_replace(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().upper()",
+        })
+        self.assertEqual(result[0], "for _i, _val in enumerate(_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)):\n    pass")
+
+    def test_roundtrip_loop_non_replace(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+        })
+
+    def test_roundtrip_loop_replace(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+
+    def test_parse_known_loop(self):
+        parsed = self._parse_action("for _i, _mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'loop')
+
+
+class TestDSLBooleanActions(_ActionTestBase):
+    """Test any, all, if_any, if_all actions via Action rule."""
+
+    def test_any_non_replace(self):
+        result = self._gen('any', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "bool(re.search(r'hello', x, flags=re.M))")
+
+    def test_any_replace(self):
+        result = self._gen('any', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertEqual(result[0], "any(_mtch.group().isdigit() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+
+    def test_all_action(self):
+        result = self._gen('all', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertEqual(result[0], "all(_mtch.group().isdigit() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+
+    def test_if_any_non_replace(self):
+        result = self._gen('if_any', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "if re.search(r'hello', x, flags=re.M):\n    pass")
+
+    def test_if_any_replace(self):
+        result = self._gen('if_any', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertIn("if any(", result[0])
+
+    def test_if_all_action(self):
+        result = self._gen('if_all', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertIn("if all(", result[0])
+
+    def test_roundtrip_any_non_replace(self):
+        self._roundtrip('any', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_any_replace(self):
+        self._roundtrip('any', {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+
+    def test_roundtrip_if_any_non_replace(self):
+        self._roundtrip('if_any', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_all(self):
+        self._roundtrip('all', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+
+    def test_parse_known_any_non_replace(self):
+        parsed = self._parse_action("bool(re.search(r'hello', x, flags=re.M))")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'any')
+
+    def test_parse_known_if_any(self):
+        parsed = self._parse_action("if re.search(r'hello', x, flags=re.M):\n    pass")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'if_any')
+
+    def test_parse_known_all(self):
+        parsed = self._parse_action("all(_mtch.group().isdigit() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'all')
+
+
+class TestDSLCountFilterActions(_ActionTestBase):
+    """Test count and filter actions via Action rule."""
+
+    def test_count_non_replace(self):
+        result = self._gen('count', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "sum(1 for _ in re.finditer(r'hello', x, flags=re.M))")
+
+    def test_count_replace(self):
+        result = self._gen('count', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertEqual(result[0], "sum(1 for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch.group().isdigit())")
+
+    def test_filter_list(self):
+        result = self._gen('filter', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertEqual(result[0], "[_mtch for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch.group().isdigit()]")
+
+    def test_filter_first(self):
+        result = self._gen('filter', {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+        self.assertIn("next(", result[0])
+
+    def test_roundtrip_count_non_replace(self):
+        self._roundtrip('count', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+        })
+
+    def test_roundtrip_count_replace(self):
+        self._roundtrip('count', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+
+    def test_roundtrip_filter(self):
+        self._roundtrip('filter', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "_mtch.group().isdigit()",
+        })
+
+    def test_parse_known_count(self):
+        parsed = self._parse_action("sum(1 for _ in re.finditer(r'hello', x, flags=re.M))")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'count')
+
+    def test_parse_known_filter(self):
+        parsed = self._parse_action("[_mtch for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch.group().isdigit()]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'filter')
+
+
+class TestDSLSplitAction(_ActionTestBase):
+    """Test split action via Action rule."""
+
+    ACTION = 'split'
+
+    def test_split_regex_all(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.split(r'hello', x, flags=re.M)")
+
+    def test_split_regex_first(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.split(r'hello', x, maxsplit=1, flags=re.M)")
+
+    def test_split_expr_all(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "x.split('hello')")
+
+    def test_split_expr_first(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': True, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "x.split('hello', 1)")
+
+    def test_split_expr_ci(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.split(re.escape('hello'), x, flags=re.I)")
+
+    def test_roundtrip_split_regex(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+        })
+
+    def test_roundtrip_split_expr_first(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+
+    def test_parse_known_split_regex(self):
+        parsed = self._parse_action("re.split(r'hello', x, flags=re.M)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'split')
+
+    def test_parse_known_split_expr(self):
+        parsed = self._parse_action("x.split('hello')")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'split')
+
+
+class TestDSLReplaceAction(_ActionTestBase):
+    """Test replace action via Action rule."""
+
+    ACTION = 'replace'
+
+    def test_replace_regex_all(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "re.sub(r'hello', lambda _mtch: 'world', x, flags=re.M)")
+
+    def test_replace_regex_first(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "re.sub(r'hello', lambda _mtch: 'world', x, count=1, flags=re.M)")
+
+    def test_replace_expr_all(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "re.sub(re.escape('hello'), lambda _mtch: 'world', x)")
+
+    def test_replace_index(self):
+        result = self._gen(self.ACTION, {
+            'is_index': True, 'is_slice': False,
+            'index_expr': '5', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "x[:5] + str((lambda _mtch: 'world')(x[5])) + x[5 + 1:]")
+
+    def test_replace_slice_both(self):
+        result = self._gen(self.ACTION, {
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "x[:5] + str((lambda _mtch: 'world')(x[5:10])) + x[10:]")
+
+    def test_replace_slice_empty_start(self):
+        result = self._gen(self.ACTION, {
+            'is_index': False, 'is_slice': True,
+            'slice_start': '', 'slice_stop': '10', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "'' + str((lambda _mtch: 'world')(x[:10])) + x[10:]")
+
+    def test_replace_slice_empty_stop(self):
+        result = self._gen(self.ACTION, {
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+        self.assertEqual(result[0], "x[:5] + str((lambda _mtch: 'world')(x[5:])) + ''")
+
+    def test_roundtrip_replace_regex(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+            'replace_expr': "int(_mtch.group())",
+        })
+
+    def test_roundtrip_replace_expr(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+
+    def test_roundtrip_replace_index(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': True, 'is_slice': False,
+            'index_expr': '5', 'var_to_search': 'x',
+            'replace_expr': "_mtch.upper()",
+        })
+
+    def test_roundtrip_replace_slice(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': False, 'is_slice': True,
+            'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
+            'replace_expr': "'world'",
+        })
+
+    def test_parse_known_replace_regex(self):
+        parsed = self._parse_action("re.sub(r'hello', lambda _mtch: 'world', x, flags=re.M)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'replace')
+
+    def test_parse_known_replace_expr(self):
+        parsed = self._parse_action("re.sub(re.escape('hello'), lambda _mtch: 'world', x)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'replace')
+
+    def test_parse_known_replace_index(self):
+        parsed = self._parse_action("x[:5] + str((lambda _mtch: 'world')(x[5])) + x[5 + 1:]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'replace')
+
+    def test_replace_no_replace_expr_returns_none(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertIsNone(result)
+
+
+class TestDSLGenerateActionWrapper(_ActionTestBase):
+    """Test the generate_action wrapper function."""
+
+    def test_generate_action_get_transform(self):
+        result = self.generate_action('get_transform', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_matches')
+        self.assertEqual(result[1], "list(re.finditer(r'hello', x, flags=re.M))")
+
+    def test_generate_action_get_transform_replace(self):
+        result = self.generate_action('get_transform', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+            'replace_visible': True, 'replace_expr': "'world'",
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_transformed')
+
+    def test_generate_action_delete(self):
+        result = self.generate_action('delete', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x')
+
+    def test_generate_action_loop_returns_none_name(self):
+        result = self.generate_action('loop', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertIsNone(result[0])
+
+    def test_generate_action_split(self):
+        result = self.generate_action('split', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_parts')
+
+    def test_parse_generated_code_recovers_action(self):
+        code = "list(re.finditer(r'hello', x, flags=re.M))"
+        result = self.parse_generated_code(code)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'get_transform')
+
 
 if __name__ == '__main__':
     unittest.main()
