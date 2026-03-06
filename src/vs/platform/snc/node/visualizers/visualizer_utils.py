@@ -2,9 +2,92 @@
 
 import ast
 import html
+import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Tuple
+
+
+# =============================================================================
+# VS Code theme colors (shared across all visualizers)
+# =============================================================================
+
+BLUE = "#569cd6"
+STRING = "#ce9178"
+VALUE = "#b5cea8"
+TYPE = "#4ec9b0"
+GRAY = "#808080"
+GRAY_HALF_ALPHA = "rgba(128,128,128,0.5)"
+ERROR_RED = "#f44747"
+ADD_GREEN = "#89d185"
+INPUT_BG = "#1e1e1e"
+INPUT_BORDER = "#3c3c3c"
+SUGGESTION_BG = "#252526"
+SUGGESTION_HOVER = "#2a2d2e"
+SELECTED_BG = "#094771"
+
+
+# =============================================================================
+# Shared HTML helpers
+# =============================================================================
+
+def safe_repr(value):
+    """HTML-escape repr(value), returning an error span on failure."""
+    try:
+        return html.escape(repr(value))
+    except Exception:
+        return f'<span style="color: {ERROR_RED};">[Error]</span>'
+
+
+def span(text, color):
+    """Wrap text in a colored <span>."""
+    return f'<span style="color: {color};">{text}</span>'
+
+
+# =============================================================================
+# Dotfile persistence (generic JSON key→list storage)
+# =============================================================================
+
+def load_dotfile_list(dotfile_name: str, key: str, transform=None):
+    """Load a list for a key from a JSON dotfile in the cwd.
+
+    Returns the list (optionally transformed), or None if not found.
+    """
+    try:
+        path = os.path.join(os.getcwd(), dotfile_name)
+        with open(path, 'r') as f:
+            data = json.load(f)
+        items = data.get(key)
+        if isinstance(items, list):
+            return [transform(item) for item in items] if transform else items
+        return None
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return None
+
+
+def save_dotfile_list(dotfile_name: str, key: str, items: list):
+    """Save a list for a key to a JSON dotfile in the cwd, preserving other keys."""
+    path = os.path.join(os.getcwd(), dotfile_name)
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = {}
+    data[key] = items
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+# =============================================================================
+# Class identification
+# =============================================================================
+
+def get_full_class_name(obj) -> str:
+    """Return the full module.qualname for an object's class."""
+    return obj.__class__.__module__ + '.' + obj.__class__.__qualname__
 
 
 # =============================================================================

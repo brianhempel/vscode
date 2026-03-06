@@ -25,9 +25,9 @@ from z_object_visualizer import (
     AddFieldClick, FieldInput, FieldSelect, FieldClick, KeyDown,
     RemoveFieldClick, DragStart, DragOver, DragEnd,
     load_fields_from_dotfile, save_fields_to_dotfile,
-    _get_full_class_name, _get_autocomplete_suggestions,
+    _get_autocomplete_suggestions,
 )
-from visualizer_utils import ChildEvent
+from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name
 import z_object_visualizer
 
 
@@ -1142,13 +1142,12 @@ class TestComposition(unittest.TestCase):
     """Test subvisualizer composition in z_object_visualizer."""
 
     def setUp(self):
+        self._orig_cwd = os.getcwd()
         self._tmpdir = tempfile.mkdtemp()
-        self._patcher = patch('z_object_visualizer._dotfile_path',
-                              return_value=os.path.join(self._tmpdir, '.snc_object_fields.json'))
-        self._patcher.start()
+        os.chdir(self._tmpdir)
 
     def tearDown(self):
-        self._patcher.stop()
+        os.chdir(self._orig_cwd)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_init_model_contains_children_dict(self):

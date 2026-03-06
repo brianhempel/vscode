@@ -1,21 +1,7 @@
 """Dictionary visualizer for Sculpt-n-Code."""
 
-import html
+from visualizer_utils import BLUE, STRING, VALUE, GRAY, safe_repr, span
 
-# VS Code theme colors
-BLUE = "#569cd6"
-STRING = "#ce9178"
-VALUE = "#b5cea8"
-GRAY = "#808080"
-
-def safe_repr(value):
-    try:
-        return html.escape(repr(value))
-    except Exception:
-        return '<span style="color: #f44747;">[Error]</span>'
-
-def span(text, color):
-    return f'<span style="color: {color};">{text}</span>'
 
 def truncate_container(items, limit, show_first=3):
     if len(items) <= limit:
