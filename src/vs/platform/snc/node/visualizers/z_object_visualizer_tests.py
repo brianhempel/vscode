@@ -25,7 +25,7 @@ from z_object_visualizer import (
     AddFieldClick, FieldInput, FieldSelect, FieldClick, KeyDown,
     RemoveFieldClick, DragStart, DragOver, DragEnd,
     load_fields_from_dotfile, save_fields_to_dotfile,
-    _get_autocomplete_suggestions,
+    _get_autocomplete_suggestions, _resolve_fields,
 )
 from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name
 import z_object_visualizer
@@ -200,6 +200,31 @@ class TestInitModel(unittest.TestCase):
         self.assertIn('^.x', model['fields'])
         self.assertIn('^.y', model['fields'])
         self.assertIn('^.name', model['fields'])
+
+
+class TestResolveFields(unittest.TestCase):
+    """Test the shared field resolution helper."""
+
+    def test_resolve_fields_prefers_dotfile(self):
+        obj = TestObj()
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['^.name']):
+            self.assertEqual(_resolve_fields(obj), ['^.name'])
+
+    def test_resolve_fields_uses_defaults_when_dotfile_missing(self):
+        import re
+        match = re.search(r'hello', 'hello world')
+        self.assertIsNotNone(match)
+
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+            self.assertEqual(_resolve_fields(match), DEFAULT_FIELDS_FOR_TYPE['re.Match'])
+
+    def test_resolve_fields_falls_back_to_non_trivial_names(self):
+        obj = TestObj()
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+            resolved = _resolve_fields(obj)
+        self.assertIn('^.x', resolved)
+        self.assertIn('^.y', resolved)
+        self.assertIn('^.name', resolved)
 
 
 # =============================================================================
