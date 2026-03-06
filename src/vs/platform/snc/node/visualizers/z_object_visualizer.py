@@ -127,13 +127,7 @@ def can_visualize(value):
 def get_fields(value):
     if value is None or isinstance(value, (int, float)):
         return None
-    full_class_name = _get_full_class_name(value)
-    fields = load_fields_from_dotfile(full_class_name)
-    if fields is None:
-        fields = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
-    if fields is None:
-        fields = _get_non_trivial_names(value)
-    return list(fields)
+    return _resolve_fields(value)
 
 
 # === Dotfile operations ===
@@ -187,6 +181,17 @@ def _get_full_class_name(obj) -> str:
 def _get_non_trivial_names(obj) -> list:
     """Return sorted list of attribute accessors (e.g. '^.x') for non-trivial names."""
     return sorted([f"^.{name}" for name in dir(obj) if name not in TRIVIAL_NAMES])
+
+
+def _resolve_fields(obj) -> list:
+    """Resolve fields using dotfile, defaults, then non-trivial names."""
+    full_class_name = _get_full_class_name(obj)
+    fields = load_fields_from_dotfile(full_class_name)
+    if fields is None:
+        fields = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
+    if fields is None:
+        fields = _get_non_trivial_names(obj)
+    return list(fields)
 
 
 def _get_autocomplete_suggestions(obj, current_fields: list, input_value: str) -> list:
@@ -254,15 +259,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
             "handledKeys": own_keys,
         }
 
-    full_class_name = _get_full_class_name(value)
-
-    fields = load_fields_from_dotfile(full_class_name)
-    if fields is None:
-        fields = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
-    if fields is None:
-        fields = _get_non_trivial_names(value)
-
-    fields = list(fields)
+    fields = _resolve_fields(value)
 
     children = {}
     if get_visualizer is not None:

@@ -152,36 +152,51 @@ def save_columns_to_dotfile(type_key: str, columns: list):
 
 # === Column autocomplete helpers ===
 
-def _get_all_possible_columns(lst, get_visualizer):
-    """Get union of all possible fields from sampled items in the list."""
+def _get_sample_indices(length: int):
+    """Return deterministic edge samples plus a bounded random middle sample."""
+    if length <= 0:
+        return set()
+
+    sample_indices = {0}
+    if length > 1:
+        sample_indices.add(length - 1)
+    if length > 2:
+        middle = list(range(1, length - 1))
+        sample_indices.update(random.sample(middle, min(10, len(middle))))
+    return sample_indices
+
+
+def _collect_sampled_fields(lst, get_visualizer, *, require_all):
+    """Collect ordered unique fields from sampled items, optionally requiring full support."""
     if not lst:
-        return []
+        return None if require_all else []
 
     columns = []
     seen = set()
 
-    sample_indices = set()
-    sample_indices.add(0)
-    if len(lst) > 1:
-        sample_indices.add(len(lst) - 1)
-    if len(lst) > 2:
-        middle = list(range(1, len(lst) - 1))
-        sample_indices.update(random.sample(middle, min(10, len(middle))))
-
-    for idx in sorted(sample_indices):
+    for idx in sorted(_get_sample_indices(len(lst))):
         vis = get_visualizer(lst[idx])
         item_get_fields = getattr(vis, 'get_fields', None)
         if item_get_fields is None:
+            if require_all:
+                return None
             continue
         fields = item_get_fields(lst[idx])
         if fields is None:
+            if require_all:
+                return None
             continue
-        for f in fields:
-            if f not in seen:
-                seen.add(f)
-                columns.append(f)
+        for field in fields:
+            if field not in seen:
+                seen.add(field)
+                columns.append(field)
 
     return columns
+
+
+def _get_all_possible_columns(lst, get_visualizer):
+    """Get union of all possible fields from sampled items in the list."""
+    return _collect_sampled_fields(lst, get_visualizer, require_all=False)
 
 
 def _get_column_suggestions(lst, get_visualizer, current_columns, input_value):
@@ -224,33 +239,7 @@ def get_fields(value):
 
 def _detect_table_columns(lst, get_visualizer):
     """Sample items and return union of fields if all sampled items are tabular, else None."""
-    if len(lst) == 0:
-        return None
-
-    sample_indices = set()
-    sample_indices.add(0)
-    sample_indices.add(len(lst) - 1)
-    if len(lst) > 2:
-        middle = list(range(1, len(lst) - 1))
-        sample_indices.update(random.sample(middle, min(10, len(middle))))
-
-    columns = []
-    seen = set()
-
-    for idx in sorted(sample_indices):
-        vis = get_visualizer(lst[idx])
-        item_get_fields = getattr(vis, 'get_fields', None)
-        if item_get_fields is None:
-            return None
-        fields = item_get_fields(lst[idx])
-        if fields is None:
-            return None
-        for f in fields:
-            if f not in seen:
-                seen.add(f)
-                columns.append(f)
-
-    return columns
+    return _collect_sampled_fields(lst, get_visualizer, require_all=True)
 
 
 _COLUMN_MGMT_DEFAULTS = {

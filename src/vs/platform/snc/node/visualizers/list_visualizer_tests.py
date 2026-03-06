@@ -18,6 +18,7 @@ from list_visualizer import (
     ColumnKeyDown, COLUMN_DOTFILE_NAME,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_item_type_key, _get_column_suggestions, _get_all_possible_columns,
+    _collect_sampled_fields,
 )
 
 
@@ -394,6 +395,54 @@ class TestTableDetection(unittest.TestCase):
         self.assertEqual(model['display_mode'], 'table')
         self.assertIn("0\x00^['name']", model['children'])
         self.assertIn("1\x00^['name']", model['children'])
+
+
+class TestCollectSampledFields(unittest.TestCase):
+    """Test the shared list field sampling helper."""
+
+    def test_collect_sampled_fields_skips_unsupported_items_when_optional(self):
+        class Supported:
+            pass
+
+        class Unsupported:
+            pass
+
+        class SupportedVis:
+            def get_fields(self, value):
+                return ['^.x']
+
+        class UnsupportedVis:
+            pass
+
+        def get_visualizer(value):
+            if isinstance(value, Supported):
+                return SupportedVis()
+            return UnsupportedVis()
+
+        fields = _collect_sampled_fields([Supported(), Unsupported()], get_visualizer, require_all=False)
+        self.assertEqual(fields, ['^.x'])
+
+    def test_collect_sampled_fields_requires_all_items_for_table_detection(self):
+        class Supported:
+            pass
+
+        class Unsupported:
+            pass
+
+        class SupportedVis:
+            def get_fields(self, value):
+                return ['^.x']
+
+        class UnsupportedVis:
+            pass
+
+        def get_visualizer(value):
+            if isinstance(value, Supported):
+                return SupportedVis()
+            return UnsupportedVis()
+
+        fields = _collect_sampled_fields([Supported(), Unsupported()], get_visualizer, require_all=True)
+        self.assertIsNone(fields)
 
 
 class TestTableRendering(unittest.TestCase):
