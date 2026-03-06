@@ -3513,16 +3513,21 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
                 if end > 0:
                     replace_expr_raw = replace_expr_raw[1:end]
             replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+        is_slice = kind == 'slice'
+        slice_start = term[0] if is_slice else None
+        slice_stop = term[1] if is_slice else None
         return {
             'selection_regex': selection_regex,
             'var_to_search': var_to_search,
             'var_name': var_name,
             'suggest_base': suggest_base,
             'is_index': is_idx,
-            'is_slice': kind == 'slice',
+            'is_slice': is_slice,
             'index_expr': index_expr,
-            'slice_start': term[0] if kind == 'slice' else None,
-            'slice_stop': term[1] if kind == 'slice' else None,
+            'slice_start': slice_start,
+            'slice_stop': slice_stop,
+            'has_slice_start': bool(slice_start) if is_slice else False,
+            'has_slice_stop': bool(slice_stop) if is_slice else False,
             'replace_visible': replace_visible,
             'replace_text': replace_text,
             'replace_expr': replace_expr,
@@ -3538,19 +3543,9 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
         else:
             regex_pattern = strip_capturing_groups(term) if term else ""
 
-    if is_expr:
-        flags_str = ', flags=re.I' if ci else ''
-        flags_str_kw = flags_str
-    else:
-        flags_str = 'flags=re.M|re.I' if ci else 'flags=re.M'
-        flags_str_kw = f', {flags_str}'
-
-    count_str = ', count=1' if first else ''
-
     replace_visible = model.get('replace_visible', False)
     replace_text = model.get('replace_text')
     replace_expr = None
-    lambda_str = None
     if replace_visible and replace_text:
         replace_expr_raw = replace_text
         if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
@@ -3558,7 +3553,6 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
             if end > 0:
                 replace_expr_raw = replace_expr_raw[1:end]
         replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
-        lambda_str = f'lambda _mtch: {replace_expr}'
 
     return {
         'selection_regex': selection_regex,
@@ -3572,268 +3566,13 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
         'is_slice': False,
         'expr': term if is_expr else None,
         'regex_pattern': regex_pattern,
-        'flags_str': flags_str,
-        'flags_str_kw': flags_str_kw,
-        'count_str': count_str,
         'replace_visible': replace_visible,
         'replace_text': replace_text,
         'replace_expr': replace_expr,
-        'lambda_str': lambda_str,
     }
 
 
-def _finditer_expr(ctx: dict) -> str:
-    """Build the re.finditer(...) call expression string."""
-    if ctx['is_expr']:
-        return f"re.finditer(re.escape({ctx['expr']}), {ctx['var_to_search']}{ctx['flags_str_kw']})"
-    else:
-        return f"re.finditer(r'{ctx['regex_pattern']}', {ctx['var_to_search']}, {ctx['flags_str']})"
-
-
-def _search_expr(ctx: dict) -> str:
-    """Build the re.search(...) call expression string."""
-    if ctx['is_expr']:
-        return f"re.search(re.escape({ctx['expr']}), {ctx['var_to_search']}{ctx['flags_str_kw']})"
-    else:
-        return f"re.search(r'{ctx['regex_pattern']}', {ctx['var_to_search']}, {ctx['flags_str']})"
-
-
-def _build_get_expr(ctx: dict) -> tuple | None:
-    """Build Get expression: list of matches (non-replace Enter behavior).
-
-    Returns (suggest_name, expr_str) or None.
-    """
-    if ctx.get('is_index'):
-        suggest_name = ctx['suggest_base'] if ctx['var_name'] else "result"
-        return (suggest_name, f"{ctx['var_to_search']}[{ctx['index_expr']}]")
-    if ctx.get('is_slice'):
-        suggest_name = ctx['suggest_base'] if ctx['var_name'] else "result"
-        return (suggest_name, f"{ctx['var_to_search']}[{ctx['slice_start']}:{ctx['slice_stop']}]")
-    if ctx['is_first']:
-        suggest_name = f"{ctx['suggest_base']}_match" if ctx['var_name'] else "result_match"
-        return (suggest_name, _search_expr(ctx))
-    else:
-        suggest_name = f"{ctx['suggest_base']}_matches" if ctx['var_name'] else "result_matches"
-        return (suggest_name, f"list({_finditer_expr(ctx)})")
-
-
-def _build_transform_expr(ctx: dict) -> tuple | None:
-    """Build Transform expression: list comprehension mapping replace expr over matches.
-
-    Returns (suggest_name, expr_str) or None if no replace expression.
-    """
-    if not ctx.get('replace_expr'):
-        return None
-    suggest_name = f"{ctx['suggest_base']}_transformed" if ctx['var_name'] else "result_transformed"
-    if ctx.get('is_index'):
-        v = ctx['var_to_search']
-        i = ctx['index_expr']
-        return (suggest_name, f"(lambda _mtch: {ctx['replace_expr']})({v}[{i}])")
-    if ctx.get('is_slice'):
-        v = ctx['var_to_search']
-        start = ctx['slice_start']
-        stop = ctx['slice_stop']
-        return (suggest_name, f"(lambda _mtch: {ctx['replace_expr']})({v}[{start}:{stop}])")
-    if ctx['is_first']:
-        return (suggest_name, f"next(({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)}), None)")
-    else:
-        return (suggest_name, f"[{ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)}]")
-
-
-def _build_get_or_transform_expr(ctx: dict) -> tuple | None:
-    """Build Get when not in replace mode, Transform when in replace mode."""
-    if ctx.get('is_index') or ctx.get('is_slice'):
-        if ctx.get('replace_visible') and ctx.get('replace_expr'):
-            return _build_transform_expr(ctx)
-        return _build_get_expr(ctx)
-    if ctx['replace_visible'] and ctx['replace_expr']:
-        return _build_transform_expr(ctx)
-    else:
-        return _build_get_expr(ctx)
-
-
-def _build_replace_expr(ctx: dict) -> tuple | None:
-    """Build Replace expression: re.sub with lambda.
-
-    Returns (suggest_name, expr_str) or None if not in replace mode.
-    """
-    if ctx.get('is_index') or ctx.get('is_slice'):
-        if not ctx.get('replace_visible') or not ctx.get('replace_expr'):
-            return None
-        suggest_name = ctx['suggest_base'] if ctx['var_name'] else "result"
-        v = ctx['var_to_search']
-        repl = f"(lambda _mtch: {ctx['replace_expr']})"
-        if ctx.get('is_index'):
-            i = ctx['index_expr']
-            return (suggest_name, f"{v}[:{i}] + str({repl}({v}[{i}])) + {v}[{i} + 1:]")
-        else:
-            start = ctx['slice_start']
-            stop = ctx['slice_stop']
-            left = f"{v}[:{start}]" if start else "''"
-            right = f"{v}[{stop}:]" if stop else "''"
-            return (suggest_name, f"{left} + str({repl}({v}[{start}:{stop}])) + {right}")
-
-    if not ctx['replace_visible'] or not ctx.get('lambda_str'):
-        return None
-    suggest_name = ctx['suggest_base'] if ctx['var_name'] else "result"
-    if ctx['is_expr']:
-        return (suggest_name, f"re.sub(re.escape({ctx['expr']}), {ctx['lambda_str']}, {ctx['var_to_search']}{ctx['count_str']}{ctx['flags_str_kw']})")
-    else:
-        return (suggest_name, f"re.sub(r'{ctx['regex_pattern']}', {ctx['lambda_str']}, {ctx['var_to_search']}{ctx['count_str']}, {ctx['flags_str']})")
-
-
-def _build_delete_expr(ctx: dict) -> tuple | None:
-    """Build Delete expression: remove matches.
-
-    Returns (suggest_name, expr_str).
-    """
-    suggest_name = ctx['suggest_base'] if ctx['var_name'] else "result"
-    if ctx.get('is_index'):
-        v = ctx['var_to_search']
-        i = ctx['index_expr']
-        return (suggest_name, f"{v}[:{i}] + {v}[{i} + 1:]")
-    if ctx.get('is_slice'):
-        v = ctx['var_to_search']
-        start = ctx['slice_start']
-        stop = ctx['slice_stop']
-        left = f"{v}[:{start}]" if start else "''"
-        right = f"{v}[{stop}:]" if stop else "''"
-        return (suggest_name, f"{left} + {right}")
-    if ctx['is_expr']:
-        expr = ctx['expr']
-        if ctx['is_ci']:
-            return (suggest_name, f"re.sub(re.escape({expr}), '', {ctx['var_to_search']}{ctx['count_str']}{ctx['flags_str_kw']})")
-        else:
-            if ctx['is_first']:
-                return (suggest_name, f"{ctx['var_to_search']}.replace({expr}, '', 1)")
-            else:
-                return (suggest_name, f"{ctx['var_to_search']}.replace({expr}, '')")
-    else:
-        if ctx['is_first']:
-            return (suggest_name, f"re.sub(r'{ctx['regex_pattern']}', '', {ctx['var_to_search']}, count=1, {ctx['flags_str']})")
-        else:
-            return (suggest_name, f"re.sub(r'{ctx['regex_pattern']}', '', {ctx['var_to_search']}, {ctx['flags_str']})")
-
-
-def _build_loop_code(ctx: dict) -> tuple | None:
-    """Build for loop code with enumerate.
-
-    Returns (None, code_str) — suggest_name is None for multiline statements.
-    """
-    if ctx['replace_visible'] and ctx['replace_expr']:
-        gen_expr = f"{ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)}"
-        return (None, f"for _i, _val in enumerate({gen_expr}):\n    pass")
-    else:
-        return (None, f"for _i, _mtch in enumerate({_finditer_expr(ctx)}):\n    pass")
-
-
-def _build_any_expr(ctx: dict) -> tuple | None:
-    """Build Any boolean expression.
-
-    Non-replace: bool(re.search(...))
-    Replace: any(EXPR for _mtch in ...)
-    """
-    suggest_name = f"{ctx['suggest_base']}_any" if ctx['var_name'] else "result_any"
-    if ctx['replace_visible'] and ctx['replace_expr']:
-        return (suggest_name, f"any({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)})")
-    else:
-        return (suggest_name, f"bool({_search_expr(ctx)})")
-
-
-def _build_all_expr(ctx: dict) -> tuple | None:
-    """Build All boolean expression (replace mode only).
-
-    Returns None when not in replace mode.
-    """
-    if not ctx['replace_visible'] or not ctx['replace_expr']:
-        return None
-    suggest_name = f"{ctx['suggest_base']}_all" if ctx['var_name'] else "result_all"
-    return (suggest_name, f"all({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)})")
-
-
-def _build_if_any_code(ctx: dict) -> tuple | None:
-    """Build if-any statement code.
-
-    Returns (None, "if EXPR:\\n    pass") for code insertion,
-    or for copy: returns the boolean expression part.
-    """
-    if ctx['replace_visible'] and ctx['replace_expr']:
-        bool_expr = f"any({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)})"
-    else:
-        bool_expr = _search_expr(ctx)
-    return (None, f"if {bool_expr}:\n    pass")
-
-
-def _build_if_all_code(ctx: dict) -> tuple | None:
-    """Build if-all statement code (replace mode only).
-
-    Returns None when not in replace mode.
-    """
-    if not ctx['replace_visible'] or not ctx['replace_expr']:
-        return None
-    bool_expr = f"all({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)})"
-    return (None, f"if {bool_expr}:\n    pass")
-
-
-def _build_count_expr(ctx: dict) -> tuple | None:
-    """Build Count expression.
-
-    Non-replace: sum(1 for _ in re.finditer(...))
-    Replace: sum(1 for _mtch in re.finditer(...) if EXPR)
-    """
-    suggest_name = f"{ctx['suggest_base']}_count" if ctx['var_name'] else "result_count"
-    if ctx['replace_visible'] and ctx['replace_expr']:
-        return (suggest_name, f"sum(1 for _mtch in {_finditer_expr(ctx)} if {ctx['replace_expr']})")
-    else:
-        return (suggest_name, f"sum(1 for _ in {_finditer_expr(ctx)})")
-
-
-def _build_filter_expr(ctx: dict) -> tuple | None:
-    """Build Filter expression: matches filtered by replace predicate.
-
-    Returns (suggest_name, expr_str) or None if not in replace mode.
-    """
-    if not ctx['replace_visible'] or not ctx['replace_expr']:
-        return None
-    suggest_name = f"{ctx['suggest_base']}_filtered" if ctx['var_name'] else "result_filtered"
-    if ctx['is_first']:
-        return (suggest_name, f"next((_mtch for _mtch in {_finditer_expr(ctx)} if {ctx['replace_expr']}), None)")
-    else:
-        return (suggest_name, f"[_mtch for _mtch in {_finditer_expr(ctx)} if {ctx['replace_expr']}]")
-
-
-def _build_split_expr(ctx: dict) -> tuple | None:
-    """Build Split expression: re.split or str.split.
-
-    Returns (suggest_name, expr_str).
-    """
-    suggest_name = f"{ctx['suggest_base']}_parts" if ctx['var_name'] else "result_parts"
-    maxsplit_str = ', maxsplit=1' if ctx['is_first'] else ''
-
-    if ctx['is_expr']:
-        expr = ctx['expr']
-        if not ctx['is_ci']:
-            if ctx['is_first']:
-                return (suggest_name, f"{ctx['var_to_search']}.split({expr}, 1)")
-            else:
-                return (suggest_name, f"{ctx['var_to_search']}.split({expr})")
-        return (suggest_name, f"re.split(re.escape({expr}), {ctx['var_to_search']}{maxsplit_str}{ctx['flags_str_kw']})")
-    else:
-        return (suggest_name, f"re.split(r'{ctx['regex_pattern']}', {ctx['var_to_search']}{maxsplit_str}, {ctx['flags_str']})")
-
-
-def _get_copy_expr_for_if(action: str, ctx: dict) -> str | None:
-    """Get just the boolean expression for copy of if_any/if_all actions."""
-    if action == 'if_any':
-        if ctx['replace_visible'] and ctx['replace_expr']:
-            return f"any({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)})"
-        else:
-            return _search_expr(ctx)
-    elif action == 'if_all':
-        if not ctx['replace_visible'] or not ctx['replace_expr']:
-            return None
-        return f"all({ctx['replace_expr']} for _mtch in {_finditer_expr(ctx)})"
-    return None
+from string_visualizer_grammar import generate_action, generate_copy_expr_for_if
 
 
 def update(event, source_code: str, source_line: int, model: dict, value: str, get_visualizer=None, eval_in_scope=None, source_expr=None) -> Tuple[dict, List[Any]]:
@@ -3973,29 +3712,26 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 if model.get('openDropdown'):
                     model['openDropdown'] = None
                 else:
-                    # Enter: Get (non-replace) or Transform (replace mode)
                     ctx = _get_search_context(model, source_code, source_line)
                     if ctx:
-                        result = _build_get_or_transform_expr(ctx)
+                        result = generate_action('get_transform', ctx)
                         if result:
                             commands.append(result)
 
             elif key == 'Backspace' and meta_key:
-                # Cmd-Delete: Delete matches
                 if model.get('openDropdown'):
                     model['openDropdown'] = None
                 else:
                     ctx = _get_search_context(model, source_code, source_line)
                     if ctx:
-                        result = _build_delete_expr(ctx)
+                        result = generate_action('delete', ctx)
                         if result:
                             commands.append(result)
 
             elif key == 'r' and meta_key:
-                # Cmd-R: Replace (re.sub)
                 ctx = _get_search_context(model, source_code, source_line)
                 if ctx:
-                    result = _build_replace_expr(ctx)
+                    result = generate_action('replace', ctx)
                     if result:
                         commands.append(result)
 
@@ -4185,47 +3921,15 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
         case ActionButtonClick(action=action, copy=copy):
             ctx = _get_search_context(model, source_code, source_line)
             if ctx:
-                result = None
-                match action:
-                    case 'get_transform':
-                        result = _build_get_or_transform_expr(ctx)
-                    case 'replace':
-                        result = _build_replace_expr(ctx)
-                    case 'delete':
-                        result = _build_delete_expr(ctx)
-                    case 'loop':
-                        result = _build_loop_code(ctx)
-                    case 'any':
-                        result = _build_any_expr(ctx)
-                    case 'all':
-                        result = _build_all_expr(ctx)
-                    case 'if_any':
-                        if copy:
-                            # Copy just the boolean expression, not the if statement
-                            bool_expr = _get_copy_expr_for_if('if_any', ctx)
-                            if bool_expr:
-                                commands.append(CopyToClipboard(text=bool_expr))
-                            return (model, commands)
-                        else:
-                            result = _build_if_any_code(ctx)
-                    case 'if_all':
-                        if copy:
-                            bool_expr = _get_copy_expr_for_if('if_all', ctx)
-                            if bool_expr:
-                                commands.append(CopyToClipboard(text=bool_expr))
-                            return (model, commands)
-                        else:
-                            result = _build_if_all_code(ctx)
-                    case 'count':
-                        result = _build_count_expr(ctx)
-                    case 'filter':
-                        result = _build_filter_expr(ctx)
-                    case 'split':
-                        result = _build_split_expr(ctx)
+                if copy and action in ('if_any', 'if_all'):
+                    bool_expr = generate_copy_expr_for_if(action, ctx)
+                    if bool_expr:
+                        commands.append(CopyToClipboard(text=bool_expr))
+                    return (model, commands)
+                result = generate_action(action, ctx)
                 if result:
                     if copy:
-                        _, expr = result
-                        commands.append(CopyToClipboard(text=expr))
+                        commands.append(CopyToClipboard(text=result[1]))
                     else:
                         commands.append(result)
 
