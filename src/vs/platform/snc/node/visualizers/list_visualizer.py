@@ -37,23 +37,18 @@ Columns shown in the table are configurable and persisted:
 """
 
 import html
-import json
-import os
 import random
 from dataclasses import dataclass
 from math import sqrt
 from typing import Any, List, Tuple
 
-from visualizer_utils import ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys, wrap_child_prefix, wrap_child_suffix, replace_caret_in_py_exp, strip_leading_caret, eval_caret_expr
-
-# VS Code theme colors
-BLUE = "#569cd6"
-STRING = "#ce9178"
-GRAY = "#808080"
-GRAY_HALF_ALPHA = "rgba(128,128,128,0.5)"
-INPUT_BG = "#1e1e1e"
-INPUT_BORDER = "#3c3c3c"
-SUGGESTION_BG = "#252526"
+from visualizer_utils import (
+    ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys,
+    wrap_child_prefix, wrap_child_suffix, replace_caret_in_py_exp,
+    strip_leading_caret, eval_caret_expr, load_dotfile_list, save_dotfile_list,
+    get_full_class_name,
+    BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
+)
 
 CELL_KEY_SEP = '\x00'
 
@@ -110,71 +105,59 @@ class ColumnKeyDown:
 COLUMN_DOTFILE_NAME = '.snc_list_columns.json'
 
 
-def _column_dotfile_path():
-    """Return the path to the column dotfile in the current working directory."""
-    return os.path.join(os.getcwd(), COLUMN_DOTFILE_NAME)
-
-
 def _get_item_type_key(lst):
     """Return a type key for the items in the list (based on first item's class)."""
     if not lst:
         return None
-    return lst[0].__class__.__module__ + '.' + lst[0].__class__.__qualname__
+    return get_full_class_name(lst[0])
 
 
 def load_columns_from_dotfile(type_key: str):
     """Load saved columns for an item type from the dotfile. Returns list or None."""
-    try:
-        with open(_column_dotfile_path(), 'r') as f:
-            data = json.load(f)
-        cols = data.get(type_key)
-        if isinstance(cols, list):
-            return cols
-        return None
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        return None
+    return load_dotfile_list(COLUMN_DOTFILE_NAME, type_key)
 
 
 def save_columns_to_dotfile(type_key: str, columns: list):
     """Save columns for an item type to the dotfile, preserving other types' entries."""
-    path = _column_dotfile_path()
-    try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            data = {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        data = {}
-    data[type_key] = columns
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    save_dotfile_list(COLUMN_DOTFILE_NAME, type_key, columns)
 
 
 # === Column autocomplete helpers ===
 
-def _get_all_possible_columns(lst, get_visualizer):
-    """Get union of all possible fields from sampled items in the list."""
+def _sample_indices(lst):
+    """Return a sorted set of representative indices for sampling a list."""
+    indices = {0}
+    if len(lst) > 1:
+        indices.add(len(lst) - 1)
+    if len(lst) > 2:
+        middle = list(range(1, len(lst) - 1))
+        indices.update(random.sample(middle, min(10, len(middle))))
+    return sorted(indices)
+
+
+def _collect_fields_from_samples(lst, get_visualizer, require_all=False):
+    """Collect the union of fields from sampled list items.
+
+    If require_all is True, returns None when any sampled item lacks get_fields.
+    Otherwise skips items without get_fields.
+    """
     if not lst:
-        return []
+        return [] if not require_all else None
 
     columns = []
     seen = set()
 
-    sample_indices = set()
-    sample_indices.add(0)
-    if len(lst) > 1:
-        sample_indices.add(len(lst) - 1)
-    if len(lst) > 2:
-        middle = list(range(1, len(lst) - 1))
-        sample_indices.update(random.sample(middle, min(10, len(middle))))
-
-    for idx in sorted(sample_indices):
+    for idx in _sample_indices(lst):
         vis = get_visualizer(lst[idx])
         item_get_fields = getattr(vis, 'get_fields', None)
         if item_get_fields is None:
+            if require_all:
+                return None
             continue
         fields = item_get_fields(lst[idx])
         if fields is None:
+            if require_all:
+                return None
             continue
         for f in fields:
             if f not in seen:
@@ -182,6 +165,11 @@ def _get_all_possible_columns(lst, get_visualizer):
                 columns.append(f)
 
     return columns
+
+
+def _get_all_possible_columns(lst, get_visualizer):
+    """Get union of all possible fields from sampled items in the list."""
+    return _collect_fields_from_samples(lst, get_visualizer, require_all=False)
 
 
 def _get_column_suggestions(lst, get_visualizer, current_columns, input_value):
@@ -224,33 +212,7 @@ def get_fields(value):
 
 def _detect_table_columns(lst, get_visualizer):
     """Sample items and return union of fields if all sampled items are tabular, else None."""
-    if len(lst) == 0:
-        return None
-
-    sample_indices = set()
-    sample_indices.add(0)
-    sample_indices.add(len(lst) - 1)
-    if len(lst) > 2:
-        middle = list(range(1, len(lst) - 1))
-        sample_indices.update(random.sample(middle, min(10, len(middle))))
-
-    columns = []
-    seen = set()
-
-    for idx in sorted(sample_indices):
-        vis = get_visualizer(lst[idx])
-        item_get_fields = getattr(vis, 'get_fields', None)
-        if item_get_fields is None:
-            return None
-        fields = item_get_fields(lst[idx])
-        if fields is None:
-            return None
-        for f in fields:
-            if f not in seen:
-                seen.add(f)
-                columns.append(f)
-
-    return columns
+    return _collect_fields_from_samples(lst, get_visualizer, require_all=True)
 
 
 _COLUMN_MGMT_DEFAULTS = {
@@ -373,7 +335,7 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
         for i, suggestion in enumerate(suggestions[:10]):
             select_event = repr(ColumnSelect(name=suggestion))
             is_selected = (selected_idx == i)
-            bg = '#094771' if is_selected else SUGGESTION_BG
+            bg = SELECTED_BG if is_selected else SUGGESTION_BG
             scroll_attr = ' snc-scroll-into-view' if is_selected else ''
             items.append(
                 f'<div snc-mouse-down="{html.escape(select_event)}" '

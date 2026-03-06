@@ -1,22 +1,6 @@
 """NumPy array visualizer for Sculpt-n-Code."""
 
-import html
-
-# VS Code theme colors
-BLUE = "#569cd6"
-STRING = "#ce9178"
-VALUE = "#b5cea8"
-TYPE = "#4ec9b0"
-GRAY = "#808080"
-
-def safe_repr(value):
-    try:
-        return html.escape(repr(value))
-    except Exception:
-        return '<span style="color: #f44747;">[Error]</span>'
-
-def span(text, color):
-    return f'<span style="color: {color};">{text}</span>'
+from visualizer_utils import BLUE, STRING, VALUE, TYPE, GRAY, safe_repr, span
 
 def make_header(type_name, info, dtype=None):
     header = f'{span(type_name, TYPE)}{span("[", BLUE)}{span(info, VALUE)}{span("]", BLUE)}'

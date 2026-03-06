@@ -43,23 +43,16 @@ Fields shown for each type are configurable and persisted:
 """
 
 import html
-import json
-import os
 
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys, replace_caret_in_py_exp, strip_leading_caret, eval_caret_expr
-
-# VS Code theme colors
-BLUE = "#569cd6"
-GRAY = "#808080"
-GRAY_HALF_ALPHA = "rgba(128,128,128,0.5)"
-ADD_GREEN = "#89d185"
-INPUT_BG = "#1e1e1e"
-INPUT_BORDER = "#3c3c3c"
-SUGGESTION_BG = "#252526"
-SUGGESTION_HOVER = "#2a2d2e"
+from visualizer_utils import (
+    ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys,
+    replace_caret_in_py_exp, strip_leading_caret, eval_caret_expr,
+    load_dotfile_list, save_dotfile_list, get_full_class_name,
+    BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
+)
 
 # === Event types ===
 
@@ -119,6 +112,8 @@ DEFAULT_FIELDS_FOR_TYPE = {
 
 DOTFILE_NAME = '.snc_object_fields.json'
 
+_OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
+
 
 def can_visualize(value):
     return True
@@ -127,7 +122,7 @@ def can_visualize(value):
 def get_fields(value):
     if value is None or isinstance(value, (int, float)):
         return None
-    full_class_name = _get_full_class_name(value)
+    full_class_name = get_full_class_name(value)
     fields = load_fields_from_dotfile(full_class_name)
     if fields is None:
         fields = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
@@ -138,50 +133,18 @@ def get_fields(value):
 
 # === Dotfile operations ===
 
-def _dotfile_path():
-    """Return the path to the dotfile in the current working directory."""
-    return os.path.join(os.getcwd(), DOTFILE_NAME)
+def _ensure_caret_prefix(f):
+    return f if f.startswith('^') else f'^{f}'
 
 
 def load_fields_from_dotfile(full_class_name: str):
-    """
-    Load saved fields for a type from the dotfile.
-
-    Returns the list of accessor codes, or None if not found.
-    """
-    try:
-        with open(_dotfile_path(), 'r') as f:
-            data = json.load(f)
-        fields = data.get(full_class_name)
-        if isinstance(fields, list):
-            return [f if f.startswith('^') else f'^{f}' for f in fields]
-        return None
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        return None
+    """Load saved fields for a type from the dotfile. Returns list or None."""
+    return load_dotfile_list(DOTFILE_NAME, full_class_name, transform=_ensure_caret_prefix)
 
 
 def save_fields_to_dotfile(full_class_name: str, fields: list):
-    """
-    Save fields for a type to the dotfile, preserving other types' entries.
-    """
-    path = _dotfile_path()
-    try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            data = {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        data = {}
-    data[full_class_name] = fields
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
-
-
-# === Helper functions ===
-
-def _get_full_class_name(obj) -> str:
-    """Return the full module.qualname for an object's class."""
-    return obj.__class__.__module__ + '.' + obj.__class__.__qualname__
+    """Save fields for a type to the dotfile, preserving other types' entries."""
+    save_dotfile_list(DOTFILE_NAME, full_class_name, fields)
 
 
 def _get_non_trivial_names(obj) -> list:
@@ -239,8 +202,6 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
 
     Priority for fields: dotfile > DEFAULT_FIELDS_FOR_TYPE > non-trivial dir() names.
     """
-    own_keys = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
-
     if value is None or isinstance(value, (int, float)):
         return {
             "fields": [],
@@ -251,10 +212,10 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
             "drag_from_index": None,
             "drag_over_index": None,
             "children": {},
-            "handledKeys": own_keys,
+            "handledKeys": list(_OWN_KEYS),
         }
 
-    full_class_name = _get_full_class_name(value)
+    full_class_name = get_full_class_name(value)
 
     fields = load_fields_from_dotfile(full_class_name)
     if fields is None:
@@ -274,7 +235,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
                 children[accessor_code] = child_vis.init_model(raw_value, get_visualizer,
                                                                eval_in_scope=eval_in_scope, source_expr=child_source_expr)
 
-    handled_keys = aggregate_handled_keys(children, own_keys)
+    handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
 
     return {
         "fields": fields,
@@ -322,11 +283,10 @@ def update(event, source_code: str, source_line: int, model: dict, value, get_vi
             source_code=source_code, source_line=source_line,
             eval_in_scope=eval_in_scope, child_source_expr_getter=child_se_getter,
         )
-        own_keys = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
-        new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), own_keys)
+        new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
         return (new_model, child_cmds)
 
-    full_class_name = _get_full_class_name(value) if value is not None and not isinstance(value, (int, float)) else None
+    full_class_name = get_full_class_name(value) if value is not None and not isinstance(value, (int, float)) else None
 
     match msg:
         case AddFieldClick():
@@ -484,7 +444,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     if obj is None or isinstance(obj, int) or isinstance(obj, float):
         return repr(obj)
 
-    full_class_name = _get_full_class_name(obj)
+    full_class_name = get_full_class_name(obj)
 
     field_trs = []
 
@@ -614,7 +574,7 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1):
         for i, suggestion in enumerate(suggestions[:10]):  # cap at 10 suggestions
             select_event = repr(FieldSelect(accessor=suggestion))
             is_selected = (selected_idx == i)
-            bg = '#094771' if is_selected else SUGGESTION_BG
+            bg = SELECTED_BG if is_selected else SUGGESTION_BG
             scroll_attr = ' snc-scroll-into-view' if is_selected else ''
             items.append(
                 f'<div snc-mouse-down="{html.escape(select_event)}" '
@@ -662,9 +622,3 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1):
         f'<td>{html.escape(val_str)}</td>'
         f'</tr>'
     )
-
-
-def field_to_tr(obj, accessor_code):
-    """Legacy field rendering (kept for reference, used by visualize internally)."""
-    placeholder_args, val_str, _, _ = _eval_field(obj, accessor_code)
-    return f'<tr><td style="color:{BLUE};opacity:0.7;">{html.escape(strip_leading_caret(accessor_code))}<span style="opacity:0.4">{html.escape(placeholder_args)}</span></td><td>{html.escape(val_str)}</td></tr>\n'
