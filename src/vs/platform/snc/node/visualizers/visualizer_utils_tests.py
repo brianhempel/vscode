@@ -115,11 +115,11 @@ class TestRouteChildEvent(unittest.TestCase):
         class MockVis:
             def can_visualize(self, value):
                 return True
-            def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+            def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
                 return {'mock': True}
             def visualize(self, value, model, get_visualizer):
                 return '<span>mock</span>'
-            def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+            def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
                 return (updated_model, commands or [])
         return MockVis()
 
@@ -188,11 +188,11 @@ class TestAggregateHandledKeys(unittest.TestCase):
         class Vis:
             def can_visualize(self, value):
                 return True
-            def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+            def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
                 return {'handledKeys': keys}
             def visualize(self, value, model, get_visualizer):
                 return ''
-            def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+            def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
                 return (model, [])
         return Vis()
 
@@ -262,21 +262,21 @@ class TestEvalCaretExpr(unittest.TestCase):
     def test_uses_eval_in_scope_when_both_provided(self):
         _my_var = [10, 20, 30]
         eis = lambda expr: eval(expr)
-        result = eval_caret_expr('^[2]', _my_var, eval_in_scope=eis, source_expr='_my_var')
+        result = eval_caret_expr('^[2]', _my_var, eval_in_scope=eis)
         self.assertEqual(result, 30)
 
     def test_eval_in_scope_with_nested_source_expr(self):
         _my_var = [[1, 2], [3, 4]]
         eis = lambda expr: eval(expr)
-        result = eval_caret_expr('^[0]', _my_var[1], eval_in_scope=eis, source_expr='_my_var[1]')
+        result = eval_caret_expr('^[0]', _my_var[1], eval_in_scope=eis)
         self.assertEqual(result, 3)
 
     def test_falls_back_when_eval_in_scope_none(self):
-        self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=None, source_expr='x'), 42)
+        self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=None), 42)
 
     def test_falls_back_when_source_expr_none(self):
         eis = lambda expr: eval(expr)
-        self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=eis, source_expr=None), 42)
+        self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=eis), 42)
 
     def test_error_propagates(self):
         with self.assertRaises(Exception):

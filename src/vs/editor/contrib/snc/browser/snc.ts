@@ -142,7 +142,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Drag-and-drop for snc-py-exp elements
 		this._register(dom.addDisposableListener(this.domNode, 'dragstart', (ev: DragEvent) => {
-			const pyExpEl = this.findPyExpAncestor(ev.target as Node);
+			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp');
 			if (pyExpEl && ev.dataTransfer) {
 				const expression = pyExpEl.getAttribute('snc-py-exp') ?? '';
 				ev.dataTransfer.setData('text/plain', expression);
@@ -151,16 +151,43 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 		}));
 
+		// Allow snc-input elements to accept snc-py-exp drops
+		this._register(dom.addDisposableListener(this.domNode, 'dragover', (ev: DragEvent) => {
+			const input = this.findAncestorWithAttr(ev.target as Node, 'snc-input');
+			if (input) {
+				ev.preventDefault();
+				input.classList.add('snc-drop-target');
+				const inputEl = input as HTMLInputElement;
+				inputEl.focus();
+				const pos = this.getInputCharIndexAtPoint(inputEl, ev.clientX);
+				inputEl.setSelectionRange(pos, pos);
+			}
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'drop', (ev: DragEvent) => {
+			const input = this.findAncestorWithAttr(ev.target as Node, 'snc-input');
+			if (input && ev.dataTransfer) {
+				ev.preventDefault();
+				ev.stopPropagation();
+				const text = ev.dataTransfer.getData('text/plain');
+				const inputEl = input as HTMLInputElement;
+				const pos = inputEl.selectionStart ?? inputEl.value.length;
+				inputEl.value = inputEl.value.slice(0, pos) + text + inputEl.value.slice(pos);
+				inputEl.selectionStart = inputEl.selectionEnd = pos + text.length;
+				input.classList.remove('snc-drop-target');
+				inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+			}
+		}));
+
 		// Tooltip on hover for snc-py-exp elements
 		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
-			const pyExpEl = this.findPyExpAncestor(ev.target as Node);
+			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp');
 			if (pyExpEl && pyExpEl !== this.pyExpCurrentTarget) {
 				this.pyExpCurrentTarget = pyExpEl;
 				clearTimeout(this.pyExpTooltipTimer);
 				clearTimeout(this.pyExpTooltipHideTimer);
 				this.pyExpTooltipTimer = setTimeout(() => {
 					this.showPyExpTooltip(pyExpEl);
-				}, 400);
+				}, 100);
 			}
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
@@ -170,7 +197,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				return;
 			}
 			// Don't hide if moving to another snc-py-exp element (will be handled by mouseover)
-			if (relatedTarget && this.findPyExpAncestor(relatedTarget)) {
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exp')) {
 				return;
 			}
 			this.schedulePyExpTooltipHide();
@@ -181,17 +208,44 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Walk up from a node to find the nearest ancestor (or itself) with snc-py-exp attribute.
+	 * Walk up from a node to find the nearest ancestor (or itself) with the given attribute.
 	 */
-	private findPyExpAncestor(node: Node | null): Element | null {
+	private findAncestorWithAttr(node: Node | null, attr: string): Element | null {
 		let el: Element | null = node?.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node?.parentElement ?? null);
 		while (el && el !== this.domNode) {
-			if (el.hasAttribute('snc-py-exp')) {
+			if (el.hasAttribute(attr)) {
 				return el;
 			}
 			el = el.parentElement;
 		}
 		return null;
+	}
+
+	/**
+	 * Find the character index in an input element closest to a given clientX.
+	 */
+	private getInputCharIndexAtPoint(inputEl: HTMLInputElement, clientX: number): number {
+		const rect = inputEl.getBoundingClientRect();
+		const style = getComputedStyle(inputEl);
+		const paddingLeft = parseFloat(style.paddingLeft) || 0;
+		const x = clientX - rect.left - paddingLeft + inputEl.scrollLeft;
+
+		const canvas = document.createElement('canvas');
+		const ctx = canvas.getContext('2d')!;
+		ctx.font = style.font;
+
+		const text = inputEl.value;
+		for (let i = 0; i <= text.length; i++) {
+			const w = ctx.measureText(text.substring(0, i)).width;
+			if (w >= x) {
+				if (i > 0) {
+					const pw = ctx.measureText(text.substring(0, i - 1)).width;
+					return (x - pw < w - x) ? i - 1 : i;
+				}
+				return 0;
+			}
+		}
+		return text.length;
 	}
 
 	/**
@@ -213,14 +267,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		const copyBtn = document.createElement('button');
 		copyBtn.className = 'snc-copy-btn';
-		copyBtn.textContent = '\u{1F4CB}';  // clipboard emoji
+		copyBtn.textContent = '\u{29C9}';  // clipboard emoji
 		copyBtn.title = 'Copy to clipboard';
 		copyBtn.addEventListener('mousedown', (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			this.clipboardService.writeText(expression);
 			copyBtn.textContent = '\u2713';  // check mark
-			setTimeout(() => { copyBtn.textContent = '\u{1F4CB}'; }, 1000);
+			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
 		});
 		tooltip.appendChild(copyBtn);
 

@@ -71,6 +71,12 @@
 	cursor: pointer !important;
 }
 
+/* Drop target highlight for snc-input elements during snc-py-exp drag */
+.editor-instance .snc-drop-target {
+	border-color: #569cd6 !important;
+	box-shadow: 0 0 4px rgba(86, 156, 214, 0.5);
+}
+
 /* Tooltip for snc-py-exp elements (code expression drag-and-drop) */
 .snc-py-exp-tooltip {
 	position: fixed;
@@ -81,7 +87,7 @@
 	font-family: monospace;
 	font-size: 11px;
 	font-style: normal;
-	color: #dcdcaa;
+	color: #aaa;
 	z-index: 10001;
 	pointer-events: auto;
 	display: flex;
@@ -93,7 +99,7 @@
 
 .snc-py-exp-tooltip .snc-copy-btn {
 	cursor: pointer;
-	color: #808080;
+	color: #aaa;
 	font-size: 12px;
 	padding: 2px 4px;
 	border: 1px solid transparent;

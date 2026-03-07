@@ -49,7 +49,7 @@ from typing import List, Tuple, Any
 
 from visualizer_utils import (
     ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys,
-    replace_caret_in_py_exp, strip_leading_caret, eval_caret_expr,
+    strip_leading_caret, eval_caret_expr,
     load_dotfile_list, save_dotfile_list, get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
 )
@@ -170,7 +170,7 @@ def _get_autocomplete_suggestions(obj, current_fields: list, input_value: str) -
     return suggestions
 
 
-def _eval_field(obj, accessor_code: str, eval_in_scope=None, source_expr=None):
+def _eval_field(obj, accessor_code: str, eval_in_scope=None):
     """
     Evaluate an accessor code against an object.
 
@@ -180,7 +180,7 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None, source_expr=None):
     is_error is True if evaluation raised an exception.
     """
     try:
-        val = eval_caret_expr(accessor_code, obj, eval_in_scope, source_expr)
+        val = eval_caret_expr(accessor_code, obj, eval_in_scope)
         val_str = None
     except Exception as e:
         return ('', str(e), None, True)
@@ -201,7 +201,7 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None, source_expr=None):
 
 # === Elm architecture functions ===
 
-def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+def init_model(value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
     """
     Initialize the model state for a new visualization.
 
@@ -225,12 +225,11 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
     children = {}
     if get_visualizer is not None:
         for accessor_code in fields:
-            placeholder_args, val_str, raw_value, is_error = _eval_field(value, accessor_code, eval_in_scope, source_expr)
+            placeholder_args, val_str, raw_value, is_error = _eval_field(value, accessor_code, eval_in_scope)
             if not is_error and not placeholder_args and raw_value is not None:
                 child_vis = get_visualizer(raw_value)
-                child_source_expr = replace_caret_in_py_exp(accessor_code, source_expr) if source_expr else None
                 children[accessor_code] = child_vis.init_model(raw_value, get_visualizer,
-                                                               eval_in_scope=eval_in_scope, source_expr=child_source_expr)
+                                                               eval_in_scope=eval_in_scope)
 
     handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
 
@@ -247,7 +246,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
     }
 
 
-def update(event, source_code: str, source_line: int, model: dict, value, get_visualizer=None, eval_in_scope=None, source_expr=None) -> Tuple[dict, List[Any]]:
+def update(event, source_code: str, source_line: int, model: dict, value, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
     """
     Update model based on event. Returns (new_model, commands) tuple.
 
@@ -273,12 +272,11 @@ def update(event, source_code: str, source_line: int, model: dict, value, get_vi
     if isinstance(msg, ChildEvent) and get_visualizer is not None:
         _obj_ref = value
         def _child_value_getter(accessor_key, _obj=_obj_ref):
-            return eval_caret_expr(accessor_key, _obj, eval_in_scope, source_expr)
-        child_se_getter = (lambda key: replace_caret_in_py_exp(key, source_expr)) if source_expr else None
+            return eval_caret_expr(accessor_key, _obj, eval_in_scope)
         new_model, child_cmds = route_child_event(
             event, model, value, _child_value_getter, get_visualizer,
             source_code=source_code, source_line=source_line,
-            eval_in_scope=eval_in_scope, child_source_expr_getter=child_se_getter,
+            eval_in_scope=eval_in_scope,
         )
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
         return (new_model, child_cmds)
@@ -431,7 +429,7 @@ def update(event, source_code: str, source_line: int, model: dict, value, get_vi
     return (model, commands)
 
 
-def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, source_expr=None):
+def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
     """
     Render the object as HTML with configurable field inspection.
 
@@ -448,10 +446,10 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     for i, accessor_code in enumerate(model.get('fields', [])):
         if model.get('editing_index') == i:
             # This field is being edited: show input
-            field_trs.append(_render_input_row(obj, model, is_editing=True, editing_index=i, eval_in_scope=eval_in_scope, source_expr=source_expr))
+            field_trs.append(_render_input_row(obj, model, is_editing=True, editing_index=i, eval_in_scope=eval_in_scope))
         else:
             # Normal display: double-clickable field name with remove/drag handles
-            placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope, source_expr)
+            placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope)
             click_event = repr(FieldClick(index=i))
             remove_event = repr(RemoveFieldClick(index=i))
             drag_start_event = repr(DragStart(index=i))
@@ -464,12 +462,11 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
             if not is_error and not placeholder_args and raw_value is not None and get_visualizer is not None:
                 child_vis = get_visualizer(raw_value)
                 child_model = children.get(accessor_code)
-                child_source_expr = replace_caret_in_py_exp(accessor_code, source_expr) if source_expr else None
                 if child_model is None:
                     child_model = child_vis.init_model(raw_value, get_visualizer,
-                                                       eval_in_scope=eval_in_scope, source_expr=child_source_expr)
+                                                       eval_in_scope=eval_in_scope)
                 child_small = (accessor_code != focused_child)
-                child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small, source_expr=child_source_expr)
+                child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small)
                 value_td = f'<td>{wrap_child_html(child_html, accessor_code)}</td>'
             else:
                 value_td = f'<td>{html.escape(val_str)}</td>'
@@ -515,7 +512,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
 
     # If adding a new field, show input row at the end
     if model.get('adding_field'):
-        field_trs.append(_render_input_row(obj, model, is_editing=False, eval_in_scope=eval_in_scope, source_expr=source_expr))
+        field_trs.append(_render_input_row(obj, model, is_editing=False, eval_in_scope=eval_in_scope))
 
     field_trs_str = '\n'.join(field_trs)
 
@@ -544,7 +541,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     )
 
 
-def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eval_in_scope=None, source_expr=None):
+def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eval_in_scope=None):
     """
     Render a table row with a text input for adding or editing a field.
 
@@ -556,7 +553,7 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eva
 
     # Evaluate current input as accessor to show live value
     if input_value.strip():
-        _, val_str, _, _ = _eval_field(obj, input_value, eval_in_scope, source_expr)
+        _, val_str, _, _ = _eval_field(obj, input_value, eval_in_scope)
     else:
         val_str = ''
 

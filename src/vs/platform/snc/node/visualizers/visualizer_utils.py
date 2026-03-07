@@ -125,16 +125,11 @@ def strip_leading_caret(name: str) -> str:
     return name
 
 
-def eval_caret_expr(field_expr: str, value, eval_in_scope=None, source_expr=None):
+def eval_caret_expr(field_expr: str, value, eval_in_scope=None):
     """Evaluate a ^-prefixed field expression against a value.
 
-    When both eval_in_scope and source_expr are provided, evaluates via
-    the user's code scope (giving access to user-defined variables).
-    Otherwise falls back to local eval with the value bound directly.
+    Uses local eval with the value bound directly.
     """
-    if eval_in_scope is not None and source_expr is not None:
-        resolved = replace_caret_in_py_exp(field_expr, source_expr)
-        return eval_in_scope(resolved)
     _v = value
     return eval(replace_caret_in_py_exp(field_expr, '_v'))
 
@@ -168,7 +163,6 @@ def route_child_event(
     source_code: str = '',
     source_line: int = 0,
     eval_in_scope=None,
-    child_source_expr_getter: Callable[[str], str] | None = None,
 ) -> Tuple[dict, List[Any]]:
     """Unwrap a ChildEvent and dispatch to the appropriate child visualizer.
 
@@ -181,10 +175,6 @@ def route_child_event(
         source_code: Source code context for the child update.
         source_line: Source line context for the child update.
         eval_in_scope: Evaluator for the user's code scope.
-        child_source_expr_getter: Maps child_key -> source_expr string for
-            the child.  Each parent provides its own implementation because
-            the key format differs (e.g. composite table keys vs plain caret
-            expressions).
 
     Returns:
         (updated_model, commands) with the child's model stored back.
@@ -203,18 +193,17 @@ def route_child_event(
     child_key = msg.child_key
     child_value = child_value_getter(child_key)
     child_vis = get_visualizer(child_value)
-    child_source_expr = child_source_expr_getter(child_key) if child_source_expr_getter else None
 
     children = model.get('children', {})
     child_model = children.get(child_key)
     if child_model is None:
         child_model = child_vis.init_model(child_value, get_visualizer,
-                                           eval_in_scope=eval_in_scope, source_expr=child_source_expr)
+                                           eval_in_scope=eval_in_scope)
 
     inner_event = {'pythonEventStr': msg.py_ev_str, 'eventJSON': event_json}
     new_child_model, commands = child_vis.update(
         inner_event, source_code, source_line, child_model, child_value, get_visualizer,
-        eval_in_scope=eval_in_scope, source_expr=child_source_expr,
+        eval_in_scope=eval_in_scope,
     )
 
     children[child_key] = new_child_model
