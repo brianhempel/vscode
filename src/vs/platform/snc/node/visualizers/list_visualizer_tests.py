@@ -1319,5 +1319,45 @@ class TestColumnManagementInListMode(unittest.TestCase):
         self.assertEqual(new_model['columns'], [])
 
 
+class TestColumnHeaderExpression(unittest.TestCase):
+    """Test that column headers in table mode have snc-py-exp attributes."""
+
+    def test_column_header_has_snc_py_exp_for_dict(self):
+        """Dict columns like ^['name'] should produce [item['name'] for item in people]."""
+        lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
+        model = init_model(lst, mock_get_visualizer, source_expr="people")
+        self.assertEqual(model['display_mode'], 'table')
+        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr="people")
+        self.assertIn("snc-py-exp", html_output)
+        self.assertIn("[item[&#x27;name&#x27;] for item in people]", html_output)
+
+    def test_column_header_has_snc_py_exp_for_nested_list(self):
+        """Nested list columns like ^[0] should produce [item[0] for item in lst1]."""
+        lst = [[1, 2], [3, 4]]
+        model = init_model(lst, mock_get_visualizer, source_expr="lst1")
+        self.assertEqual(model['display_mode'], 'table')
+        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr="lst1")
+        self.assertIn("snc-py-exp", html_output)
+        self.assertIn("[item[0] for item in lst1]", html_output)
+        self.assertIn("[item[1] for item in lst1]", html_output)
+
+    def test_column_header_no_expr_without_source_expr(self):
+        """Without source_expr, no snc-py-exp should appear in column headers."""
+        lst = [{'name': 'Alice'}, {'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer, source_expr=None)
+        self.assertEqual(model['display_mode'], 'table')
+        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr=None)
+        self.assertNotIn('snc-py-exp', html_output)
+
+    def test_column_header_draggable(self):
+        """Column headers with snc-py-exp should also have draggable=true."""
+        lst = [[1, 2], [3, 4]]
+        model = init_model(lst, mock_get_visualizer, source_expr="x")
+        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr="x")
+        # Find the snc-py-exp attribute and check draggable is nearby
+        self.assertIn('draggable="true"', html_output)
+        self.assertIn('snc-py-exp', html_output)
+
+
 if __name__ == '__main__':
     unittest.main()
