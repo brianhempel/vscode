@@ -1,3 +1,40 @@
+"""Bidirectional grammar DSL: parse strings into context dicts and generate
+strings back from context dicts using the same grammar definition.
+
+A grammar is a dict of named rules (BiTemplate or Alt). Each BiTemplate
+holds a *template* that is one of:
+
+  - A parsing format string with ``{ctx_name:RuleName}`` placeholders, e.g.
+    ``"{var:Var} = {expr:Action}"``. Substrings are parsed with the named
+    rules (Var and Action here). Match substrings are added to the context
+    dict under the given names (var and expr here). Generation is the
+    reverse: if the subparser is a terminal, the context value is emitted verbatim.
+
+  - A compiled ``re.Pattern`` -- used as a leaf matcher during parsing
+    (``re.match`` at the current position). During generation, the stored
+    context value is emitted verbatim (i.e. the BiTemplate must be used
+    in the {ctx_name:RuleName} form so there is a ctx value to emit).
+
+  - A callable (e.g. ``ast.parse``) -- during parsing, matches substrings
+    for which the callable returns truthy. During generation, the stored
+    context value is emitted verbatim (i.e. the BiTemplate must be used
+    in the {ctx_name:RuleName} form so there is a ctx value to emit).
+
+An Alt is an ordered list of alternatives tried left-to-right. Each Alt
+can be a BiTemplate, a nested Alt, or a string naming another grammar rule.
+
+Both BiTemplate and Alt carry a *ctx* dict of required context constraints.
+In generation, a rule only fires when the current context is compatible:
+this is how the generation is steered to generate the code for the given
+action. In parsing, the context (and the action specified therein) is
+reconstructed based on the matching rules (see ``merge_ctx``).
+``False``, ``None``, and missing *ctx* keys are all treated as equivalent.
+
+Brian wrote this code by hand (but its documentation is AI-assisted, and
+the yield patter was AI-inspired...last time I wrote this kind of thing I
+returned lists instead, but yield should be more memory-efficient and
+potentially faster).
+"""
 
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, cast
@@ -7,7 +44,14 @@ from ast import Module, Expr, JoinedStr, Constant, FormattedValue
 
 SUBPARSERS = re.compile(r'\{(\w+)?:(\w+)\}')
 
+
 def compile(templ_str) -> list[str | tuple[str|None, str]]:
+    """Compile a template string into a list of literal strings and
+    ``(ctx_name, rule_name)`` tuples.
+
+    >>> compile("{var:Var} = {expr:Action}")
+    [('var', 'Var'), ' = ', ('expr', 'Action')]
+    """
     parts = []
     i = 0
     for m in SUBPARSERS.finditer(templ_str):
@@ -26,6 +70,14 @@ def compile(templ_str) -> list[str | tuple[str|None, str]]:
 
 @dataclass(slots=True)
 class BiTemplate:
+    """A named bidirectional template rule.
+
+    *template* is stored as compiled parts (list), a regex ``Pattern``, or a
+    callable validator.  *ctx* holds context constraints that must be satisfied
+    for this rule to apply (e.g. ``{'is_ci': True}``) during generation OR are
+    added to the context on parsing.
+    """
+
     name: str
     template: list[str|tuple[str|None,str]] | re.Pattern | Callable
     ctx: dict[str, Any]
@@ -43,6 +95,15 @@ class BiTemplate:
 
 @dataclass(frozen=True, slots=True)
 class Alt:
+    """An ordered alternation: tries each alternative left-to-right and
+    yields the first (parse) or first compatible (generate) match.
+
+    Alternatives can be ``BiTemplate``, nested ``Alt``, or a ``str`` naming
+    another rule in the grammar.
+
+    The whole Alt group can have context constraints (e.g. ``{'is_ci': True}``).
+    """
+
     name: str
     alts: list[BiTemplate|Alt|str]
     ctx: dict[str, Any]
@@ -67,17 +128,26 @@ BASE_RULES = [
 ]
 
 def make_grammar(rules: list[BiTemplate|Alt]) -> dict[str, BiTemplate|Alt]:
+    """Build a name-keyed grammar dict from a list of rules."""
     return {rule.name: rule for rule in rules}
 
 
-# Returns None if the generation fails, otherwise a tuple of the generated string and a list of (context key, prior template name consuming it)
 def generate(
     grammar: dict[str, BiTemplate|Alt],
     bi_or_alt: BiTemplate|Alt,
     ctx: dict[str, Any],
     as_ctx_name: str | None = None,
-    consumed: list[tuple[str, str]] = [] # list of (context key, prior template name consuming it)
+    consumed: list[tuple[str, str]] = []
 ) -> tuple[str, list[tuple[str, str]]] | None:
+    """Generate a string from *ctx* using the given rule.
+
+    Returns ``(generated_string, consumed)`` on success, or ``None`` if the
+    context doesn't satisfy the rule's constraints.
+
+    *consumed* tracks ``(context_key, rule_name)`` pairs already used, which
+    prevents infinite recursion when a context key would re-trigger the same
+    rule.
+    """
     rule_name  = bi_or_alt.name
     req_context = bi_or_alt.ctx
     for k, req_v in req_context.items():
@@ -132,6 +202,10 @@ def parse(
     string: str,
     ctx_in: dict = {}
 ) -> dict[str, Any] | None:
+    """Parse *string* against a rule and return the resulting context dict,
+    or ``None`` if the string doesn't match.  Only a *complete* match (all
+    characters consumed) counts as success.
+    """
     for ctx, i in parse_bi_or_alt(grammar, bi_or_alt, string, ctx_in.copy()):
         if i == len(string):
             return ctx
@@ -143,6 +217,10 @@ def parse_bi_or_alt(
     string: str,
     ctx_in: dict
 ) -> Iterator[tuple[dict[str, Any], int]]:
+    """Yield ``(ctx, chars_consumed)`` for every way *string* can match
+    *bi_or_alt* from the beginning of the string. A rule whose *ctx* conflicts
+    with *ctx_in* yields nothing.
+    """
     rule_ctx = bi_or_alt.ctx
     ctx = merge_ctx(ctx_in, rule_ctx)
 
@@ -164,6 +242,7 @@ def parse_bi_template(
     string: str,
     ctx_in: dict
 ) -> Iterator[tuple[dict[str, Any], int]]:
+    """Dispatch parsing based on template type: regex, callable, or parts list."""
     match templ:
         case re.Pattern() as regex:
             if (m := regex.match(string)) is not None:
@@ -197,6 +276,12 @@ def parse_bi_parts(
     string: str,
     ctx_in: dict
 ) -> Iterator[tuple[dict[str, Any], int]]:
+    """Parse a compiled parts list (interleaved literals and sub-rule refs).
+
+    For efficiency, matches the literals first, and then the sub-rules on
+    the smaller strings in between. Presumably, this means the potentially
+    expensive sub-rules are only tested on smaller strings.
+    """
     if len(parts) == 0:
         yield (ctx_in, 0)
         return
@@ -228,13 +313,16 @@ def parse_bi_parts(
     return
 
 
-# hopefully parts is usually length 1
 def parse_nonlit_bi_parts(
     grammar: dict[str, BiTemplate|Alt],
     parts: list[tuple[str|None,str]],
     string: str,
     ctx_in: dict
 ) -> Iterator[tuple[dict[str, Any], int]]:
+    """Parse a sequence of consecutive non-literal (sub-rule) parts.
+
+    Typically this parts list is length 1.
+    """
     if len(parts) == 0:
         yield (ctx_in, 0)
         return
@@ -262,6 +350,7 @@ def parse_alts(
     string: str,
     ctx_in: dict
 ) -> Iterator[tuple[dict[str, Any], int]]:
+    """Try each alternative in order, yielding all matches from each."""
     for alt in alts:
         match alt:
             case BiTemplate() | Alt():
@@ -272,8 +361,13 @@ def parse_alts(
     return
 
 
-# Returns none if contexts conflict. more effecient if ctx2 is smaller
 def merge_ctx(ctx1: dict[str, Any], ctx2: dict[str, Any]) -> dict[str, Any] | None:
+    """Merge two context dicts.  Returns ``None`` if they disagree on any key.
+
+    ``False`` and ``None`` are treated as equivalent so that rules can use
+    ``{'flag': False}`` to match an absent key.  More efficient when *ctx2*
+    is the smaller dict.
+    """
     out = ctx1.copy()
 
     for k2, v2 in ctx2.items():
