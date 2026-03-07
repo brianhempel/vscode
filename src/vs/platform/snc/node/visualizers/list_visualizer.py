@@ -276,7 +276,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_expr=None):
             **_COLUMN_MGMT_DEFAULTS}
 
 
-def _render_column_header(col, index, model):
+def _render_column_header(col, index, model, source_expr=None):
     """Render a normal column header with drag handle, remove button, and column name."""
     click_event = repr(ColumnClick(index=index))
     remove_event = repr(RemoveColumnClick(index=index))
@@ -298,6 +298,13 @@ def _render_column_header(col, index, model):
         else:
             th_style += f'border-right:2px solid {BLUE};'
 
+    # Build snc-py-exp attribute for the column name span (list comprehension expression)
+    py_exp_attr = ''
+    if source_expr is not None:
+        col_expr = replace_caret_in_py_exp(col, 'item')
+        list_comp_expr = f'[{col_expr} for item in {source_expr}]'
+        py_exp_attr = f' snc-py-exp="{html.escape(list_comp_expr)}" draggable="true"'
+
     return (
         f'<th class="snc-hover-hidden-parent" '
         f'snc-mouse-move="{html.escape(drag_over_event)}" '
@@ -310,7 +317,8 @@ def _render_column_header(col, index, model):
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'style="color:{GRAY};cursor:pointer;opacity:0.5;user-select:none;" '
         f'title="Remove column" class="snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
-        f'<span snc-mouse-down="{html.escape(click_event)}" '
+        f'<span snc-mouse-down="{html.escape(click_event)}"'
+        f'{py_exp_attr} '
         f'style="color:{BLUE};cursor:pointer;">'
         f'{html.escape(strip_leading_caret(col))}</span>'
         f'</th>'
@@ -395,7 +403,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         if model.get('editing_column_index') == ci:
             strs.append(_render_column_input(lst, model, get_visualizer, is_editing=True, editing_index=ci))
         else:
-            strs.append(_render_column_header(col, ci, model))
+            strs.append(_render_column_header(col, ci, model, source_expr=source_expr))
 
     if model.get('adding_column'):
         strs.append(_render_column_input(lst, model, get_visualizer, is_editing=False))
