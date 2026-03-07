@@ -81,7 +81,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import replace_caret_in_py_exp, STRING, GRAY, BLUE
+from visualizer_utils import replace_caret_in_py_exp, extract_expression_from_line, EditorTextSelect, Unlink, STRING, GRAY, BLUE
 
 # === Command types (Elm-style commands for VS Code to execute) ===
 
@@ -159,14 +159,6 @@ class RepetitionInput:
     dropdown_id: str
     field: str  # 'exact', 'min', or 'max'
     value: str
-
-@dataclass(frozen=True, slots=True)
-class EditorTextSelect:
-    text: str
-
-@dataclass(frozen=True, slots=True)
-class Unlink:
-    pass
 
 # attached handlers can be Python code strings that evaluate to functions of type: RawEventJSON -> ModelEvent
 # def mouse_move(i) -> Callable[[dict], MouseMove | MouseDown | MouseUp | KeyDown]:
@@ -2338,33 +2330,7 @@ def is_adjacent_left(idx: int, first_start: int, string_value: str) -> bool:
 
 
 # === Source code analysis functions ===
-
-def extract_expression_from_line(source_code: str, line_number: int) -> Tuple[str, str | None]:
-    """
-    Extract the expression being visualized from the source line.
-
-    Returns:
-        (expression, variable_name) where variable_name is set if it's a simple assignment
-    """
-    lines = source_code.split('\n')
-    if line_number < 1 or line_number > len(lines):
-        return ("result", None)
-
-    line = lines[line_number - 1].strip()
-
-    # Check for simple assignment: var = expr
-    # Match: identifier = something (but not ==)
-    assignment_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?!=)(.+)$', line)
-    if assignment_match:
-        var_name = assignment_match.group(1)
-        return (var_name, var_name)
-
-    # Not a simple assignment, use the whole expression
-    # Strip any trailing comment
-    if '#' in line:
-        line = line[:line.index('#')].strip()
-
-    return (line if line else "result", None)
+# extract_expression_from_line is imported from visualizer_utils
 
 
 def find_available_variable_name(source_code: str, desired_name: str) -> str:

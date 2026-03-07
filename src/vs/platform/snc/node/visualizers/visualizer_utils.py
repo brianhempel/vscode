@@ -134,6 +134,34 @@ def eval_caret_expr(field_expr: str, value, eval_in_scope=None):
     return eval(replace_caret_in_py_exp(field_expr, '_v'))
 
 
+# =============================================================================
+# Source code analysis
+# =============================================================================
+
+def extract_expression_from_line(source_code: str, line_number: int) -> Tuple[str, 'str | None']:
+    """
+    Extract the expression being visualized from the source line.
+
+    Returns:
+        (expression, variable_name) where variable_name is set if it's a simple assignment
+    """
+    lines = source_code.split('\n')
+    if line_number < 1 or line_number > len(lines):
+        return ("result", None)
+
+    line = lines[line_number - 1].strip()
+
+    assignment_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?!=)(.+)$', line)
+    if assignment_match:
+        var_name = assignment_match.group(1)
+        return (var_name, var_name)
+
+    if '#' in line:
+        line = line[:line.index('#')].strip()
+
+    return (line if line else "result", None)
+
+
 @dataclass(frozen=True, slots=True)
 class ChildEvent:
     """Envelope wrapping a child visualizer's event for parent routing."""

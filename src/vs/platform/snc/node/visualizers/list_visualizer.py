@@ -43,9 +43,12 @@ from math import sqrt
 from typing import Any, List, Tuple
 
 from visualizer_utils import (
-    ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys,
+    ChildEvent, EditorTextSelect, Unlink,
+    wrap_child_html, route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix,
-    strip_leading_caret, eval_caret_expr, load_dotfile_list, save_dotfile_list,
+    strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
+    extract_expression_from_line,
+    load_dotfile_list, save_dotfile_list,
     get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
 )
@@ -232,6 +235,11 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
         return {'children': {}, 'handledKeys': [], 'display_mode': 'list', 'columns': [],
                 **_COLUMN_MGMT_DEFAULTS}
 
+    source_expr = None
+    if source_code and source_line:
+        expr, var_name = extract_expression_from_line(source_code, source_line)
+        source_expr = var_name if var_name else expr
+
     type_key = _get_item_type_key(lst)
     saved_columns = load_columns_from_dotfile(type_key) if type_key else None
 
@@ -259,6 +267,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
             'handledKeys': handled_keys,
             'display_mode': 'table',
             'columns': columns,
+            '_source_expr': source_expr,
             **_COLUMN_MGMT_DEFAULTS,
         }
 
@@ -270,6 +279,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
 
     handled_keys = aggregate_handled_keys(children)
     return {'children': children, 'handledKeys': handled_keys, 'display_mode': 'list', 'columns': [],
+            '_source_expr': source_expr,
             **_COLUMN_MGMT_DEFAULTS}
 
 
@@ -295,8 +305,13 @@ def _render_column_header(col, index, model):
         else:
             th_style += f'border-right:2px solid {BLUE};'
 
-    # Build snc-py-exp attribute for the column name span (list comprehension expression)
-    py_exp_attr = ''
+    source_expr = model.get('_source_expr')
+    if source_expr is not None:
+        item_expr = replace_caret_in_py_exp(col, 'item')
+        full_expr = f'[{item_expr} for item in {source_expr}]'
+        py_exp_attr = f' snc-py-exp="{html.escape(full_expr)}" draggable="true"'
+    else:
+        py_exp_attr = ''
 
     return (
         f'<th class="snc-hover-hidden-parent" '
@@ -413,6 +428,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     strs.append('</tr>')
 
+    source_expr = model.get('_source_expr')
+
     for i, item in enumerate(lst):
         strs.append('<tr><td style="color:')
         strs.append(GRAY)
@@ -438,11 +455,32 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small)
                 else:
                     cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small)]
-                strs.append('<td style="padding:0 8px;">')
-                strs.append(wrap_child_prefix(composite_key))
-                strs.extend(cell_htmls)
-                strs.append(wrap_child_suffix)
-                strs.append('</td>')
+
+                is_generic = cell_model is None
+                cell_exp_attr = ''
+                if source_expr is not None:
+                    cell_expr = replace_caret_in_py_exp(col, f'{source_expr}[{i}]')
+                    cell_exp_attr = f' snc-py-exp="{html.escape(cell_expr)}" draggable="true"'
+
+                if is_generic or not cell_exp_attr:
+                    strs.append('<td style="padding:0 8px;">')
+                    strs.append(wrap_child_prefix(composite_key))
+                    if cell_exp_attr:
+                        strs.append(f'<span{cell_exp_attr} style="cursor:grab;">')
+                    strs.extend(cell_htmls)
+                    if cell_exp_attr:
+                        strs.append('</span>')
+                    strs.append(wrap_child_suffix)
+                    strs.append('</td>')
+                else:
+                    strs.append('<td style="padding:0;">')
+                    strs.append(f'<div{cell_exp_attr} style="padding:3px 8px;cursor:grab;">')
+                    strs.append('<div draggable="false" style="cursor:auto;">')
+                    strs.append(wrap_child_prefix(composite_key))
+                    strs.extend(cell_htmls)
+                    strs.append(wrap_child_suffix)
+                    strs.append('</div></div>')
+                    strs.append('</td>')
             else:
                 strs.append('<td style="padding:0 8px;"></td>')
 
