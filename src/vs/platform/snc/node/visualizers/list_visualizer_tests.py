@@ -1320,15 +1320,128 @@ class TestColumnManagementInListMode(unittest.TestCase):
 
 
 class TestColumnHeaderExpression(unittest.TestCase):
-    """Test that column headers in table mode render correctly."""
+    """Test that column headers in table mode have draggable snc-py-exp."""
 
-    def test_column_header_no_snc_py_exp(self):
-        """Column headers do not have snc-py-exp (source_expr removed)."""
+    def test_column_header_no_snc_py_exp_without_source(self):
+        """Column headers do not have snc-py-exp when source_code/source_line are not provided."""
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
         html_output = visualize(lst, model, mock_get_visualizer, None)
         self.assertNotIn('snc-py-exp', html_output)
+
+    def test_column_header_has_snc_py_exp_with_source(self):
+        """Column headers have snc-py-exp with list comprehension expression."""
+        lst = [{'name': 'Alice'}, {'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        self.assertEqual(model['display_mode'], 'table')
+        self.assertEqual(model.get('_source_expr'), 'people')
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        # Column ^['name'] -> [item['name'] for item in people]
+        self.assertIn("snc-py-exp", html_output)
+        expected_expr = html.escape("[item['name'] for item in people]")
+        self.assertIn(f'snc-py-exp="{expected_expr}"', html_output)
+
+    def test_column_header_is_draggable(self):
+        """Column header snc-py-exp span should have draggable=true."""
+        lst = [{'name': 'Alice'}, {'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        expected_expr = html.escape("[item['name'] for item in people]")
+        self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
+
+    def test_column_header_bare_expression(self):
+        """For a bare expression line (no assignment), uses the whole expression."""
+        lst = [{'x': 1}, {'x': 2}]
+        model = init_model(lst, mock_get_visualizer, source_code='a = 1\nget_items()', source_line=2)
+        self.assertEqual(model.get('_source_expr'), 'get_items()')
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        expected_expr = html.escape("[item['x'] for item in get_items()]")
+        self.assertIn(f'snc-py-exp="{expected_expr}"', html_output)
+
+
+class TestCellDraggablePyExp(unittest.TestCase):
+    """Test that table cells have draggable snc-py-exp attributes."""
+
+    def test_no_snc_py_exp_without_source(self):
+        """Cells do not have snc-py-exp when source_code/source_line are not provided."""
+        lst = [{'age': 25}, {'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn('snc-py-exp', html_output)
+
+    def test_generic_cell_whole_draggable(self):
+        """Generic cells (int, model=None) are wrapped entirely in a draggable snc-py-exp span."""
+        lst = [{'age': 25}, {'age': 30}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        expected_expr = html.escape("people[0]['age']")
+        self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
+        expected_expr_1 = html.escape("people[1]['age']")
+        self.assertIn(f'snc-py-exp="{expected_expr_1}" draggable="true"', html_output)
+
+    def test_generic_cell_content_inside_draggable_span(self):
+        """The cell content should be inside the draggable span for generic cells."""
+        lst = [{'age': 42}]
+        model = init_model(lst, mock_get_visualizer, source_code='data = [...]', source_line=1)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        expected_expr = html.escape("data[0]['age']")
+        # The draggable span should wrap the cell content
+        self.assertRegex(html_output,
+            r'snc-py-exp="' + re.escape(expected_expr) + r'"[^>]*draggable="true"[^>]*>.*?<span>42</span>.*?</span>')
+
+    def test_nongeneric_cell_border_drag(self):
+        """Non-generic cells (string, model=dict) use border-only drag with draggable=false inner."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        expected_expr = html.escape("people[0]['name']")
+        # Outer div should have snc-py-exp and draggable=true
+        self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
+        # Inner div should have draggable=false to protect cell interactions
+        self.assertIn('draggable="false"', html_output)
+
+    def test_nongeneric_cell_content_preserved(self):
+        """Non-generic cell visualizer content should be present inside the wrapper."""
+        lst = [{'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        # MockStringVisualizer renders: <span snc-mouse-down="MouseDown(index=0)">Bob</span>
+        self.assertIn('Bob</span>', html_output)
+
+    def test_mixed_generic_and_nongeneric_cells(self):
+        """A table with both generic (int) and non-generic (str) columns handles both correctly."""
+        lst = [{'name': 'Alice', 'age': 25}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        # Both cell expressions should be present
+        self.assertIn('snc-py-exp=', html_output)
+        # Should have at least one draggable="false" for the string cell
+        self.assertIn('draggable="false"', html_output)
+
+
+class TestSourceExprInModel(unittest.TestCase):
+    """Test that _source_expr is stored in the list model."""
+
+    def test_source_expr_stored_in_table_model(self):
+        lst = [{'x': 1}]
+        model = init_model(lst, mock_get_visualizer, source_code='data = [...]', source_line=1)
+        self.assertEqual(model['_source_expr'], 'data')
+
+    def test_source_expr_none_without_source_code(self):
+        lst = [{'x': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIsNone(model.get('_source_expr'))
+
+    def test_source_expr_none_without_source_line(self):
+        lst = [{'x': 1}]
+        model = init_model(lst, mock_get_visualizer, source_code='data = [...]')
+        self.assertIsNone(model.get('_source_expr'))
+
+    def test_source_expr_stored_in_list_model(self):
+        lst = ['a', 'b']
+        model = init_model(lst, mock_get_visualizer, source_code='items = [...]', source_line=1)
+        self.assertEqual(model.get('_source_expr'), 'items')
 
 
 if __name__ == '__main__':
