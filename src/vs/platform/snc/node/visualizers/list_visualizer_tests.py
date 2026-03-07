@@ -38,11 +38,11 @@ class MockStringVisualizer:
         return isinstance(value, str)
     def get_fields(self, value):
         return None
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return {'selection': None, 'handledKeys': ['Escape', 'Enter']}
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return f'<span snc-mouse-down="MouseDown(index=0)">{html.escape(value)}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         model = dict(model)
         model['last_event'] = event['pythonEventStr']
         return (model, [])
@@ -56,12 +56,12 @@ class SmallTrackingVisualizer:
         return isinstance(value, str)
     def get_fields(self, value):
         return None
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return {'handledKeys': []}
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         self.visualize_calls.append({'value': value, 'small': small})
         return f'<span>{html.escape(value)}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
 
@@ -69,11 +69,11 @@ class MockIntVisualizer:
     """Mimics a simple int visualizer (no interactive model)."""
     def can_visualize(self, value):
         return isinstance(value, int)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return f'<span>{value}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
 
@@ -83,11 +83,11 @@ class MockDictVisualizer:
         return isinstance(value, dict)
     def get_fields(self, value):
         return [f"^[{repr(k)}]" for k in value.keys()]
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return f'<span>{html.escape(repr(value))}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
 
@@ -100,11 +100,11 @@ class MockObjectVisualizer:
             return None
         names = sorted([name for name in dir(value) if not name.startswith('_')])
         return [f'^.{name}' for name in names]
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return f'<span>{html.escape(repr(value))}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
 
@@ -114,12 +114,12 @@ class ListVisualizerAdapter:
         return list_visualizer.can_visualize(value)
     def get_fields(self, value):
         return list_visualizer.get_fields(value)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
-        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, source_expr=source_expr)
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
-        return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, source_expr=source_expr)
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
-        return list_visualizer.update(event, source_code, source_line, model, value, get_visualizer, eval_in_scope=eval_in_scope, source_expr=source_expr)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+        return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
+        return list_visualizer.update(event, source_code, source_line, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
 
 _mock_string_vis = MockStringVisualizer()
@@ -276,9 +276,9 @@ class TestUpdate(unittest.TestCase):
     def test_child_commands_propagated(self):
         class CmdVis:
             def can_visualize(self, v): return True
-            def init_model(self, v, get_visualizer=None, eval_in_scope=None, source_expr=None): return {}
-            def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None, source_expr=None): return '<span snc-mouse-down="X">x</span>'
-            def update(self, event, sc, sl, model, value, gv=None, eval_in_scope=None, source_expr=None):
+            def init_model(self, v, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None): return {}
+            def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None): return '<span snc-mouse-down="X">x</span>'
+            def update(self, event, sc, sl, model, value, gv=None, eval_in_scope=None):
                 return (model, ['test_command'])
 
         cmd_vis = CmdVis()
@@ -502,9 +502,9 @@ class TestTableEventRouting(unittest.TestCase):
     def test_cell_commands_propagated(self):
         class CmdVis:
             def can_visualize(self, v): return isinstance(v, str)
-            def init_model(self, v, get_visualizer=None, eval_in_scope=None, source_expr=None): return {}
-            def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None, source_expr=None): return '<span snc-mouse-down="X">x</span>'
-            def update(self, event, sc, sl, model, value, gv=None, eval_in_scope=None, source_expr=None):
+            def init_model(self, v, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None): return {}
+            def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None): return '<span snc-mouse-down="X">x</span>'
+            def update(self, event, sc, sl, model, value, gv=None, eval_in_scope=None):
                 return (model, ['table_cmd'])
 
         cmd_vis = CmdVis()
@@ -1320,43 +1320,15 @@ class TestColumnManagementInListMode(unittest.TestCase):
 
 
 class TestColumnHeaderExpression(unittest.TestCase):
-    """Test that column headers in table mode have snc-py-exp attributes."""
+    """Test that column headers in table mode render correctly."""
 
-    def test_column_header_has_snc_py_exp_for_dict(self):
-        """Dict columns like ^['name'] should produce [item['name'] for item in people]."""
-        lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
-        model = init_model(lst, mock_get_visualizer, source_expr="people")
-        self.assertEqual(model['display_mode'], 'table')
-        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr="people")
-        self.assertIn("snc-py-exp", html_output)
-        self.assertIn("[item[&#x27;name&#x27;] for item in people]", html_output)
-
-    def test_column_header_has_snc_py_exp_for_nested_list(self):
-        """Nested list columns like ^[0] should produce [item[0] for item in lst1]."""
-        lst = [[1, 2], [3, 4]]
-        model = init_model(lst, mock_get_visualizer, source_expr="lst1")
-        self.assertEqual(model['display_mode'], 'table')
-        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr="lst1")
-        self.assertIn("snc-py-exp", html_output)
-        self.assertIn("[item[0] for item in lst1]", html_output)
-        self.assertIn("[item[1] for item in lst1]", html_output)
-
-    def test_column_header_no_expr_without_source_expr(self):
-        """Without source_expr, no snc-py-exp should appear in column headers."""
+    def test_column_header_no_snc_py_exp(self):
+        """Column headers do not have snc-py-exp (source_expr removed)."""
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
-        model = init_model(lst, mock_get_visualizer, source_expr=None)
+        model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr=None)
+        html_output = visualize(lst, model, mock_get_visualizer, None)
         self.assertNotIn('snc-py-exp', html_output)
-
-    def test_column_header_draggable(self):
-        """Column headers with snc-py-exp should also have draggable=true."""
-        lst = [[1, 2], [3, 4]]
-        model = init_model(lst, mock_get_visualizer, source_expr="x")
-        html_output = visualize(lst, model, mock_get_visualizer, None, source_expr="x")
-        # Find the snc-py-exp attribute and check draggable is nearby
-        self.assertIn('draggable="true"', html_output)
-        self.assertIn('snc-py-exp', html_output)
 
 
 if __name__ == '__main__':

@@ -8190,41 +8190,53 @@ class TestIndexSliceCodeGen(unittest.TestCase):
 
 
 class TestLenIndicator(unittest.TestCase):
-    """Tests for the len() indicator displayed at the end of a string visualization."""
+    """Tests for the len() indicator displayed at the end of a string visualization.
 
-    def test_len_indicator_present_in_html(self):
-        """When source_expr is provided, the len indicator appears with snc-py-exp attribute."""
-        model = init_model("hello")
-        html_output = visualize("hello", model, None, None, source_expr="str1")
+    The source expression for the len indicator comes from the model's _source_expr
+    key, which is set by init_model() via extract_expression_from_line using the
+    source_code and source_line — not from the source_expr parameter passed by
+    the AST rewriter (which contains internal temp variable names like _snc_temp_1).
+    """
+
+    def test_len_indicator_from_assignment(self):
+        """init_model extracts var name from assignment and visualize uses it."""
+        model = init_model("hello", source_code='str1 = "hello"', source_line=1)
+        html_output = visualize("hello", model, None, None)
         self.assertIn('snc-py-exp="len(str1)"', html_output)
-        self.assertIn('>5<', html_output)  # the length value
+        self.assertNotIn('_snc_temp', html_output)
+        self.assertIn('>5<', html_output)
 
-    def test_len_indicator_absent_when_no_source_expr(self):
-        """Without source_expr, no snc-py-exp should appear."""
+    def test_len_indicator_absent_without_source_code(self):
+        """Without source_code/source_line, no len snc-py-exp should appear."""
         model = init_model("hello")
-        html_output = visualize("hello", model, None, None, source_expr=None)
+        html_output = visualize("hello", model, None, None)
         self.assertNotIn('snc-py-exp', html_output)
 
     def test_len_indicator_empty_string(self):
         """Empty string should show len indicator with 0."""
-        model = init_model("")
-        html_output = visualize("", model, None, None, source_expr="s")
+        model = init_model("", source_code='s = ""', source_line=1)
+        html_output = visualize("", model, None, None)
         self.assertIn('snc-py-exp="len(s)"', html_output)
         self.assertIn('>0<', html_output)
 
     def test_len_indicator_small_mode(self):
         """Len indicator should still appear in small mode."""
-        model = init_model("hi")
-        html_output = visualize("hi", model, None, None, small=True, source_expr="s")
+        model = init_model("hi", source_code='s = "hi"', source_line=1)
+        html_output = visualize("hi", model, None, None, small=True)
         self.assertIn('snc-py-exp="len(s)"', html_output)
         self.assertIn('>2<', html_output)
 
     def test_len_indicator_draggable(self):
         """The len indicator element should have draggable=true."""
-        model = init_model("abc")
-        html_output = visualize("abc", model, None, None, source_expr="x")
+        model = init_model("abc", source_code='x = "abc"', source_line=1)
+        html_output = visualize("abc", model, None, None)
         self.assertIn('draggable="true"', html_output)
         self.assertIn('snc-py-exp="len(x)"', html_output)
+
+    def test_len_indicator_bare_expression(self):
+        """For a bare expression line, _source_expr is the whole expression."""
+        model = init_model("hello", source_code='x = 1\nmy_func()', source_line=2)
+        self.assertEqual(model['_source_expr'], 'my_func()')
 
 # =============================================================================
 # DSL Grammar Tests via Action Rule

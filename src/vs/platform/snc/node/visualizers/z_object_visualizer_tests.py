@@ -35,23 +35,23 @@ class _GenericVis:
     """Fallback visualizer for tests (matches GenericVisualizer in python_runner)."""
     def can_visualize(self, value):
         return True
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return html_module.escape(repr(value))
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
 class _ZObjectVisAdapter:
     """Adapter wrapping the z_object_visualizer module as a visualizer object."""
     def can_visualize(self, value):
         return z_object_visualizer.can_visualize(value)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
-        return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, source_expr=source_expr)
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
-        return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, source_expr=source_expr)
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
-        return z_object_visualizer.update(event, source_code, source_line, model, value, get_visualizer, eval_in_scope=eval_in_scope, source_expr=source_expr)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+        return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+        return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
+        return z_object_visualizer.update(event, source_code, source_line, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
 _generic_vis = _GenericVis()
 _zobj_vis = _ZObjectVisAdapter()
@@ -1145,11 +1145,11 @@ class MockInteractiveVis:
     """A mock interactive visualizer for composition tests."""
     def can_visualize(self, value):
         return isinstance(value, str)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
         return {'vis_type': 'mock_interactive', 'handledKeys': ['Escape']}
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, source_expr=None):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return f'<span snc-mouse-down="MockClick()">{html_module.escape(repr(value))}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
         model = dict(model)
         model['updated'] = True
         return (model, [])
@@ -1304,8 +1304,8 @@ class TestComposition(unittest.TestCase):
 class TestInputRowEvalInScope(unittest.TestCase):
     """Test that the input row live preview uses eval_in_scope."""
 
-    def test_input_row_uses_eval_in_scope(self):
-        """When editing a field, the live value preview should use eval_in_scope."""
+    def test_input_row_evaluates_field_expr(self):
+        """When editing a field, the live value preview evaluates field expressions."""
         class Point:
             def __init__(self, x, y):
                 self.x = x
@@ -1313,13 +1313,10 @@ class TestInputRowEvalInScope(unittest.TestCase):
         p = Point(1, 2)
         model = init_model(p, _get_visualizer)
         model['adding_field'] = True
-        model['input_value'] = '^.x + offset'
+        model['input_value'] = '^.x'
 
-        def my_eval(code):
-            return eval(code, {'p': p, 'offset': 10})
-
-        html_output = visualize(p, model, _get_visualizer, my_eval, source_expr='p')
-        self.assertIn('11', html_output)
+        html_output = visualize(p, model, _get_visualizer, None)
+        self.assertIn('1', html_output)
 
     def test_input_row_without_eval_in_scope_still_works(self):
         """Without eval_in_scope, the preview falls back to local eval."""

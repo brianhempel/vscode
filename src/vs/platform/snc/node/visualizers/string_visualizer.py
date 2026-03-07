@@ -81,7 +81,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import replace_caret_in_py_exp
+from visualizer_utils import replace_caret_in_py_exp, STRING, GRAY, BLUE
 
 # === Command types (Elm-style commands for VS Code to execute) ===
 
@@ -176,10 +176,6 @@ class Unlink:
 # eval(f"{MouseOver(10)}") works
 
 
-
-# VS Code theme colors
-STRING = "#ce9178"
-GRAY = "#808080"
 
 # Search magnifying glass SVG
 with open(os.path.join(os.path.dirname(__file__), 'search.svg'), 'r') as f:
@@ -2777,10 +2773,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     )
 
 
-def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, source_expr=None) -> str:
-    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, source_expr=source_expr))
+def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> str:
+    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small))
 
-def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, source_expr=None) -> List[str]:
+def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> List[str]:
     if eval_in_scope is None:
         eval_in_scope = lambda _c: eval(_c)
 
@@ -2830,23 +2826,24 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
     flush_group()
 
-    # len() indicator at the top-left of the final character position
-    if source_expr is not None:
-        len_val = len(value)
-        len_expr = f'len({source_expr})'
-        char_els.append(
-            f'<span style="position:relative;display:inline-block;width:0;height:0;vertical-align:text-top;">'
-            f'<span snc-py-exp="{html.escape(len_expr)}" draggable="true" '
-            f'style="position:absolute;left:0;top:-2px;font-size:9px;color:{GRAY};'
-            f'cursor:grab;user-select:none;white-space:nowrap;"'
-            f'>{len_val}</span></span>'
-        )
-
     # (must match internal index scheme for 1:1 correspondence with extract_by_internal_indices)
     char_els.append(char_span('$', index, True, highlight_by_index.get(index), model))
     index += 1
     char_els.append(char_span('\\Z', index, True, highlight_by_index.get(index), model))
     index += 1
+
+    # len() indicator at the top-left of the final character position
+    resolved_source_expr = model.get('_source_expr') if model else None
+    if resolved_source_expr is not None:
+        len_val = len(value)
+        len_expr = f'len({resolved_source_expr})'
+        char_els.append(
+            f'<span style="position:relative;display:inline-block;width:0;height:0;vertical-align:top;">'
+            f'<span snc-py-exp="{html.escape(len_expr)}" draggable="true" '
+            f'style="position:absolute;left:3px;top:1px;font-size:7px;color:{BLUE};line-height:7px;'
+            f'cursor:grab;user-select:none;white-space:nowrap;"'
+            f'>{len_val}</span></span>'
+        )
 
     # chars_html = ''.join(char_els)
 
@@ -3351,14 +3348,22 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
     )
 
 
-def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None):
+def init_model(value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
     """
     Initialize the model state for a new visualization.
 
     Args:
         value: The string value being visualized (not stored in model)
+        source_code: The full source code of the file
+        source_line: The line number where this value is visualized
     """
+    source_expr = None
+    if source_code and source_line:
+        expr, var_name = extract_expression_from_line(source_code, source_line)
+        source_expr = var_name if var_name else expr
+
     return {
+        "_source_expr": source_expr,
         "search": None,   # Regex pattern with / delimiters in canonical form, e.g., "/hello.*world/"
         "anchorIdx": None,
         "anchorType": None,       # "literal" or "fuzzy" - determined when drag starts
@@ -3603,7 +3608,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
 from string_visualizer_grammar import generate_action, generate_copy_expr_for_if, parse_generated_code_or_assignment
 
 
-def update(event, source_code: str, source_line: int, model: dict, value: str, get_visualizer=None, eval_in_scope=None, source_expr=None) -> Tuple[dict, List[Any]]:
+def update(event, source_code: str, source_line: int, model: dict, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
     """
     Update model based on event. Returns (new_model, commands) tuple.
 
@@ -3622,7 +3627,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
     if event is None or event.get('pythonEventStr', '') == '' or event.get('eventJSON', '') == '':
         return (model, commands)
     if model is None:
-        model = init_model(value)
+        model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
 
     make_python_event = eval(event['pythonEventStr'])
     event_json = event['eventJSON']
@@ -3699,7 +3704,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 # Fresh start: reset selection, preserving linked-editing state and search flags
                 saved_linked = (model.get('linked_action'), model.get('linked_var_to_search'), model.get('linked_prefix'))
                 saved_flags = get_search_flags(model.get('search'))
-                model = init_model(value)
+                model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
                 model['linked_action'], model['linked_var_to_search'], model['linked_prefix'] = saved_linked
                 if saved_flags:
                     model['search'] = '``' + saved_flags
