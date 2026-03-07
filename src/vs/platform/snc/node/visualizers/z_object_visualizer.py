@@ -448,7 +448,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     for i, accessor_code in enumerate(model.get('fields', [])):
         if model.get('editing_index') == i:
             # This field is being edited: show input
-            field_trs.append(_render_input_row(obj, model, is_editing=True, editing_index=i))
+            field_trs.append(_render_input_row(obj, model, is_editing=True, editing_index=i, eval_in_scope=eval_in_scope, source_expr=source_expr))
         else:
             # Normal display: double-clickable field name with remove/drag handles
             placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope, source_expr)
@@ -515,7 +515,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
 
     # If adding a new field, show input row at the end
     if model.get('adding_field'):
-        field_trs.append(_render_input_row(obj, model, is_editing=False))
+        field_trs.append(_render_input_row(obj, model, is_editing=False, eval_in_scope=eval_in_scope, source_expr=source_expr))
 
     field_trs_str = '\n'.join(field_trs)
 
@@ -544,7 +544,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     )
 
 
-def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1):
+def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eval_in_scope=None, source_expr=None):
     """
     Render a table row with a text input for adding or editing a field.
 
@@ -556,7 +556,7 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1):
 
     # Evaluate current input as accessor to show live value
     if input_value.strip():
-        _, val_str, _, _ = _eval_field(obj, input_value)
+        _, val_str, _, _ = _eval_field(obj, input_value, eval_in_scope, source_expr)
     else:
         val_str = ''
 

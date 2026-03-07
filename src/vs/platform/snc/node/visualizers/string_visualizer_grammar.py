@@ -81,31 +81,31 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("TransformAction", [
         BiTemplate("TransformSlice",
-                   "(lambda _mtch: {replace_expr:AnyPython})({var_to_search:Var}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}])",
+                   "(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}])",
                    {'is_slice': True}),
         BiTemplate("TransformIndex",
-                   "(lambda _mtch: {replace_expr:AnyPython})({var_to_search:Var}[{index_expr:IndexExpr}])",
+                   "(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[{index_expr:IndexExpr}])",
                    {'is_index': True}),
         BiTemplate("TransformFirst",
-                   "next(({replace_expr:AnyPython} for _mtch in {:FinditerExpr}), None)",
+                   "next(({replace_expr:AnyPython} for mtch in {:FinditerExpr}), None)",
                    {'is_first': True, 'is_index': False, 'is_slice': False}),
         BiTemplate("TransformList",
-                   "[{replace_expr:AnyPython} for _mtch in {:FinditerExpr}]",
+                   "[{replace_expr:AnyPython} for mtch in {:FinditerExpr}]",
                    {'is_first': False, 'is_index': False, 'is_slice': False}),
     ], {'has_replace': True}),
 
     Alt("LoopAction", [
         BiTemplate("LoopReplace",
-                   "for _i, _val in enumerate({replace_expr:AnyPython} for _mtch in {:FinditerExpr}):\n    pass",
+                   "for _i, _val in enumerate({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
                    {'has_replace': True}),
         BiTemplate("LoopNonReplace",
-                   "for _i, _mtch in enumerate({:FinditerExpr}):\n    pass",
+                   "for _i, mtch in enumerate({:FinditerExpr}):\n    pass",
                    {'has_replace': False}),
     ], {}),
 
     Alt("AnyAction", [
         BiTemplate("AnyReplace",
-                   "any({replace_expr:AnyPython} for _mtch in {:FinditerExpr})",
+                   "any({replace_expr:AnyPython} for mtch in {:FinditerExpr})",
                    {'has_replace': True}),
         BiTemplate("AnyNonReplace",
                    "bool({:SearchExpr})",
@@ -113,12 +113,12 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     BiTemplate("AllAction",
-               "all({replace_expr:AnyPython} for _mtch in {:FinditerExpr})",
+               "all({replace_expr:AnyPython} for mtch in {:FinditerExpr})",
                {}),
 
     Alt("IfAnyAction", [
         BiTemplate("IfAnyReplace",
-                   "if any({replace_expr:AnyPython} for _mtch in {:FinditerExpr}):\n    pass",
+                   "if any({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
                    {'has_replace': True}),
         BiTemplate("IfAnyNonReplace",
                    "if {:SearchExpr}:\n    pass",
@@ -126,12 +126,12 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     BiTemplate("IfAllAction",
-               "if all({replace_expr:AnyPython} for _mtch in {:FinditerExpr}):\n    pass",
+               "if all({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
                {}),
 
     Alt("CountAction", [
         BiTemplate("CountReplace",
-                   "sum(1 for _mtch in {:FinditerExpr} if {replace_expr:AnyPython})",
+                   "sum(1 for mtch in {:FinditerExpr} if {replace_expr:AnyPython})",
                    {'has_replace': True}),
         BiTemplate("CountNonReplace",
                    "sum(1 for _ in {:FinditerExpr})",
@@ -140,10 +140,10 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("FilterAction", [
         BiTemplate("FilterFirst",
-                   "next((_mtch for _mtch in {:FinditerExpr} if {replace_expr:AnyPython}), None)",
+                   "next((mtch for mtch in {:FinditerExpr} if {replace_expr:AnyPython}), None)",
                    {'is_first': True}),
         BiTemplate("FilterList",
-                   "[_mtch for _mtch in {:FinditerExpr} if {replace_expr:AnyPython}]",
+                   "[mtch for mtch in {:FinditerExpr} if {replace_expr:AnyPython}]",
                    {'is_first': False}),
     ], {}),
 
@@ -164,16 +164,16 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("ReplaceAction", [
         BiTemplate("ReplaceIndex",
-                   "{var_to_search:Var}[:{index_expr:IndexExpr}] + str((lambda _mtch: {replace_expr:AnyPython})({var_to_search:Var}[{index_expr:IndexExpr}])) + {var_to_search:Var}[{index_expr:IndexExpr} + 1:]",
+                   "{var_to_search:Var}[:{index_expr:IndexExpr}] + str((lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[{index_expr:IndexExpr}])) + {var_to_search:Var}[{index_expr:IndexExpr} + 1:]",
                    {'is_index': True}),
         BiTemplate("ReplaceSlice",
-                   "{:SliceLeft} + str((lambda _mtch: {replace_expr:AnyPython})({var_to_search:Var}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}])) + {:SliceRight}",
+                   "{:SliceLeft} + str((lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}])) + {:SliceRight}",
                    {'is_slice': True}),
         BiTemplate("ReplaceRegex",
-                   "re.sub(r'{regex_pattern:RawContent}', lambda _mtch: {replace_expr:AnyPython}, {var_to_search:Var}{:PerhapsCount}, flags={:RegexFlags})",
+                   "re.sub(r'{regex_pattern:RawContent}', lambda mtch: {replace_expr:AnyPython}, {var_to_search:Var}{:PerhapsCount}, flags={:RegexFlags})",
                    {'is_expr': False, 'is_index': False, 'is_slice': False}),
         BiTemplate("ReplaceExpr",
-                   "re.sub(re.escape({expr:Something}), lambda _mtch: {replace_expr:AnyPython}, {var_to_search:Var}{:PerhapsCount}{:ExprKwFlags})",
+                   "re.sub(re.escape({expr:Something}), lambda mtch: {replace_expr:AnyPython}, {var_to_search:Var}{:PerhapsCount}{:ExprKwFlags})",
                    {'is_expr': True, 'is_index': False, 'is_slice': False}),
     ], {}),
 
@@ -184,6 +184,15 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         BiTemplate("DeleteSlice",
                    "{:SliceLeft} + {:SliceRight}",
                    {'is_slice': True}),
+        BiTemplate("DeletePredicateFirst",
+                   "next(({var_to_search:Var}[:mtch.start()] + {var_to_search:Var}[mtch.end():] for mtch in {:FinditerExpr} if {replace_expr:AnyPython}), {var_to_search:Var})",
+                   {'is_first': True, 'is_index': False, 'is_slice': False, 'has_replace': True}),
+        BiTemplate("DeletePredicateRegexAll",
+                   "re.sub(r'{regex_pattern:RawContent}', lambda mtch: '' if ({replace_expr:AnyPython}) else mtch[0], {var_to_search:Var}, flags={:RegexFlags})",
+                   {'is_expr': False, 'is_first': False, 'is_index': False, 'is_slice': False, 'has_replace': True}),
+        BiTemplate("DeletePredicateExprAll",
+                   "re.sub(re.escape({expr:Something}), lambda mtch: '' if ({replace_expr:AnyPython}) else mtch[0], {var_to_search:Var}{:ExprKwFlags})",
+                   {'is_expr': True, 'is_first': False, 'is_index': False, 'is_slice': False, 'has_replace': True}),
         BiTemplate("DeleteExprFirst",
                    "{var_to_search:Var}.replace({expr:Something}, '', 1)",
                    {'is_expr': True, 'is_ci': False, 'is_first': True, 'is_index': False, 'is_slice': False}),
@@ -203,7 +212,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     # --- Top-level Action alt: gates on 'action' key ---
 
-    # Order matters for parse: more specific patterns first, get_transform last
+    # Order matters for parse: more specific patterns first, find_or_map last
     # (its GetSlice/TransformList are very general and can ambiguously match others)
     Alt("Action", [
         Alt("ActionReplace", ["ReplaceAction"], {'action': 'replace'}),
@@ -216,7 +225,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         Alt("ActionAny", ["AnyAction"], {'action': 'any'}),
         Alt("ActionAll", ["AllAction"], {'action': 'all'}),
         Alt("ActionSplit", ["SplitAction"], {'action': 'split'}),
-        Alt("ActionGetTransform", ["TransformAction", "GetAction"], {'action': 'get_transform'}),
+        Alt("ActionFindOrMap", ["TransformAction", "GetAction"], {'action': 'find_or_map'}),
     ], {}),
 ])
 
@@ -253,7 +262,7 @@ def _suggest_name_for_get(ctx: dict) -> str:
 def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
     if action in _STATEMENT_ACTIONS:
         return None
-    if action == 'get_transform':
+    if action == 'find_or_map':
         if ctx.get('has_replace'):
             return _suggest_name(ctx, 'transformed')
         return _suggest_name_for_get(ctx)

@@ -147,7 +147,7 @@ class CaptureGroupsToggle:
 
 @dataclass(frozen=True, slots=True)
 class ActionButtonClick:
-    action: str  # 'get_transform', 'replace', 'delete', 'loop', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'split'
+    action: str  # 'find_or_map', 'replace', 'delete', 'loop', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'split'
     copy: bool   # True → CopyToClipboard, False → NewCode
 
 @dataclass(frozen=True, slots=True)
@@ -2596,13 +2596,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     replace_text = bool(model.get('replace_text'))
     has_replace = replace_visible and replace_text
 
-    # Compute match count for the Count button label.
-    # When a transform/replace is present, count truthy transform results
-    # (the transform could be a boolean predicate filtering which items to count).
-    if has_search and has_replace:
-        match_count = _count_truthy_transform_results(selection_regex, value, model.get('replace_text'), eval_in_scope)
-    else:
-        match_count = _count_matches(selection_regex, value, eval_in_scope) if has_search else 0
+    match_count = _eval_count_via_grammar(selection_regex, value, model, eval_in_scope) if has_search else 0
 
     # Common button styles
     btn_base = (
@@ -2659,10 +2653,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     # 1. Get/Transform + Copy
     if has_replace:
         lbl = 'Map First Match \u23ce' if first else 'Map Matches \u23ce'
-        parts.append(btn_group(lbl, 'get_transform', has_search, 'Map expression over matches (Enter)'))
+        parts.append(btn_group(lbl, 'find_or_map', has_search, 'Map expression over matches (Enter)'))
     else:
         lbl = 'Find First Match \u23ce' if first else 'Find Matches \u23ce'
-        parts.append(btn_group(lbl, 'get_transform', has_search, 'Find matches (Enter)'))
+        parts.append(btn_group(lbl, 'find_or_map', has_search, 'Find matches (Enter)'))
 
     # 2. Replace + Copy (grayed out when not in replace mode)
     replace_lbl = 'Replace First \u2318R' if first else 'Replace All \u2318R'
@@ -2704,9 +2698,9 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
             )
 
         dropdown_opts.append(dropdown_row(f'Any{any_suffix}', 'any', has_search))
-        dropdown_opts.append(dropdown_row(f'All{all_suffix}', 'all', has_search and has_replace))
+        dropdown_opts.append(dropdown_row(f'All{all_suffix}', 'all', has_search and has_replace and not first))
         dropdown_opts.append(dropdown_row(f'If Any{any_suffix}', 'if_any', has_search))
-        dropdown_opts.append(dropdown_row(f'If All{all_suffix}', 'if_all', has_search and has_replace))
+        dropdown_opts.append(dropdown_row(f'If All{all_suffix}', 'if_all', has_search and has_replace and not first))
 
         dropdown_panel = (
             '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
@@ -2735,14 +2729,14 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     parts.append(btn_group(delete_lbl, 'delete', has_search, 'Delete matches (\u2318\u232b)'))
 
     # 6. Split + Copy
-    parts.append(btn_group('Split', 'split', has_search, 'Split string at matches'))
+    parts.append(btn_group('Split', 'split', has_search and not replace_visible, 'Split string at matches'))
 
     # 8. Filter + Copy (requires replace/transform predicate)
     parts.append(btn_group('Filter', 'filter', has_search and has_replace, 'Filter matches by predicate'))
 
     # 8. Count (N) + Copy
     count_label = f'Count ({match_count})'
-    parts.append(btn_group(count_label, 'count', has_search, 'Count of matches'))
+    parts.append(btn_group(count_label, 'count', has_search and not first, 'Count of matches'))
 
     return (
         f'<div style="margin-top: 4px; white-space: normal;max-width: {str(max_width) + "px" if max_width is not None else "none"};">'
@@ -3076,85 +3070,31 @@ def is_index_or_slice_search(selection_regex: str | None, eval_in_scope=None) ->
     return False
 
 
-def _count_matches(selection_regex: str | None, string_value: str, eval_in_scope) -> int:
-    """Count the number of matches for the current search pattern.
+def _eval_count_via_grammar(selection_regex: str | None, value: str, model: dict, eval_in_scope) -> int:
+    """Compute count preview by generating and evaluating the grammar's CountAction expression.
 
-    Used by the Count button to display the match count in its label.
+    Uses the same generate_action('count', ...) path as the Count button click,
+    ensuring the preview always matches the code that would be produced.
     """
-    if not selection_regex or not string_value:
+    from string_visualizer_grammar import generate_action as _gen_action
+
+    if not selection_regex or not value:
         return 0
 
-    matched = _eval_index_or_slice_match(selection_regex, string_value, eval_in_scope)
-    if matched is not None:
-        return 1
-    if is_slice_search(selection_regex) or is_index_or_slice_search(selection_regex, eval_in_scope):
+    ctx = _get_search_context(model, var_to_search='_snc_v')
+    if not ctx or ctx.get('is_index') or ctx.get('is_slice'):
         return 0
 
-    parsed = parse_search_term(selection_regex)
-    if not parsed:
+    result = _gen_action('count', ctx)
+    if not result:
         return 0
-    kind, term, flags = parsed
-    ci = 'i' in flags
-    first = '1' in flags
 
-    if kind in ('string', 'expr'):
-        if kind == 'string':
-            search_text = eval_string_search(selection_regex)
-        else:
-            try:
-                search_text = eval_in_scope(term)
-            except Exception:
-                return 0
-            if not isinstance(search_text, str):
-                return 0
-        if not search_text:
-            return 0
-        if ci:
-            compiled = re.compile(re.escape(search_text), re.IGNORECASE)
-            if first:
-                return 1 if compiled.search(string_value) else 0
-            return len(compiled.findall(string_value))
-        else:
-            if first:
-                return 1 if search_text in string_value else 0
-            return string_value.count(search_text)
-
-    if kind == 'regex':
-        pattern = strip_capturing_groups(term) if term else ''
-        if not pattern:
-            return 0
-        re_flags = re.M | (re.I if ci else 0)
-        try:
-            if first:
-                return 1 if re.search(pattern, string_value, flags=re_flags) else 0
-            return len(list(re.finditer(pattern, string_value, flags=re_flags)))
-        except Exception:
-            return 0
-
-    return 0
-
-
-def _count_truthy_transform_results(selection_regex: str, string_value: str, replace_text: str, eval_in_scope) -> int:
-    """Count matches whose transform result is truthy.
-
-    Falls back to _count_matches if the transform can't be evaluated.
-    """
-    if not selection_regex or not string_value or not replace_text:
-        return 0
-    matches = _find_matches(selection_regex, string_value, eval_in_scope)
-    if not matches:
-        return 0
-    replace_expr_raw = replace_text
-    if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-        end = replace_expr_raw.find('`', 1)
-        if end > 0:
-            replace_expr_raw = replace_expr_raw[1:end]
-    replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+    _, code = result
     try:
-        transform_fn = eval_in_scope(f"(lambda _mtch: {replace_expr})")
-        return sum(1 for m in matches if transform_fn(m))
+        count_fn = eval_in_scope(f"(lambda _snc_v: {code})")
+        return count_fn(value)
     except Exception:
-        return _count_matches(selection_regex, string_value, eval_in_scope)
+        return 0
 
 
 def _find_matches(selection_regex: str, string_value: str, eval_in_scope) -> list:
@@ -3230,10 +3170,10 @@ def _compute_predicate_previews(selection_regex, value, replace_visible, replace
         end = replace_expr_raw.find('`', 1)
         if end > 0:
             replace_expr_raw = replace_expr_raw[1:end]
-    replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+    replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
 
     try:
-        transform_fn = eval_in_scope(f"(lambda _mtch: {replace_expr})")
+        transform_fn = eval_in_scope(f"(lambda mtch: {replace_expr})")
         results = [transform_fn(m) for m in matches]
         return (any(results), all(results))
     except Exception:
@@ -3299,9 +3239,9 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
                 end = replace_expr_raw.find('`', 1)
                 if end > 0:
                     replace_expr_raw = replace_expr_raw[1:end]
-            replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+            replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
             try:
-                transform_fn = eval_in_scope(f"(lambda _mtch: {replace_expr})")
+                transform_fn = eval_in_scope(f"(lambda mtch: {replace_expr})")
                 result = transform_fn(matched_str)
                 result_str = html.escape(_trunc_repr(result))
             except Exception as e:
@@ -3361,10 +3301,10 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
             end = replace_expr_raw.find('`', 1)
             if end > 0:
                 replace_expr_raw = replace_expr_raw[1:end]
-        replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+        replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
 
         try:
-            transform_fn = eval_in_scope(f"(lambda _mtch: {replace_expr})")
+            transform_fn = eval_in_scope(f"(lambda mtch: {replace_expr})")
             result = transform_fn(transform_match)
             result_str = html.escape(_trunc_repr(result))
         except Exception as e:
@@ -3470,14 +3410,17 @@ def finalize_handle_drag(model: dict, string_value: str) -> dict:
 # Expression Builder Helpers for Action Buttons
 # =============================================================================
 
-def _get_search_context(model: dict, source_code: str, source_line: int) -> dict | None:
+def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, var_to_search: str = None) -> dict | None:
     """Extract common search context from model and source code.
 
     Returns None if no valid search pattern or source info is available.
     Otherwise returns a dict with all values needed to build code expressions.
+
+    If var_to_search is provided, source_code/source_line are not needed
+    (used by the count preview which doesn't have source context).
     """
     selection_regex = model.get('search')
-    if not selection_regex or not source_code or not source_line:
+    if not selection_regex:
         return None
 
     parsed = parse_search_term(selection_regex)
@@ -3485,9 +3428,15 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
         return None
     kind, term, flags = parsed
 
-    expr, var_name = extract_expression_from_line(source_code, source_line)
-    var_to_search = var_name if var_name else f"({expr})"
-    suggest_base = var_name if var_name else "result"
+    if var_to_search:
+        suggest_base = var_to_search
+        var_name = var_to_search
+    else:
+        if not source_code or not source_line:
+            return None
+        expr, var_name = extract_expression_from_line(source_code, source_line)
+        var_to_search = var_name if var_name else f"({expr})"
+        suggest_base = var_name if var_name else "result"
 
     is_idx = False
     index_expr = None
@@ -3512,7 +3461,7 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
                 end = replace_expr_raw.find('`', 1)
                 if end > 0:
                     replace_expr_raw = replace_expr_raw[1:end]
-            replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+            replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
         is_slice = kind == 'slice'
         slice_start = term[0] if is_slice else None
         slice_stop = term[1] if is_slice else None
@@ -3552,7 +3501,7 @@ def _get_search_context(model: dict, source_code: str, source_line: int) -> dict
             end = replace_expr_raw.find('`', 1)
             if end > 0:
                 replace_expr_raw = replace_expr_raw[1:end]
-        replace_expr = replace_caret_in_py_exp(replace_expr_raw, '_mtch')
+        replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
 
     return {
         'selection_regex': selection_regex,
@@ -3714,7 +3663,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 else:
                     ctx = _get_search_context(model, source_code, source_line)
                     if ctx:
-                        result = generate_action('get_transform', ctx)
+                        result = generate_action('find_or_map', ctx)
                         if result:
                             commands.append(result)
 
@@ -3919,6 +3868,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             model['replace_text'] = val if val else None
 
         case ActionButtonClick(action=action, copy=copy):
+            model['openDropdown'] = None
             ctx = _get_search_context(model, source_code, source_line)
             if ctx:
                 if copy and action in ('if_any', 'if_all'):

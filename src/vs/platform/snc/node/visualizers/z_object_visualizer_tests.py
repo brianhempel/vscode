@@ -1301,6 +1301,70 @@ class TestComposition(unittest.TestCase):
         self.assertIn('Escape', model['handledKeys'])
 
 
+class TestInputRowEvalInScope(unittest.TestCase):
+    """Test that the input row live preview uses eval_in_scope."""
+
+    def test_input_row_uses_eval_in_scope(self):
+        """When editing a field, the live value preview should use eval_in_scope."""
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+        p = Point(1, 2)
+        model = init_model(p, _get_visualizer)
+        model['adding_field'] = True
+        model['input_value'] = '^.x + offset'
+
+        def my_eval(code):
+            return eval(code, {'p': p, 'offset': 10})
+
+        html_output = visualize(p, model, _get_visualizer, my_eval, source_expr='p')
+        self.assertIn('11', html_output)
+
+    def test_input_row_without_eval_in_scope_still_works(self):
+        """Without eval_in_scope, the preview falls back to local eval."""
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+        p = Point(1, 2)
+        model = init_model(p, _get_visualizer)
+        model['adding_field'] = True
+        model['input_value'] = '^.x'
+
+        html_output = visualize(p, model, _get_visualizer, None)
+        self.assertIn('1', html_output)
+
+
+class TestDotfileCaretHandling(unittest.TestCase):
+    """Test that load_fields_from_dotfile returns fields as stored."""
+
+    def setUp(self):
+        self.orig_cwd = os.getcwd()
+        self.tmp_dir = tempfile.mkdtemp()
+        os.chdir(self.tmp_dir)
+
+    def tearDown(self):
+        os.chdir(self.orig_cwd)
+        shutil.rmtree(self.tmp_dir)
+
+    def test_load_preserves_embedded_caret(self):
+        """Fields with ^ embedded (not leading) are returned as-is."""
+        data = {'re.Match': ['str3[^.start():]']}
+        with open(DOTFILE_NAME, 'w') as f:
+            json.dump(data, f)
+        result = load_fields_from_dotfile('re.Match')
+        self.assertEqual(result, ['str3[^.start():]'])
+
+    def test_load_preserves_leading_caret(self):
+        """Fields with leading ^ are returned as-is."""
+        data = {'re.Match': ['^[0]', '^.start()']}
+        with open(DOTFILE_NAME, 'w') as f:
+            json.dump(data, f)
+        result = load_fields_from_dotfile('re.Match')
+        self.assertEqual(result, ['^[0]', '^.start()'])
+
+
 class TestGetFields(unittest.TestCase):
     """Test get_fields and eval_caret_expr integration on z_object_visualizer."""
 
