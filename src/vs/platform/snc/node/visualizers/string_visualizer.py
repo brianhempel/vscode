@@ -2752,7 +2752,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
 
 def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, source_expr=None) -> str:
-    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small))
+    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, source_expr=source_expr))
 
 def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, source_expr=None) -> List[str]:
     if eval_in_scope is None:
@@ -2803,6 +2803,18 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             char_els.extend(char_htmls)
 
     flush_group()
+
+    # len() indicator at the top-left of the final character position
+    if source_expr is not None:
+        len_val = len(value)
+        len_expr = f'len({source_expr})'
+        char_els.append(
+            f'<span style="position:relative;display:inline-block;width:0;height:0;vertical-align:text-top;">'
+            f'<span snc-py-exp="{html.escape(len_expr)}" draggable="true" '
+            f'style="position:absolute;left:0;top:-2px;font-size:9px;color:{GRAY};'
+            f'cursor:grab;user-select:none;white-space:nowrap;"'
+            f'>{len_val}</span></span>'
+        )
 
     # (must match internal index scheme for 1:1 correspondence with extract_by_internal_indices)
     char_els.append(char_span('$', index, True, highlight_by_index.get(index), model))

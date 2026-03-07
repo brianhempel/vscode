@@ -8001,5 +8001,43 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         self.assertIn('x[10:]', expr)
 
 
+class TestLenIndicator(unittest.TestCase):
+    """Tests for the len() indicator displayed at the end of a string visualization."""
+
+    def test_len_indicator_present_in_html(self):
+        """When source_expr is provided, the len indicator appears with snc-py-exp attribute."""
+        model = init_model("hello")
+        html_output = visualize("hello", model, None, None, source_expr="str1")
+        self.assertIn('snc-py-exp="len(str1)"', html_output)
+        self.assertIn('>5<', html_output)  # the length value
+
+    def test_len_indicator_absent_when_no_source_expr(self):
+        """Without source_expr, no snc-py-exp should appear."""
+        model = init_model("hello")
+        html_output = visualize("hello", model, None, None, source_expr=None)
+        self.assertNotIn('snc-py-exp', html_output)
+
+    def test_len_indicator_empty_string(self):
+        """Empty string should show len indicator with 0."""
+        model = init_model("")
+        html_output = visualize("", model, None, None, source_expr="s")
+        self.assertIn('snc-py-exp="len(s)"', html_output)
+        self.assertIn('>0<', html_output)
+
+    def test_len_indicator_small_mode(self):
+        """Len indicator should still appear in small mode."""
+        model = init_model("hi")
+        html_output = visualize("hi", model, None, None, small=True, source_expr="s")
+        self.assertIn('snc-py-exp="len(s)"', html_output)
+        self.assertIn('>2<', html_output)
+
+    def test_len_indicator_draggable(self):
+        """The len indicator element should have draggable=true."""
+        model = init_model("abc")
+        html_output = visualize("abc", model, None, None, source_expr="x")
+        self.assertIn('draggable="true"', html_output)
+        self.assertIn('snc-py-exp="len(x)"', html_output)
+
+
 if __name__ == '__main__':
     unittest.main()
