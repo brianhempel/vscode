@@ -41,8 +41,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoistedDropdown: HTMLElement | null = null;
 	private hoistedDropdownListeners: IDisposable[] = [];
 	private useBlockLayout = false;
+	private readonly clipboardService: IClipboardService;
+	private pyExpTooltip: HTMLElement | null = null;
+	private pyExpTooltipTimer: any = null;
+	private pyExpTooltipHideTimer: any = null;
+	private pyExpCurrentTarget: Element | null = null;
 
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -51,6 +56,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onPointerEvent = onPointerEvent;
 		this.onKeyboardEvent = onKeyboardEvent;
 		this.onInputEvent = onInputEvent;
+		this.clipboardService = clipboardService;
 
 		// Create the widget DOM node
 		this.domNode = document.createElement('div');
@@ -133,8 +139,134 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_input_event('snc-input', ev);
 		}));
 
+		// Drag-and-drop for snc-py-exp elements
+		this._register(dom.addDisposableListener(this.domNode, 'dragstart', (ev: DragEvent) => {
+			const pyExpEl = this.findPyExpAncestor(ev.target as Node);
+			if (pyExpEl && ev.dataTransfer) {
+				const expression = pyExpEl.getAttribute('snc-py-exp') ?? '';
+				ev.dataTransfer.setData('text/plain', expression);
+				ev.dataTransfer.effectAllowed = 'copy';
+				this.hidePyExpTooltip();
+			}
+		}));
+
+		// Tooltip on hover for snc-py-exp elements
+		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
+			const pyExpEl = this.findPyExpAncestor(ev.target as Node);
+			if (pyExpEl && pyExpEl !== this.pyExpCurrentTarget) {
+				this.pyExpCurrentTarget = pyExpEl;
+				clearTimeout(this.pyExpTooltipTimer);
+				clearTimeout(this.pyExpTooltipHideTimer);
+				this.pyExpTooltipTimer = setTimeout(() => {
+					this.showPyExpTooltip(pyExpEl);
+				}, 400);
+			}
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
+			const relatedTarget = ev.relatedTarget as Node | null;
+			// Don't hide if moving into the tooltip itself
+			if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
+				return;
+			}
+			// Don't hide if moving to another snc-py-exp element (will be handled by mouseover)
+			if (relatedTarget && this.findPyExpAncestor(relatedTarget)) {
+				return;
+			}
+			this.schedulePyExpTooltipHide();
+		}));
+
 		// Add the widget to the editor
 		this.editor.addOverlayWidget(this);
+	}
+
+	/**
+	 * Walk up from a node to find the nearest ancestor (or itself) with snc-py-exp attribute.
+	 */
+	private findPyExpAncestor(node: Node | null): Element | null {
+		let el: Element | null = node?.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node?.parentElement ?? null);
+		while (el && el !== this.domNode) {
+			if (el.hasAttribute('snc-py-exp')) {
+				return el;
+			}
+			el = el.parentElement;
+		}
+		return null;
+	}
+
+	/**
+	 * Show a tooltip with the Python expression and a copy button near the given element.
+	 */
+	private showPyExpTooltip(target: Element): void {
+		this.hidePyExpTooltip();
+
+		const expression = target.getAttribute('snc-py-exp');
+		if (!expression) { return; }
+
+		const rect = target.getBoundingClientRect();
+		const tooltip = document.createElement('div');
+		tooltip.className = 'snc-py-exp-tooltip';
+
+		const exprSpan = document.createElement('span');
+		exprSpan.textContent = expression;
+		tooltip.appendChild(exprSpan);
+
+		const copyBtn = document.createElement('button');
+		copyBtn.className = 'snc-copy-btn';
+		copyBtn.textContent = '\u{1F4CB}';  // clipboard emoji
+		copyBtn.title = 'Copy to clipboard';
+		copyBtn.addEventListener('mousedown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.clipboardService.writeText(expression);
+			copyBtn.textContent = '\u2713';  // check mark
+			setTimeout(() => { copyBtn.textContent = '\u{1F4CB}'; }, 1000);
+		});
+		tooltip.appendChild(copyBtn);
+
+		// Keep tooltip alive while hovering it
+		tooltip.addEventListener('mouseenter', () => {
+			clearTimeout(this.pyExpTooltipHideTimer);
+		});
+		tooltip.addEventListener('mouseleave', () => {
+			this.schedulePyExpTooltipHide();
+		});
+
+		// Position tooltip above the target element
+		tooltip.style.left = `${rect.left}px`;
+		tooltip.style.top = `${rect.top - 28}px`;
+
+		this.editor.getContainerDomNode().appendChild(tooltip);
+		this.pyExpTooltip = tooltip;
+
+		// Adjust if tooltip goes off screen top
+		const tooltipRect = tooltip.getBoundingClientRect();
+		if (tooltipRect.top < 0) {
+			tooltip.style.top = `${rect.bottom + 4}px`;
+		}
+	}
+
+	/**
+	 * Schedule hiding the tooltip after a short delay.
+	 */
+	private schedulePyExpTooltipHide(): void {
+		clearTimeout(this.pyExpTooltipTimer);
+		clearTimeout(this.pyExpTooltipHideTimer);
+		this.pyExpTooltipHideTimer = setTimeout(() => {
+			this.hidePyExpTooltip();
+		}, 200);
+	}
+
+	/**
+	 * Immediately hide and remove the tooltip.
+	 */
+	private hidePyExpTooltip(): void {
+		clearTimeout(this.pyExpTooltipTimer);
+		clearTimeout(this.pyExpTooltipHideTimer);
+		this.pyExpCurrentTarget = null;
+		if (this.pyExpTooltip) {
+			this.pyExpTooltip.remove();
+			this.pyExpTooltip = null;
+		}
 	}
 
 	private wrapWithChildKeys(pythonEventStr: string, from: Element | null, stop: Element | null): string {
@@ -360,6 +492,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		if (this.lastRenderedHtml === html) {
 			return false;
 		}
+
+		// Dismiss any active py-exp tooltip since the DOM is being replaced
+		this.hidePyExpTooltip();
 
 		// Any pending focus restoration from an older render should be ignored.
 		const currentFocusRestoreVersion = ++this.focusRestoreVersion;
@@ -636,6 +771,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 * Dispose of the widget
 	 */
 	override dispose(): void {
+		this.hidePyExpTooltip();
 		this.cleanupHoistedDropdown();
 		this.editor.removeOverlayWidget(this);
 		super.dispose();
@@ -1086,7 +1222,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 							visIndex,
 							(pythonEventStr, ev, overrideRect?) => { this.onPointerEvent(lineNumber, visIndex, pythonEventStr, ev, overrideRect); },
 							(pythonEventStr, ev) => { this.onKeyboardEvent(lineNumber, visIndex, pythonEventStr, ev); },
-							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); }
+							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); },
+							this.clipboardService
 						);
 						widget.updateContent(item.html);
 						widgets.push(widget);
