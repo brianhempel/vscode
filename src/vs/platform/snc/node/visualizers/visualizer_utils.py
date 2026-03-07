@@ -140,6 +140,19 @@ class ChildEvent:
     child_key: str
     py_ev_str: str
 
+@dataclass(frozen=True, slots=True)
+class EditorTextSelect:
+    """Sent by the TypeScript front-end when the user selects text in the editor.
+
+    Every visualizer's update() evals event strings in module scope, so this
+    must be importable everywhere an eval happens."""
+    text: str
+
+@dataclass(frozen=True, slots=True)
+class Unlink:
+    """Sent by the TypeScript front-end when an editor-visualizer link is broken."""
+    pass
+
 def wrap_child_prefix(child_key: str) -> str:
     return f'<span snc-child-key="{html.escape(repr(child_key))}">'
 
