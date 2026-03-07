@@ -70,3 +70,40 @@
 	color: white !important;
 	cursor: pointer !important;
 }
+
+/* Tooltip for snc-py-exp elements (code expression drag-and-drop) */
+.snc-py-exp-tooltip {
+	position: fixed;
+	background: #1e1e1e;
+	border: 1px solid #3c3c3c;
+	border-radius: 4px;
+	padding: 4px 8px;
+	font-family: monospace;
+	font-size: 11px;
+	font-style: normal;
+	color: #dcdcaa;
+	z-index: 10001;
+	pointer-events: auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.snc-py-exp-tooltip .snc-copy-btn {
+	cursor: pointer;
+	color: #808080;
+	font-size: 12px;
+	padding: 2px 4px;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	background: none;
+	line-height: 1;
+}
+
+.snc-py-exp-tooltip .snc-copy-btn:hover {
+	color: #ffffff;
+	border-color: #3c3c3c;
+	background: #2a2a2a;
+}
