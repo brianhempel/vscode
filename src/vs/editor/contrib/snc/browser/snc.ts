@@ -852,6 +852,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	// Linked-editing state: tracks the editor selection that is live-synced with a visualizer
 	private linkedSelectionDecorationId: string | null = null;
+	private linkedVisualizerLine: number | null = null;
+	private linkedVisualizerVisIndex: number | null = null;
 	private suppressSelectionEvent = false;
 	private selectionDebounceTimer: any = null;
 
@@ -1034,11 +1036,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const editorModel = this.editor.getModel();
 		const selection = this.editor.getSelection();
 		if (!editorModel || !selection || selection.isEmpty()) {
+			if (this.linkedVisualizerLine !== null) {
+				this.sendUnlinkEvent();
+			}
 			return;
 		}
 
 		const selectedText = editorModel.getValueInRange(selection);
 		if (!selectedText || selectedText.length < 3) {
+			if (this.linkedVisualizerLine !== null) {
+				this.sendUnlinkEvent();
+			}
 			return;
 		}
 
@@ -1081,6 +1089,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}]
 		);
 		this.linkedSelectionDecorationId = decorationIds[0] ?? null;
+		this.linkedVisualizerLine = targetVisItem.line;
+		this.linkedVisualizerVisIndex = targetVisItem.visIndex;
 
 		const pythonEventStr = "lambda e: EditorTextSelect(text=e.get('text', ''))";
 		const eventJSON = { type: 'editorTextSelect', text: selectedText };
@@ -1090,6 +1100,33 @@ export class SNCController extends Disposable implements IEditorContribution {
 			pythonEventStr,
 			eventJSON,
 		};
+		this.sendEventToPython(event);
+	}
+
+	private sendUnlinkEvent(): void {
+		if (this.linkedVisualizerLine === null || this.linkedVisualizerVisIndex === null) {
+			return;
+		}
+		const pythonEventStr = 'lambda e: Unlink()';
+		const eventJSON = { type: 'unlink' };
+		const event: UiEvent = {
+			line: this.linkedVisualizerLine,
+			visIndex: this.linkedVisualizerVisIndex,
+			pythonEventStr,
+			eventJSON,
+		};
+
+		// Clean up linked state
+		if (this.linkedSelectionDecorationId) {
+			const editorModel = this.editor.getModel();
+			if (editorModel) {
+				editorModel.deltaDecorations([this.linkedSelectionDecorationId], []);
+			}
+			this.linkedSelectionDecorationId = null;
+		}
+		this.linkedVisualizerLine = null;
+		this.linkedVisualizerVisIndex = null;
+
 		this.sendEventToPython(event);
 	}
 

@@ -48,7 +48,8 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any
 
 from visualizer_utils import (
-    ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys,
+    ChildEvent, EditorTextSelect, Unlink,
+    wrap_child_html, route_child_event, aggregate_handled_keys,
     strip_leading_caret, eval_caret_expr,
     load_dotfile_list, save_dotfile_list, get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
