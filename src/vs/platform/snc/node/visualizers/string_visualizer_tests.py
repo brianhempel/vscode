@@ -1211,10 +1211,80 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_down_event(10, top_half=True),
                          source_code, 1, model, value)
 
-        # Selection should be reset, new drag started
+        # Selection should be reset, new drag started (no flags to preserve)
         self.assertIsNone(model['search'])
         self.assertEqual(model['anchorIdx'], 10)
         self.assertTrue(model['dragging'])
+
+    def test_fresh_drag_preserves_case_insensitive_flag(self):
+        """A fresh drag with /hello/i preserves the i flag as ``i."""
+        value = "hello world"
+        model = init_model(value)
+        source_code = "x = 'hello world'"
+
+        # Create selection with case-insensitive flag
+        model['search'] = '/hello/i'
+
+        # Click somewhere NOT an extension point to start fresh drag
+        model, _ = update(make_mouse_down_event(10, top_half=True),
+                         source_code, 1, model, value)
+
+        # Flags should be preserved as bare backtick form
+        self.assertEqual(model['search'], '``i')
+        self.assertTrue(model['dragging'])
+
+    def test_fresh_drag_preserves_multiple_flags(self):
+        """A fresh drag with /hello/i1 preserves both flags as ``i1."""
+        value = "hello world"
+        model = init_model(value)
+        source_code = "x = 'hello world'"
+
+        model['search'] = '/hello/i1'
+
+        model, _ = update(make_mouse_down_event(10, top_half=True),
+                         source_code, 1, model, value)
+
+        self.assertEqual(model['search'], '``i1')
+
+    def test_fresh_drag_then_select_builds_regex_with_preserved_flags(self):
+        """After fresh drag preserving flags, completing selection carries flags to new regex."""
+        value = "hello world"
+        model = init_model(value)
+        source_code = "x = 'hello world'"
+
+        model['search'] = '/hello/i'
+
+        # Fresh drag on "world" (indices 8-12)
+        model, _ = update(make_mouse_down_event(8, top_half=True),
+                         source_code, 1, model, value)
+        model, _ = update(make_mouse_move_event(12),
+                         source_code, 1, model, value)
+        model, _ = update(make_mouse_up_event(12),
+                         source_code, 1, model, value)
+
+        # New regex should have the i flag preserved
+        self.assertEqual(model['search'], '/world/i')
+
+    def test_bare_flags_preserved_across_toggle_then_drag(self):
+        """Toggle 1st with no search, then drag should carry flag to new regex."""
+        value = "hello world"
+        model = init_model(value)
+        source_code = "x = 'hello world'"
+
+        # Toggle 1st with no search
+        model, _ = update(make_first_match_toggle_event(),
+                         source_code, 1, model, value)
+        self.assertEqual(model['search'], '``1')
+
+        # Drag to select "hello" (indices 2-6)
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         source_code, 1, model, value)
+        model, _ = update(make_mouse_move_event(6),
+                         source_code, 1, model, value)
+        model, _ = update(make_mouse_up_event(6),
+                         source_code, 1, model, value)
+
+        self.assertEqual(model['search'], '/hello/1')
 
 
 # =============================================================================
@@ -4742,8 +4812,15 @@ class TestFirstMatchToggle(unittest.TestCase):
                           self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
-    def test_toggle_with_no_search_does_nothing(self):
-        """Toggling with no search pattern does nothing."""
+    def test_toggle_with_no_search_creates_bare_flags(self):
+        """Toggling with no search creates bare backtick form with flag."""
+        model, _ = update(make_first_match_toggle_event(),
+                          self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(model['search'], '``1')
+
+    def test_toggle_off_bare_flags_returns_to_none(self):
+        """Toggling off the only flag on bare form returns search to None."""
+        self.model['search'] = '``1'
         model, _ = update(make_first_match_toggle_event(),
                           self.source_code, self.source_line, self.model, self.value)
         self.assertIsNone(model['search'])
@@ -5074,7 +5151,15 @@ class TestCaseSensitiveToggle(unittest.TestCase):
                           self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(model['search'], '/hello/1')
 
-    def test_toggle_with_no_search_does_nothing(self):
+    def test_toggle_with_no_search_creates_bare_flags(self):
+        """Toggling with no search creates bare backtick form with i flag."""
+        model, _ = update(make_case_sensitive_toggle_event(),
+                          self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(model['search'], '``i')
+
+    def test_toggle_off_bare_flags_returns_to_none(self):
+        """Toggling off the only flag on bare form returns search to None."""
+        self.model['search'] = '``i'
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.source_code, self.source_line, self.model, self.value)
         self.assertIsNone(model['search'])

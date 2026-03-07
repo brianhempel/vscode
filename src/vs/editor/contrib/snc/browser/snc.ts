@@ -6,6 +6,7 @@ import { Position } from '../../../common/core/position.js';
 import { Range } from '../../../common/core/range.js';
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
+import { TrackedRangeStickiness } from '../../../common/model.js';
 import { IProcessOptions, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData, UiEvent } from '../../../../platform/snc/common/snc.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -795,6 +796,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private streamUpdateTimer: any = null;
 	private cursorUpdateTimer: any = null;
 
+	// Linked-editing state: tracks the editor selection that is live-synced with a visualizer
+	private linkedSelectionDecorationId: string | null = null;
+	private suppressSelectionEvent = false;
+	private selectionDebounceTimer: any = null;
+
 	// Timing tracking: all frontend times use performance.now()
 	private runTriggerMsById: Map<string, number> = new Map();        // When runProgram was called (frontend)
 	private runSpawnTimingById: Map<string, SNCTimingData> = new Map(); // Backend spawn timing data
@@ -831,6 +837,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this._register(editor.onDidDispose(() => { this.clearVisualizationWidgets(); }));
 		this._register(editor.onDidChangeCursorPosition(() => {
 			this.onCursorPositionChanged();
+		}));
+		this._register(editor.onDidChangeCursorSelection(() => {
+			this.onSelectionChanged();
 		}));
 
 		// Register scroll event handler to update overlay widget positions
@@ -953,6 +962,90 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.cursorUpdateTimer = setTimeout(() => {
 			this.updateVisualizationWidgets(data);
 		}, 50);
+	}
+
+	private onSelectionChanged(): void {
+		if (this.suppressSelectionEvent) {
+			return;
+		}
+		if (this.selectionDebounceTimer) {
+			clearTimeout(this.selectionDebounceTimer);
+		}
+		this.selectionDebounceTimer = setTimeout(() => {
+			this.handleEditorSelection();
+		}, 150);
+	}
+
+	private handleEditorSelection(): void {
+		const editorModel = this.editor.getModel();
+		const selection = this.editor.getSelection();
+		if (!editorModel || !selection || selection.isEmpty()) {
+			return;
+		}
+
+		const selectedText = editorModel.getValueInRange(selection);
+		if (!selectedText || selectedText.length < 3) {
+			return;
+		}
+
+		const selStartLine = selection.startLineNumber;
+		const selIndent = this.getLineIndent(selStartLine);
+
+		// Walk backward to find the first non-blank line with a visualizer at same/lesser indent
+		let targetVisItem: IVisualizationItem | undefined;
+		for (let line = selStartLine - 1; line >= 1; line--) {
+			const content = editorModel.getLineContent(line);
+			if (content.trim() === '') {
+				continue;
+			}
+			const lineIndent = content.length - content.trimStart().length;
+			if (lineIndent > selIndent) {
+				continue;
+			}
+			targetVisItem = this.visualizationItems.find(item => item.line === line);
+			if (targetVisItem) {
+				break;
+			}
+			if (lineIndent < selIndent) {
+				break;
+			}
+		}
+
+		if (!targetVisItem) {
+			return;
+		}
+
+		// Track the selection range via a decoration so it survives edits
+		const decorationIds = editorModel.deltaDecorations(
+			this.linkedSelectionDecorationId ? [this.linkedSelectionDecorationId] : [],
+			[{
+				range: selection,
+				options: {
+					description: 'snc-linked-selection',
+					stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+				}
+			}]
+		);
+		this.linkedSelectionDecorationId = decorationIds[0] ?? null;
+
+		const pythonEventStr = "lambda e: EditorTextSelect(text=e.get('text', ''))";
+		const eventJSON = { type: 'editorTextSelect', text: selectedText };
+		const event: UiEvent = {
+			line: targetVisItem.line,
+			visIndex: targetVisItem.visIndex,
+			pythonEventStr,
+			eventJSON,
+		};
+		this.sendEventToPython(event);
+	}
+
+	private getLineIndent(lineNumber: number): number {
+		const model = this.editor.getModel();
+		if (!model || lineNumber < 1 || lineNumber > model.getLineCount()) {
+			return 0;
+		}
+		const content = model.getLineContent(lineNumber);
+		return content.length - content.trimStart().length;
 	}
 
 	private setupLanguageChangeListener(): void {
@@ -1392,9 +1485,57 @@ export class SNCController extends Disposable implements IEditorContribution {
 			});
 
 			model.pushEditOperations([], editOperations, () => null);
+		} else if (command.type === 'ChangeSelectedText') {
+			this.handleChangeSelectedText(command.text);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
+	}
+
+	private handleChangeSelectedText(newText: string): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel || !this.linkedSelectionDecorationId) {
+			return;
+		}
+		const trackedRange = editorModel.getDecorationRange(this.linkedSelectionDecorationId);
+		if (!trackedRange) {
+			return;
+		}
+
+		const currentText = editorModel.getValueInRange(trackedRange);
+		if (currentText === newText) {
+			return;
+		}
+
+		this.suppressSelectionEvent = true;
+		editorModel.pushEditOperations([], [{
+			range: trackedRange,
+			text: newText,
+		}], () => null);
+
+		// Update the tracked decoration to cover the newly inserted text
+		const startOffset = editorModel.getOffsetAt(trackedRange.getStartPosition());
+		const newEnd = editorModel.getPositionAt(startOffset + newText.length);
+		const newRange = new Range(
+			trackedRange.startLineNumber, trackedRange.startColumn,
+			newEnd.lineNumber, newEnd.column
+		);
+		const ids = editorModel.deltaDecorations(
+			[this.linkedSelectionDecorationId],
+			[{
+				range: newRange,
+				options: {
+					description: 'snc-linked-selection',
+					stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+				},
+			}]
+		);
+		this.linkedSelectionDecorationId = ids[0] ?? null;
+
+		// Keep the text selected so the user can see what's linked
+		this.editor.setSelection(newRange);
+
+		setTimeout(() => { this.suppressSelectionEvent = false; }, 0);
 	}
 
 	/**

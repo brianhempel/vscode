@@ -89,6 +89,10 @@ from visualizer_utils import replace_caret_in_py_exp
 class CopyToClipboard:
     text: str
 
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    text: str
+
 # === Event types ===
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +159,14 @@ class RepetitionInput:
     dropdown_id: str
     field: str  # 'exact', 'min', or 'max'
     value: str
+
+@dataclass(frozen=True, slots=True)
+class EditorTextSelect:
+    text: str
+
+@dataclass(frozen=True, slots=True)
+class Unlink:
+    pass
 
 # attached handlers can be Python code strings that evaluate to functions of type: RawEventJSON -> ModelEvent
 # def mouse_move(i) -> Callable[[dict], MouseMove | MouseDown | MouseUp | KeyDown]:
@@ -1266,6 +1278,12 @@ def is_case_insensitive(search: str | None) -> bool:
 def is_capture_groups_mode(search: str | None) -> bool:
     """Check if the search has capture groups preserved ('c' in postfix flags)."""
     return 'c' in get_search_flags(search)
+
+
+def _is_flags_only(search: str | None) -> bool:
+    """Check if search is a bare backtick form with only flags and no content (e.g. ``i1)."""
+    p = parse_search_term(search)
+    return p is not None and p[0] == 'expr' and p[1] == ''
 
 
 def parse_search_term(search: str | None) -> tuple | None:
@@ -2530,7 +2548,7 @@ def build_preview_regex(model, string_value: str) -> str | None:
         #   so synthesize_fuzzy_pattern uses + (one or more).
         # - Adjacent to existing literal: pass None for that side so it uses *
         #   (zero or more), since the literal already anchors the match.
-        is_fresh = current_regex is None and extend_direction is None and insert_after_segment is None
+        is_fresh = (current_regex is None or _is_flags_only(current_regex)) and extend_direction is None and insert_after_segment is None
 
         if is_fresh:
             # New selection: check both edges
@@ -2596,7 +2614,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     replace_text = bool(model.get('replace_text'))
     has_replace = replace_visible and replace_text
 
+    linked_action = model.get('linked_action')
     match_count = _eval_count_via_grammar(selection_regex, value, model, eval_in_scope) if has_search else 0
+
+    linked_highlight = 'background: #264f78; color: #ccc; border-color: #aaa;'
 
     # Common button styles
     btn_base = (
@@ -2632,7 +2653,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     disabled_style = 'opacity: 0.35; pointer-events: none;'
 
     def action_btn(label: str, action: str, enabled: bool = True, title: str = '', extra_style: str = '') -> str:
-        style = btn_with_copy + ('' if enabled else disabled_style) + extra_style
+        active = linked_highlight if linked_action == action else ''
+        style = btn_with_copy + ('' if enabled else disabled_style) + active + extra_style
         event = repr(ActionButtonClick(action=action, copy=False))
         title_attr = f' title="{html.escape(title)}"' if title else ''
         return f'<span class="snc-hoverable" snc-mouse-down="{html.escape(event)}" style="margin-left: 3px;{style}"{title_attr}>{label}</span>'
@@ -2687,7 +2709,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         opt_style = 'padding: 3px 6px; display: flex; align-items: center; gap: 2px;'
 
         def dropdown_row(label: str, action: str, enabled: bool) -> str:
-            row_style = opt_style + ('' if enabled else disabled_style)
+            active = linked_highlight if linked_action == action else ''
+            row_style = opt_style + ('' if enabled else disabled_style) + active
             act_event = repr(ActionButtonClick(action=action, copy=False))
             cp_event = repr(ActionButtonClick(action=action, copy=True))
             return (
@@ -2737,6 +2760,15 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     # 8. Count (N) + Copy
     count_label = f'Count ({match_count})'
     parts.append(btn_group(count_label, 'count', has_search and not first, 'Count of matches'))
+
+    if linked_action:
+        unlink_event = repr(Unlink())
+        unlink_style = btn_base + 'color: #e0a060;'
+        parts.append(
+            f'<span class="snc-hoverable" snc-mouse-down="{html.escape(unlink_event)}"'
+            f' style="margin-left: 6px;{unlink_style}" title="Unlink from selected code">'
+            f'\u26d3\ufe0e Unlink</span>'
+        )
 
     return (
         f'<div style="margin-top: 4px; white-space: normal;max-width: {str(max_width) + "px" if max_width is not None else "none"};">'
@@ -3343,6 +3375,9 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_expr=None)
         "hoverType": None,        # "literal" or "fuzzy" based on mouse position in top/bottom half
         "replace_visible": False, # Whether the replace input box is visible
         "replace_text": None,     # The replacement text (a Python string literal, e.g., "'world'")
+        "linked_action": None,         # When linked: the action name (e.g. 'replace')
+        "linked_var_to_search": None,  # When linked: variable from parsed code (e.g. 'str1')
+        "linked_prefix": None,         # When linked: assignment prefix (e.g. 'str2 = ') or ''
     }
 
 
@@ -3409,6 +3444,50 @@ def finalize_handle_drag(model: dict, string_value: str) -> dict:
 # =============================================================================
 # Expression Builder Helpers for Action Buttons
 # =============================================================================
+
+def _ctx_to_model(ctx: dict, model: dict) -> None:
+    """Apply parsed DSL context to model state (reverse of _get_search_context).
+
+    Mutates *model* in-place to reflect the search, replace, and flag state
+    encoded in *ctx* (as returned by parse_generated_code).
+    """
+    if ctx.get('is_index'):
+        model['search'] = ctx.get('index_expr', '')
+    elif ctx.get('is_slice'):
+        start = ctx.get('slice_start', '')
+        stop = ctx.get('slice_stop', '')
+        model['search'] = f'{start}:{stop}'
+    elif ctx.get('is_expr') and ctx.get('expr'):
+        model['search'] = ctx['expr']
+    elif ctx.get('regex_pattern') is not None:
+        flags = ''
+        if ctx.get('is_first'):
+            flags += '1'
+        if ctx.get('is_ci'):
+            flags += 'i'
+        model['search'] = f"/{ctx['regex_pattern']}/{flags}"
+    else:
+        model['search'] = None
+
+    replace_expr = ctx.get('replace_expr')
+    if replace_expr:
+        model['replace_visible'] = True
+        model['replace_text'] = re.sub(r'\bmtch\b', '^', replace_expr)
+    else:
+        has_replace = ctx.get('has_replace', False)
+        if not has_replace:
+            model['replace_visible'] = False
+            model['replace_text'] = None
+
+    model['anchorIdx'] = None
+    model['cursorIdx'] = None
+    model['dragging'] = False
+    model['insertAfterSegment'] = None
+    model['openDropdown'] = None
+    model['handleDrag'] = None
+    model['undoHistory'] = []
+    model['redoHistory'] = []
+
 
 def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, var_to_search: str = None) -> dict | None:
     """Extract common search context from model and source code.
@@ -3521,7 +3600,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
     }
 
 
-from string_visualizer_grammar import generate_action, generate_copy_expr_for_if
+from string_visualizer_grammar import generate_action, generate_copy_expr_for_if, parse_generated_code_or_assignment
 
 
 def update(event, source_code: str, source_line: int, model: dict, value: str, get_visualizer=None, eval_in_scope=None, source_expr=None) -> Tuple[dict, List[Any]]:
@@ -3617,8 +3696,13 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 model['extendDirection'] = None  # Not a simple left/right extend
                 model['insertAfterSegment'] = fuzzy_info['segment_index']  # Insert after this segment
             else:
-                # Fresh start: reset selection
+                # Fresh start: reset selection, preserving linked-editing state and search flags
+                saved_linked = (model.get('linked_action'), model.get('linked_var_to_search'), model.get('linked_prefix'))
+                saved_flags = get_search_flags(model.get('search'))
                 model = init_model(value)
+                model['linked_action'], model['linked_var_to_search'], model['linked_prefix'] = saved_linked
+                if saved_flags:
+                    model['search'] = '``' + saved_flags
                 if isinstance(idx, int):
                     model['anchorIdx'] = idx
                     model['anchorType'] = anchor_type
@@ -3660,6 +3744,8 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             if key == 'Enter':
                 if model.get('openDropdown'):
                     model['openDropdown'] = None
+                elif model.get('linked_action'):
+                    model['linked_action'] = 'find_or_map'
                 else:
                     ctx = _get_search_context(model, source_code, source_line)
                     if ctx:
@@ -3670,6 +3756,8 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             elif key == 'Backspace' and meta_key:
                 if model.get('openDropdown'):
                     model['openDropdown'] = None
+                elif model.get('linked_action'):
+                    model['linked_action'] = 'delete'
                 else:
                     ctx = _get_search_context(model, source_code, source_line)
                     if ctx:
@@ -3678,11 +3766,14 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                             commands.append(result)
 
             elif key == 'r' and meta_key:
-                ctx = _get_search_context(model, source_code, source_line)
-                if ctx:
-                    result = generate_action('replace', ctx)
-                    if result:
-                        commands.append(result)
+                if model.get('linked_action'):
+                    model['linked_action'] = 'replace'
+                else:
+                    ctx = _get_search_context(model, source_code, source_line)
+                    if ctx:
+                        result = generate_action('replace', ctx)
+                        if result:
+                            commands.append(result)
 
             elif key == 'Escape':
                 # Close dropdown if open, otherwise clear selections
@@ -3815,19 +3906,21 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
 
         case FirstMatchToggle():
             current_regex = model.get('search')
-            if current_regex:
-                new_regex = _toggle_search_flag(current_regex, '1')
-                model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
-                model['redoHistory'] = []
-                model['search'] = new_regex
+            new_regex = _toggle_search_flag(current_regex or '``', '1')
+            if _is_flags_only(new_regex) and not get_search_flags(new_regex):
+                new_regex = None
+            model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
+            model['redoHistory'] = []
+            model['search'] = new_regex
 
         case CaseSensitiveToggle():
             current_regex = model.get('search')
-            if current_regex:
-                new_regex = _toggle_search_flag(current_regex, 'i')
-                model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
-                model['redoHistory'] = []
-                model['search'] = new_regex
+            new_regex = _toggle_search_flag(current_regex or '``', 'i')
+            if _is_flags_only(new_regex) and not get_search_flags(new_regex):
+                new_regex = None
+            model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
+            model['redoHistory'] = []
+            model['search'] = new_regex
 
         case CaptureGroupsToggle():
             current_regex = model.get('search')
@@ -3867,20 +3960,66 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
         case ReplaceBoxInput(value=val):
             model['replace_text'] = val if val else None
 
+        case EditorTextSelect(text=selected_text):
+            parsed, prefix = parse_generated_code_or_assignment(selected_text)
+            if parsed and parsed.get('action') and parsed.get('var_to_search'):
+                valid = True
+                if source_code and source_line:
+                    _, line_var = extract_expression_from_line(source_code, source_line)
+                    if line_var and parsed['var_to_search'] != line_var:
+                        valid = False
+                if valid:
+                    _ctx_to_model(parsed, model)
+                    model['linked_action'] = parsed['action']
+                    model['linked_var_to_search'] = parsed['var_to_search']
+                    model['linked_prefix'] = prefix
+
+        case Unlink():
+            model['linked_action'] = None
+            model['linked_var_to_search'] = None
+            model['linked_prefix'] = None
+
         case ActionButtonClick(action=action, copy=copy):
             model['openDropdown'] = None
-            ctx = _get_search_context(model, source_code, source_line)
-            if ctx:
-                if copy and action in ('if_any', 'if_all'):
-                    bool_expr = generate_copy_expr_for_if(action, ctx)
-                    if bool_expr:
-                        commands.append(CopyToClipboard(text=bool_expr))
-                    return (model, commands)
-                result = generate_action(action, ctx)
-                if result:
-                    if copy:
-                        commands.append(CopyToClipboard(text=result[1]))
-                    else:
-                        commands.append(result)
+            if model.get('linked_action') and not copy:
+                model['linked_action'] = action
+                ctx = _get_search_context(model, source_code, source_line,
+                                          var_to_search=model['linked_var_to_search'])
+                if ctx:
+                    result = generate_action(action, ctx)
+                    if result:
+                        _emit_linked_update(result[1], model, commands)
+            else:
+                ctx = _get_search_context(model, source_code, source_line)
+                if ctx:
+                    if copy and action in ('if_any', 'if_all'):
+                        bool_expr = generate_copy_expr_for_if(action, ctx)
+                        if bool_expr:
+                            commands.append(CopyToClipboard(text=bool_expr))
+                        return (model, commands)
+                    result = generate_action(action, ctx)
+                    if result:
+                        if copy:
+                            commands.append(CopyToClipboard(text=result[1]))
+                        else:
+                            commands.append(result)
+
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
+        ctx = _get_search_context(model, source_code, source_line,
+                                  var_to_search=model['linked_var_to_search'])
+        if ctx:
+            result = generate_action(model['linked_action'], ctx)
+            if result:
+                _emit_linked_update(result[1], model, commands)
 
     return (model, commands)
+
+
+def _emit_linked_update(expr: str, model: dict, commands: list) -> None:
+    """Append a ChangeSelectedText command only if the full text is valid Python."""
+    text = (model.get('linked_prefix') or '') + expr
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))

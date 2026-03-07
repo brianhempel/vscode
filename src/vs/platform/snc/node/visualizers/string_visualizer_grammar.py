@@ -328,3 +328,19 @@ def parse_generated_code(code_line: str) -> dict | None:
     Returns a dict including the 'action' key, or None.
     """
     return parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Action'], code_line)
+
+
+def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str]:
+    """Parse code as an action expression or ``var = expr`` assignment.
+
+    Returns ``(ctx, prefix)`` where *prefix* is ``'var = '`` when the code
+    was an assignment, or ``''`` for a bare expression.  Returns
+    ``(None, '')`` when parsing fails entirely.
+    """
+    ctx = parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Action'], code_line)
+    if ctx is not None:
+        return (ctx, '')
+    ctx = parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Assignment'], code_line)
+    if ctx is not None and 'assign_var_name' in ctx:
+        return (ctx, f"{ctx['assign_var_name']} = ")
+    return (None, '')
