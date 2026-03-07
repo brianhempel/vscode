@@ -1,6 +1,6 @@
 import { registerEditorContribution, EditorContributionInstantiation } from '../../../browser/editorExtensions.js';
 import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
-import { IEditorContribution } from '../../../common/editorCommon.js';
+import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js';
 import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates } from '../../../browser/editorBrowser.js';
 import { Position } from '../../../common/core/position.js';
 import { Range } from '../../../common/core/range.js';
@@ -1136,6 +1136,36 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// zone data structures are mid-mutation, causing crashes in ViewZones.render.
 		const widgetsToReposition: VisualizationWidget[] = [];
 
+		// Capture scroll state so we can stabilize after view zone changes.
+		// Anchor to the cursor line if visible, otherwise the line just above the viewport midpoint.
+		const scrollTop = this.editor.getScrollTop();
+		const shouldStabilizeScroll = scrollTop > 0 && !this.editor.hasPendingScrollAnimation();
+		let anchorLineNumber = 0;
+		let anchorDelta = 0;
+
+		if (shouldStabilizeScroll) {
+			const visibleRanges = this.editor.getVisibleRanges();
+			if (visibleRanges.length > 0) {
+				const cursorPos = this.editor.getPosition();
+				const firstVisibleLine = visibleRanges[0].startLineNumber;
+				const lastVisibleLine = visibleRanges[visibleRanges.length - 1].endLineNumber;
+
+				if (cursorPos && cursorPos.lineNumber >= firstVisibleLine && cursorPos.lineNumber <= lastVisibleLine) {
+					anchorLineNumber = cursorPos.lineNumber;
+				} else {
+					const midPixel = scrollTop + this.editor.getLayoutInfo().height / 2;
+					anchorLineNumber = firstVisibleLine;
+					for (let line = firstVisibleLine; line <= lastVisibleLine; line++) {
+						if (this.editor.getTopForLineNumber(line) + lineHeight > midPixel) {
+							break;
+						}
+						anchorLineNumber = line;
+					}
+				}
+				anchorDelta = scrollTop - this.editor.getTopForLineNumber(anchorLineNumber);
+			}
+		}
+
 		this.editor.changeViewZones((accessor) => {
 			// Remove widgets/view zones for lines no longer present
 			for (const [line, widgets] of Array.from(this.visualizationWidgets.entries())) {
@@ -1247,6 +1277,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 				}
 			}
 		});
+
+		if (shouldStabilizeScroll && anchorLineNumber > 0) {
+			const anchorTopAfter = this.editor.getTopForLineNumber(anchorLineNumber);
+			this.editor.setScrollTop(anchorTopAfter + anchorDelta, ScrollType.Immediate);
+		}
 
 		for (const widget of widgetsToReposition) {
 			widget.updatePosition();
