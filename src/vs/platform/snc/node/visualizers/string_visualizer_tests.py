@@ -58,7 +58,7 @@ from string_visualizer import (
     is_adjacent_left,
     synthesize_fuzzy_pattern,
     find_available_variable_name,
-    _count_matches,
+    _eval_count_via_grammar,
     char_to_regex_literal,
     DC1, DC2, DC3, DC4,  # Sentinel characters
     _render_transform_preview,
@@ -6185,7 +6185,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
     """Test Enter in replace mode generates Transform code (list comprehension).
 
     Enter in replace mode now produces a list comprehension that maps
-    the replace expression over matches. The ^ character translates to _mtch.
+    the replace expression over matches. The ^ character translates to mtch.
     The old re.sub behavior is accessed via Cmd-R or the Replace button.
     """
 
@@ -6205,7 +6205,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
-        self.assertEqual(expr, "['world' for _mtch in re.finditer(r'hello', x, flags=re.M)]")
+        self.assertEqual(expr, "['world' for mtch in re.finditer(r'hello', x, flags=re.M)]")
 
     def test_regex_replace_first_match(self):
         """Regex search + first-match generates next(...)."""
@@ -6217,7 +6217,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("next(", expr)
-        self.assertIn("'world' for _mtch in", expr)
+        self.assertIn("'world' for mtch in", expr)
 
     def test_regex_replace_case_insensitive(self):
         """Regex search + case-insensitive includes re.M|re.I."""
@@ -6228,7 +6228,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.M|re.I", expr)
-        self.assertIn("'world' for _mtch in", expr)
+        self.assertIn("'world' for mtch in", expr)
 
     def test_string_replace_many_match_case_sensitive(self):
         """String search + replace produces list comprehension."""
@@ -6240,7 +6240,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("re.escape('hello')", expr)
-        self.assertIn("'world' for _mtch in", expr)
+        self.assertIn("'world' for mtch in", expr)
 
     def test_string_replace_first_match_case_sensitive(self):
         """String search + replace, first-match uses next()."""
@@ -6274,14 +6274,14 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.assertIn("re.escape(s)", expr)
 
     def test_caret_translates_to_match_var(self):
-        """^ in replace expression translates to _mtch in list comprehension."""
+        """^ in replace expression translates to mtch in list comprehension."""
         self.model['search'] = '/hello/'
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_key_down_event('Enter'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertIn("_mtch[0].upper() for _mtch in", expr)
+        self.assertIn("mtch[0].upper() for mtch in", expr)
 
     def test_backtick_wrapped_expression(self):
         """Backtick-wrapped replace expression is unwrapped and ^ translated."""
@@ -6291,17 +6291,17 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertIn("_mtch[0].upper() for _mtch in", expr)
+        self.assertIn("mtch[0].upper() for mtch in", expr)
 
     def test_caret_method_call(self):
-        """^ with method call: ^.group(1) -> _mtch.group(1) in comprehension."""
+        """^ with method call: ^.group(1) -> mtch.group(1) in comprehension."""
         self.model['search'] = '/hello/'
         self.model['replace_text'] = "^.group(1)"
         _, commands = update(make_key_down_event('Enter'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertIn("_mtch.group(1) for _mtch in", expr)
+        self.assertIn("mtch.group(1) for mtch in", expr)
 
     def test_arbitrary_code_accepted(self):
         """Any non-empty replace text is accepted as Python code."""
@@ -6311,7 +6311,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertIn("some_func(_mtch[0]) for _mtch in", expr)
+        self.assertIn("some_func(mtch[0]) for mtch in", expr)
 
     def test_empty_replace_text_does_nothing(self):
         """Enter with empty replace text in replace mode falls back to Get."""
@@ -6344,7 +6344,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertIn('"world" for _mtch in', expr)
+        self.assertIn('"world" for mtch in', expr)
 
     def test_fstring_replace(self):
         """f-string replacement is preserved in comprehension."""
@@ -6354,7 +6354,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertIn("f'hi {name}' for _mtch in", expr)
+        self.assertIn("f'hi {name}' for mtch in", expr)
 
     def test_no_search_does_nothing(self):
         """Enter in replace mode with no search pattern produces no commands."""
@@ -6463,8 +6463,8 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.source_line = 1
 
     def test_get_button_non_replace(self):
-        """ActionButtonClick('get_transform') with regex produces finditer."""
-        _, commands = update(make_action_button_event('get_transform'),
+        """ActionButtonClick('find_or_map') with regex produces finditer."""
+        _, commands = update(make_action_button_event('find_or_map'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -6474,7 +6474,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
     def test_get_button_non_replace_first_match(self):
         """With 1st mode, Get produces re.search."""
         self.model['search'] = '/hello/1'
-        _, commands = update(make_action_button_event('get_transform'),
+        _, commands = update(make_action_button_event('find_or_map'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -6482,27 +6482,27 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.assertEqual(expr, "re.search(r'hello', x, flags=re.M)")
 
     def test_transform_button_replace_mode(self):
-        """With replace_visible, get_transform produces list comprehension."""
+        """With replace_visible, find_or_map produces list comprehension."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
-        _, commands = update(make_action_button_event('get_transform'),
+        _, commands = update(make_action_button_event('find_or_map'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
-        self.assertEqual(expr, "[_mtch[0].upper() for _mtch in re.finditer(r'hello', x, flags=re.M)]")
+        self.assertEqual(expr, "[mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M)]")
 
     def test_transform_button_first_match(self):
         """With 1st mode + replace, produces next(..., None)."""
         self.model['search'] = '/hello/1'
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
-        _, commands = update(make_action_button_event('get_transform'),
+        _, commands = update(make_action_button_event('find_or_map'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
-        self.assertEqual(expr, "next((_mtch[0].upper() for _mtch in re.finditer(r'hello', x, flags=re.M)), None)")
+        self.assertEqual(expr, "next((mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M)), None)")
 
     def test_enter_key_non_replace_unchanged(self):
         """Enter still produces Get in non-replace mode."""
@@ -6522,31 +6522,31 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
-        self.assertIn("for _mtch in re.finditer(", expr)
+        self.assertIn("for mtch in re.finditer(", expr)
         self.assertNotIn("re.sub(", expr)
 
-    def test_copy_get_transform(self):
+    def test_copy_find_or_map(self):
         """copy=True produces CopyToClipboard command."""
-        _, commands = update(make_action_button_event('get_transform', copy=True),
+        _, commands = update(make_action_button_event('find_or_map', copy=True),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
         self.assertEqual(cmd.text, "list(re.finditer(r'hello', x, flags=re.M))")
 
-    def test_get_transform_string_search(self):
+    def test_find_or_map_string_search(self):
         """Get with string search uses re.escape."""
         self.model['search'] = "'hello'"
-        _, commands = update(make_action_button_event('get_transform'),
+        _, commands = update(make_action_button_event('find_or_map'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.escape('hello')", expr)
 
-    def test_get_transform_no_search_does_nothing(self):
+    def test_find_or_map_no_search_does_nothing(self):
         """No search pattern produces no commands."""
         self.model['search'] = None
-        _, commands = update(make_action_button_event('get_transform'),
+        _, commands = update(make_action_button_event('find_or_map'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(commands, [])
 
@@ -6574,7 +6574,7 @@ class TestActionButtonReplace(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
-        self.assertEqual(expr, "re.sub(r'hello', lambda _mtch: 'world', x, flags=re.M)")
+        self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, flags=re.M)")
 
     def test_replace_button_first_match(self):
         """Replace with first-match includes count=1."""
@@ -6583,7 +6583,7 @@ class TestActionButtonReplace(unittest.TestCase):
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
-        self.assertEqual(expr, "re.sub(r'hello', lambda _mtch: 'world', x, count=1, flags=re.M)")
+        self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, count=1, flags=re.M)")
 
     def test_replace_button_not_in_replace_mode(self):
         """Replace button does nothing when not in replace mode."""
@@ -6599,7 +6599,7 @@ class TestActionButtonReplace(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
-        self.assertEqual(expr, "re.sub(r'hello', lambda _mtch: 'world', x, flags=re.M)")
+        self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, flags=re.M)")
 
     def test_copy_replace(self):
         """copy=True produces CopyToClipboard with re.sub expr."""
@@ -6698,7 +6698,7 @@ class TestActionButtonLoop(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
-        self.assertIn("for _i, _mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):", expr)
+        self.assertIn("for _i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):", expr)
         self.assertIn("\n    pass", expr)
 
     def test_loop_replace_mode(self):
@@ -6711,7 +6711,7 @@ class TestActionButtonLoop(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
         self.assertIn("for _i, _val in enumerate(", expr)
-        self.assertIn("_mtch[0].upper() for _mtch in re.finditer(", expr)
+        self.assertIn("mtch[0].upper() for mtch in re.finditer(", expr)
 
     def test_loop_suggest_name_none(self):
         """Loop returns suggest_name=None for multiline code."""
@@ -6727,7 +6727,7 @@ class TestActionButtonLoop(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
-        self.assertIn("for _i, _mtch in enumerate(", cmd.text)
+        self.assertIn("for _i, mtch in enumerate(", cmd.text)
 
 
 # =============================================================================
@@ -6754,7 +6754,7 @@ class TestActionButtonAny(unittest.TestCase):
         self.assertEqual(expr, "bool(re.search(r'hello', x, flags=re.M))")
 
     def test_any_replace_mode(self):
-        """Any in replace mode produces any(EXPR for _mtch in ...)."""
+        """Any in replace mode produces any(EXPR for mtch in ...)."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('any'),
@@ -6762,7 +6762,7 @@ class TestActionButtonAny(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_any")
-        self.assertEqual(expr, "any(_mtch[0].upper() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+        self.assertEqual(expr, "any(mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
     def test_copy_any(self):
         """copy=True produces CopyToClipboard."""
@@ -6797,7 +6797,7 @@ class TestActionButtonAll(unittest.TestCase):
         self.source_line = 1
 
     def test_all_replace_mode(self):
-        """All in replace mode produces all(EXPR for _mtch in ...)."""
+        """All in replace mode produces all(EXPR for mtch in ...)."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('all'),
@@ -6805,7 +6805,7 @@ class TestActionButtonAll(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_all")
-        self.assertEqual(expr, "all(_mtch[0].upper() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+        self.assertEqual(expr, "all(mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
     def test_all_non_replace_returns_nothing(self):
         """All not in replace mode produces no commands."""
@@ -6948,7 +6948,7 @@ class TestActionButtonCount(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_count")
-        self.assertEqual(expr, "sum(1 for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch[0].upper())")
+        self.assertEqual(expr, "sum(1 for mtch in re.finditer(r'hello', x, flags=re.M) if mtch[0].upper())")
 
     def test_copy_count(self):
         """copy=True produces CopyToClipboard."""
@@ -6984,13 +6984,13 @@ class TestActionButtonFilter(unittest.TestCase):
         self.source_line = 1
 
     def test_filter_generates_list_comprehension_with_predicate(self):
-        """Filter produces [_mtch for _mtch in re.finditer(...) if EXPR]."""
+        """Filter produces [mtch for mtch in re.finditer(...) if EXPR]."""
         _, commands = update(make_action_button_event('filter'),
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_filtered")
-        self.assertEqual(expr, r"[_mtch for _mtch in re.finditer(r'\w+', x, flags=re.M) if len(_mtch[0]) > 4]")
+        self.assertEqual(expr, r"[mtch for mtch in re.finditer(r'\w+', x, flags=re.M) if len(mtch[0]) > 4]")
 
     def test_filter_not_in_replace_mode_returns_none(self):
         """Filter without replace mode produces no command."""
@@ -7006,7 +7006,7 @@ class TestActionButtonFilter(unittest.TestCase):
                             self.source_code, self.source_line, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], CopyToClipboard)
-        self.assertIn('for _mtch in', commands[0].text)
+        self.assertIn('for mtch in', commands[0].text)
 
     def test_filter_string_search(self):
         """Filter with string search."""
@@ -7016,7 +7016,7 @@ class TestActionButtonFilter(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.escape('hello')", expr)
-        self.assertIn("if len(_mtch[0]) > 4", expr)
+        self.assertIn("if len(mtch[0]) > 4", expr)
 
     def test_filter_suggest_name_no_var(self):
         """Filter without var name uses 'result_filtered'."""
@@ -7035,7 +7035,7 @@ class TestActionButtonFilter(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("next(", expr)
-        self.assertIn("if len(_mtch[0]) > 4", expr)
+        self.assertIn("if len(mtch[0]) > 4", expr)
 
 
 # =============================================================================
@@ -7125,40 +7125,60 @@ class TestActionButtonSplit(unittest.TestCase):
         self.assertEqual(suggest_name, "result_parts")
 
 
-# =============================================================================
-# Count Matches Helper Tests
-# =============================================================================
-
-class TestCountMatches(unittest.TestCase):
-    """Test _count_matches() helper for button label display."""
+class TestCountViaGrammar(unittest.TestCase):
+    """Count preview should use the same grammar-generated expression as the Count button."""
 
     eis = staticmethod(lambda _c: eval(_c))
 
-    def test_count_regex_matches(self):
-        """Count regex matches in a string."""
-        self.assertEqual(_count_matches('/l/', "hello world", self.eis), 3)
+    def test_regex_with_predicate(self):
+        """Predicate filters: only count matches where predicate is truthy."""
+        model = {'search': '/\\w+/', 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
+        # "hi" (len 2, False), "world" (len 5, True), "hello" (len 5, True)
+        self.assertEqual(_eval_count_via_grammar('/\\w+/', "hi world hello", model, self.eis), 2)
 
-    def test_count_string_matches(self):
-        """Count string literal matches."""
-        self.assertEqual(_count_matches("'l'", "hello world", self.eis), 3)
+    def test_regex_without_predicate(self):
+        """Without replace, count all matches."""
+        model = {'search': '/\\w+/'}
+        self.assertEqual(_eval_count_via_grammar('/\\w+/', "hi world hello", model, self.eis), 3)
 
-    def test_count_first_match_mode(self):
-        """First match mode returns 0 or 1."""
-        self.assertEqual(_count_matches('/l/1', "hello world", self.eis), 1)
-        self.assertEqual(_count_matches('/z/1', "hello world", self.eis), 0)
+    def test_string_search_with_predicate(self):
+        """String search with predicate filters by truthy results."""
+        model = {'search': "'l'", 'replace_visible': True, 'replace_text': '^.start() < 5'}
+        # 'l' at positions 2, 3, 9 in "hello world"; start < 5: True, True, False
+        self.assertEqual(_eval_count_via_grammar("'l'", "hello world", model, self.eis), 2)
 
-    def test_count_no_search(self):
-        """No search returns 0."""
-        self.assertEqual(_count_matches(None, "hello world", self.eis), 0)
+    def test_case_insensitive_with_predicate(self):
+        """Case-insensitive search + predicate."""
+        model = {'search': '/hello/i', 'replace_visible': True, 'replace_text': '^.start() == 0'}
+        # "Hello hello HELLO" → matches at 0, 6, 12; start==0 is only first
+        self.assertEqual(_eval_count_via_grammar('/hello/i', "Hello hello HELLO", model, self.eis), 1)
 
-    def test_count_no_matches(self):
-        """Pattern that doesn't match returns 0."""
-        self.assertEqual(_count_matches('/xyz/', "hello world", self.eis), 0)
+    def test_generates_same_code_as_button(self):
+        """The count expression should be identical to what generate_action('count') produces."""
+        from string_visualizer_grammar import generate_action
+        from string_visualizer import replace_caret_in_py_exp
+        model = {'search': '/\\w+/', 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
+        ctx = {
+            'var_to_search': '_snc_v',
+            'is_first': False, 'is_ci': False, 'is_expr': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': '\\w+',
+            'replace_visible': True, 'replace_text': 'len(^[0]) > 3',
+            'replace_expr': replace_caret_in_py_exp('len(^[0]) > 3', 'mtch'),
+        }
+        result = generate_action('count', ctx)
+        self.assertIsNotNone(result)
+        _, grammar_code = result
+        _snc_v = "hi world hello"
+        expected = eval(grammar_code)
+        actual = _eval_count_via_grammar('/\\w+/', _snc_v, model, self.eis)
+        self.assertEqual(actual, expected)
 
-    def test_count_case_insensitive(self):
-        """Case insensitive flag affects count."""
-        self.assertEqual(_count_matches('/HELLO/i', "hello world", self.eis), 1)
-        self.assertEqual(_count_matches('/HELLO/', "hello world", self.eis), 0)
+    def test_no_search_returns_zero(self):
+        self.assertEqual(_eval_count_via_grammar(None, "hello", {}, self.eis), 0)
+
+    def test_no_value_returns_zero(self):
+        self.assertEqual(_eval_count_via_grammar('/x/', "", {'search': '/x/'}, self.eis), 0)
 
 
 # =============================================================================
@@ -7179,7 +7199,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model['search'] = '/hello/'
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('ActionButtonClick', html_output)
-        self.assertIn('get_transform', html_output)
+        self.assertIn('find_or_map', html_output)
         self.assertIn('delete', html_output)
 
     def test_buttons_absent_small(self):
@@ -7410,6 +7430,89 @@ class TestActionButtonRendering(unittest.TestCase):
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertNotIn('All (True)', html_output)
         self.assertNotIn('All (False)', html_output)
+
+    def test_count_disabled_in_first_match_mode(self):
+        """Count button is disabled in first-match mode."""
+        model = init_model(self.value)
+        model['search'] = '/l/1'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        count_match = re_mod.search(r"action=&#x27;count&#x27;.*?style=\"(.*?)\"", html_output)
+        self.assertIsNotNone(count_match, "Count button should be present")
+        self.assertIn('opacity: 0.35', count_match.group(1))
+
+    def test_count_enabled_in_all_mode(self):
+        """Count button is enabled in find-all mode."""
+        model = init_model(self.value)
+        model['search'] = '/l/'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        count_match = re_mod.search(r"action=&#x27;count&#x27;.*?style=\"(.*?)\"", html_output)
+        self.assertIsNotNone(count_match, "Count button should be present")
+        self.assertNotIn('opacity: 0.35', count_match.group(1))
+
+    def test_all_disabled_in_first_match_mode(self):
+        """All option is disabled in first-match mode even with replace."""
+        model = init_model(self.value)
+        model['search'] = '/hello/1'
+        model['replace_visible'] = True
+        model['replace_text'] = "^[0].upper()"
+        model['openDropdown'] = {'id': 'action-predicate'}
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        for m in re_mod.finditer(r'<div style="([^"]*)"[^>]*class="snc-dropdown-option"[^>]*>(.*?)</div>', html_output):
+            if "action=&#x27;all&#x27;" in m.group(2) and "if_all" not in m.group(2):
+                self.assertIn('opacity: 0.35', m.group(1))
+                return
+        self.fail("All dropdown row not found")
+
+    def test_if_all_disabled_in_first_match_mode(self):
+        """If All option is disabled in first-match mode even with replace."""
+        model = init_model(self.value)
+        model['search'] = '/hello/1'
+        model['replace_visible'] = True
+        model['replace_text'] = "^[0].upper()"
+        model['openDropdown'] = {'id': 'action-predicate'}
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        for m in re_mod.finditer(r'<div style="([^"]*)"[^>]*class="snc-dropdown-option"[^>]*>(.*?)</div>', html_output):
+            if "action=&#x27;if_all&#x27;" in m.group(2):
+                self.assertIn('opacity: 0.35', m.group(1))
+                return
+        self.fail("If All dropdown row not found")
+
+    def test_split_disabled_when_replace_visible(self):
+        """Split button is disabled when the replace box is open."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        model['replace_visible'] = True
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        split_match = re_mod.search(r"action=&#x27;split&#x27;.*?style=\"(.*?)\"", html_output)
+        self.assertIsNotNone(split_match, "Split button should be present")
+        self.assertIn('opacity: 0.35', split_match.group(1))
+
+    def test_split_enabled_when_replace_hidden(self):
+        """Split button is enabled when the replace box is closed."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        model['replace_visible'] = False
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        split_match = re_mod.search(r"action=&#x27;split&#x27;.*?style=\"(.*?)\"", html_output)
+        self.assertIsNotNone(split_match, "Split button should be present")
+        self.assertNotIn('opacity: 0.35', split_match.group(1))
+
+    def test_dropdown_closes_on_action_button_click(self):
+        """Predicate dropdown closes when an action button is clicked."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        model['replace_visible'] = True
+        model['replace_text'] = "^[0].upper()"
+        model['openDropdown'] = {'id': 'action-predicate'}
+        event = make_action_button_event('any')
+        new_model, _ = update(event, "x = 'hello world'", 1, model, self.value)
+        self.assertIsNone(new_model.get('openDropdown'))
 
 
 # =============================================================================
@@ -8105,9 +8208,9 @@ class _ActionTestBase(unittest.TestCase):
 
 
 class TestDSLGetTransformNonReplace(_ActionTestBase):
-    """Test get_transform action in non-replace mode (Get variants) via Action rule."""
+    """Test find_or_map action in non-replace mode (Get variants) via Action rule."""
 
-    ACTION = 'get_transform'
+    ACTION = 'find_or_map'
 
     def _g(self, ctx):
         return self._gen(self.ACTION, {**ctx, 'has_replace': False})
@@ -8191,33 +8294,33 @@ class TestDSLGetTransformNonReplace(_ActionTestBase):
     def test_parse_known_get_list_regex(self):
         parsed = self._parse_action("list(re.finditer(r'hello', x, flags=re.M))")
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertEqual(parsed['action'], 'find_or_map')
         self.assertEqual(parsed['regex_pattern'], 'hello')
         self.assertFalse(parsed.get('has_replace', False))
 
     def test_parse_known_get_first_regex(self):
         parsed = self._parse_action("re.search(r'hello', x, flags=re.M)")
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertEqual(parsed['action'], 'find_or_map')
         self.assertTrue(parsed.get('is_first'))
 
     def test_parse_known_index(self):
         parsed = self._parse_action("x[5]")
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertEqual(parsed['action'], 'find_or_map')
         self.assertTrue(parsed.get('is_index'))
 
     def test_parse_known_slice(self):
         parsed = self._parse_action("x[5:10]")
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertEqual(parsed['action'], 'find_or_map')
         self.assertTrue(parsed.get('is_slice'))
 
 
 class TestDSLGetTransformReplace(_ActionTestBase):
-    """Test get_transform action in replace mode (Transform variants) via Action rule."""
+    """Test find_or_map action in replace mode (Transform variants) via Action rule."""
 
-    ACTION = 'get_transform'
+    ACTION = 'find_or_map'
 
     def _g(self, ctx):
         return self._gen(self.ACTION, {**ctx, 'has_replace': True})
@@ -8227,18 +8330,18 @@ class TestDSLGetTransformReplace(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().upper()",
+            'replace_expr': "mtch.group().upper()",
         })
-        self.assertEqual(result[0], "[_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)]")
+        self.assertEqual(result[0], "[mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)]")
 
     def test_transform_first_regex(self):
         result = self._g({
             'is_expr': False, 'is_first': True, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().upper()",
+            'replace_expr': "mtch.group().upper()",
         })
-        self.assertEqual(result[0], "next((_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)), None)")
+        self.assertEqual(result[0], "next((mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)), None)")
 
     def test_transform_list_expr(self):
         result = self._g({
@@ -8247,30 +8350,30 @@ class TestDSLGetTransformReplace(_ActionTestBase):
             'expr': "'hello'", 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "['world' for _mtch in re.finditer(re.escape('hello'), x)]")
+        self.assertEqual(result[0], "['world' for mtch in re.finditer(re.escape('hello'), x)]")
 
     def test_transform_index(self):
         result = self._g({
             'is_index': True, 'is_slice': False,
             'index_expr': '5', 'var_to_search': 'x',
-            'replace_expr': "_mtch.upper()",
+            'replace_expr': "mtch.upper()",
         })
-        self.assertEqual(result[0], "(lambda _mtch: _mtch.upper())(x[5])")
+        self.assertEqual(result[0], "(lambda mtch: mtch.upper())(x[5])")
 
     def test_transform_slice(self):
         result = self._g({
             'is_index': False, 'is_slice': True,
             'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
-            'replace_expr': "_mtch.upper()",
+            'replace_expr': "mtch.upper()",
         })
-        self.assertEqual(result[0], "(lambda _mtch: _mtch.upper())(x[5:10])")
+        self.assertEqual(result[0], "(lambda mtch: mtch.upper())(x[5:10])")
 
     def test_roundtrip_transform_list_regex(self):
         self._roundtrip(self.ACTION, {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False, 'has_replace': True,
             'regex_pattern': r'\d+', 'var_to_search': 'data',
-            'replace_expr': "int(_mtch.group())",
+            'replace_expr': "int(mtch.group())",
         })
 
     def test_roundtrip_transform_first_expr_ci(self):
@@ -8285,13 +8388,13 @@ class TestDSLGetTransformReplace(_ActionTestBase):
         self._roundtrip(self.ACTION, {
             'is_index': True, 'is_slice': False, 'has_replace': True,
             'index_expr': '5', 'var_to_search': 'x',
-            'replace_expr': "_mtch.upper()",
+            'replace_expr': "mtch.upper()",
         })
 
     def test_parse_known_transform_list(self):
-        parsed = self._parse_action("[_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)]")
+        parsed = self._parse_action("[mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)]")
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed['action'], 'get_transform')
+        self.assertEqual(parsed['action'], 'find_or_map')
         self.assertTrue(parsed.get('has_replace'))
 
     def test_no_replace_expr_falls_to_get(self):
@@ -8417,6 +8520,84 @@ class TestDSLDeleteAction(_ActionTestBase):
         self.assertEqual(parsed['action'], 'delete')
         self.assertTrue(parsed.get('is_slice'))
 
+    def test_delete_regex_all_with_predicate(self):
+        result = self._g({
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': r'\w+', 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "re.sub(r'\\w+', lambda mtch: '' if (len(mtch[0]) > 3) else mtch[0], x, flags=re.M)")
+
+    def test_delete_regex_first_with_predicate(self):
+        result = self._g({
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': r'\w+', 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "next((x[:mtch.start()] + x[mtch.end():] for mtch in re.finditer(r'\\w+', x, flags=re.M) if len(mtch[0]) > 3), x)")
+
+    def test_delete_regex_first_with_predicate_ci(self):
+        result = self._g({
+            'is_expr': False, 'is_first': True, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': r'\w+', 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "next((x[:mtch.start()] + x[mtch.end():] for mtch in re.finditer(r'\\w+', x, flags=re.M|re.I) if len(mtch[0]) > 3), x)")
+
+    def test_delete_expr_all_with_predicate(self):
+        result = self._g({
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "re.sub(re.escape('hello'), lambda mtch: '' if (len(mtch[0]) > 3) else mtch[0], x)")
+
+    def test_delete_expr_first_with_predicate(self):
+        result = self._g({
+            'is_expr': True, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "next((x[:mtch.start()] + x[mtch.end():] for mtch in re.finditer(re.escape('hello'), x) if len(mtch[0]) > 3), x)")
+
+    def test_delete_expr_ci_all_with_predicate(self):
+        result = self._g({
+            'is_expr': True, 'is_first': False, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "re.sub(re.escape('hello'), lambda mtch: '' if (len(mtch[0]) > 3) else mtch[0], x, flags=re.I)")
+
+    def test_delete_expr_ci_first_with_predicate(self):
+        result = self._g({
+            'is_expr': True, 'is_first': True, 'is_ci': True,
+            'is_index': False, 'is_slice': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+            'replace_visible': True, 'replace_expr': 'len(mtch[0]) > 3',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "next((x[:mtch.start()] + x[mtch.end():] for mtch in re.finditer(re.escape('hello'), x, flags=re.I) if len(mtch[0]) > 3), x)")
+
+    def test_delete_without_predicate_unchanged(self):
+        """Existing delete behavior is preserved when no replace is active."""
+        result = self._g({
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "re.sub(r'hello', '', x, flags=re.M)")
 
 class TestDSLLoopAction(_ActionTestBase):
     """Test loop action via Action rule."""
@@ -8429,16 +8610,16 @@ class TestDSLLoopAction(_ActionTestBase):
             'is_index': False, 'is_slice': False, 'has_replace': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
         })
-        self.assertEqual(result[0], "for _i, _mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for _i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
 
     def test_loop_replace(self):
         result = self._gen(self.ACTION, {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False, 'has_replace': True,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().upper()",
+            'replace_expr': "mtch.group().upper()",
         })
-        self.assertEqual(result[0], "for _i, _val in enumerate(_mtch.group().upper() for _mtch in re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for _i, _val in enumerate(mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)):\n    pass")
 
     def test_roundtrip_loop_non_replace(self):
         self._roundtrip(self.ACTION, {
@@ -8456,7 +8637,7 @@ class TestDSLLoopAction(_ActionTestBase):
         })
 
     def test_parse_known_loop(self):
-        parsed = self._parse_action("for _i, _mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        parsed = self._parse_action("for _i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'loop')
 
@@ -8477,18 +8658,18 @@ class TestDSLBooleanActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False, 'has_replace': True,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
-        self.assertEqual(result[0], "any(_mtch.group().isdigit() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+        self.assertEqual(result[0], "any(mtch.group().isdigit() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
     def test_all_action(self):
         result = self._gen('all', {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
-        self.assertEqual(result[0], "all(_mtch.group().isdigit() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+        self.assertEqual(result[0], "all(mtch.group().isdigit() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
     def test_if_any_non_replace(self):
         result = self._gen('if_any', {
@@ -8503,7 +8684,7 @@ class TestDSLBooleanActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False, 'has_replace': True,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
         self.assertIn("if any(", result[0])
 
@@ -8512,7 +8693,7 @@ class TestDSLBooleanActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
         self.assertIn("if all(", result[0])
 
@@ -8543,7 +8724,7 @@ class TestDSLBooleanActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
 
     def test_parse_known_any_non_replace(self):
@@ -8557,7 +8738,7 @@ class TestDSLBooleanActions(_ActionTestBase):
         self.assertEqual(parsed['action'], 'if_any')
 
     def test_parse_known_all(self):
-        parsed = self._parse_action("all(_mtch.group().isdigit() for _mtch in re.finditer(r'hello', x, flags=re.M))")
+        parsed = self._parse_action("all(mtch.group().isdigit() for mtch in re.finditer(r'hello', x, flags=re.M))")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'all')
 
@@ -8578,25 +8759,25 @@ class TestDSLCountFilterActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False, 'has_replace': True,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
-        self.assertEqual(result[0], "sum(1 for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch.group().isdigit())")
+        self.assertEqual(result[0], "sum(1 for mtch in re.finditer(r'hello', x, flags=re.M) if mtch.group().isdigit())")
 
     def test_filter_list(self):
         result = self._gen('filter', {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
-        self.assertEqual(result[0], "[_mtch for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch.group().isdigit()]")
+        self.assertEqual(result[0], "[mtch for mtch in re.finditer(r'hello', x, flags=re.M) if mtch.group().isdigit()]")
 
     def test_filter_first(self):
         result = self._gen('filter', {
             'is_expr': False, 'is_first': True, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
         self.assertIn("next(", result[0])
 
@@ -8612,7 +8793,7 @@ class TestDSLCountFilterActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False, 'has_replace': True,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
 
     def test_roundtrip_filter(self):
@@ -8620,7 +8801,7 @@ class TestDSLCountFilterActions(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
-            'replace_expr': "_mtch.group().isdigit()",
+            'replace_expr': "mtch.group().isdigit()",
         })
 
     def test_parse_known_count(self):
@@ -8629,7 +8810,7 @@ class TestDSLCountFilterActions(_ActionTestBase):
         self.assertEqual(parsed['action'], 'count')
 
     def test_parse_known_filter(self):
-        parsed = self._parse_action("[_mtch for _mtch in re.finditer(r'hello', x, flags=re.M) if _mtch.group().isdigit()]")
+        parsed = self._parse_action("[mtch for mtch in re.finditer(r'hello', x, flags=re.M) if mtch.group().isdigit()]")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'filter')
 
@@ -8716,7 +8897,7 @@ class TestDSLReplaceAction(_ActionTestBase):
             'regex_pattern': 'hello', 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "re.sub(r'hello', lambda _mtch: 'world', x, flags=re.M)")
+        self.assertEqual(result[0], "re.sub(r'hello', lambda mtch: 'world', x, flags=re.M)")
 
     def test_replace_regex_first(self):
         result = self._gen(self.ACTION, {
@@ -8725,7 +8906,7 @@ class TestDSLReplaceAction(_ActionTestBase):
             'regex_pattern': 'hello', 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "re.sub(r'hello', lambda _mtch: 'world', x, count=1, flags=re.M)")
+        self.assertEqual(result[0], "re.sub(r'hello', lambda mtch: 'world', x, count=1, flags=re.M)")
 
     def test_replace_expr_all(self):
         result = self._gen(self.ACTION, {
@@ -8734,7 +8915,7 @@ class TestDSLReplaceAction(_ActionTestBase):
             'expr': "'hello'", 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "re.sub(re.escape('hello'), lambda _mtch: 'world', x)")
+        self.assertEqual(result[0], "re.sub(re.escape('hello'), lambda mtch: 'world', x)")
 
     def test_replace_index(self):
         result = self._gen(self.ACTION, {
@@ -8742,7 +8923,7 @@ class TestDSLReplaceAction(_ActionTestBase):
             'index_expr': '5', 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "x[:5] + str((lambda _mtch: 'world')(x[5])) + x[5 + 1:]")
+        self.assertEqual(result[0], "x[:5] + str((lambda mtch: 'world')(x[5])) + x[5 + 1:]")
 
     def test_replace_slice_both(self):
         result = self._gen(self.ACTION, {
@@ -8750,7 +8931,7 @@ class TestDSLReplaceAction(_ActionTestBase):
             'slice_start': '5', 'slice_stop': '10', 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "x[:5] + str((lambda _mtch: 'world')(x[5:10])) + x[10:]")
+        self.assertEqual(result[0], "x[:5] + str((lambda mtch: 'world')(x[5:10])) + x[10:]")
 
     def test_replace_slice_empty_start(self):
         result = self._gen(self.ACTION, {
@@ -8758,7 +8939,7 @@ class TestDSLReplaceAction(_ActionTestBase):
             'slice_start': '', 'slice_stop': '10', 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "'' + str((lambda _mtch: 'world')(x[:10])) + x[10:]")
+        self.assertEqual(result[0], "'' + str((lambda mtch: 'world')(x[:10])) + x[10:]")
 
     def test_replace_slice_empty_stop(self):
         result = self._gen(self.ACTION, {
@@ -8766,14 +8947,14 @@ class TestDSLReplaceAction(_ActionTestBase):
             'slice_start': '5', 'slice_stop': '', 'var_to_search': 'x',
             'replace_expr': "'world'",
         })
-        self.assertEqual(result[0], "x[:5] + str((lambda _mtch: 'world')(x[5:])) + ''")
+        self.assertEqual(result[0], "x[:5] + str((lambda mtch: 'world')(x[5:])) + ''")
 
     def test_roundtrip_replace_regex(self):
         self._roundtrip(self.ACTION, {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': r'\d+', 'var_to_search': 'data',
-            'replace_expr': "int(_mtch.group())",
+            'replace_expr': "int(mtch.group())",
         })
 
     def test_roundtrip_replace_expr(self):
@@ -8788,7 +8969,7 @@ class TestDSLReplaceAction(_ActionTestBase):
         self._roundtrip(self.ACTION, {
             'is_index': True, 'is_slice': False,
             'index_expr': '5', 'var_to_search': 'x',
-            'replace_expr': "_mtch.upper()",
+            'replace_expr': "mtch.upper()",
         })
 
     def test_roundtrip_replace_slice(self):
@@ -8799,17 +8980,17 @@ class TestDSLReplaceAction(_ActionTestBase):
         })
 
     def test_parse_known_replace_regex(self):
-        parsed = self._parse_action("re.sub(r'hello', lambda _mtch: 'world', x, flags=re.M)")
+        parsed = self._parse_action("re.sub(r'hello', lambda mtch: 'world', x, flags=re.M)")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'replace')
 
     def test_parse_known_replace_expr(self):
-        parsed = self._parse_action("re.sub(re.escape('hello'), lambda _mtch: 'world', x)")
+        parsed = self._parse_action("re.sub(re.escape('hello'), lambda mtch: 'world', x)")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'replace')
 
     def test_parse_known_replace_index(self):
-        parsed = self._parse_action("x[:5] + str((lambda _mtch: 'world')(x[5])) + x[5 + 1:]")
+        parsed = self._parse_action("x[:5] + str((lambda mtch: 'world')(x[5])) + x[5 + 1:]")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'replace')
 
@@ -8825,8 +9006,8 @@ class TestDSLReplaceAction(_ActionTestBase):
 class TestDSLGenerateActionWrapper(_ActionTestBase):
     """Test the generate_action wrapper function."""
 
-    def test_generate_action_get_transform(self):
-        result = self.generate_action('get_transform', {
+    def test_generate_action_find_or_map(self):
+        result = self.generate_action('find_or_map', {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
@@ -8836,8 +9017,8 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
         self.assertEqual(result[0], 'x_matches')
         self.assertEqual(result[1], "list(re.finditer(r'hello', x, flags=re.M))")
 
-    def test_generate_action_get_transform_replace(self):
-        result = self.generate_action('get_transform', {
+    def test_generate_action_find_or_map_replace(self):
+        result = self.generate_action('find_or_map', {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
@@ -8880,7 +9061,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
         code = "list(re.finditer(r'hello', x, flags=re.M))"
         result = self.parse_generated_code(code)
         self.assertIsNotNone(result)
-        self.assertEqual(result['action'], 'get_transform')
+        self.assertEqual(result['action'], 'find_or_map')
 
 
 if __name__ == '__main__':

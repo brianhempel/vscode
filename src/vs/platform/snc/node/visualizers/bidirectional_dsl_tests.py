@@ -177,11 +177,11 @@ class TestGenerate:
         assert result[0] == "out = [m[0] for m in re.finditer(r'pat', s, flags=re.M)]"
 
     def test_full_generation_with_flags(self, regex_grammar):
-        ctx = {'assign_var_name': 'str2', 'match_var': '_mtch', 'repl_expr': '_mtch[0]',
+        ctx = {'assign_var_name': 'str2', 'match_var': 'mtch', 'repl_expr': 'mtch[0]',
                'var_to_search': 'str1', 'regex_pattern': 'x', 'ci': True}
         result = generate(regex_grammar, regex_grammar['Assignment'], ctx)
         assert result is not None
-        assert result[0] == "str2 = [_mtch[0] for _mtch in re.finditer(r'x', str1, flags=re.I|re.M)]"
+        assert result[0] == "str2 = [mtch[0] for mtch in re.finditer(r'x', str1, flags=re.I|re.M)]"
 
     def test_generate_escape_variant(self, regex_grammar):
         ctx = {'assign_var_name': 'r', 'match_var': 'm', 'repl_expr': 'm[0]',
@@ -232,7 +232,7 @@ class TestParse:
         assert ctx['ci'] is False
 
     def test_parse_full_assignment_with_flags(self, regex_grammar):
-        code = "str2 = [_mtch[0] for _mtch in re.finditer(r'x', str1, flags=re.I|re.M)]"
+        code = "str2 = [mtch[0] for mtch in re.finditer(r'x', str1, flags=re.I|re.M)]"
         ctx = parse(regex_grammar, regex_grammar['Assignment'], code)
         assert ctx is not None
         assert ctx['assign_var_name'] == 'str2'
@@ -272,7 +272,7 @@ class TestParse:
 
 class TestRoundtrip:
     @pytest.mark.parametrize("ctx", [
-        {'assign_var_name': 'str2', 'match_var': '_mtch', 'repl_expr': '_mtch[0]',
+        {'assign_var_name': 'str2', 'match_var': 'mtch', 'repl_expr': 'mtch[0]',
          'var_to_search': 'str1', 'regex_pattern': 'x', 'ci': True},
         {'assign_var_name': 'out', 'match_var': 'm', 'repl_expr': 'm.group()',
          'var_to_search': 'data', 'regex_pattern': r'\d+', 'ci': False},
