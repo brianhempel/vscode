@@ -166,23 +166,23 @@ class TestCanVisualize(unittest.TestCase):
 
 
 class TestInitModel(unittest.TestCase):
-    def test_stores_child_models_by_string_index(self):
+    def test_stores_child_models_by_composite_key(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         self.assertIn('children', model)
-        self.assertIn('^[0]', model['children'])
-        self.assertIn('^[1]', model['children'])
+        self.assertIn('0\x00^', model['children'])
+        self.assertIn('1\x00^', model['children'])
 
     def test_child_models_come_from_child_visualizer(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
-        child_model = model['children']['^[0]']
+        child_model = model['children']['0\x00^']
         self.assertEqual(child_model, _mock_string_vis.init_model("hello"))
 
     def test_int_child_model(self):
         lst = [42]
         model = init_model(lst, mock_get_visualizer)
-        self.assertIsNone(model['children']['^[0]'])
+        self.assertIsNone(model['children']['0\x00^'])
 
     def test_aggregates_handled_keys(self):
         lst = ["hello", "world"]
@@ -210,7 +210,7 @@ class TestVisualize(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         matches = re.findall(r'snc-child-key="([^"]*)"', output)
         self.assertTrue(len(matches) > 0)
-        self.assertEqual(eval(html.unescape(matches[0])), '^[0]')
+        self.assertEqual(eval(html.unescape(matches[0])), '0\x00^')
 
     def test_multiple_items_have_different_keys(self):
         lst = ["a", "b"]
@@ -218,8 +218,8 @@ class TestVisualize(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         matches = re.findall(r'snc-child-key="([^"]*)"', output)
         keys = {eval(html.unescape(m)) for m in matches}
-        self.assertIn('^[0]', keys)
-        self.assertIn('^[1]', keys)
+        self.assertIn('0\x00^', keys)
+        self.assertIn('1\x00^', keys)
 
     def test_contains_child_content(self):
         lst = ["hello"]
@@ -227,37 +227,35 @@ class TestVisualize(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('hello', output)
 
-    def test_brackets_present(self):
+    def test_renders_table(self):
         lst = [42]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('[', output)
-        self.assertIn(']', output)
+        self.assertIn('<table', output)
 
     def test_empty_list(self):
         lst = []
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('[', output)
-        self.assertIn(']', output)
+        self.assertIn('<table', output)
 
 
 class TestUpdate(unittest.TestCase):
     def test_child_event_routes_to_child_visualizer(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('^[0]', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
         new_model, commands = update(event, 'x = ["hello"]', 1, model, lst, mock_get_visualizer)
-        child_model = new_model['children']['^[0]']
+        child_model = new_model['children']['0\x00^']
         self.assertIn('last_event', child_model)
 
     def test_child_event_preserves_other_children(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('^[0]', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
         new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
-        self.assertIn('^[1]', new_model['children'])
-        self.assertNotIn('last_event', new_model['children']['^[1]'])
+        self.assertIn('1\x00^', new_model['children'])
+        self.assertNotIn('last_event', new_model['children']['1\x00^'])
 
     def test_null_event_is_noop(self):
         lst = ["hello"]
@@ -286,14 +284,14 @@ class TestUpdate(unittest.TestCase):
 
         lst = ["x"]
         model = init_model(lst, get_vis)
-        event = make_child_mouse_event('^[0]', 'X')
+        event = make_child_mouse_event('0\x00^', 'X')
         _, commands = update(event, '', 1, model, lst, get_vis)
         self.assertIn('test_command', commands)
 
     def test_handled_keys_updated_after_child_event(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('^[0]', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
         new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
         self.assertIn('handledKeys', new_model)
 
@@ -342,14 +340,16 @@ class TestTableDetection(unittest.TestCase):
         self.assertIn("^['name']", model['columns'])
         self.assertIn("^['age']", model['columns'])
 
-    def test_list_of_strings_is_list_mode(self):
+    def test_list_of_strings_is_table_mode_with_caret_column(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(model['display_mode'], 'list')
+        self.assertEqual(model['display_mode'], 'table')
+        self.assertEqual(model['columns'], ['^'])
 
-    def test_empty_list_is_list_mode(self):
+    def test_empty_list_is_table_mode(self):
         model = init_model([], mock_get_visualizer)
-        self.assertEqual(model['display_mode'], 'list')
+        self.assertEqual(model['display_mode'], 'table')
+        self.assertEqual(model['columns'], ['^'])
 
     def test_list_of_lists_is_table_mode(self):
         lst = [[1, 2, 3], [4, 5, 6]]
@@ -357,10 +357,11 @@ class TestTableDetection(unittest.TestCase):
         self.assertEqual(model['display_mode'], 'table')
         self.assertEqual(model['columns'], ['^[0]', '^[1]', '^[2]'])
 
-    def test_mixed_types_is_list_mode(self):
+    def test_mixed_types_is_table_mode_with_caret_column(self):
         lst = ["hello", 42]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(model['display_mode'], 'list')
+        self.assertEqual(model['display_mode'], 'table')
+        self.assertEqual(model['columns'], ['^'])
 
     def test_union_columns_from_different_field_sets(self):
         lst = [{'a': 1, 'b': 2}, {'b': 3, 'c': 4}]
@@ -452,13 +453,13 @@ class TestTableRendering(unittest.TestCase):
         self.assertIn("^['b']", unescaped)
         self.assertIn('<td style="padding:0 8px;"></td>', output) # missing cell
 
-    def test_list_mode_still_uses_brackets(self):
+    def test_string_list_renders_as_table(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('[', output)
-        self.assertIn(']', output)
-        self.assertNotIn('<table', output)
+        self.assertIn('<table', output)
+        self.assertIn('hello', output)
+        self.assertIn('world', output)
 
     def test_list_of_lists_renders_table(self):
         lst = [[1, 2], [3, 4]]
@@ -526,14 +527,15 @@ class TestTableEventRouting(unittest.TestCase):
 class TestVisualizeMaxDimensions(unittest.TestCase):
     """Test that visualize() accepts optional max_width and max_height."""
 
-    def test_list_mode_accepts_max_width_and_max_height(self):
+    def test_accepts_max_width_and_max_height(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
         output_default = visualize(lst, model, mock_get_visualizer, None)
         output_with_dims = visualize(lst, model, mock_get_visualizer, None, max_width=100, max_height=50)
-        self.assertEqual(output_default, output_with_dims)
+        self.assertIn('<table', output_default)
+        self.assertIn('<table', output_with_dims)
 
-    def test_table_mode_accepts_max_width_and_max_height(self):
+    def test_dict_list_accepts_max_width_and_max_height(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None, max_width=200, max_height=100)
@@ -543,7 +545,7 @@ class TestVisualizeMaxDimensions(unittest.TestCase):
         lst = []
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None, max_width=50, max_height=50)
-        self.assertIn('[', output)
+        self.assertIn('<table', output)
 
 
 class TestSmallParameter(unittest.TestCase):
@@ -570,11 +572,13 @@ class TestSmallParameter(unittest.TestCase):
         get_vis = lambda v: tracker
         lst = ["a", "b"]
         model = init_model(lst, get_vis)
-        model['focused_child'] = '^[1]'
+        model['focused_child'] = '1\x00^'
         tracker.visualize_calls.clear()
         visualize(lst, model, get_vis, None)
-        self.assertTrue(tracker.visualize_calls[0]['small'])
-        self.assertFalse(tracker.visualize_calls[1]['small'])
+        a_call = next(c for c in tracker.visualize_calls if c['value'] == 'a')
+        b_call = next(c for c in tracker.visualize_calls if c['value'] == 'b')
+        self.assertTrue(a_call['small'])
+        self.assertFalse(b_call['small'])
 
     def test_no_focused_child_all_small(self):
         tracker = SmallTrackingVisualizer()
@@ -619,19 +623,19 @@ class TestFocusTracking(unittest.TestCase):
     def test_child_event_sets_focused_child(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('^[0]', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
         new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model.get('focused_child'), '^[0]')
+        self.assertEqual(new_model.get('focused_child'), '0\x00^')
 
     def test_second_child_event_changes_focus(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        event1 = make_child_mouse_event('^[0]', 'MouseDown(index=0)')
+        event1 = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
         model, _ = update(event1, '', 1, model, lst, mock_get_visualizer)
-        self.assertEqual(model.get('focused_child'), '^[0]')
-        event2 = make_child_mouse_event('^[1]', 'MouseDown(index=0)')
+        self.assertEqual(model.get('focused_child'), '0\x00^')
+        event2 = make_child_mouse_event('1\x00^', 'MouseDown(index=0)')
         model, _ = update(event2, '', 1, model, lst, mock_get_visualizer)
-        self.assertEqual(model.get('focused_child'), '^[1]')
+        self.assertEqual(model.get('focused_child'), '1\x00^')
 
     def test_table_cell_event_sets_focused_child(self):
         lst = [{'name': 'Alice'}]
@@ -728,10 +732,10 @@ class TestColumnManagementInitModel(unittest.TestCase):
         self.assertIsNone(model['column_drag_from'])
         self.assertIsNone(model['column_drag_over'])
 
-    def test_list_mode_has_column_management_fields(self):
+    def test_string_list_has_column_management_fields(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(model['display_mode'], 'list')
+        self.assertEqual(model['display_mode'], 'table')
         self.assertIsNone(model['editing_column_index'])
         self.assertFalse(model['adding_column'])
         self.assertEqual(model['column_input_value'], '')
@@ -1300,22 +1304,24 @@ class TestColumnVisualize(unittest.TestCase):
             self.assertIn('last_event', cell_model)
 
 
-class TestColumnManagementInListMode(unittest.TestCase):
-    """Verify column management events are no-ops in list mode."""
+class TestColumnManagementForStringLists(unittest.TestCase):
+    """Column management works for string lists (always table mode)."""
 
-    def test_add_column_is_noop_in_list_mode(self):
+    def test_add_column_works_for_string_list(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(model['display_mode'], 'list')
+        self.assertEqual(model['display_mode'], 'table')
         event = make_column_mouse_event(repr(AddColumnClick()))
         new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
-        self.assertFalse(new_model.get('adding_column', False))
+        self.assertTrue(new_model['adding_column'])
 
-    def test_remove_column_is_noop_in_list_mode(self):
+    def test_remove_caret_column_from_string_list(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
+        self.assertEqual(model['columns'], ['^'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
-        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'], [])
 
 
