@@ -7124,6 +7124,91 @@ class TestActionButtonFilter(unittest.TestCase):
 
 
 # =============================================================================
+# Action Button: Find Indices Tests
+# =============================================================================
+
+class TestActionButtonFindIndices(unittest.TestCase):
+    """Test Find Indices action button."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.model['search'] = '/\\w+/'
+        self.source_code = "x = 'hello world'"
+        self.source_line = 1
+
+    def test_find_indices_no_replace_generates_start_list(self):
+        """Find Indices without replace produces [mtch.start() for mtch in ...]."""
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertEqual(suggest_name, "x_indices")
+        self.assertEqual(expr, r"[mtch.start() for mtch in re.finditer(r'\w+', x, flags=re.M)]")
+
+    def test_find_indices_with_replace_generates_filtered_start_list(self):
+        """Find Indices with replace produces [mtch.start() for mtch in ... if EXPR]."""
+        self.model['replace_visible'] = True
+        self.model['replace_text'] = "len(^[0]) > 4"
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertEqual(suggest_name, "x_indices")
+        self.assertEqual(expr, r"[mtch.start() for mtch in re.finditer(r'\w+', x, flags=re.M) if len(mtch[0]) > 4]")
+
+    def test_find_indices_first_match_no_replace(self):
+        """Find Indices with first-match uses next(..., None)."""
+        self.model['search'] = '/\\w+/1'
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertIn("next(", expr)
+        self.assertIn("mtch.start()", expr)
+
+    def test_find_indices_first_match_with_replace(self):
+        """Find Indices with first-match and replace uses next(..., None) with if."""
+        self.model['search'] = '/\\w+/1'
+        self.model['replace_visible'] = True
+        self.model['replace_text'] = "len(^[0]) > 4"
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertIn("next(", expr)
+        self.assertIn("mtch.start()", expr)
+        self.assertIn("if len(mtch[0]) > 4", expr)
+
+    def test_copy_find_indices(self):
+        """copy=True produces CopyToClipboard."""
+        _, commands = update(make_action_button_event('find_indices', copy=True),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], CopyToClipboard)
+        self.assertIn('mtch.start()', commands[0].text)
+
+    def test_find_indices_string_search(self):
+        """Find Indices with string search."""
+        self.model['search'] = "'hello'"
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertIn("re.escape('hello')", expr)
+        self.assertIn("mtch.start()", expr)
+
+    def test_find_indices_suggest_name_no_var(self):
+        """Find Indices without var name uses 'result_indices'."""
+        self.source_code = "f('hello world')"
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        suggest_name, _ = commands[0]
+        self.assertEqual(suggest_name, "result_indices")
+
+
+# =============================================================================
 # Action Button: Split Tests
 # =============================================================================
 
@@ -7388,6 +7473,25 @@ class TestActionButtonRendering(unittest.TestCase):
         filter_match = re_mod.search(r"style=\"([^\"]*?)\"[^>]*>Filter", html_output)
         self.assertIsNotNone(filter_match, "Filter button should be present")
         style = filter_match.group(1)
+        self.assertNotIn('opacity: 0.35', style)
+
+    def test_find_indices_button_present(self):
+        """Find Indices button renders in the action bar."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Find Indices', html_output)
+        self.assertIn("action=&#x27;find_indices&#x27;", html_output)
+
+    def test_find_indices_button_enabled_without_replace(self):
+        """Find Indices button is enabled even without replace mode."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        match = re_mod.search(r"style=\"([^\"]*?)\"[^>]*>Find Indices", html_output)
+        self.assertIsNotNone(match, "Find Indices button should be present")
+        style = match.group(1)
         self.assertNotIn('opacity: 0.35', style)
 
     def test_count_shows_match_count(self):
@@ -8912,6 +9016,77 @@ class TestDSLCountFilterActions(_ActionTestBase):
         self.assertEqual(parsed['action'], 'filter')
 
 
+class TestDSLFindIndicesAction(_ActionTestBase):
+    """Test find_indices action via Action rule."""
+
+    def test_find_indices_list_no_replace(self):
+        result = self._gen('find_indices', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "[mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M)]")
+
+    def test_find_indices_first_no_replace(self):
+        result = self._gen('find_indices', {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "next((mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M)), None)")
+
+    def test_find_indices_list_with_replace(self):
+        result = self._gen('find_indices', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "mtch.group().isdigit()",
+        })
+        self.assertEqual(result[0], "[mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M) if mtch.group().isdigit()]")
+
+    def test_find_indices_first_with_replace(self):
+        result = self._gen('find_indices', {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "mtch.group().isdigit()",
+        })
+        self.assertEqual(result[0], "next((mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M) if mtch.group().isdigit()), None)")
+
+    def test_find_indices_expr_search(self):
+        result = self._gen('find_indices', {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'expr': "'hello'", 'var_to_search': 'x',
+        })
+        self.assertEqual(result[0], "[mtch.start() for mtch in re.finditer(re.escape('hello'), x)]")
+
+    def test_roundtrip_find_indices_no_replace(self):
+        self._roundtrip('find_indices', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': r'\d+', 'var_to_search': 'data',
+        })
+
+    def test_roundtrip_find_indices_with_replace(self):
+        self._roundtrip('find_indices', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'replace_expr': "mtch.group().isdigit()",
+        })
+
+    def test_parse_known_find_indices(self):
+        parsed = self._parse_action("[mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M)]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'find_indices')
+
+    def test_parse_known_find_indices_with_predicate(self):
+        parsed = self._parse_action("[mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M) if mtch.group().isdigit()]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'find_indices')
+
+
 class TestDSLSplitAction(_ActionTestBase):
     """Test split action via Action rule."""
 
@@ -9153,6 +9328,28 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x_parts')
+
+    def test_generate_action_find_indices(self):
+        result = self.generate_action('find_indices', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_indices')
+        self.assertEqual(result[1], "[mtch.start() for mtch in re.finditer(r'hello', x, flags=re.M)]")
+
+    def test_generate_action_find_indices_with_replace(self):
+        result = self.generate_action('find_indices', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'var_to_search': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+            'replace_visible': True, 'replace_expr': "mtch.group().isdigit()",
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_indices')
 
     def test_parse_generated_code_recovers_action(self):
         code = "list(re.finditer(r'hello', x, flags=re.M))"

@@ -147,6 +147,21 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
                    {'is_first': False}),
     ], {}),
 
+    Alt("FindIndicesAction", [
+        BiTemplate("FindIndicesFilterFirst",
+                   "next((mtch.start() for mtch in {:FinditerExpr} if {replace_expr:AnyPython}), None)",
+                   {'is_first': True, 'has_replace': True}),
+        BiTemplate("FindIndicesFilterList",
+                   "[mtch.start() for mtch in {:FinditerExpr} if {replace_expr:AnyPython}]",
+                   {'is_first': False, 'has_replace': True}),
+        BiTemplate("FindIndicesFirst",
+                   "next((mtch.start() for mtch in {:FinditerExpr}), None)",
+                   {'is_first': True, 'has_replace': False}),
+        BiTemplate("FindIndicesList",
+                   "[mtch.start() for mtch in {:FinditerExpr}]",
+                   {'is_first': False, 'has_replace': False}),
+    ], {'is_index': False, 'is_slice': False}),
+
     Alt("SplitAction", [
         BiTemplate("SplitRegex",
                    "re.split(r'{regex_pattern:RawContent}', {var_to_search:Var}{:PerhapsMaxsplit}, flags={:RegexFlags})",
@@ -220,6 +235,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         Alt("ActionLoop", ["LoopAction"], {'action': 'loop'}),
         Alt("ActionIfAny", ["IfAnyAction"], {'action': 'if_any'}),
         Alt("ActionIfAll", ["IfAllAction"], {'action': 'if_all'}),
+        Alt("ActionFindIndices", ["FindIndicesAction"], {'action': 'find_indices'}),
         Alt("ActionFilter", ["FilterAction"], {'action': 'filter'}),
         Alt("ActionCount", ["CountAction"], {'action': 'count'}),
         Alt("ActionAny", ["AnyAction"], {'action': 'any'}),
@@ -236,7 +252,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
 _SUGGEST_SUFFIXES = {
     'any': 'any', 'all': 'all', 'count': 'count',
-    'filter': 'filtered', 'split': 'parts',
+    'filter': 'filtered', 'split': 'parts', 'find_indices': 'indices',
 }
 _STATEMENT_ACTIONS = frozenset({'loop', 'if_any', 'if_all'})
 _BARE_NAME_ACTIONS = frozenset({'replace', 'delete'})
