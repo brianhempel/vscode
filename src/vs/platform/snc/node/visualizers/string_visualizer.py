@@ -1987,6 +1987,7 @@ def _slice_search_highlights(search: str, string_value: str, eval_in_scope) -> l
     """Produce highlight tuples for a slice search expression.
 
     Evaluates slice bounds in the user's scope and highlights the resulting range.
+    Supports broadcast slicing when left/right evaluates to a list of ints.
     """
     parts = parse_slice_parts(search)
     if parts is None:
@@ -1997,6 +1998,35 @@ def _slice_search_highlights(search: str, string_value: str, eval_in_scope) -> l
         stop = eval_in_scope(right) if right else None
     except Exception:
         return []
+
+    start_is_list = _is_list_of_ints(start)
+    stop_is_list = _is_list_of_ints(stop)
+
+    if start_is_list or stop_is_list:
+        if not string_value:
+            return []
+        n = len(string_value)
+        str_to_internal = build_string_to_internal_mapping(string_value)
+        highlights = []
+        if start_is_list and stop_is_list:
+            for s, e in zip(start, stop):
+                h = _slice_range_highlight(s, e, string_value, str_to_internal, f'{s}:{e}')
+                if h:
+                    highlights.append(h)
+        elif start_is_list:
+            for s in start:
+                a_stop = stop if stop is not None else n
+                h = _slice_range_highlight(s, a_stop, string_value, str_to_internal, f'{s}:{right}')
+                if h:
+                    highlights.append(h)
+        else:
+            for e in stop:
+                a_start = start if start is not None else 0
+                h = _slice_range_highlight(a_start, e, string_value, str_to_internal, f'{left}:{e}')
+                if h:
+                    highlights.append(h)
+        return highlights
+
     if start is not None and not isinstance(start, int):
         return []
     if stop is not None and not isinstance(stop, int):
@@ -2031,11 +2061,46 @@ def _slice_search_highlights(search: str, string_value: str, eval_in_scope) -> l
     return [(internal_start, internal_end, 'literal', display, (1, 1), None)]
 
 
+def _is_list_of_ints(val) -> bool:
+    return isinstance(val, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in val)
+
+
+def _is_list_of_int_pairs(val) -> bool:
+    return (isinstance(val, list)
+            and len(val) > 0
+            and all(isinstance(x, (tuple, list)) and len(x) == 2
+                    and isinstance(x[0], int) and not isinstance(x[0], bool)
+                    and isinstance(x[1], int) and not isinstance(x[1], bool)
+                    for x in val))
+
+
+def _slice_range_highlight(actual_start: int, actual_stop: int, string_value: str, str_to_internal: list, display: str) -> tuple | None:
+    n = len(string_value)
+    if actual_start < 0:
+        actual_start = max(actual_start + n, 0)
+    if actual_stop < 0:
+        actual_stop = max(actual_stop + n, 0)
+    actual_stop = min(actual_stop, n)
+    actual_start = min(actual_start, n)
+    if actual_start >= actual_stop:
+        return None
+    internal_start = str_to_internal[actual_start]
+    if actual_stop > 0 and actual_stop <= len(str_to_internal):
+        internal_end = str_to_internal[actual_stop - 1] + 1
+        if actual_stop - 1 < n and string_value[actual_stop - 1] == '\n':
+            internal_end += 1
+    else:
+        internal_end = str_to_internal[-1] if str_to_internal else 2
+    return (internal_start, internal_end, 'literal', display, (1, 1), None)
+
+
 def _expression_search_highlights(search: str, string_value: str, eval_in_scope) -> list:
     """Produce highlight tuples for a backtick or bare expression search.
 
     Uses eval_in_scope to evaluate in the user's code scope.
     If the expression evaluates to an int, treats it as an index search (str[N]).
+    If it evaluates to a list of ints, highlights each indexed character.
+    If it evaluates to a list of (int,int) pairs, highlights each slice range.
     Returns no highlights if eval fails.
     """
     p = parse_search_term(search)
@@ -2047,6 +2112,24 @@ def _expression_search_highlights(search: str, string_value: str, eval_in_scope)
         return []
     if isinstance(result, int) and not isinstance(result, bool):
         return _index_highlight(result, string_value)
+    if _is_list_of_ints(result):
+        highlights = []
+        for idx in result:
+            highlights.extend(_index_highlight(idx, string_value))
+        return highlights
+    if _is_list_of_int_pairs(result):
+        if not string_value:
+            return []
+        str_to_internal = build_string_to_internal_mapping(string_value)
+        highlights = []
+        for s, e in result:
+            n = len(string_value)
+            a_start = s if s >= 0 else max(s + n, 0)
+            a_stop = e if e >= 0 else max(e + n, 0)
+            h = _slice_range_highlight(a_start, a_stop, string_value, str_to_internal, f'{s}:{e}')
+            if h:
+                highlights.append(h)
+        return highlights
     if not isinstance(result, str):
         return []
     if not result:
@@ -3016,8 +3099,14 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     ]
 
 
-def _eval_index_or_slice_match(selection_regex: str, string_value: str, eval_in_scope) -> str | None:
-    """Evaluate index or slice search and return the matched string, or None."""
+def _eval_index_or_slice_match(selection_regex: str, string_value: str, eval_in_scope) -> str | list | None:
+    """Evaluate index or slice search and return the matched string(s), or None.
+
+    Returns:
+      - str for single index/slice
+      - list[str] for multi-index, multi-pair-slice, or broadcast slice
+      - None if not an index/slice search
+    """
     parsed = parse_search_term(selection_regex)
     if not parsed:
         return None
@@ -3030,6 +3119,16 @@ def _eval_index_or_slice_match(selection_regex: str, string_value: str, eval_in_
             stop = eval_in_scope(right) if right else None
         except Exception:
             return None
+        start_is_list = _is_list_of_ints(start)
+        stop_is_list = _is_list_of_ints(stop)
+        if start_is_list or stop_is_list:
+            n = len(string_value)
+            if start_is_list and stop_is_list:
+                return [string_value[s:e] for s, e in zip(start, stop)]
+            elif start_is_list:
+                return [string_value[s:stop] for s in start]
+            else:
+                return [string_value[start:e] for e in stop]
         sliced = string_value[start:stop]
         return sliced if sliced else None
 
@@ -3043,15 +3142,20 @@ def _eval_index_or_slice_match(selection_regex: str, string_value: str, eval_in_
             if n == 0 or result < -n or result >= n:
                 return None
             return string_value[result]
+        if _is_list_of_ints(result):
+            return [string_value[i] for i in result]
+        if _is_list_of_int_pairs(result):
+            return [string_value[s:e] for s, e in result]
 
     return None
 
 
 def is_index_or_slice_search(selection_regex: str | None, eval_in_scope=None) -> bool:
-    """Check if the search is an index (expression->int) or slice search.
+    """Check if the search is an index (expression->int), slice, or multi-index search.
 
-    For slice, no eval needed. For index, eval_in_scope is required to check
-    if the expression evaluates to an int.
+    For slice, no eval needed. For index/multi variants, eval_in_scope is
+    required to check if the expression evaluates to int, list[int], or
+    list[tuple[int,int]].
     """
     parsed = parse_search_term(selection_regex)
     if not parsed:
@@ -3062,7 +3166,10 @@ def is_index_or_slice_search(selection_regex: str | None, eval_in_scope=None) ->
     if kind == 'expr' and eval_in_scope is not None:
         try:
             result = eval_in_scope(term)
-            return isinstance(result, int) and not isinstance(result, bool)
+            if isinstance(result, int) and not isinstance(result, bool):
+                return True
+            if _is_list_of_ints(result) or _is_list_of_int_pairs(result):
+                return True
         except Exception:
             pass
     return False
@@ -3079,7 +3186,7 @@ def _eval_count_via_grammar(selection_regex: str | None, value: str, model: dict
     if not selection_regex or not value:
         return 0
 
-    ctx = _get_search_context(model, var_to_search='_snc_v')
+    ctx = _get_search_context(model, var_to_search='_snc_v', eval_in_scope=eval_in_scope)
     if not ctx or ctx.get('is_index') or ctx.get('is_slice'):
         return 0
 
@@ -3102,6 +3209,8 @@ def _find_matches(selection_regex: str, string_value: str, eval_in_scope) -> lis
 
     matched = _eval_index_or_slice_match(selection_regex, string_value, eval_in_scope)
     if matched is not None:
+        if isinstance(matched, list):
+            return matched
         return [matched]
     if is_slice_search(selection_regex) or is_index_or_slice_search(selection_regex, eval_in_scope):
         return []
@@ -3463,7 +3572,7 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     model['redoHistory'] = []
 
 
-def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, var_to_search: str = None) -> dict | None:
+def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, var_to_search: str = None, eval_in_scope=None) -> dict | None:
     """Extract common search context from model and source code.
 
     Returns None if no valid search pattern or source info is available.
@@ -3491,45 +3600,118 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         var_to_search = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
 
-    is_idx = False
-    index_expr = None
-    if kind == 'slice':
-        slice_start, slice_stop = term
-    elif kind == 'expr':
-        try:
-            val = ast.literal_eval(term)
-            if isinstance(val, int) and not isinstance(val, bool):
-                is_idx = True
-                index_expr = term
-        except (ValueError, SyntaxError):
-            pass
+    replace_visible = model.get('replace_visible', False)
+    replace_text = model.get('replace_text')
+    replace_expr = None
+    if replace_visible and replace_text:
+        replace_expr_raw = replace_text
+        if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
+            end = replace_expr_raw.find('`', 1)
+            if end > 0:
+                replace_expr_raw = replace_expr_raw[1:end]
+        replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
 
-    if is_idx or kind == 'slice':
-        replace_visible = model.get('replace_visible', False)
-        replace_text = model.get('replace_text')
-        replace_expr = None
-        if replace_visible and replace_text:
-            replace_expr_raw = replace_text
-            if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-                end = replace_expr_raw.find('`', 1)
-                if end > 0:
-                    replace_expr_raw = replace_expr_raw[1:end]
-            replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
-        is_slice = kind == 'slice'
-        slice_start = term[0] if is_slice else None
-        slice_stop = term[1] if is_slice else None
+    # --- Multi-index: list[int] ---
+    if kind == 'expr':
+        _eval = eval_in_scope or ast.literal_eval
+        try:
+            val = _eval(term)
+        except Exception:
+            val = None
+        if _is_list_of_ints(val):
+            return {
+                'selection_regex': selection_regex,
+                'var_to_search': var_to_search,
+                'var_name': var_name,
+                'suggest_base': suggest_base,
+                'is_index': False, 'is_slice': False,
+                'is_multi_index': True,
+                'indices_expr': term,
+                'replace_visible': replace_visible,
+                'replace_text': replace_text,
+                'replace_expr': replace_expr,
+            }
+        if _is_list_of_int_pairs(val):
+            return {
+                'selection_regex': selection_regex,
+                'var_to_search': var_to_search,
+                'var_name': var_name,
+                'suggest_base': suggest_base,
+                'is_index': False, 'is_slice': False,
+                'is_multi_pair_slice': True,
+                'pairs_expr': term,
+                'replace_visible': replace_visible,
+                'replace_text': replace_text,
+                'replace_expr': replace_expr,
+            }
+        if isinstance(val, int) and not isinstance(val, bool):
+            is_slice = False
+            return {
+                'selection_regex': selection_regex,
+                'var_to_search': var_to_search,
+                'var_name': var_name,
+                'suggest_base': suggest_base,
+                'is_index': True,
+                'is_slice': False,
+                'index_expr': term,
+                'slice_start': None, 'slice_stop': None,
+                'has_slice_start': False, 'has_slice_stop': False,
+                'replace_visible': replace_visible,
+                'replace_text': replace_text,
+                'replace_expr': replace_expr,
+            }
+
+    # --- Slice (including broadcast) ---
+    if kind == 'slice':
+        slice_start_raw, slice_stop_raw = term
+        _eval = eval_in_scope or ast.literal_eval
+        start_val = None
+        stop_val = None
+        try:
+            start_val = _eval(slice_start_raw) if slice_start_raw else None
+        except Exception:
+            pass
+        try:
+            stop_val = _eval(slice_stop_raw) if slice_stop_raw else None
+        except Exception:
+            pass
+        start_is_list = _is_list_of_ints(start_val)
+        stop_is_list = _is_list_of_ints(stop_val)
+        if start_is_list or stop_is_list:
+            ctx = {
+                'selection_regex': selection_regex,
+                'var_to_search': var_to_search,
+                'var_name': var_name,
+                'suggest_base': suggest_base,
+                'is_index': False, 'is_slice': False,
+                'is_broadcast_slice': True,
+                'has_start_list': start_is_list,
+                'has_stop_list': stop_is_list,
+                'replace_visible': replace_visible,
+                'replace_text': replace_text,
+                'replace_expr': replace_expr,
+            }
+            if start_is_list:
+                ctx['start_list_expr'] = slice_start_raw
+            else:
+                ctx['slice_start'] = slice_start_raw
+            if stop_is_list:
+                ctx['stop_list_expr'] = slice_stop_raw
+            else:
+                ctx['slice_stop'] = slice_stop_raw
+            return ctx
         return {
             'selection_regex': selection_regex,
             'var_to_search': var_to_search,
             'var_name': var_name,
             'suggest_base': suggest_base,
-            'is_index': is_idx,
-            'is_slice': is_slice,
-            'index_expr': index_expr,
-            'slice_start': slice_start,
-            'slice_stop': slice_stop,
-            'has_slice_start': bool(slice_start) if is_slice else False,
-            'has_slice_stop': bool(slice_stop) if is_slice else False,
+            'is_index': False,
+            'is_slice': True,
+            'index_expr': None,
+            'slice_start': slice_start_raw,
+            'slice_stop': slice_stop_raw,
+            'has_slice_start': bool(slice_start_raw),
+            'has_slice_stop': bool(slice_stop_raw),
             'replace_visible': replace_visible,
             'replace_text': replace_text,
             'replace_expr': replace_expr,
@@ -3544,17 +3726,6 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
             regex_pattern = term or ""
         else:
             regex_pattern = strip_capturing_groups(term) if term else ""
-
-    replace_visible = model.get('replace_visible', False)
-    replace_text = model.get('replace_text')
-    replace_expr = None
-    if replace_visible and replace_text:
-        replace_expr_raw = replace_text
-        if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-            end = replace_expr_raw.find('`', 1)
-            if end > 0:
-                replace_expr_raw = replace_expr_raw[1:end]
-        replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
 
     return {
         'selection_regex': selection_regex,
@@ -3721,7 +3892,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 elif model.get('linked_action'):
                     model['linked_action'] = 'find_or_map'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line)
+                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('find_or_map', ctx)
                         if result:
@@ -3733,7 +3904,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 elif model.get('linked_action'):
                     model['linked_action'] = 'delete'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line)
+                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
@@ -3743,7 +3914,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 if model.get('linked_action'):
                     model['linked_action'] = 'replace'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line)
+                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('replace', ctx)
                         if result:
@@ -3958,13 +4129,14 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             if model.get('linked_action') and not copy:
                 model['linked_action'] = action
                 ctx = _get_search_context(model, source_code, source_line,
-                                          var_to_search=model['linked_var_to_search'])
+                                          var_to_search=model['linked_var_to_search'],
+                                          eval_in_scope=eval_in_scope)
                 if ctx:
                     result = generate_action(action, ctx)
                     if result:
                         _emit_linked_update(result[1], model, commands)
             else:
-                ctx = _get_search_context(model, source_code, source_line)
+                ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
                 if ctx:
                     if copy and action in ('if_any', 'if_all'):
                         bool_expr = generate_copy_expr_for_if(action, ctx)
@@ -3980,7 +4152,8 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
         ctx = _get_search_context(model, source_code, source_line,
-                                  var_to_search=model['linked_var_to_search'])
+                                  var_to_search=model['linked_var_to_search'],
+                                  eval_in_scope=eval_in_scope)
         if ctx:
             result = generate_action(model['linked_action'], ctx)
             if result:

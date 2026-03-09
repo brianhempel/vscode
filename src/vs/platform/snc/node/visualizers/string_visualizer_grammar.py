@@ -96,10 +96,10 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("LoopAction", [
         BiTemplate("LoopReplace",
-                   "for _i, _val in enumerate({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
+                   "for i, val in enumerate({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
                    {'has_replace': True}),
         BiTemplate("LoopNonReplace",
-                   "for _i, mtch in enumerate({:FinditerExpr}):\n    pass",
+                   "for i, mtch in enumerate({:FinditerExpr}):\n    pass",
                    {'has_replace': False}),
     ], {}),
 
@@ -160,6 +160,94 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         BiTemplate("FindIndicesList",
                    "[mtch.start() for mtch in {:FinditerExpr}]",
                    {'is_first': False, 'has_replace': False}),
+    ], {'is_index': False, 'is_slice': False}),
+
+    # --- Multi-index / multi-pair / broadcast-slice sub-rules ---
+
+    Alt("MultiIter", [
+        BiTemplate("MultiIterIndex",
+                   "{var_to_search:Var}[i] for i in {indices_expr:Something}",
+                   {'is_multi_index': True}),
+        BiTemplate("MultiIterBroadcastBoth",
+                   "{var_to_search:Var}[i:j] for i, j in zip({start_list_expr:Something}, {stop_list_expr:Something})",
+                   {'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': True}),
+        BiTemplate("MultiIterPairSlice",
+                   "{var_to_search:Var}[i:j] for i, j in {pairs_expr:Something}",
+                   {'is_multi_pair_slice': True}),
+        BiTemplate("MultiIterBroadcastLeft",
+                   "{var_to_search:Var}[i:{slice_stop:SliceComponent}] for i in {start_list_expr:Something}",
+                   {'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': False}),
+        BiTemplate("MultiIterBroadcastRight",
+                   "{var_to_search:Var}[{slice_start:SliceComponent}:i] for i in {stop_list_expr:Something}",
+                   {'is_broadcast_slice': True, 'has_start_list': False, 'has_stop_list': True}),
+    ], {'is_index': False, 'is_slice': False}),
+
+    BiTemplate("MultiGetAction",
+               "[{:MultiIter}]",
+               {'has_replace': False}),
+
+    Alt("MultiTransformAction", [
+        BiTemplate("MultiTransformIndex",
+                   "[(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[i]) for i in {indices_expr:Something}]",
+                   {'is_multi_index': True}),
+        BiTemplate("MultiTransformBroadcastBoth",
+                   "[(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[i:j]) for i, j in zip({start_list_expr:Something}, {stop_list_expr:Something})]",
+                   {'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': True}),
+        BiTemplate("MultiTransformPairSlice",
+                   "[(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[i:j]) for i, j in {pairs_expr:Something}]",
+                   {'is_multi_pair_slice': True}),
+        BiTemplate("MultiTransformBroadcastLeft",
+                   "[(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[i:{slice_stop:SliceComponent}]) for i in {start_list_expr:Something}]",
+                   {'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': False}),
+        BiTemplate("MultiTransformBroadcastRight",
+                   "[(lambda mtch: {replace_expr:AnyPython})({var_to_search:Var}[{slice_start:SliceComponent}:i]) for i in {stop_list_expr:Something}]",
+                   {'is_broadcast_slice': True, 'has_start_list': False, 'has_stop_list': True}),
+    ], {'has_replace': True}),
+
+    Alt("MultiCountAction", [
+        BiTemplate("MultiCountNoReplace",
+                   "len({indices_expr:Something})",
+                   {'is_multi_index': True, 'has_replace': False}),
+        BiTemplate("MultiCountNoReplacePair",
+                   "len({pairs_expr:Something})",
+                   {'is_multi_pair_slice': True, 'has_replace': False}),
+        BiTemplate("MultiCountNoReplaceBroadcast",
+                   "len({start_list_expr:Something})",
+                   {'is_broadcast_slice': True, 'has_start_list': True, 'has_replace': False}),
+        BiTemplate("MultiCountNoReplaceBroadcastRight",
+                   "len({stop_list_expr:Something})",
+                   {'is_broadcast_slice': True, 'has_start_list': False, 'has_stop_list': True, 'has_replace': False}),
+        BiTemplate("MultiCountReplace",
+                   "sum(1 for mtch in [{:MultiIter}] if {replace_expr:AnyPython})",
+                   {'has_replace': True}),
+    ], {}),
+
+    Alt("MultiLoopAction", [
+        BiTemplate("MultiLoopReplace",
+                   "for i, val in enumerate((lambda mtch: {replace_expr:AnyPython})({:MultiIter})):\n    pass",
+                   {'has_replace': True}),
+        BiTemplate("MultiLoopNonReplace",
+                   "for i, mtch in enumerate([{:MultiIter}]):\n    pass",
+                   {'has_replace': False}),
+    ], {}),
+
+    BiTemplate("MultiFilterAction",
+               "[mtch for mtch in [{:MultiIter}] if {replace_expr:AnyPython}]",
+               {}),
+
+    Alt("MultiFindIndicesAction", [
+        BiTemplate("MultiFindIndicesIndex",
+                   "{indices_expr:Something}",
+                   {'is_multi_index': True}),
+        BiTemplate("MultiFindIndicesPair",
+                   "[i for i, j in {pairs_expr:Something}]",
+                   {'is_multi_pair_slice': True}),
+        BiTemplate("MultiFindIndicesBroadcastStart",
+                   "{start_list_expr:Something}",
+                   {'is_broadcast_slice': True, 'has_start_list': True}),
+        BiTemplate("MultiFindIndicesBroadcastRight",
+                   "[0] * len({stop_list_expr:Something})",
+                   {'is_broadcast_slice': True, 'has_start_list': False, 'has_stop_list': True}),
     ], {'is_index': False, 'is_slice': False}),
 
     Alt("SplitAction", [
@@ -232,16 +320,22 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     Alt("Action", [
         Alt("ActionReplace", ["ReplaceAction"], {'action': 'replace'}),
         Alt("ActionDelete", ["DeleteAction"], {'action': 'delete'}),
+        Alt("ActionMultiLoop", ["MultiLoopAction"], {'action': 'loop'}),
         Alt("ActionLoop", ["LoopAction"], {'action': 'loop'}),
         Alt("ActionIfAny", ["IfAnyAction"], {'action': 'if_any'}),
         Alt("ActionIfAll", ["IfAllAction"], {'action': 'if_all'}),
-        Alt("ActionFindIndices", ["FindIndicesAction"], {'action': 'find_indices'}),
+        Alt("ActionMultiFilter", ["MultiFilterAction"], {'action': 'filter'}),
         Alt("ActionFilter", ["FilterAction"], {'action': 'filter'}),
+        Alt("ActionMultiCount", ["MultiCountAction"], {'action': 'count'}),
         Alt("ActionCount", ["CountAction"], {'action': 'count'}),
         Alt("ActionAny", ["AnyAction"], {'action': 'any'}),
         Alt("ActionAll", ["AllAction"], {'action': 'all'}),
         Alt("ActionSplit", ["SplitAction"], {'action': 'split'}),
+        Alt("ActionFindIndices", ["FindIndicesAction"], {'action': 'find_indices'}),
+        Alt("ActionMultiFindOrMap", ["MultiTransformAction", "MultiGetAction"], {'action': 'find_or_map'}),
         Alt("ActionFindOrMap", ["TransformAction", "GetAction"], {'action': 'find_or_map'}),
+        # MultiFindIndices last: its patterns are greedy catch-alls
+        Alt("ActionMultiFindIndices", ["MultiFindIndicesAction"], {'action': 'find_indices'}),
     ], {}),
 ])
 
@@ -270,6 +364,10 @@ def _suggest_name_bare(ctx: dict) -> str:
 def _suggest_name_for_get(ctx: dict) -> str:
     if ctx.get('is_index') or ctx.get('is_slice'):
         return _suggest_name_bare(ctx)
+    if ctx.get('is_multi_index'):
+        return _suggest_name(ctx, 'chars')
+    if ctx.get('is_multi_pair_slice') or ctx.get('is_broadcast_slice'):
+        return _suggest_name(ctx, 'slices')
     if ctx.get('is_first'):
         return _suggest_name(ctx, 'match')
     return _suggest_name(ctx, 'matches')
