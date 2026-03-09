@@ -77,6 +77,23 @@
 	box-shadow: 0 0 4px rgba(86, 156, 214, 0.5);
 }
 
+/* Drag ghost for snc-py-exp elements */
+.snc-py-exp-drag-ghost {
+	position: fixed;
+	top: -1000px;
+	left: -1000px;
+	background: #1e1e1e;
+	border: 1px solid #3c3c3c;
+	border-radius: 4px;
+	padding: 4px 8px;
+	font-family: monospace;
+	font-size: 11px;
+	color: #aaa;
+	white-space: nowrap;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+	z-index: 10002;
+}
+
 /* Tooltip for snc-py-exp elements (code expression drag-and-drop) */
 .snc-py-exp-tooltip {
 	position: fixed;
