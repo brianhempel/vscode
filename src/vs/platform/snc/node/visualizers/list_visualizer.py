@@ -7,21 +7,21 @@ ARCHITECTURE OVERVIEW
 This visualizer follows the Elm architecture with three core functions:
 
 1. visualize(value, model) -> HTML string
-   - Renders lists either as inline items or as a table with configurable columns
-   - In table mode, shows column management controls (add, edit, remove, reorder)
+   - Always renders lists as a table with configurable columns
+   - Shows column management controls (add, edit, remove, reorder)
 
 2. init_model(value) -> dict
    - Returns the initial model state
-   - Detects table mode for homogeneous lists with field-bearing items
+   - Auto-detects columns from item fields, or defaults to ['^'] (the item)
    - Loads saved column configuration from dotfile
 
 3. update(event, source_code, source_line, model, value) -> (new_model, commands)
    - Processes UI events (click, input, keyboard, drag) and returns updated model
    - Routes child events to cell visualizers
-   - Handles column management events in table mode
+   - Handles column management events
 
 ================================================================================
-COLUMN CONFIGURATION (table mode)
+COLUMN CONFIGURATION
 ================================================================================
 
 Columns shown in the table are configurable and persisted:
@@ -32,7 +32,10 @@ Columns shown in the table are configurable and persisted:
 
 2. Auto-detection via _detect_table_columns:
    - Samples items and returns union of fields if all support get_fields
-   - Fallback when type not in dotfile
+
+3. Default: ['^'] (the item itself)
+   - Used when items lack fields (strings, ints, mixed types, empty lists)
+   - Users can add computed columns via the (+) button
 ================================================================================
 """
 
@@ -44,7 +47,7 @@ from typing import Any, List, Tuple
 
 from visualizer_utils import (
     ChildEvent, EditorTextSelect, Unlink,
-    wrap_child_html, route_child_event, aggregate_handled_keys,
+    route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     extract_expression_from_line,
@@ -232,7 +235,7 @@ _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
     if get_visualizer is None:
-        return {'children': {}, 'handledKeys': [], 'display_mode': 'list', 'columns': [],
+        return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
                 **_COLUMN_MGMT_DEFAULTS}
 
     source_expr = None
@@ -247,40 +250,30 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
         columns = saved_columns
     else:
         columns = _detect_table_columns(lst, get_visualizer)
-
-    if columns is not None:
-        children = {}
-        for i, item in enumerate(lst):
-            for col in columns:
-                try:
-                    cell_value = eval_caret_expr(col, item, eval_in_scope)
-                except Exception:
-                    cell_value = None
-                if cell_value is not None:
-                    cell_vis = get_visualizer(cell_value)
-                    children[f"{i}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(cell_value, get_visualizer,
-                                                                              eval_in_scope=eval_in_scope)
-
-        handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
-        return {
-            'children': children,
-            'handledKeys': handled_keys,
-            'display_mode': 'table',
-            'columns': columns,
-            '_source_expr': source_expr,
-            **_COLUMN_MGMT_DEFAULTS,
-        }
+        if columns is None:
+            columns = ['^']
 
     children = {}
     for i, item in enumerate(lst):
-        vis = get_visualizer(item)
-        children[f'^[{i}]'] = vis.init_model(item, get_visualizer,
-                                              eval_in_scope=eval_in_scope)
+        for col in columns:
+            try:
+                cell_value = eval_caret_expr(col, item, eval_in_scope)
+            except Exception:
+                cell_value = None
+            if cell_value is not None:
+                cell_vis = get_visualizer(cell_value)
+                children[f"{i}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(cell_value, get_visualizer,
+                                                                          eval_in_scope=eval_in_scope)
 
-    handled_keys = aggregate_handled_keys(children)
-    return {'children': children, 'handledKeys': handled_keys, 'display_mode': 'list', 'columns': [],
-            '_source_expr': source_expr,
-            **_COLUMN_MGMT_DEFAULTS}
+    handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
+    return {
+        'children': children,
+        'handledKeys': handled_keys,
+        'display_mode': 'table',
+        'columns': columns,
+        '_source_expr': source_expr,
+        **_COLUMN_MGMT_DEFAULTS,
+    }
 
 
 def _render_column_header(col, index, model):
@@ -328,7 +321,7 @@ def _render_column_header(col, index, model):
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'style="color:{BLUE};cursor:pointer;">'
-        f'{html.escape(strip_leading_caret(col))}</span>'
+        f'{html.escape(strip_leading_caret(col) or col)}</span>'
         f'</th>'
     )
 
@@ -492,26 +485,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
 
 def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
-    if model.get('display_mode') == 'table':
-        return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
-
-    children = model.get('children', {})
-    focused_child = model.get('focused_child')
-    items_html_parts = []
-
-    for i, item in enumerate(lst):
-        key = f'^[{i}]'
-        vis = get_visualizer(item)
-        child_model = children.get(key)
-        if child_model is None:
-            child_model = vis.init_model(item, get_visualizer,
-                                         eval_in_scope=eval_in_scope)
-        child_small = (key != focused_child)
-        child_html = vis.visualize(item, child_model, get_visualizer, eval_in_scope, small=child_small)
-        items_html_parts.append(wrap_child_html(child_html, key))
-
-    items_html = '\n'.join(items_html_parts)
-    return f'[{items_html}]'
+    return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
 
 
 def _table_child_value_getter(key, lst, eval_in_scope=None):
@@ -525,7 +499,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
         return (model, [])
 
     if model is None:
-        model = {'children': {}, 'handledKeys': [], 'display_mode': 'list', 'columns': [],
+        model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
                  **_COLUMN_MGMT_DEFAULTS}
 
     try:
@@ -539,36 +513,19 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
     if msg is None:
         return (model, [])
 
-    # Route child events (both list and table mode)
     if isinstance(msg, ChildEvent):
-        is_table = model.get('display_mode') == 'table'
-        if is_table:
-            child_value_getter = lambda key: _table_child_value_getter(key, value, eval_in_scope)
-        else:
-            child_value_getter = lambda key, _val=value: eval_caret_expr(key, _val, eval_in_scope)
-
         new_model, commands = route_child_event(
             event, model, value,
-            child_value_getter=child_value_getter,
+            child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope),
             get_visualizer=get_visualizer,
             source_code=source_code,
             source_line=source_line,
             eval_in_scope=eval_in_scope,
         )
-
-        if is_table:
-            new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
-        else:
-            new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}))
+        new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
         return (new_model, commands)
 
-    # Column management events (table mode only)
     commands: List[Any] = []
-    is_table = model.get('display_mode') == 'table'
-
-    if not is_table:
-        return (model, commands)
-
     type_key = _get_item_type_key(value) if value else None
 
     match msg:
