@@ -151,7 +151,7 @@ class CaptureGroupsToggle:
 
 @dataclass(frozen=True, slots=True)
 class ActionButtonClick:
-    action: str  # 'find_or_map', 'replace', 'delete', 'loop', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'split'
+    action: str  # 'find_or_map', 'replace', 'delete', 'loop', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'find_indices', 'split'
     copy: bool   # True → CopyToClipboard, False → NewCode
 
 @dataclass(frozen=True, slots=True)
@@ -2719,7 +2719,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     # 8. Filter + Copy (requires replace/transform predicate)
     parts.append(btn_group('Filter', 'filter', has_search and has_replace, 'Filter matches by predicate'))
 
-    # 8. Count (N) + Copy
+    # 9. Find Indices + Copy
+    parts.append(btn_group('Find Indices', 'find_indices', has_search, 'Start indices of matches'))
+
+    # 10. Count (N) + Copy
     count_label = f'Count ({match_count})'
     parts.append(btn_group(count_label, 'count', has_search and not first, 'Count of matches'))
 
