@@ -62,6 +62,9 @@ from string_visualizer import (
     char_to_regex_literal,
     DC1, DC2, DC3, DC4,  # Sentinel characters
     _render_transform_preview,
+    _eval_index_or_slice_match,
+    _find_matches,
+    is_index_or_slice_search,
 )
 
 
@@ -6783,7 +6786,7 @@ class TestActionButtonLoop(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
-        self.assertIn("for _i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):", expr)
+        self.assertIn("for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):", expr)
         self.assertIn("\n    pass", expr)
 
     def test_loop_replace_mode(self):
@@ -6795,7 +6798,7 @@ class TestActionButtonLoop(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
-        self.assertIn("for _i, _val in enumerate(", expr)
+        self.assertIn("for i, val in enumerate(", expr)
         self.assertIn("mtch[0].upper() for mtch in re.finditer(", expr)
 
     def test_loop_suggest_name_none(self):
@@ -6812,7 +6815,7 @@ class TestActionButtonLoop(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
-        self.assertIn("for _i, mtch in enumerate(", cmd.text)
+        self.assertIn("for i, mtch in enumerate(", cmd.text)
 
 
 # =============================================================================
@@ -8811,7 +8814,7 @@ class TestDSLLoopAction(_ActionTestBase):
             'is_index': False, 'is_slice': False, 'has_replace': False,
             'regex_pattern': 'hello', 'var_to_search': 'x',
         })
-        self.assertEqual(result[0], "for _i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
 
     def test_loop_replace(self):
         result = self._gen(self.ACTION, {
@@ -8820,7 +8823,7 @@ class TestDSLLoopAction(_ActionTestBase):
             'regex_pattern': 'hello', 'var_to_search': 'x',
             'replace_expr': "mtch.group().upper()",
         })
-        self.assertEqual(result[0], "for _i, _val in enumerate(mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for i, val in enumerate(mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)):\n    pass")
 
     def test_roundtrip_loop_non_replace(self):
         self._roundtrip(self.ACTION, {
@@ -8838,7 +8841,7 @@ class TestDSLLoopAction(_ActionTestBase):
         })
 
     def test_parse_known_loop(self):
-        parsed = self._parse_action("for _i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        parsed = self._parse_action("for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'loop')
 
@@ -9356,6 +9359,507 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
         result = self.parse_generated_code(code)
         self.assertIsNotNone(result)
         self.assertEqual(result['action'], 'find_or_map')
+
+
+# =============================================================================
+# Multi-Index Search: Detection & Highlighting Tests
+# =============================================================================
+
+class TestMultiIndexHighlighting(unittest.TestCase):
+    """Test highlighting for list-of-int index searches."""
+
+    def setUp(self):
+        self.value = "hello"
+
+    def test_list_of_ints_highlights_each_char(self):
+        """[0,2,4] highlights 'h', 'l', 'o' individually."""
+        highlights = parse_regex_for_highlighting('[0,2,4]', self.value, eval)
+        self.assertEqual(len(highlights), 3)
+
+    def test_list_of_ints_with_duplicates(self):
+        """[0,0,4,-1] highlights 4 positions (duplicates OK)."""
+        highlights = parse_regex_for_highlighting('[0,0,4,-1]', self.value, eval)
+        self.assertEqual(len(highlights), 4)
+
+    def test_list_of_ints_negative_index(self):
+        """[-1] highlights last character 'o'."""
+        highlights = parse_regex_for_highlighting('[-1]', self.value, eval)
+        self.assertEqual(len(highlights), 1)
+
+    def test_empty_list_no_highlights(self):
+        """[] produces no highlights."""
+        highlights = parse_regex_for_highlighting('[]', self.value, eval)
+        self.assertEqual(len(highlights), 0)
+
+
+class TestMultiIndexEval(unittest.TestCase):
+    """Test _eval_index_or_slice_match for multi-index modes."""
+
+    def setUp(self):
+        self.value = "hello"
+
+    def test_list_of_ints_returns_char_list(self):
+        """[0,0,4,-1] returns ['h','h','o','o']."""
+        result = _eval_index_or_slice_match('[0,0,4,-1]', self.value, eval)
+        self.assertEqual(result, ['h', 'h', 'o', 'o'])
+
+    def test_list_of_ints_single(self):
+        """[2] returns ['l']."""
+        result = _eval_index_or_slice_match('[2]', self.value, eval)
+        self.assertEqual(result, ['l'])
+
+    def test_empty_list_returns_empty(self):
+        """[] returns []."""
+        result = _eval_index_or_slice_match('[]', self.value, eval)
+        self.assertEqual(result, [])
+
+    def test_list_of_pairs_returns_slices(self):
+        """[(2,3),(0,4)] returns ['l','hell']."""
+        result = _eval_index_or_slice_match('[(2,3),(0,4)]', self.value, eval)
+        self.assertEqual(result, ['l', 'hell'])
+
+    def test_is_index_or_slice_for_list_of_ints(self):
+        """is_index_or_slice_search returns True for list-of-int."""
+        self.assertTrue(is_index_or_slice_search('[0,2,4]', eval))
+
+    def test_is_index_or_slice_for_list_of_pairs(self):
+        """is_index_or_slice_search returns True for list-of-pairs."""
+        self.assertTrue(is_index_or_slice_search('[(2,3),(0,4)]', eval))
+
+
+class TestMultiIndexFindMatches(unittest.TestCase):
+    """Test _find_matches for multi-index modes."""
+
+    def setUp(self):
+        self.value = "hello"
+
+    def test_multi_index_find_matches(self):
+        """_find_matches for [0,2,4] returns ['h','l','o']."""
+        result = _find_matches('[0,2,4]', self.value, eval)
+        self.assertEqual(result, ['h', 'l', 'o'])
+
+    def test_multi_pair_find_matches(self):
+        """_find_matches for [(0,2),(3,5)] returns ['he','lo']."""
+        result = _find_matches('[(0,2),(3,5)]', self.value, eval)
+        self.assertEqual(result, ['he', 'lo'])
+
+
+# =============================================================================
+# Broadcast Slice: Detection & Highlighting Tests
+# =============================================================================
+
+class TestBroadcastSliceHighlighting(unittest.TestCase):
+    """Test highlighting for broadcast slice searches."""
+
+    def setUp(self):
+        self.value = "hello"
+
+    def test_left_list_broadcast(self):
+        """[2,3]: highlights 'llo' and 'lo' separately."""
+        highlights = parse_regex_for_highlighting('[2,3]:', self.value, eval)
+        self.assertEqual(len(highlights), 2)
+
+    def test_both_lists_broadcast(self):
+        """[0,1]:[3,2] highlights 'hel' and 'e' separately."""
+        highlights = parse_regex_for_highlighting('[0,1]:[3,2]', self.value, eval)
+        self.assertEqual(len(highlights), 2)
+
+    def test_right_list_broadcast(self):
+        """:[3,2] highlights 'hel' and 'he' separately."""
+        highlights = parse_regex_for_highlighting(':[3,2]', self.value, eval)
+        self.assertEqual(len(highlights), 2)
+
+
+class TestBroadcastSliceEval(unittest.TestCase):
+    """Test _eval_index_or_slice_match for broadcast slice modes."""
+
+    def setUp(self):
+        self.value = "hello"
+
+    def test_left_list_broadcast(self):
+        """[2,3]: returns ['llo','lo']."""
+        result = _eval_index_or_slice_match('[2,3]:', self.value, eval)
+        self.assertEqual(result, ['llo', 'lo'])
+
+    def test_both_lists_broadcast(self):
+        """[0,1]:[3,2] returns ['hel','e']."""
+        result = _eval_index_or_slice_match('[0,1]:[3,2]', self.value, eval)
+        self.assertEqual(result, ['hel', 'e'])
+
+    def test_right_list_broadcast(self):
+        """:[3,2] returns ['hel','he']."""
+        result = _eval_index_or_slice_match(':[3,2]', self.value, eval)
+        self.assertEqual(result, ['hel', 'he'])
+
+    def test_is_index_or_slice_for_broadcast(self):
+        """is_index_or_slice_search returns True for broadcast slice."""
+        self.assertTrue(is_index_or_slice_search('[2,3]:', eval))
+
+    def test_broadcast_find_matches(self):
+        """_find_matches for [2,3]: returns ['llo','lo']."""
+        result = _find_matches('[2,3]:', self.value, eval)
+        self.assertEqual(result, ['llo', 'lo'])
+
+
+# =============================================================================
+# Multi-Pair Slice: Highlighting Tests
+# =============================================================================
+
+class TestMultiPairSliceHighlighting(unittest.TestCase):
+    """Test highlighting for list-of-pairs slice searches."""
+
+    def setUp(self):
+        self.value = "hello"
+
+    def test_list_of_pairs_highlights(self):
+        """[(2,3),(0,4)] highlights 2 regions."""
+        highlights = parse_regex_for_highlighting('[(2,3),(0,4)]', self.value, eval)
+        self.assertEqual(len(highlights), 2)
+
+
+# =============================================================================
+# Multi-Index: Action Button Code Generation Tests
+# =============================================================================
+
+class TestMultiIndexActionButtons(unittest.TestCase):
+    """Test action button code generation for multi-index search."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.model['search'] = '[0,0,4,-1]'
+        self.source_code = "x = 'hello world'"
+        self.source_line = 1
+
+    def test_find_or_map_multi_index(self):
+        """Get button produces [x[i] for i in INDICES]."""
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertEqual(suggest_name, "x_chars")
+        self.assertEqual(expr, "[x[i] for i in [0,0,4,-1]]")
+
+    def test_find_or_map_multi_index_with_replace(self):
+        """Map button produces [(lambda mtch: EXPR)(x[i]) for i in INDICES]."""
+        self.model['replace_visible'] = True
+        self.model['replace_text'] = "^.upper()"
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[(lambda mtch: mtch.upper())(x[i]) for i in [0,0,4,-1]]")
+
+    def test_count_multi_index(self):
+        """Count produces len(INDICES)."""
+        _, commands = update(make_action_button_event('count'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "len([0,0,4,-1])")
+
+    def test_copy_multi_index(self):
+        """copy=True produces CopyToClipboard."""
+        _, commands = update(make_action_button_event('find_or_map', copy=True),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], CopyToClipboard)
+
+    def test_loop_multi_index(self):
+        """Loop produces for i, mtch in enumerate(...)."""
+        _, commands = update(make_action_button_event('loop'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertIn("for i, mtch in enumerate(", expr)
+
+    def test_filter_multi_index(self):
+        """Filter with replace produces [mtch for mtch in [...] if EXPR]."""
+        self.model['replace_visible'] = True
+        self.model['replace_text'] = "^ != 'h'"
+        _, commands = update(make_action_button_event('filter'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertIn("for mtch in", expr)
+        self.assertIn("if mtch != 'h'", expr)
+
+    def test_find_indices_multi_index(self):
+        """Find Indices for multi-index returns the index list itself."""
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[0,0,4,-1]")
+
+
+# =============================================================================
+# Broadcast Slice: Action Button Code Generation Tests
+# =============================================================================
+
+class TestBroadcastSliceActionButtons(unittest.TestCase):
+    """Test action button code generation for broadcast slice search."""
+
+    def setUp(self):
+        self.value = "hello"
+        self.model = init_model(self.value)
+        self.model['search'] = '[2,3]:'
+        self.source_code = "x = 'hello'"
+        self.source_line = 1
+
+    def test_find_or_map_broadcast_left(self):
+        """Get with left-list broadcast produces [x[i:] for i in [2,3]]."""
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[x[i:] for i in [2,3]]")
+
+    def test_find_or_map_broadcast_both(self):
+        """Get with both-lists broadcast produces zip form."""
+        self.model['search'] = '[0,1]:[3,2]'
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[x[i:j] for i, j in zip([0,1], [3,2])]")
+
+    def test_find_or_map_broadcast_right(self):
+        """Get with right-list broadcast produces [x[:i] for i in [3,2]]."""
+        self.model['search'] = ':[3,2]'
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[x[:i] for i in [3,2]]")
+
+
+# =============================================================================
+# Multi-Pair Slice: Action Button Code Generation Tests
+# =============================================================================
+
+class TestMultiPairSliceActionButtons(unittest.TestCase):
+    """Test action button code generation for list-of-pairs slice search."""
+
+    def setUp(self):
+        self.value = "hello"
+        self.model = init_model(self.value)
+        self.model['search'] = '[(2,3),(0,4)]'
+        self.source_code = "x = 'hello'"
+        self.source_line = 1
+
+    def test_find_or_map_multi_pair(self):
+        """Get produces [x[i:j] for i, j in PAIRS]."""
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[x[i:j] for i, j in [(2,3),(0,4)]]")
+
+    def test_find_or_map_multi_pair_with_replace(self):
+        """Map produces [(lambda mtch: EXPR)(x[i:j]) for ...]."""
+        self.model['replace_visible'] = True
+        self.model['replace_text'] = "len(^)"
+        _, commands = update(make_action_button_event('find_or_map'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[(lambda mtch: len(mtch))(x[i:j]) for i, j in [(2,3),(0,4)]]")
+
+    def test_find_indices_multi_pair(self):
+        """Find Indices for pairs returns [i for i, j in PAIRS]."""
+        _, commands = update(make_action_button_event('find_indices'),
+                            self.source_code, self.source_line, self.model, self.value,
+                            eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertEqual(expr, "[i for i, j in [(2,3),(0,4)]]")
+
+
+# =============================================================================
+# Multi-Index DSL Grammar Tests
+# =============================================================================
+
+class TestDSLMultiIndexAction(_ActionTestBase):
+    """Test multi-index action via Action rule."""
+
+    def test_multi_index_get(self):
+        result = self._gen('find_or_map', {
+            'is_multi_index': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'indices_expr': '[0,2,4]', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[x[i] for i in [0,2,4]]")
+
+    def test_multi_index_transform(self):
+        result = self._gen('find_or_map', {
+            'is_multi_index': True, 'has_replace': True,
+            'is_index': False, 'is_slice': False,
+            'indices_expr': '[0,2,4]', 'var_to_search': 'x',
+            'replace_expr': "mtch.upper()",
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[(lambda mtch: mtch.upper())(x[i]) for i in [0,2,4]]")
+
+    def test_multi_index_count_no_replace(self):
+        result = self._gen('count', {
+            'is_multi_index': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'indices_expr': '[0,2,4]', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "len([0,2,4])")
+
+    def test_multi_index_loop(self):
+        result = self._gen('loop', {
+            'is_multi_index': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'indices_expr': '[0,2,4]', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertIn("for i, mtch in enumerate(", result[0])
+
+    def test_multi_index_find_indices(self):
+        result = self._gen('find_indices', {
+            'is_multi_index': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'indices_expr': '[0,2,4]', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[0,2,4]")
+
+    def test_roundtrip_multi_index_get(self):
+        self._roundtrip('find_or_map', {
+            'is_multi_index': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'indices_expr': '[0,2,4]', 'var_to_search': 'x',
+        })
+
+    def test_parse_known_multi_index(self):
+        parsed = self._parse_action("[x[i] for i in [0,2,4]]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'find_or_map')
+        self.assertTrue(parsed.get('is_multi_index'))
+
+
+class TestDSLMultiPairSliceAction(_ActionTestBase):
+    """Test multi-pair-slice action via Action rule."""
+
+    def test_multi_pair_get(self):
+        result = self._gen('find_or_map', {
+            'is_multi_pair_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'pairs_expr': '[(2,3),(0,4)]', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[x[i:j] for i, j in [(2,3),(0,4)]]")
+
+    def test_multi_pair_transform(self):
+        result = self._gen('find_or_map', {
+            'is_multi_pair_slice': True, 'has_replace': True,
+            'is_index': False, 'is_slice': False,
+            'pairs_expr': '[(2,3),(0,4)]', 'var_to_search': 'x',
+            'replace_expr': "len(mtch)",
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[(lambda mtch: len(mtch))(x[i:j]) for i, j in [(2,3),(0,4)]]")
+
+    def test_multi_pair_find_indices(self):
+        result = self._gen('find_indices', {
+            'is_multi_pair_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'pairs_expr': '[(2,3),(0,4)]', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[i for i, j in [(2,3),(0,4)]]")
+
+    def test_roundtrip_multi_pair_get(self):
+        self._roundtrip('find_or_map', {
+            'is_multi_pair_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'pairs_expr': '[(2,3),(0,4)]', 'var_to_search': 'x',
+        })
+
+    def test_parse_known_multi_pair(self):
+        parsed = self._parse_action("[x[i:j] for i, j in [(2,3),(0,4)]]")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'find_or_map')
+        self.assertTrue(parsed.get('is_multi_pair_slice'))
+
+
+class TestDSLBroadcastSliceAction(_ActionTestBase):
+    """Test broadcast-slice action via Action rule."""
+
+    def test_broadcast_left_get(self):
+        result = self._gen('find_or_map', {
+            'is_broadcast_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'has_start_list': True, 'has_stop_list': False,
+            'start_list_expr': '[2,3]', 'slice_stop': '', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[x[i:] for i in [2,3]]")
+
+    def test_broadcast_right_get(self):
+        result = self._gen('find_or_map', {
+            'is_broadcast_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'has_start_list': False, 'has_stop_list': True,
+            'stop_list_expr': '[3,2]', 'slice_start': '', 'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[x[:i] for i in [3,2]]")
+
+    def test_broadcast_both_get(self):
+        result = self._gen('find_or_map', {
+            'is_broadcast_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'has_start_list': True, 'has_stop_list': True,
+            'start_list_expr': '[0,1]', 'stop_list_expr': '[3,2]',
+            'var_to_search': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "[x[i:j] for i, j in zip([0,1], [3,2])]")
+
+    def test_roundtrip_broadcast_left(self):
+        self._roundtrip('find_or_map', {
+            'is_broadcast_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'has_start_list': True, 'has_stop_list': False,
+            'start_list_expr': '[2,3]', 'slice_stop': '', 'var_to_search': 'x',
+        })
+
+    def test_roundtrip_broadcast_both(self):
+        self._roundtrip('find_or_map', {
+            'is_broadcast_slice': True, 'has_replace': False,
+            'is_index': False, 'is_slice': False,
+            'has_start_list': True, 'has_stop_list': True,
+            'start_list_expr': '[0,1]', 'stop_list_expr': '[3,2]',
+            'var_to_search': 'x',
+        })
+
+    def test_parse_known_broadcast_left(self):
+        parsed = self._parse_action("[x[i:] for i in [2,3]]")
+        self.assertIsNotNone(parsed)
+        self.assertTrue(parsed.get('is_broadcast_slice'))
+
+    def test_parse_known_broadcast_both(self):
+        parsed = self._parse_action("[x[i:j] for i, j in zip([0,1], [3,2])]")
+        self.assertIsNotNone(parsed)
+        self.assertTrue(parsed.get('is_broadcast_slice'))
 
 
 if __name__ == '__main__':
