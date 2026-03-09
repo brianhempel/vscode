@@ -148,6 +148,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				ev.dataTransfer.setData('text/plain', expression);
 				ev.dataTransfer.effectAllowed = 'copy';
 				this.hidePyExpTooltip();
+
+				const dragGhost = document.createElement('div');
+				dragGhost.textContent = expression;
+				dragGhost.className = 'snc-py-exp-drag-ghost';
+				document.body.appendChild(dragGhost);
+				ev.dataTransfer.setDragImage(dragGhost, 0, 0);
+				setTimeout(() => dragGhost.remove(), 0);
 			}
 		}));
 
