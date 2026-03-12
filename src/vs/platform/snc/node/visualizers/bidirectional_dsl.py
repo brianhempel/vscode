@@ -113,6 +113,10 @@ BASE_RULES = [
                re.compile(r'[A-Za-z_][A-Za-z0-9_]*'),
                {}
     ),
+    BiTemplate("VarOrExpr",
+               re.compile(r'[A-Za-z_][A-Za-z0-9_]*|\((?:[^()]*|\([^()]*\))*\)'),
+               {}
+    ),
     BiTemplate("Something",
                re.compile(r'[\s\S]+'),
                {}

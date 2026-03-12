@@ -2722,7 +2722,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         lbl = 'Map First Match \u23ce' if first else 'Map Matches \u23ce'
         parts.append(btn_group(lbl, 'find_or_map', has_search, 'Map expression over matches (Enter)'))
     else:
-        lbl = 'Find First Match \u23ce' if first else 'Find Matches \u23ce'
+        lbl = 'First Match \u23ce' if first else 'Find Matches \u23ce'
         parts.append(btn_group(lbl, 'find_or_map', has_search, 'Find matches (Enter)'))
 
     # 2. Replace + Copy (grayed out when not in replace mode)
@@ -2803,7 +2803,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     parts.append(btn_group('Filter', 'filter', has_search and has_replace, 'Filter matches by predicate'))
 
     # 9. Find Indices + Copy
-    parts.append(btn_group('Find Indices', 'find_indices', has_search, 'Start indices of matches'))
+    indices_lbl = 'First Index' if first else 'Find Indices'
+    parts.append(btn_group(indices_lbl, 'find_indices', has_search, 'Start indices of matches'))
 
     # 10. Count (N) + Copy
     count_label = f'Count ({match_count})'
@@ -3186,7 +3187,7 @@ def _eval_count_via_grammar(selection_regex: str | None, value: str, model: dict
     if not selection_regex or not value:
         return 0
 
-    ctx = _get_search_context(model, var_to_search='_snc_v', eval_in_scope=eval_in_scope)
+    ctx = _get_search_context(model, source_expr='_snc_v', eval_in_scope=eval_in_scope)
     if not ctx or ctx.get('is_index') or ctx.get('is_slice'):
         return 0
 
@@ -3459,7 +3460,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_code=None,
         "replace_visible": False, # Whether the replace input box is visible
         "replace_text": None,     # The replacement text (a Python string literal, e.g., "'world'")
         "linked_action": None,         # When linked: the action name (e.g. 'replace')
-        "linked_var_to_search": None,  # When linked: variable from parsed code (e.g. 'str1')
+        "linked_source_expr": None,  # When linked: variable from parsed code (e.g. 'str1')
         "linked_prefix": None,         # When linked: assignment prefix (e.g. 'str2 = ') or ''
     }
 
@@ -3572,13 +3573,13 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     model['redoHistory'] = []
 
 
-def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, var_to_search: str = None, eval_in_scope=None) -> dict | None:
+def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, source_expr: str = None, eval_in_scope=None) -> dict | None:
     """Extract common search context from model and source code.
 
     Returns None if no valid search pattern or source info is available.
     Otherwise returns a dict with all values needed to build code expressions.
 
-    If var_to_search is provided, source_code/source_line are not needed
+    If source_expr is provided, source_code/source_line are not needed
     (used by the count preview which doesn't have source context).
     """
     selection_regex = model.get('search')
@@ -3590,14 +3591,14 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         return None
     kind, term, flags = parsed
 
-    if var_to_search:
-        suggest_base = var_to_search
-        var_name = var_to_search
+    if source_expr:
+        suggest_base = source_expr
+        var_name = source_expr
     else:
         if not source_code or not source_line:
             return None
         expr, var_name = extract_expression_from_line(source_code, source_line)
-        var_to_search = var_name if var_name else f"({expr})"
+        source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
 
     replace_visible = model.get('replace_visible', False)
@@ -3621,7 +3622,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         if _is_list_of_ints(val):
             return {
                 'selection_regex': selection_regex,
-                'var_to_search': var_to_search,
+                'source_expr': source_expr,
                 'var_name': var_name,
                 'suggest_base': suggest_base,
                 'is_index': False, 'is_slice': False,
@@ -3634,7 +3635,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         if _is_list_of_int_pairs(val):
             return {
                 'selection_regex': selection_regex,
-                'var_to_search': var_to_search,
+                'source_expr': source_expr,
                 'var_name': var_name,
                 'suggest_base': suggest_base,
                 'is_index': False, 'is_slice': False,
@@ -3648,7 +3649,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
             is_slice = False
             return {
                 'selection_regex': selection_regex,
-                'var_to_search': var_to_search,
+                'source_expr': source_expr,
                 'var_name': var_name,
                 'suggest_base': suggest_base,
                 'is_index': True,
@@ -3680,7 +3681,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         if start_is_list or stop_is_list:
             ctx = {
                 'selection_regex': selection_regex,
-                'var_to_search': var_to_search,
+                'source_expr': source_expr,
                 'var_name': var_name,
                 'suggest_base': suggest_base,
                 'is_index': False, 'is_slice': False,
@@ -3702,7 +3703,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
             return ctx
         return {
             'selection_regex': selection_regex,
-            'var_to_search': var_to_search,
+            'source_expr': source_expr,
             'var_name': var_name,
             'suggest_base': suggest_base,
             'is_index': False,
@@ -3729,7 +3730,7 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
 
     return {
         'selection_regex': selection_regex,
-        'var_to_search': var_to_search,
+        'source_expr': source_expr,
         'var_name': var_name,
         'suggest_base': suggest_base,
         'is_first': first,
@@ -3842,10 +3843,10 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 model['insertAfterSegment'] = fuzzy_info['segment_index']  # Insert after this segment
             else:
                 # Fresh start: reset selection, preserving linked-editing state and search flags
-                saved_linked = (model.get('linked_action'), model.get('linked_var_to_search'), model.get('linked_prefix'))
+                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_prefix'))
                 saved_flags = get_search_flags(model.get('search'))
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
-                model['linked_action'], model['linked_var_to_search'], model['linked_prefix'] = saved_linked
+                model['linked_action'], model['linked_source_expr'], model['linked_prefix'] = saved_linked
                 if saved_flags:
                     model['search'] = '``' + saved_flags
                 if isinstance(idx, int):
@@ -4107,21 +4108,21 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
 
         case EditorTextSelect(text=selected_text):
             parsed, prefix = parse_generated_code_or_assignment(selected_text)
-            if parsed and parsed.get('action') and parsed.get('var_to_search'):
+            if parsed and parsed.get('action') and parsed.get('source_expr'):
                 valid = True
                 if source_code and source_line:
                     _, line_var = extract_expression_from_line(source_code, source_line)
-                    if line_var and parsed['var_to_search'] != line_var:
+                    if line_var and parsed['source_expr'] != line_var:
                         valid = False
                 if valid:
                     _ctx_to_model(parsed, model)
                     model['linked_action'] = parsed['action']
-                    model['linked_var_to_search'] = parsed['var_to_search']
+                    model['linked_source_expr'] = parsed['source_expr']
                     model['linked_prefix'] = prefix
 
         case Unlink():
             model['linked_action'] = None
-            model['linked_var_to_search'] = None
+            model['linked_source_expr'] = None
             model['linked_prefix'] = None
 
         case ActionButtonClick(action=action, copy=copy):
@@ -4129,7 +4130,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             if model.get('linked_action') and not copy:
                 model['linked_action'] = action
                 ctx = _get_search_context(model, source_code, source_line,
-                                          var_to_search=model['linked_var_to_search'],
+                                          source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
                 if ctx:
                     result = generate_action(action, ctx)
@@ -4152,7 +4153,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
         ctx = _get_search_context(model, source_code, source_line,
-                                  var_to_search=model['linked_var_to_search'],
+                                  source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
         if ctx:
             result = generate_action(model['linked_action'], ctx)
