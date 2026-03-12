@@ -19,7 +19,7 @@ def regex_grammar():
                    "[{repl_expr:AnyPython} for {match_var:Var} in {iter_expr:IterExp}]",
                    {}),
         BiTemplate("IterExp",
-                   "re.finditer({:SearchExp}, {var_to_search:Var}{:PerhapsFlags})",
+                   "re.finditer({:SearchExp}, {source_expr:VarOrExpr}{:PerhapsFlags})",
                    {}),
         Alt("Action", ["Map"], {}),
         Alt("SearchExp",
@@ -171,21 +171,21 @@ class TestGenerate:
     def test_alt_picks_first_match(self, regex_grammar):
         """ci=False still generates re.M because ReIFlag ctx {is_expr:False} matches absent is_expr."""
         ctx = {'assign_var_name': 'out', 'match_var': 'm', 'repl_expr': 'm[0]',
-               'var_to_search': 's', 'regex_pattern': 'pat', 'ci': False}
+               'source_expr': 's', 'regex_pattern': 'pat', 'ci': False}
         result = generate(regex_grammar, regex_grammar['Assignment'], ctx)
         assert result is not None
         assert result[0] == "out = [m[0] for m in re.finditer(r'pat', s, flags=re.M)]"
 
     def test_full_generation_with_flags(self, regex_grammar):
         ctx = {'assign_var_name': 'str2', 'match_var': 'mtch', 'repl_expr': 'mtch[0]',
-               'var_to_search': 'str1', 'regex_pattern': 'x', 'ci': True}
+               'source_expr': 'str1', 'regex_pattern': 'x', 'ci': True}
         result = generate(regex_grammar, regex_grammar['Assignment'], ctx)
         assert result is not None
         assert result[0] == "str2 = [mtch[0] for mtch in re.finditer(r'x', str1, flags=re.I|re.M)]"
 
     def test_generate_escape_variant(self, regex_grammar):
         ctx = {'assign_var_name': 'r', 'match_var': 'm', 'repl_expr': 'm[0]',
-               'var_to_search': 's', 'expr': 'needle', 'is_expr': True, 'ci': False}
+               'source_expr': 's', 'expr': 'needle', 'is_expr': True, 'ci': False}
         result = generate(regex_grammar, regex_grammar['Assignment'], ctx)
         assert result is not None
         assert "re.escape(needle)" in result[0]
@@ -226,7 +226,7 @@ class TestParse:
         assert ctx is not None
         assert ctx['assign_var_name'] == 'out'
         assert ctx['regex_pattern'] == 'pat'
-        assert ctx['var_to_search'] == 'src'
+        assert ctx['source_expr'] == 'src'
         assert ctx['match_var'] == 'm'
         assert ctx['repl_expr'] == 'm[0]'
         assert ctx['ci'] is False
@@ -245,6 +245,22 @@ class TestParse:
         assert ctx is not None
         assert ctx['expr'] == 'needle'
         assert ctx['is_expr'] is True
+
+    def test_parse_var_or_expr_identifier(self):
+        g = make_grammar(BASE_RULES)
+        ctx = parse(g, g['VarOrExpr'], "hello")
+        assert ctx is not None
+        assert ctx == {}
+
+    def test_parse_var_or_expr_parenthesized(self):
+        g = make_grammar(BASE_RULES)
+        ctx = parse(g, g['VarOrExpr'], "(my_func(x))")
+        assert ctx is not None
+        assert ctx == {}
+
+    def test_parse_var_or_expr_rejects_bare_number(self):
+        g = make_grammar(BASE_RULES)
+        assert parse(g, g['VarOrExpr'], "123") is None
 
     def test_parse_with_ctx_in(self):
         g = make_grammar(BASE_RULES)
@@ -273,11 +289,11 @@ class TestParse:
 class TestRoundtrip:
     @pytest.mark.parametrize("ctx", [
         {'assign_var_name': 'str2', 'match_var': 'mtch', 'repl_expr': 'mtch[0]',
-         'var_to_search': 'str1', 'regex_pattern': 'x', 'ci': True},
+         'source_expr': 'str1', 'regex_pattern': 'x', 'ci': True},
         {'assign_var_name': 'out', 'match_var': 'm', 'repl_expr': 'm.group()',
-         'var_to_search': 'data', 'regex_pattern': r'\d+', 'ci': False},
+         'source_expr': 'data', 'regex_pattern': r'\d+', 'ci': False},
         {'assign_var_name': 'r', 'match_var': 'm', 'repl_expr': 'm[0]',
-         'var_to_search': 's', 'expr': 'needle', 'is_expr': True, 'ci': False},
+         'source_expr': 's', 'expr': 'needle', 'is_expr': True, 'ci': False},
     ])
     def test_roundtrip(self, regex_grammar, ctx):
         gen_result = generate(regex_grammar, regex_grammar['Assignment'], ctx)

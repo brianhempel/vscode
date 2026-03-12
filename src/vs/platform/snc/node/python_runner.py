@@ -1328,13 +1328,20 @@ def split_leading_imports(source_code: str):
     """
     tree = ast.parse(source_code)
 
-    # Walk top-level statements; collect leading imports and docstrings
+    # Walk top-level statements; collect leading imports and the true module docstring.
+    # A bare string after imports is executable code and must remain in the body so
+    # reruns still emit a visualization item for that line.
     split_idx = 0
     for stmt in tree.body:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             split_idx += 1
-        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
-            # Module docstring or bare string expression — keep with imports
+        elif (
+            split_idx == 0
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            # Only the very first top-level string literal is a module docstring.
             split_idx += 1
         else:
             break
