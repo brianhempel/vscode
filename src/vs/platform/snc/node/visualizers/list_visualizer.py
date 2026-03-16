@@ -39,6 +39,7 @@ Columns shown in the table are configurable and persisted:
 ================================================================================
 """
 
+import ast
 import html
 import random
 from dataclasses import dataclass
@@ -527,9 +528,8 @@ def _emit_linked_update(model: dict, commands: list) -> None:
     if result is None:
         return
     text = (model.get('linked_prefix') or '') + result
-    import ast as _ast
     try:
-        _ast.parse(text)
+        ast.parse(text)
     except SyntaxError:
         return
     commands.append(ChangeSelectedText(text=text))
