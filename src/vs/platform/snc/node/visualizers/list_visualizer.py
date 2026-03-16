@@ -936,7 +936,7 @@ def _render_column_header(col, index, model):
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'style="color:{GRAY};cursor:grab;opacity:0.5;user-select:none;'
         f'font-size:8px;font-style:normal;" '
-        f'title="Drag to reorder" class="snc-hover-hidden full-opacity-on-hover">\u283F</span>'
+        f'title="Drag to reorder" class="snc-hover-hidden full-opacity-on-hover">U</span>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'style="color:{GRAY};cursor:pointer;opacity:0.5;user-select:none;" '
         f'title="Remove column" class="snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
