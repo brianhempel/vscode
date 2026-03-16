@@ -39,6 +39,8 @@ Columns shown in the table are configurable and persisted:
 ================================================================================
 """
 
+import ast
+import copy
 import html
 import random
 from dataclasses import dataclass
@@ -57,8 +59,13 @@ from visualizer_utils import (
 )
 
 CELL_KEY_SEP = '\x00'
+_LINKED_ITEM_SENTINEL = '__snc_list_item__'
 
 # === Event types ===
+
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    text: str
 
 @dataclass(frozen=True, slots=True)
 class AddColumnClick:
@@ -228,6 +235,9 @@ _COLUMN_MGMT_DEFAULTS = {
     'selected_suggestion_index': None,
     'column_drag_from': None,
     'column_drag_over': None,
+    'linked_source_expr': None,
+    'linked_prefix': None,
+    'linked_columns': None,
 }
 
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
@@ -276,6 +286,79 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
     }
 
 
+def _get_render_source_expr(model):
+    return model.get('linked_source_expr') or model.get('_source_expr')
+
+
+def _persist_columns_if_needed(model, type_key):
+    if type_key and not model.get('linked_source_expr'):
+        save_columns_to_dotfile(type_key, model['columns'])
+
+
+def _name_to_caret_expr(expr, target_name):
+    class _RenameTargetName(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load) and node.id == target_name:
+                return ast.copy_location(ast.Name(id=_LINKED_ITEM_SENTINEL, ctx=ast.Load()), node)
+            return node
+
+    renamed = _RenameTargetName().visit(copy.deepcopy(expr))
+    ast.fix_missing_locations(renamed)
+    return ast.unparse(renamed).replace(_LINKED_ITEM_SENTINEL, '^')
+
+
+def _parse_generated_list_expression(expr):
+    if not isinstance(expr, ast.ListComp) or len(expr.generators) != 1:
+        return None
+    generator = expr.generators[0]
+    if generator.is_async or generator.ifs or not isinstance(generator.target, ast.Name):
+        return None
+    return {
+        'source_expr': ast.unparse(generator.iter),
+        'columns': [_name_to_caret_expr(expr.elt, generator.target.id)],
+    }
+
+
+def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str]:
+    code_line = code_line.strip()
+    if not code_line:
+        return (None, '')
+
+    try:
+        parsed = ast.parse(code_line)
+    except SyntaxError:
+        return (None, '')
+
+    if len(parsed.body) != 1:
+        return (None, '')
+
+    stmt = parsed.body[0]
+    if isinstance(stmt, ast.Expr):
+        ctx = _parse_generated_list_expression(stmt.value)
+        return (ctx, '') if ctx is not None else (None, '')
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+        ctx = _parse_generated_list_expression(stmt.value)
+        if ctx is None:
+            return (None, '')
+        return (ctx, f'{stmt.targets[0].id} = ')
+    return (None, '')
+
+
+def _emit_linked_update(model, commands):
+    source_expr = model.get('linked_source_expr')
+    columns = model.get('columns', [])
+    if not source_expr or len(columns) != 1:
+        return
+
+    item_expr = replace_caret_in_py_exp(columns[0], 'item')
+    text = (model.get('linked_prefix') or '') + f'[{item_expr} for item in {source_expr}]'
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))
+
+
 def _render_column_header(col, index, model):
     """Render a normal column header with drag handle, remove button, and column name."""
     click_event = repr(ColumnClick(index=index))
@@ -298,7 +381,7 @@ def _render_column_header(col, index, model):
         else:
             th_style += f'border-right:2px solid {BLUE};'
 
-    source_expr = model.get('_source_expr')
+    source_expr = _get_render_source_expr(model)
     if source_expr is not None:
         item_expr = replace_caret_in_py_exp(col, 'item')
         full_expr = f'[{item_expr} for item in {source_expr}]'
@@ -421,7 +504,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     strs.append('</tr>')
 
-    source_expr = model.get('_source_expr')
+    source_expr = _get_render_source_expr(model)
 
     for i, item in enumerate(lst):
         strs.append('<tr><td style="color:')
@@ -547,8 +630,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 model['columns'].append(name)
                 model['adding_column'] = False
                 model['column_input_value'] = ''
-                if type_key:
-                    save_columns_to_dotfile(type_key, model['columns'])
+                _persist_columns_if_needed(model, type_key)
             elif model.get('editing_column_index') is not None:
                 idx = model['editing_column_index']
                 if 0 <= idx < len(model['columns']):
@@ -558,8 +640,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         _rename_column_children(model, old_name, name)
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
-                if type_key:
-                    save_columns_to_dotfile(type_key, model['columns'])
+                _persist_columns_if_needed(model, type_key)
 
         case ColumnClick(index=idx):
             detail = event_json.get('detail', 1)
@@ -579,8 +660,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         model['column_input_value'] = ''
                     elif model['editing_column_index'] > idx:
                         model['editing_column_index'] -= 1
-                if type_key:
-                    save_columns_to_dotfile(type_key, model['columns'])
+                _persist_columns_if_needed(model, type_key)
 
         case ColumnDragStart(index=idx):
             if 0 <= idx < len(model['columns']):
@@ -602,8 +682,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 if drag_from != target:
                     col = model['columns'].pop(drag_from)
                     model['columns'].insert(target, col)
-                    if type_key:
-                        save_columns_to_dotfile(type_key, model['columns'])
+                    _persist_columns_if_needed(model, type_key)
             model['column_drag_from'] = None
             model['column_drag_over'] = None
 
@@ -645,8 +724,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 if model.get('adding_column'):
                     if commit_val:
                         model['columns'].append(commit_val)
-                        if type_key:
-                            save_columns_to_dotfile(type_key, model['columns'])
+                        _persist_columns_if_needed(model, type_key)
                     model['adding_column'] = False
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
@@ -657,8 +735,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         model['columns'][idx] = commit_val
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
-                        if type_key:
-                            save_columns_to_dotfile(type_key, model['columns'])
+                        _persist_columns_if_needed(model, type_key)
                     model['editing_column_index'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
@@ -668,5 +745,35 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 model['selected_suggestion_index'] = None
+
+        case EditorTextSelect(text=selected_text):
+            parsed, prefix = parse_generated_code_or_assignment(selected_text)
+            if parsed and parsed.get('source_expr'):
+                valid = True
+                if source_code and source_line:
+                    _, line_var = extract_expression_from_line(source_code, source_line)
+                    if line_var and parsed['source_expr'] != line_var:
+                        valid = False
+                if valid:
+                    if model.get('linked_source_expr') is None:
+                        model['linked_columns'] = list(model.get('columns', []))
+                    model['columns'] = list(parsed['columns'])
+                    model['linked_source_expr'] = parsed['source_expr']
+                    model['linked_prefix'] = prefix
+                    model['adding_column'] = False
+                    model['editing_column_index'] = None
+                    model['column_input_value'] = ''
+                    model['selected_suggestion_index'] = None
+
+        case Unlink():
+            linked_columns = model.get('linked_columns')
+            if linked_columns is not None:
+                model['columns'] = list(linked_columns)
+            model['linked_source_expr'] = None
+            model['linked_prefix'] = None
+            model['linked_columns'] = None
+
+    if model.get('linked_source_expr') and not isinstance(msg, (EditorTextSelect, Unlink)):
+        _emit_linked_update(model, commands)
 
     return (model, commands)
