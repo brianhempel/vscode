@@ -716,6 +716,22 @@ def make_column_mouse_up_event(python_event_str):
     }
 
 
+def make_editor_text_select_event(text):
+    """Create an EditorTextSelect event matching frontend behavior."""
+    return {
+        'pythonEventStr': "lambda e: EditorTextSelect(text=e.get('text', ''))",
+        'eventJSON': {'type': 'editorTextSelect', 'text': text},
+    }
+
+
+def make_unlink_event():
+    """Create an Unlink event matching frontend behavior."""
+    return {
+        'pythonEventStr': 'lambda e: Unlink()',
+        'eventJSON': {'type': 'unlink'},
+    }
+
+
 # === Column management tests ===
 
 class TestColumnManagementInitModel(unittest.TestCase):
@@ -1448,6 +1464,69 @@ class TestSourceExprInModel(unittest.TestCase):
         lst = ['a', 'b']
         model = init_model(lst, mock_get_visualizer, source_code='items = [...]', source_line=1)
         self.assertEqual(model.get('_source_expr'), 'items')
+
+
+class TestBidirectionalParsing(unittest.TestCase):
+    """Selecting generated list code should link visualizer editing state."""
+
+    def test_editor_text_select_links_list_comprehension(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        event = make_editor_text_select_event("[item['name'] for item in people]")
+        new_model, commands = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(commands, [])
+        self.assertEqual(new_model.get('linked_source_expr'), 'people')
+        self.assertEqual(new_model.get('linked_column'), "^['name']")
+        self.assertEqual(new_model.get('linked_prefix'), '')
+
+    def test_editor_text_select_links_assignment_prefix(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        event = make_editor_text_select_event("names = [row['name'] for row in people]")
+        new_model, _ = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model.get('linked_source_expr'), 'people')
+        self.assertEqual(new_model.get('linked_column'), "^['name']")
+        self.assertEqual(new_model.get('linked_prefix'), 'names = ')
+
+    def test_editor_text_select_ignores_mismatched_source_var(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        event = make_editor_text_select_event("[item['name'] for item in others]")
+        new_model, _ = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model.get('linked_source_expr'))
+        self.assertIsNone(new_model.get('linked_column'))
+        self.assertIsNone(new_model.get('linked_prefix'))
+
+    def test_linked_column_edit_emits_change_selected_text(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        model['columns'] = ["^['name']"]
+        model['linked_source_expr'] = 'people'
+        model['linked_column'] = "^['name']"
+        model['linked_prefix'] = 'names = '
+        model['editing_column_index'] = 0
+        model['column_input_value'] = "^['city']"
+        event = make_column_key_event('Enter')
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, commands = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['columns'][0], "^['city']")
+        self.assertEqual(new_model.get('linked_column'), "^['city']")
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(type(commands[0]).__name__, 'ChangeSelectedText')
+        self.assertEqual(commands[0].text, "names = [item['city'] for item in people]")
+
+    def test_unlink_clears_bidirectional_state(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        model['linked_source_expr'] = 'people'
+        model['linked_column'] = "^['name']"
+        model['linked_prefix'] = ''
+        event = make_unlink_event()
+        new_model, commands = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(commands, [])
+        self.assertIsNone(new_model.get('linked_source_expr'))
+        self.assertIsNone(new_model.get('linked_column'))
+        self.assertIsNone(new_model.get('linked_prefix'))
 
 
 if __name__ == '__main__':

@@ -39,6 +39,7 @@ Columns shown in the table are configurable and persisted:
 ================================================================================
 """
 
+import ast
 import html
 import random
 from dataclasses import dataclass
@@ -57,6 +58,13 @@ from visualizer_utils import (
 )
 
 CELL_KEY_SEP = '\x00'
+
+# === Command types ===
+
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    text: str
+
 
 # === Event types ===
 
@@ -126,6 +134,80 @@ def load_columns_from_dotfile(type_key: str):
 def save_columns_to_dotfile(type_key: str, columns: list):
     """Save columns for an item type to the dotfile, preserving other types' entries."""
     save_dotfile_list(COLUMN_DOTFILE_NAME, type_key, columns)
+
+
+def _node_source_text(source: str, node: ast.AST) -> str:
+    segment = ast.get_source_segment(source, node)
+    if segment is not None:
+        return segment.strip()
+    return ast.unparse(node).strip()
+
+
+def _replace_name_with_caret(expr_source: str, target_name: str) -> str | None:
+    """Replace every target variable occurrence in an expression with '^'."""
+    try:
+        tree = ast.parse(expr_source, mode='eval')
+    except SyntaxError:
+        return None
+
+    spans = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == target_name:
+            spans.append((node.col_offset, node.end_col_offset))
+
+    if not spans:
+        return None
+
+    out = expr_source
+    for start, end in sorted(spans, reverse=True):
+        out = out[:start] + '^' + out[end:]
+    return out.strip()
+
+
+def _parse_generated_code_or_assignment(code_text: str) -> tuple[dict | None, str]:
+    """Parse `[item_expr for item in source_expr]` or `name = [item_expr for ...]`."""
+    text = code_text.strip()
+    if not text:
+        return (None, '')
+
+    expr_node: ast.AST | None = None
+    prefix = ''
+    parse_source = text
+
+    try:
+        expr_node = ast.parse(parse_source, mode='eval').body
+    except SyntaxError:
+        try:
+            module = ast.parse(parse_source, mode='exec')
+        except SyntaxError:
+            return (None, '')
+        if len(module.body) != 1 or not isinstance(module.body[0], ast.Assign):
+            return (None, '')
+        assign = module.body[0]
+        if len(assign.targets) != 1 or not isinstance(assign.targets[0], ast.Name):
+            return (None, '')
+        prefix = f'{assign.targets[0].id} = '
+        expr_node = assign.value
+
+    if not isinstance(expr_node, ast.ListComp):
+        return (None, '')
+    if len(expr_node.generators) != 1:
+        return (None, '')
+
+    generator = expr_node.generators[0]
+    if generator.is_async or generator.ifs:
+        return (None, '')
+    if not isinstance(generator.target, ast.Name):
+        return (None, '')
+
+    item_var = generator.target.id
+    item_expr = _node_source_text(parse_source, expr_node.elt)
+    source_expr = _node_source_text(parse_source, generator.iter)
+    column_expr = _replace_name_with_caret(item_expr, item_var)
+    if not column_expr:
+        return (None, '')
+
+    return ({'source_expr': source_expr, 'column_expr': column_expr}, prefix)
 
 
 # === Column autocomplete helpers ===
@@ -230,13 +312,19 @@ _COLUMN_MGMT_DEFAULTS = {
     'column_drag_over': None,
 }
 
+_LINKED_DEFAULTS = {
+    'linked_source_expr': None,
+    'linked_column': None,
+    'linked_prefix': None,
+}
+
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
-                **_COLUMN_MGMT_DEFAULTS}
+                **_COLUMN_MGMT_DEFAULTS, **_LINKED_DEFAULTS}
 
     source_expr = None
     if source_code and source_line:
@@ -273,7 +361,23 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
         'columns': columns,
         '_source_expr': source_expr,
         **_COLUMN_MGMT_DEFAULTS,
+        **_LINKED_DEFAULTS,
     }
+
+
+def _emit_linked_update(model: dict, commands: list) -> None:
+    linked_source_expr = model.get('linked_source_expr')
+    linked_column = model.get('linked_column')
+    if not linked_source_expr or not linked_column:
+        return
+
+    item_expr = replace_caret_in_py_exp(linked_column, 'item')
+    text = f"{model.get('linked_prefix') or ''}[{item_expr} for item in {linked_source_expr}]"
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))
 
 
 def _render_column_header(col, index, model):
@@ -500,7 +604,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
 
     if model is None:
         model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
-                 **_COLUMN_MGMT_DEFAULTS}
+                 **_COLUMN_MGMT_DEFAULTS, **_LINKED_DEFAULTS}
 
     try:
         make_python_event = eval(event['pythonEventStr'])
@@ -556,6 +660,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     model['columns'][idx] = name
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
+                        if model.get('linked_column') == old_name:
+                            model['linked_column'] = name
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 if type_key:
@@ -573,6 +679,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             if 0 <= idx < len(model['columns']):
                 removed_col = model['columns'].pop(idx)
                 _remove_column_children(model, removed_col)
+                if model.get('linked_column') == removed_col:
+                    model['linked_column'] = None
                 if model.get('editing_column_index') is not None:
                     if model['editing_column_index'] == idx:
                         model['editing_column_index'] = None
@@ -657,6 +765,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         model['columns'][idx] = commit_val
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
+                            if model.get('linked_column') == old_name:
+                                model['linked_column'] = commit_val
                         if type_key:
                             save_columns_to_dotfile(type_key, model['columns'])
                     model['editing_column_index'] = None
@@ -668,5 +778,26 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 model['selected_suggestion_index'] = None
+
+        case EditorTextSelect(text=selected_text):
+            parsed, prefix = _parse_generated_code_or_assignment(selected_text)
+            if parsed and parsed.get('source_expr') and parsed.get('column_expr'):
+                valid = True
+                if source_code and source_line:
+                    _, line_var = extract_expression_from_line(source_code, source_line)
+                    if line_var and parsed['source_expr'] != line_var:
+                        valid = False
+                if valid:
+                    model['linked_source_expr'] = parsed['source_expr']
+                    model['linked_column'] = parsed['column_expr']
+                    model['linked_prefix'] = prefix
+
+        case Unlink():
+            model['linked_source_expr'] = None
+            model['linked_column'] = None
+            model['linked_prefix'] = None
+
+    if model.get('linked_source_expr') and model.get('linked_column') and not isinstance(msg, (EditorTextSelect, Unlink)):
+        _emit_linked_update(model, commands)
 
     return (model, commands)
