@@ -55,6 +55,16 @@ from visualizer_utils import (
     get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
 )
+from list_visualizer_grammar import (
+    col_expr_to_column, generate_action as grammar_generate_action,
+    parse_generated_code_or_assignment,
+)
+
+# === Command types (Elm-style commands for VS Code to execute) ===
+
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    text: str
 
 CELL_KEY_SEP = '\x00'
 
@@ -230,13 +240,20 @@ _COLUMN_MGMT_DEFAULTS = {
     'column_drag_over': None,
 }
 
+_LINKED_DEFAULTS = {
+    'linked_action': None,
+    'linked_source_expr': None,
+    'linked_prefix': None,
+    'linked_col': None,
+}
+
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
-                **_COLUMN_MGMT_DEFAULTS}
+                **_COLUMN_MGMT_DEFAULTS, **_LINKED_DEFAULTS}
 
     source_expr = None
     if source_code and source_line:
@@ -273,6 +290,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
         'columns': columns,
         '_source_expr': source_expr,
         **_COLUMN_MGMT_DEFAULTS,
+        **_LINKED_DEFAULTS,
     }
 
 
@@ -494,13 +512,36 @@ def _table_child_value_getter(key, lst, eval_in_scope=None):
     return eval_caret_expr(field_key, item, eval_in_scope)
 
 
+def _emit_linked_update(model: dict, commands: list) -> None:
+    """If in linked mode, regenerate the code expression and emit ChangeSelectedText."""
+    linked_action = model.get('linked_action')
+    linked_source_expr = model.get('linked_source_expr')
+    linked_col = model.get('linked_col')
+    if not linked_action or not linked_source_expr or not linked_col:
+        return
+    col_expr = replace_caret_in_py_exp(linked_col, 'item')
+    result = grammar_generate_action(linked_action, {
+        'col_expr': col_expr,
+        'source_expr': linked_source_expr,
+    })
+    if result is None:
+        return
+    text = (model.get('linked_prefix') or '') + result
+    import ast as _ast
+    try:
+        _ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))
+
+
 def update(event, source_code: str, source_line: int, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
     if event is None or not isinstance(event, dict) or not event.get('pythonEventStr'):
         return (model, [])
 
     if model is None:
         model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
-                 **_COLUMN_MGMT_DEFAULTS}
+                 **_COLUMN_MGMT_DEFAULTS, **_LINKED_DEFAULTS}
 
     try:
         make_python_event = eval(event['pythonEventStr'])
@@ -523,12 +564,35 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             eval_in_scope=eval_in_scope,
         )
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
+        if new_model.get('linked_action') and not isinstance(msg, (EditorTextSelect, Unlink)):
+            _emit_linked_update(new_model, commands)
         return (new_model, commands)
 
     commands: List[Any] = []
     type_key = _get_item_type_key(value) if value else None
 
     match msg:
+        case EditorTextSelect(text=selected_text):
+            parsed, prefix = parse_generated_code_or_assignment(selected_text)
+            if parsed and parsed.get('action') and parsed.get('source_expr'):
+                valid = True
+                if source_code and source_line:
+                    _, line_var = extract_expression_from_line(source_code, source_line)
+                    if line_var and parsed['source_expr'] != line_var:
+                        valid = False
+                if valid:
+                    col_expr = parsed.get('col_expr', 'item')
+                    model['linked_action'] = parsed['action']
+                    model['linked_source_expr'] = parsed['source_expr']
+                    model['linked_prefix'] = prefix
+                    model['linked_col'] = col_expr_to_column(col_expr)
+
+        case Unlink():
+            model['linked_action'] = None
+            model['linked_source_expr'] = None
+            model['linked_prefix'] = None
+            model['linked_col'] = None
+
         case AddColumnClick():
             model['adding_column'] = True
             model['column_input_value'] = ''
@@ -556,6 +620,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     model['columns'][idx] = name
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
+                        if model.get('linked_col') == old_name:
+                            model['linked_col'] = name
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 if type_key:
@@ -573,6 +639,11 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             if 0 <= idx < len(model['columns']):
                 removed_col = model['columns'].pop(idx)
                 _remove_column_children(model, removed_col)
+                if model.get('linked_col') == removed_col:
+                    model['linked_action'] = None
+                    model['linked_source_expr'] = None
+                    model['linked_prefix'] = None
+                    model['linked_col'] = None
                 if model.get('editing_column_index') is not None:
                     if model['editing_column_index'] == idx:
                         model['editing_column_index'] = None
@@ -657,6 +728,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         model['columns'][idx] = commit_val
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
+                            if model.get('linked_col') == old_name:
+                                model['linked_col'] = commit_val
                         if type_key:
                             save_columns_to_dotfile(type_key, model['columns'])
                     model['editing_column_index'] = None
@@ -668,5 +741,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 model['selected_suggestion_index'] = None
+
+    if model.get('linked_action') and not isinstance(msg, (EditorTextSelect, Unlink)):
+        _emit_linked_update(model, commands)
 
     return (model, commands)

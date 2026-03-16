@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Bidirectional grammar DSL: parse strings into context dicts and generate
 strings back from context dicts using the same grammar definition.
 
