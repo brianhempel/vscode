@@ -181,6 +181,16 @@ class Unlink:
     """Sent by the TypeScript front-end when an editor-visualizer link is broken."""
     pass
 
+
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    """Command to replace the currently selected text in the editor.
+
+    Used when a visualizer is linked to editor selection and the user
+    changes the selection in the visualizer UI."""
+    text: str
+
+
 def wrap_child_prefix(child_key: str) -> str:
     return f'<span snc-child-key="{html.escape(repr(child_key))}">'
 

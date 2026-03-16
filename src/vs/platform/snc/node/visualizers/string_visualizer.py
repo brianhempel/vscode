@@ -81,16 +81,12 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import replace_caret_in_py_exp, extract_expression_from_line, EditorTextSelect, Unlink, STRING, GRAY, BLUE
+from visualizer_utils import replace_caret_in_py_exp, extract_expression_from_line, EditorTextSelect, Unlink, ChangeSelectedText, STRING, GRAY, BLUE
 
 # === Command types (Elm-style commands for VS Code to execute) ===
 
 @dataclass(frozen=True, slots=True)
 class CopyToClipboard:
-    text: str
-
-@dataclass(frozen=True, slots=True)
-class ChangeSelectedText:
     text: str
 
 # === Event types ===

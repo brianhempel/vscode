@@ -46,7 +46,7 @@ from math import sqrt
 from typing import Any, List, Tuple
 
 from visualizer_utils import (
-    ChildEvent, EditorTextSelect, Unlink,
+    ChildEvent, EditorTextSelect, Unlink, ChangeSelectedText,
     route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
@@ -54,6 +54,12 @@ from visualizer_utils import (
     load_dotfile_list, save_dotfile_list,
     get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
+)
+
+from list_visualizer_grammar import (
+    parse_generated_code_or_assignment,
+    generate_column_expr,
+    generate_cell_expr,
 )
 
 CELL_KEY_SEP = '\x00'
@@ -494,6 +500,33 @@ def _table_child_value_getter(key, lst, eval_in_scope=None):
     return eval_caret_expr(field_key, item, eval_in_scope)
 
 
+def _emit_linked_update(model: dict, value: list, commands: list) -> None:
+    """Append ChangeSelectedText when linked and generated code is valid Python."""
+    import ast
+    prefix = model.get('linked_prefix') or ''
+    source_expr = model.get('linked_source_expr')
+    linked_column = model.get('linked_column', '^')
+    expr_type = model.get('linked_expr_type')
+
+    if not source_expr or not expr_type:
+        return
+
+    if expr_type == 'column':
+        expr = generate_column_expr(source_expr, linked_column)
+    else:
+        idx = model.get('linked_index', 0)
+        if idx is None or idx < 0 or idx >= len(value):
+            return
+        expr = generate_cell_expr(source_expr, idx, linked_column)
+
+    text = prefix + expr
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))
+
+
 def update(event, source_code: str, source_line: int, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
     if event is None or not isinstance(event, dict) or not event.get('pythonEventStr'):
         return (model, [])
@@ -523,12 +556,44 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             eval_in_scope=eval_in_scope,
         )
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
+        # When linked to cell, update from focused child and emit
+        focused = new_model.get('focused_child')
+        if focused and CELL_KEY_SEP in focused and new_model.get('linked_expr_type') == 'cell':
+            row_key, col_key = focused.split(CELL_KEY_SEP, 1)
+            new_model['linked_index'] = int(row_key)
+            new_model['linked_column'] = col_key
+            _emit_linked_update(new_model, value, commands)
         return (new_model, commands)
 
     commands: List[Any] = []
     type_key = _get_item_type_key(value) if value else None
 
     match msg:
+        case EditorTextSelect(text=selected_text):
+            parsed, prefix = parse_generated_code_or_assignment(selected_text)
+            if parsed and parsed.get('source_expr'):
+                valid = True
+                if source_code and source_line:
+                    _, line_var = extract_expression_from_line(source_code, source_line)
+                    if line_var and parsed['source_expr'] != line_var:
+                        valid = False
+                if valid:
+                    model['linked_expr_type'] = parsed.get('expr_type')
+                    model['linked_source_expr'] = parsed['source_expr']
+                    model['linked_column'] = parsed.get('linked_column', '^')
+                    model['linked_prefix'] = prefix
+                    if parsed.get('expr_type') == 'cell':
+                        model['linked_index'] = int(parsed.get('index_expr', 0))
+                    else:
+                        model['linked_index'] = None
+
+        case Unlink():
+            model['linked_expr_type'] = None
+            model['linked_source_expr'] = None
+            model['linked_column'] = None
+            model['linked_index'] = None
+            model['linked_prefix'] = None
+
         case AddColumnClick():
             model['adding_column'] = True
             model['column_input_value'] = ''
@@ -568,6 +633,9 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     model['editing_column_index'] = idx
                     model['column_input_value'] = model['columns'][idx]
                     model['adding_column'] = False
+            elif detail == 1 and model.get('linked_expr_type') == 'column' and 0 <= idx < len(model['columns']):
+                model['linked_column'] = model['columns'][idx]
+                _emit_linked_update(model, value, commands)
 
         case RemoveColumnClick(index=idx):
             if 0 <= idx < len(model['columns']):
@@ -668,5 +736,10 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 model['selected_suggestion_index'] = None
+
+    if model.get('linked_expr_type') and not isinstance(msg, (EditorTextSelect, Unlink)):
+        # Skip emit for ColumnClick single-click (already emitted in case handler)
+        if not (isinstance(msg, ColumnClick) and event_json.get('detail', 1) == 1):
+            _emit_linked_update(model, value, commands)
 
     return (model, commands)

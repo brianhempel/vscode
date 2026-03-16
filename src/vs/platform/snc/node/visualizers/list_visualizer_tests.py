@@ -11,6 +11,8 @@ import re
 
 from visualizer_utils import ChildEvent
 import list_visualizer
+from visualizer_utils import ChangeSelectedText
+
 from list_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
@@ -1448,6 +1450,82 @@ class TestSourceExprInModel(unittest.TestCase):
         lst = ['a', 'b']
         model = init_model(lst, mock_get_visualizer, source_code='items = [...]', source_line=1)
         self.assertEqual(model.get('_source_expr'), 'items')
+
+
+class TestBidirectionalParsing(unittest.TestCase):
+    """Test EditorTextSelect and bidirectional parsing for list visualizer."""
+
+    def _make_editor_text_select_event(self, text):
+        return {
+            'pythonEventStr': "lambda e: EditorTextSelect(text=e.get('text', ''))",
+            'eventJSON': {'type': 'editorTextSelect', 'text': text},
+        }
+
+    def test_editor_text_select_parses_list_comp(self):
+        """Selecting [item.x for item in my_list] in editor links to that column."""
+        lst = [{'x': 1, 'y': 2}, {'x': 3, 'y': 4}]
+        model = init_model(lst, mock_get_visualizer, source_code='my_list = [...]', source_line=1)
+        event = self._make_editor_text_select_event('[item.x for item in my_list]')
+        new_model, commands = update(event, 'my_list = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_expr_type'], 'column')
+        self.assertEqual(new_model['linked_source_expr'], 'my_list')
+        self.assertEqual(new_model['linked_column'], '^x')
+        self.assertIsNone(new_model['linked_index'])
+
+    def test_editor_text_select_parses_cell_expr(self):
+        """Selecting my_list[0].x in editor links to that cell."""
+        lst = [{'x': 1, 'y': 2}, {'x': 3, 'y': 4}]
+        model = init_model(lst, mock_get_visualizer, source_code='my_list = [...]', source_line=1)
+        event = self._make_editor_text_select_event('my_list[0].x')
+        new_model, commands = update(event, 'my_list = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_expr_type'], 'cell')
+        self.assertEqual(new_model['linked_source_expr'], 'my_list')
+        self.assertEqual(new_model['linked_column'], '^x')
+        self.assertEqual(new_model['linked_index'], 0)
+
+    def test_editor_text_select_parses_assignment(self):
+        """Selecting x = [item.y for item in data] parses and sets linked_prefix."""
+        lst = [{'x': 1, 'y': 2}]
+        model = init_model(lst, mock_get_visualizer, source_code='data = [...]', source_line=1)
+        event = self._make_editor_text_select_event('x = [item.y for item in data]')
+        new_model, commands = update(event, 'data = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_expr_type'], 'column')
+        self.assertEqual(new_model['linked_source_expr'], 'data')
+        self.assertEqual(new_model['linked_column'], '^y')
+        self.assertEqual(new_model['linked_prefix'], 'x = ')
+
+    def test_unlink_clears_linked_state(self):
+        """Unlink event clears all linked state."""
+        lst = [{'x': 1}]
+        model = init_model(lst, mock_get_visualizer, source_code='my_list = [...]', source_line=1)
+        model['linked_expr_type'] = 'column'
+        model['linked_source_expr'] = 'my_list'
+        model['linked_column'] = '^x'
+        event = {'pythonEventStr': 'lambda e: Unlink()', 'eventJSON': {'type': 'unlink'}}
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model.get('linked_expr_type'))
+        self.assertIsNone(new_model.get('linked_source_expr'))
+        self.assertIsNone(new_model.get('linked_column'))
+
+    def test_linked_column_click_emits_change_selected_text(self):
+        """Single-click on column header when linked emits ChangeSelectedText."""
+        lst = [{'x': 1, 'y': 2}, {'x': 3, 'y': 4}]
+        model = init_model(lst, mock_get_visualizer, source_code='my_list = [...]', source_line=1)
+        # Dict columns are ^['x'] and ^['y']; set linked to first column
+        model['linked_expr_type'] = 'column'
+        model['linked_source_expr'] = 'my_list'
+        model['linked_column'] = model['columns'][0]
+        y_col_idx = 1
+        event = {
+            'pythonEventStr': repr(ColumnClick(index=y_col_idx)),
+            'eventJSON': {'detail': 1},
+        }
+        new_model, commands = update(event, 'my_list = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_column'], model['columns'][y_col_idx])
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        expected = "[item['y'] for item in my_list]"
+        self.assertEqual(change_cmds[0].text, expected)
 
 
 if __name__ == '__main__':

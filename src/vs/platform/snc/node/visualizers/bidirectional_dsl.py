@@ -35,6 +35,7 @@ the yield patter was AI-inspired...last time I wrote this kind of thing I
 returned lists instead, but yield should be more memory-efficient and
 potentially faster).
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, cast
