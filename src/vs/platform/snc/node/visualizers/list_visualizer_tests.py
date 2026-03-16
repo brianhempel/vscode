@@ -9,7 +9,7 @@ import unittest
 import html
 import re
 
-from visualizer_utils import ChildEvent
+from visualizer_utils import ChildEvent, EditorTextSelect, Unlink
 import list_visualizer
 from list_visualizer import (
     can_visualize, init_model, visualize, update,
@@ -1448,6 +1448,268 @@ class TestSourceExprInModel(unittest.TestCase):
         lst = ['a', 'b']
         model = init_model(lst, mock_get_visualizer, source_code='items = [...]', source_line=1)
         self.assertEqual(model.get('_source_expr'), 'items')
+
+
+class TestParseListComprehension(unittest.TestCase):
+    """Test the _parse_list_comprehension helper."""
+
+    def setUp(self):
+        from list_visualizer import _parse_list_comprehension
+        self.parse = _parse_list_comprehension
+
+    def test_basic_subscript(self):
+        result = self.parse("[item['name'] for item in people]")
+        self.assertIsNotNone(result)
+        source_expr, col_expr, prefix = result
+        self.assertEqual(source_expr, 'people')
+        self.assertEqual(col_expr, "^['name']")
+        self.assertEqual(prefix, '')
+
+    def test_attribute_access(self):
+        result = self.parse("[item.age for item in employees]")
+        self.assertIsNotNone(result)
+        source_expr, col_expr, prefix = result
+        self.assertEqual(source_expr, 'employees')
+        self.assertEqual(col_expr, '^.age')
+        self.assertEqual(prefix, '')
+
+    def test_bare_item(self):
+        result = self.parse("[item for item in lst]")
+        self.assertIsNotNone(result)
+        source_expr, col_expr, prefix = result
+        self.assertEqual(source_expr, 'lst')
+        self.assertEqual(col_expr, '^')
+        self.assertEqual(prefix, '')
+
+    def test_with_assignment_prefix(self):
+        result = self.parse("result = [item['name'] for item in people]")
+        self.assertIsNotNone(result)
+        source_expr, col_expr, prefix = result
+        self.assertEqual(col_expr, "^['name']")
+        self.assertEqual(source_expr, 'people')
+        self.assertEqual(prefix, 'result = ')
+
+    def test_with_filter_returns_none(self):
+        result = self.parse("[item['name'] for item in people if item['age'] > 30]")
+        self.assertIsNone(result)
+
+    def test_not_a_list_comp_returns_none(self):
+        self.assertIsNone(self.parse("x = 42"))
+        self.assertIsNone(self.parse("for item in lst:"))
+        self.assertIsNone(self.parse("people[0]['name']"))
+
+    def test_non_name_iter_target_returns_none(self):
+        # Tuple unpacking as iter target is not supported
+        self.assertIsNone(self.parse("[a + b for a, b in pairs]"))
+
+    def test_various_iter_var_names(self):
+        result = self.parse("[x['val'] for x in data]")
+        self.assertIsNotNone(result)
+        _, col_expr, _ = result
+        self.assertEqual(col_expr, "^['val']")
+
+    def test_complex_source_expr(self):
+        result = self.parse("[item.name for item in get_people()]")
+        self.assertIsNotNone(result)
+        source_expr, col_expr, _ = result
+        self.assertEqual(source_expr, 'get_people()')
+        self.assertEqual(col_expr, '^.name')
+
+    def test_double_subscript(self):
+        result = self.parse("[item['a']['b'] for item in lst]")
+        self.assertIsNotNone(result)
+        _, col_expr, _ = result
+        self.assertEqual(col_expr, "^['a']['b']")
+
+
+class TestBidirectionalParsing(unittest.TestCase):
+    """Test EditorTextSelect / Unlink / ChangeSelectedText for bidirectional editing."""
+
+    def _make_editor_select_event(self, text):
+        from visualizer_utils import EditorTextSelect
+        return {
+            'pythonEventStr': repr(EditorTextSelect(text=text)),
+            'eventJSON': {},
+        }
+
+    def _make_unlink_event(self):
+        from visualizer_utils import Unlink
+        return {
+            'pythonEventStr': repr(Unlink()),
+            'eventJSON': {},
+        }
+
+    def test_editor_select_enters_linked_mode(self):
+        """Selecting [item['name'] for item in people] enters linked mode."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        event = self._make_editor_select_event("[item['name'] for item in people]")
+        new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_column'], "^['name']")
+        self.assertEqual(new_model['linked_source_expr'], 'people')
+        self.assertEqual(new_model['linked_prefix'], '')
+
+    def test_editor_select_with_assignment_prefix(self):
+        """Selecting `result = [item['name'] for item in people]` sets prefix."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        event = self._make_editor_select_event("result = [item['name'] for item in people]")
+        new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_column'], "^['name']")
+        self.assertEqual(new_model['linked_source_expr'], 'people')
+        self.assertEqual(new_model['linked_prefix'], 'result = ')
+
+    def test_editor_select_non_comprehension_leaves_state(self):
+        """Selecting non-comprehension text leaves existing linked state unchanged."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        model['linked_column'] = "^['name']"
+        model['linked_source_expr'] = 'people'
+        event = self._make_editor_select_event("x = 42")
+        new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_column'], "^['name']")
+
+    def test_editor_select_wrong_source_does_not_link(self):
+        """Selecting a comprehension with wrong source_expr is rejected."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        # model._source_expr = 'people', but comprehension uses 'other_list'
+        event = self._make_editor_select_event("[item['name'] for item in other_list]")
+        new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model.get('linked_column'))
+
+    def test_editor_select_no_source_expr_in_model_accepts_any(self):
+        """If model has no _source_expr, any comprehension is accepted."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        # no source_code/source_line so _source_expr is None
+        event = self._make_editor_select_event("[item['name'] for item in anything]")
+        new_model, cmds = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_column'], "^['name']")
+        self.assertEqual(new_model['linked_source_expr'], 'anything')
+
+    def test_unlink_clears_linked_state(self):
+        """Unlink event clears all linked state fields."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        model['linked_column'] = "^['name']"
+        model['linked_source_expr'] = 'people'
+        model['linked_prefix'] = 'r = '
+        event = self._make_unlink_event()
+        new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model['linked_column'])
+        self.assertIsNone(new_model['linked_source_expr'])
+        self.assertIsNone(new_model['linked_prefix'])
+
+    def test_init_model_has_linked_defaults(self):
+        """init_model should include linked state fields defaulting to None."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIsNone(model.get('linked_column'))
+        self.assertIsNone(model.get('linked_source_expr'))
+        self.assertIsNone(model.get('linked_prefix'))
+
+    def test_column_rename_emits_change_selected_text(self):
+        """Renaming the linked column emits ChangeSelectedText with updated text."""
+        from list_visualizer import ChangeSelectedText
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        name_col = next(c for c in model['columns'] if 'name' in c)
+        model['linked_column'] = name_col
+        model['linked_source_expr'] = 'people'
+        model['linked_prefix'] = ''
+        model['editing_column_index'] = model['columns'].index(name_col)
+        model['column_input_value'] = "^['age']"
+        event = make_column_key_event('Enter')
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        change_cmds = [c for c in cmds if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertIn("item['age']", change_cmds[0].text)
+        self.assertIn('people', change_cmds[0].text)
+
+    def test_column_rename_updates_linked_column_in_model(self):
+        """After renaming the linked column, linked_column in model is updated."""
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        name_col = next(c for c in model['columns'] if 'name' in c)
+        model['linked_column'] = name_col
+        model['linked_source_expr'] = 'people'
+        model['linked_prefix'] = ''
+        model['editing_column_index'] = model['columns'].index(name_col)
+        model['column_input_value'] = "^['city']"
+        event = make_column_key_event('Enter')
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['linked_column'], "^['city']")
+
+    def test_unrelated_column_rename_no_change_selected_text(self):
+        """Renaming a non-linked column does NOT emit ChangeSelectedText."""
+        from list_visualizer import ChangeSelectedText
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        name_col = next(c for c in model['columns'] if 'name' in c)
+        age_col = next(c for c in model['columns'] if 'age' in c)
+        model['linked_column'] = name_col
+        model['linked_source_expr'] = 'people'
+        model['linked_prefix'] = ''
+        # Edit the age column (not the linked one)
+        model['editing_column_index'] = model['columns'].index(age_col)
+        model['column_input_value'] = "^['city']"
+        event = make_column_key_event('Enter')
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        change_cmds = [c for c in cmds if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 0)
+
+    def test_column_select_rename_emits_change_selected_text(self):
+        """ColumnSelect while editing linked column emits ChangeSelectedText."""
+        from list_visualizer import ChangeSelectedText
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        name_col = next(c for c in model['columns'] if 'name' in c)
+        model['linked_column'] = name_col
+        model['linked_source_expr'] = 'people'
+        model['linked_prefix'] = ''
+        model['editing_column_index'] = model['columns'].index(name_col)
+        model['column_input_value'] = "^['ag"
+        event = make_column_mouse_event(repr(ColumnSelect(name="^['age']")))
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        change_cmds = [c for c in cmds if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertIn("item['age']", change_cmds[0].text)
+
+    def test_remove_linked_column_unlinks(self):
+        """Removing the linked column clears linked state."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        name_col = next(c for c in model['columns'] if 'name' in c)
+        model['linked_column'] = name_col
+        model['linked_source_expr'] = 'people'
+        idx = model['columns'].index(name_col)
+        event = make_column_mouse_event(repr(RemoveColumnClick(index=idx)))
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model['linked_column'])
+
+    def test_change_selected_text_includes_prefix(self):
+        """ChangeSelectedText respects linked_prefix."""
+        from list_visualizer import ChangeSelectedText
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, source_code='people = [...]', source_line=1)
+        name_col = next(c for c in model['columns'] if 'name' in c)
+        model['linked_column'] = name_col
+        model['linked_source_expr'] = 'people'
+        model['linked_prefix'] = 'names = '
+        model['editing_column_index'] = model['columns'].index(name_col)
+        model['column_input_value'] = "^['age']"
+        event = make_column_key_event('Enter')
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, cmds = update(event, 'people = [...]', 1, model, lst, mock_get_visualizer)
+        change_cmds = [c for c in cmds if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertTrue(change_cmds[0].text.startswith('names = '))
 
 
 if __name__ == '__main__':

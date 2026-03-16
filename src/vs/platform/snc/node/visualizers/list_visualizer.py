@@ -39,8 +39,10 @@ Columns shown in the table are configurable and persisted:
 ================================================================================
 """
 
+import ast
 import html
 import random
+import re as _re
 from dataclasses import dataclass
 from math import sqrt
 from typing import Any, List, Tuple
@@ -104,6 +106,85 @@ class ColumnDragEnd:
 class ColumnKeyDown:
     """Keyboard event in column management (Enter to commit, Escape to cancel)."""
     pass
+
+
+# === Command types ===
+
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    """Tell VS Code to replace the currently linked editor selection with new text."""
+    text: str
+
+
+# === Bidirectional parsing ===
+
+def _parse_list_comprehension(code_line: str):
+    """Parse a single-generator list comprehension into (source_expr, col_expr, prefix).
+
+    Handles:
+      [item_expr for item in source_expr]
+      var = [item_expr for item in source_expr]
+
+    Returns (source_expr, col_expr, prefix) where col_expr uses ^ for the
+    iteration variable (e.g. "^['name']", "^.age", "^").
+    Returns None for anything that does not match the supported shape
+    (conditions, nested generators, tuple targets, etc.).
+    """
+    stripped = code_line.strip()
+    prefix = ''
+
+    # Optional leading assignment: `var = ...`
+    assign_m = _re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?!=)(.+)$', stripped, _re.DOTALL)
+    if assign_m:
+        try:
+            ast.parse(assign_m.group(2).strip(), mode='eval')
+            prefix = f'{assign_m.group(1)} = '
+            stripped = assign_m.group(2).strip()
+        except SyntaxError:
+            pass
+
+    try:
+        tree = ast.parse(stripped, mode='eval')
+    except SyntaxError:
+        return None
+
+    if not isinstance(tree.body, ast.ListComp):
+        return None
+
+    comp = tree.body
+
+    # Require exactly one generator with no conditions and a simple name target
+    if len(comp.generators) != 1:
+        return None
+    gen = comp.generators[0]
+    if not isinstance(gen.target, ast.Name):
+        return None
+    if gen.ifs:
+        return None
+
+    iter_var = gen.target.id
+    source_expr = ast.unparse(gen.iter)
+
+    # Convert the element expression: replace the iteration variable with ^
+    item_expr_str = ast.unparse(comp.elt)
+    col_expr = _re.sub(r'\b' + _re.escape(iter_var) + r'\b', '^', item_expr_str)
+
+    return (source_expr, col_expr, prefix)
+
+
+def _emit_linked_update(model: dict, commands: list) -> None:
+    """Append ChangeSelectedText if the model is in linked mode and the expression is valid."""
+    linked_col = model.get('linked_column')
+    linked_src = model.get('linked_source_expr')
+    if not linked_col or not linked_src:
+        return
+    item_expr = replace_caret_in_py_exp(linked_col, 'item')
+    text = f'{model.get("linked_prefix") or ""}[{item_expr} for item in {linked_src}]'
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))
 
 
 # === Dotfile operations ===
@@ -230,13 +311,19 @@ _COLUMN_MGMT_DEFAULTS = {
     'column_drag_over': None,
 }
 
+_LINKED_DEFAULTS = {
+    'linked_column': None,
+    'linked_source_expr': None,
+    'linked_prefix': None,
+}
+
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
-                **_COLUMN_MGMT_DEFAULTS}
+                **_COLUMN_MGMT_DEFAULTS, **_LINKED_DEFAULTS}
 
     source_expr = None
     if source_code and source_line:
@@ -273,6 +360,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
         'columns': columns,
         '_source_expr': source_expr,
         **_COLUMN_MGMT_DEFAULTS,
+        **_LINKED_DEFAULTS,
     }
 
 
@@ -500,7 +588,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
 
     if model is None:
         model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
-                 **_COLUMN_MGMT_DEFAULTS}
+                 **_COLUMN_MGMT_DEFAULTS, **_LINKED_DEFAULTS}
 
     try:
         make_python_event = eval(event['pythonEventStr'])
@@ -542,6 +630,24 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             else:
                 model['selected_suggestion_index'] = None
 
+        case EditorTextSelect(text=selected_text):
+            parsed = _parse_list_comprehension(selected_text)
+            if parsed is not None:
+                src, col_expr, prefix = parsed
+                valid = True
+                model_source = model.get('_source_expr')
+                if model_source and src != model_source:
+                    valid = False
+                if valid:
+                    model['linked_column'] = col_expr
+                    model['linked_source_expr'] = src
+                    model['linked_prefix'] = prefix
+
+        case Unlink():
+            model['linked_column'] = None
+            model['linked_source_expr'] = None
+            model['linked_prefix'] = None
+
         case ColumnSelect(name=name):
             if model.get('adding_column'):
                 model['columns'].append(name)
@@ -556,6 +662,9 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     model['columns'][idx] = name
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
+                    if old_name == model.get('linked_column'):
+                        model['linked_column'] = name
+                        _emit_linked_update(model, commands)
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 if type_key:
@@ -579,6 +688,10 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         model['column_input_value'] = ''
                     elif model['editing_column_index'] > idx:
                         model['editing_column_index'] -= 1
+                if removed_col == model.get('linked_column'):
+                    model['linked_column'] = None
+                    model['linked_source_expr'] = None
+                    model['linked_prefix'] = None
                 if type_key:
                     save_columns_to_dotfile(type_key, model['columns'])
 
@@ -657,6 +770,9 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         model['columns'][idx] = commit_val
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
+                        if old_name == model.get('linked_column'):
+                            model['linked_column'] = commit_val
+                            _emit_linked_update(model, commands)
                         if type_key:
                             save_columns_to_dotfile(type_key, model['columns'])
                     model['editing_column_index'] = None
