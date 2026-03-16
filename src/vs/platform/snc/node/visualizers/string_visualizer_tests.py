@@ -9879,5 +9879,71 @@ class TestDSLBroadcastSliceAction(_ActionTestBase):
         self.assertTrue(parsed.get('is_broadcast_slice'))
 
 
+class TestScrollToMatch(unittest.TestCase):
+    """Test snc-scroll-to-match attribute on first match character span."""
+
+    def test_scroll_to_match_after_search_input(self):
+        """SearchBoxInput sets _scroll_to_match, first match span gets attribute."""
+        value = "hello world"
+        model = init_model(value)
+        model, _ = update(make_search_box_input_event('/world/'),
+                          "x = 'hello world'", 1, model, value)
+        self.assertTrue(model.get('_scroll_to_match'))
+        html = visualize(value, model, None, None)
+        self.assertIn('snc-scroll-to-match', html)
+
+    def test_scroll_to_match_on_first_match_only(self):
+        """Attribute appears only once even with multiple matches."""
+        value = "abcabc"
+        model = init_model(value)
+        model['search'] = '/abc/'
+        model['_scroll_to_match'] = True
+        html = visualize(value, model, None, None)
+        self.assertEqual(html.count('snc-scroll-to-match'), 1)
+
+    def test_no_scroll_to_match_without_flag(self):
+        """Without _scroll_to_match flag, no attribute even with matches."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '/hello/'
+        html = visualize(value, model, None, None)
+        self.assertNotIn('snc-scroll-to-match', html)
+
+    def test_no_scroll_to_match_without_search(self):
+        """No attribute when there's no search."""
+        value = "hello world"
+        model = init_model(value)
+        model['_scroll_to_match'] = True
+        html = visualize(value, model, None, None)
+        self.assertNotIn('snc-scroll-to-match', html)
+
+    def test_no_scroll_to_match_when_no_results(self):
+        """No attribute when search has no matches."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '/xyz/'
+        model['_scroll_to_match'] = True
+        html = visualize(value, model, None, None)
+        self.assertNotIn('snc-scroll-to-match', html)
+
+    def test_scroll_to_match_cleared_on_other_events(self):
+        """Non-search events clear _scroll_to_match flag."""
+        value = "hello world"
+        model = init_model(value)
+        model['_scroll_to_match'] = True
+        event = make_mouse_down_event(5, top_half=True)
+        new_model, _ = update(event, "x = 'hello world'", 1, model, value)
+        self.assertFalse(new_model.get('_scroll_to_match'))
+
+    def test_scroll_to_match_not_set_on_same_search(self):
+        """Typing the same search value does not set _scroll_to_match."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '/hello/'
+        model, _ = update(make_search_box_input_event('/hello/'),
+                          "x = 'hello world'", 1, model, value)
+        self.assertFalse(model.get('_scroll_to_match'))
+
+
 if __name__ == '__main__':
     unittest.main()

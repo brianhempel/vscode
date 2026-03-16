@@ -1450,5 +1450,1040 @@ class TestSourceExprInModel(unittest.TestCase):
         self.assertEqual(model.get('_source_expr'), 'items')
 
 
+# ============================================================================
+# Search feature tests
+# ============================================================================
+
+from list_visualizer import (
+    SearchBoxInput, FirstMatchToggle, ActionButtonClick, DropdownToggle,
+    CopyToClipboard,
+    parse_search_term, needs_implicit_caret,
+    _get_search_context, generate_action, _get_matching_indices,
+)
+
+
+def make_search_input_event(value):
+    """Create a SearchBoxInput event."""
+    return {
+        'pythonEventStr': f"lambda e: SearchBoxInput(value=e.get('value', ''))",
+        'eventJSON': {'type': 'input', 'value': value},
+    }
+
+
+def make_search_key_event(key, meta=False, shift=False):
+    """Create a key event for the search/action area."""
+    return {
+        'pythonEventStr': repr(ColumnKeyDown()),
+        'eventJSON': {
+            'type': 'keydown',
+            'key': key,
+            'metaKey': meta,
+            'shiftKey': shift,
+            'ctrlKey': False,
+            'altKey': False,
+        },
+    }
+
+
+def make_action_button_event(action, copy=False):
+    """Create an ActionButtonClick event."""
+    return {
+        'pythonEventStr': repr(ActionButtonClick(action=action, copy=copy)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+def make_first_match_toggle_event():
+    """Create a FirstMatchToggle event."""
+    return {
+        'pythonEventStr': repr(FirstMatchToggle()),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+def make_dropdown_toggle_event(dropdown_id):
+    """Create a DropdownToggle event."""
+    return {
+        'pythonEventStr': repr(DropdownToggle(dropdown_id=dropdown_id)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+# === Search parsing tests ===
+
+class TestParseSearchTerm(unittest.TestCase):
+    """Test parse_search_term for classifying search text."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(parse_search_term(None))
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(parse_search_term(''))
+
+    def test_slice_two_bounds(self):
+        result = parse_search_term('2:5')
+        self.assertEqual(result, ('slice', ('2', '5')))
+
+    def test_slice_left_only(self):
+        result = parse_search_term('2:')
+        self.assertEqual(result, ('slice', ('2', '')))
+
+    def test_slice_right_only(self):
+        result = parse_search_term(':5')
+        self.assertEqual(result, ('slice', ('', '5')))
+
+    def test_bare_expression(self):
+        result = parse_search_term('^ > 100')
+        self.assertEqual(result, ('expr', '^ > 100'))
+
+    def test_integer_literal_is_expr(self):
+        result = parse_search_term('5')
+        self.assertEqual(result, ('expr', '5'))
+
+    def test_list_literal_is_expr(self):
+        result = parse_search_term('[1,3,5]')
+        self.assertEqual(result, ('expr', '[1,3,5]'))
+
+    def test_predicate_with_caret(self):
+        result = parse_search_term('^.name == "Alice"')
+        self.assertEqual(result, ('expr', '^.name == "Alice"'))
+
+    def test_complex_slice(self):
+        result = parse_search_term('len(x):')
+        self.assertEqual(result, ('slice', ('len(x)', '')))
+
+    def test_string_with_colon_is_not_slice(self):
+        result = parse_search_term('"a:b"')
+        self.assertNotEqual(result[0], 'slice')
+
+
+class TestNeedsImplicitCaret(unittest.TestCase):
+    """Test detection of binary operators needing implicit ^ prepend."""
+
+    def test_greater_than(self):
+        self.assertTrue(needs_implicit_caret('> 100'))
+
+    def test_less_than(self):
+        self.assertTrue(needs_implicit_caret('< 50'))
+
+    def test_greater_equal(self):
+        self.assertTrue(needs_implicit_caret('>= 10'))
+
+    def test_less_equal(self):
+        self.assertTrue(needs_implicit_caret('<= 10'))
+
+    def test_double_equals(self):
+        self.assertTrue(needs_implicit_caret('== "hello"'))
+
+    def test_not_equals(self):
+        self.assertTrue(needs_implicit_caret('!= 0'))
+
+    def test_in_operator(self):
+        self.assertTrue(needs_implicit_caret('in [1,2,3]'))
+
+    def test_not_in_operator(self):
+        self.assertTrue(needs_implicit_caret('not in [1,2,3]'))
+
+    def test_is_operator(self):
+        self.assertTrue(needs_implicit_caret('is None'))
+
+    def test_is_not_operator(self):
+        self.assertTrue(needs_implicit_caret('is not None'))
+
+    def test_dot_attribute(self):
+        self.assertTrue(needs_implicit_caret('.startswith("foo")'))
+
+    def test_no_implicit_for_caret_expr(self):
+        self.assertFalse(needs_implicit_caret('^ > 100'))
+
+    def test_no_implicit_for_integer(self):
+        self.assertFalse(needs_implicit_caret('5'))
+
+    def test_no_implicit_for_list(self):
+        self.assertFalse(needs_implicit_caret('[1,2,3]'))
+
+    def test_no_implicit_for_variable(self):
+        self.assertFalse(needs_implicit_caret('len(^) > 3'))
+
+    def test_no_implicit_for_none(self):
+        self.assertFalse(needs_implicit_caret('None'))
+
+    def test_with_leading_whitespace(self):
+        self.assertTrue(needs_implicit_caret(' > 100'))
+
+
+class TestGetMatchingIndices(unittest.TestCase):
+    """Test _get_matching_indices for various search types."""
+
+    def test_predicate_match(self):
+        lst = [10, 20, 30, 40, 50]
+        indices = _get_matching_indices('^ > 25', lst, eval)
+        self.assertEqual(indices, [2, 3, 4])
+
+    def test_predicate_no_match(self):
+        lst = [1, 2, 3]
+        indices = _get_matching_indices('^ > 100', lst, eval)
+        self.assertEqual(indices, [])
+
+    def test_implicit_caret(self):
+        lst = [10, 20, 30]
+        indices = _get_matching_indices('> 15', lst, eval)
+        self.assertEqual(indices, [1, 2])
+
+    def test_index_search(self):
+        lst = [10, 20, 30]
+        indices = _get_matching_indices('1', lst, eval)
+        self.assertEqual(indices, [1])
+
+    def test_slice_search(self):
+        lst = [10, 20, 30, 40, 50]
+        indices = _get_matching_indices('1:3', lst, eval)
+        self.assertEqual(indices, [1, 2])
+
+    def test_multi_index_search(self):
+        lst = [10, 20, 30, 40, 50]
+        indices = _get_matching_indices('[0, 2, 4]', lst, eval)
+        self.assertEqual(indices, [0, 2, 4])
+
+    def test_empty_search(self):
+        lst = [1, 2, 3]
+        indices = _get_matching_indices('', lst, eval)
+        self.assertEqual(indices, [])
+
+    def test_none_search(self):
+        lst = [1, 2, 3]
+        indices = _get_matching_indices(None, lst, eval)
+        self.assertEqual(indices, [])
+
+    def test_predicate_with_equality(self):
+        lst = ['alice', 'bob', 'alice']
+        indices = _get_matching_indices('^ == "alice"', lst, eval)
+        self.assertEqual(indices, [0, 2])
+
+
+# === Code generation tests ===
+
+class TestGetSearchContext(unittest.TestCase):
+    """Test _get_search_context builds correct context dicts."""
+
+    def test_predicate_context(self):
+        model = {'search': '^ > 100', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx['source_expr'], 'data')
+        self.assertTrue(ctx['is_predicate'])
+        self.assertEqual(ctx['predicate_expr'], 'item > 100')
+        self.assertFalse(ctx['is_first'])
+
+    def test_index_context(self):
+        model = {'search': '5', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_index'])
+        self.assertEqual(ctx['index_expr'], '5')
+
+    def test_slice_context(self):
+        model = {'search': '2:5', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_slice'])
+        self.assertEqual(ctx['slice_start'], '2')
+        self.assertEqual(ctx['slice_stop'], '5')
+
+    def test_multi_index_context(self):
+        model = {'search': '[1,3,5]', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_multi_index'])
+        self.assertEqual(ctx['indices_expr'], '[1,3,5]')
+
+    def test_implicit_caret_in_context(self):
+        model = {'search': '> 100', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_predicate'])
+        self.assertEqual(ctx['predicate_expr'], 'item > 100')
+
+    def test_first_match_flag(self):
+        model = {'search': '^ > 100', 'first_match': True}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertTrue(ctx['is_first'])
+
+    def test_no_search_returns_none(self):
+        model = {'search': None, 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNone(ctx)
+
+    def test_no_source_returns_none(self):
+        model = {'search': '^ > 0', 'first_match': False}
+        ctx = _get_search_context(model, eval_in_scope=eval)
+        self.assertIsNone(ctx)
+
+    def test_dot_access_predicate(self):
+        model = {'search': '.startswith("a")', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_predicate'])
+        self.assertEqual(ctx['predicate_expr'], 'item.startswith("a")')
+
+
+class TestGenerateAction(unittest.TestCase):
+    """Test generate_action produces correct code for each action type."""
+
+    def _predicate_ctx(self, predicate='item > 100', first=False, src='data'):
+        return {
+            'source_expr': src,
+            'var_name': src,
+            'suggest_base': src,
+            'is_predicate': True,
+            'predicate_expr': predicate,
+            'is_first': first,
+            'is_index': False,
+            'is_slice': False,
+            'is_multi_index': False,
+        }
+
+    def _index_ctx(self, index='5', src='data'):
+        return {
+            'source_expr': src,
+            'var_name': src,
+            'suggest_base': src,
+            'is_index': True,
+            'index_expr': index,
+            'is_predicate': False,
+            'is_first': True,
+            'is_slice': False,
+            'is_multi_index': False,
+        }
+
+    def _slice_ctx(self, start='2', stop='5', src='data'):
+        return {
+            'source_expr': src,
+            'var_name': src,
+            'suggest_base': src,
+            'is_slice': True,
+            'slice_start': start,
+            'slice_stop': stop,
+            'is_predicate': False,
+            'is_first': True,
+            'is_index': False,
+            'is_multi_index': False,
+        }
+
+    def _multi_index_ctx(self, indices='[1,3,5]', src='data'):
+        return {
+            'source_expr': src,
+            'var_name': src,
+            'suggest_base': src,
+            'is_multi_index': True,
+            'indices_expr': indices,
+            'is_predicate': False,
+            'is_first': False,
+            'is_index': False,
+            'is_slice': False,
+        }
+
+    # --- Filter/Find One ---
+
+    def test_filter_predicate(self):
+        result = generate_action('filter', self._predicate_ctx())
+        self.assertIsNotNone(result)
+        name, code = result
+        self.assertEqual(code, '[item for item in data if item > 100]')
+
+    def test_filter_predicate_first(self):
+        result = generate_action('filter', self._predicate_ctx(first=True))
+        name, code = result
+        self.assertEqual(code, 'next((item for item in data if item > 100), None)')
+
+    def test_filter_index(self):
+        result = generate_action('filter', self._index_ctx())
+        name, code = result
+        self.assertEqual(code, 'data[5]')
+
+    def test_filter_slice(self):
+        result = generate_action('filter', self._slice_ctx())
+        name, code = result
+        self.assertEqual(code, 'data[2:5]')
+
+    def test_filter_multi_index(self):
+        result = generate_action('filter', self._multi_index_ctx())
+        name, code = result
+        self.assertEqual(code, '[data[i] for i in [1,3,5]]')
+
+    # --- Loop ---
+
+    def test_loop_no_idx_predicate(self):
+        result = generate_action('loop_no_idx', self._predicate_ctx())
+        name, code = result
+        self.assertEqual(code, 'for item in (item for item in data if item > 100):\n    pass')
+
+    def test_loop_orig_idx_predicate(self):
+        result = generate_action('loop_orig_idx', self._predicate_ctx())
+        name, code = result
+        self.assertIn('for i, item in enumerate(data)', code)
+        self.assertIn('if item > 100', code)
+
+    def test_loop_new_idx_predicate(self):
+        result = generate_action('loop_new_idx', self._predicate_ctx())
+        name, code = result
+        self.assertIn('for i, item in enumerate', code)
+        self.assertIn('if item > 100', code)
+
+    def test_loop_orig_idx_multi_index(self):
+        result = generate_action('loop_orig_idx', self._multi_index_ctx())
+        name, code = result
+        self.assertIn('for i in [1,3,5]', code)
+
+    # --- Any/All ---
+
+    def test_any_predicate(self):
+        result = generate_action('any', self._predicate_ctx())
+        name, code = result
+        self.assertEqual(code, 'any(item > 100 for item in data)')
+
+    def test_all_predicate(self):
+        result = generate_action('all', self._predicate_ctx())
+        name, code = result
+        self.assertEqual(code, 'all(item > 100 for item in data)')
+
+    def test_if_any_predicate(self):
+        result = generate_action('if_any', self._predicate_ctx())
+        name, code = result
+        self.assertIn('if any(item > 100 for item in data)', code)
+        self.assertIn('pass', code)
+
+    def test_if_all_predicate(self):
+        result = generate_action('if_all', self._predicate_ctx())
+        name, code = result
+        self.assertIn('if all(item > 100 for item in data)', code)
+        self.assertIn('pass', code)
+
+    # --- Delete ---
+
+    def test_delete_predicate(self):
+        result = generate_action('delete', self._predicate_ctx())
+        name, code = result
+        self.assertEqual(code, '[item for item in data if not (item > 100)]')
+
+    def test_delete_predicate_first(self):
+        result = generate_action('delete', self._predicate_ctx(first=True))
+        name, code = result
+        self.assertIn('data[:i]', code)
+        self.assertIn('data[i+1:]', code)
+
+    def test_delete_index(self):
+        result = generate_action('delete', self._index_ctx())
+        name, code = result
+        self.assertEqual(code, 'data[:5] + data[5+1:]')
+
+    def test_delete_slice(self):
+        result = generate_action('delete', self._slice_ctx())
+        name, code = result
+        self.assertEqual(code, 'data[:2] + data[5:]')
+
+    # --- Find Indices ---
+
+    def test_find_indices_predicate(self):
+        result = generate_action('find_indices', self._predicate_ctx())
+        name, code = result
+        self.assertEqual(code, '[i for i, item in enumerate(data) if item > 100]')
+
+    def test_find_indices_predicate_first(self):
+        result = generate_action('find_indices', self._predicate_ctx(first=True))
+        name, code = result
+        self.assertEqual(code, 'next((i for i, item in enumerate(data) if item > 100), None)')
+
+    def test_find_indices_index(self):
+        result = generate_action('find_indices', self._index_ctx())
+        name, code = result
+        self.assertEqual(code, '5')
+
+    def test_find_indices_multi_index(self):
+        result = generate_action('find_indices', self._multi_index_ctx())
+        name, code = result
+        self.assertEqual(code, '[1,3,5]')
+
+    # --- Count ---
+
+    def test_count_predicate(self):
+        result = generate_action('count', self._predicate_ctx())
+        name, code = result
+        self.assertEqual(code, 'sum(1 for item in data if item > 100)')
+
+    def test_count_multi_index(self):
+        result = generate_action('count', self._multi_index_ctx())
+        name, code = result
+        self.assertEqual(code, 'len([1,3,5])')
+
+    # --- Suggest names ---
+
+    def test_filter_suggest_name(self):
+        result = generate_action('filter', self._predicate_ctx())
+        name, _ = result
+        self.assertEqual(name, 'data_filtered')
+
+    def test_filter_first_suggest_name(self):
+        result = generate_action('filter', self._predicate_ctx(first=True))
+        name, _ = result
+        self.assertEqual(name, 'data_match')
+
+    def test_count_suggest_name(self):
+        result = generate_action('count', self._predicate_ctx())
+        name, _ = result
+        self.assertEqual(name, 'data_count')
+
+    def test_find_indices_suggest_name(self):
+        result = generate_action('find_indices', self._predicate_ctx())
+        name, _ = result
+        self.assertEqual(name, 'data_indices')
+
+    def test_loop_suggest_name_is_none(self):
+        result = generate_action('loop_orig_idx', self._predicate_ctx())
+        name, _ = result
+        self.assertIsNone(name)
+
+    def test_delete_suggest_name(self):
+        result = generate_action('delete', self._predicate_ctx())
+        name, _ = result
+        self.assertEqual(name, 'data')
+
+
+# === Event handling tests ===
+
+class TestSearchBoxInput(unittest.TestCase):
+    """Test SearchBoxInput event handling in update()."""
+
+    def test_search_input_sets_model_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        event = make_search_input_event('^ > 15')
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['search'], '^ > 15')
+
+    def test_empty_search_input_clears_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_search_input_event('')
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model.get('search'))
+
+    def test_search_input_preserves_other_model_state(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        original_columns = list(model['columns'])
+        event = make_search_input_event('^ > 15')
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['columns'], original_columns)
+
+
+class TestFirstMatchToggle(unittest.TestCase):
+    """Test FirstMatchToggle event handling in update()."""
+
+    def test_toggle_on(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['first_match'] = False
+        event = make_first_match_toggle_event()
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertTrue(new_model['first_match'])
+
+    def test_toggle_off(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['first_match'] = True
+        event = make_first_match_toggle_event()
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertFalse(new_model['first_match'])
+
+
+class TestActionButtonClick(unittest.TestCase):
+    """Test ActionButtonClick event handling in update()."""
+
+    def test_filter_action_emits_new_code(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_action_button_event('filter', copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        cmd = commands[0]
+        self.assertIsInstance(cmd, tuple)
+        self.assertIn('item for item in data if item > 15', cmd[1])
+
+    def test_filter_copy_emits_clipboard(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_action_button_event('filter', copy=True)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        cmd = commands[0]
+        self.assertIsInstance(cmd, CopyToClipboard)
+
+    def test_no_search_no_command(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_action_button_event('filter', copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(commands, [])
+
+
+class TestDropdownToggle(unittest.TestCase):
+    """Test DropdownToggle event handling for ? menu."""
+
+    def test_open_dropdown(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        event = make_dropdown_toggle_event('action-predicate')
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertIsNotNone(new_model.get('openDropdown'))
+        self.assertEqual(new_model['openDropdown']['id'], 'action-predicate')
+
+    def test_close_dropdown(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'action-predicate'}
+        event = make_dropdown_toggle_event('action-predicate')
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertIsNone(new_model.get('openDropdown'))
+
+
+# === Rendering tests ===
+
+class TestSearchBoxRendering(unittest.TestCase):
+    """Test search box HTML rendering."""
+
+    def test_search_box_rendered_when_not_small(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('SearchBoxInput', output)
+        self.assertIn('placeholder="Search"', output)
+
+    def test_search_box_hidden_when_small(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None, small=True)
+        self.assertNotIn('SearchBoxInput', output)
+
+    def test_search_box_shows_current_value(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('value="^ &gt; 15"', output)
+
+    def test_first_match_toggle_rendered(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('FirstMatchToggle', output)
+        self.assertIn('1', output)
+
+    def test_first_match_toggle_highlighted_when_on(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('#264f78', output)
+
+    def test_no_replace_box(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn('ReplaceBoxInput', output)
+        self.assertNotIn('snc-replace-input', output)
+
+    def test_no_case_sensitive_toggle(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn('CaseSensitiveToggle', output)
+
+    def test_no_capture_groups_toggle(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn('CaptureGroupsToggle', output)
+
+
+class TestActionButtonsRendering(unittest.TestCase):
+    """Test action buttons HTML rendering."""
+
+    def test_action_buttons_rendered_when_not_small(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('ActionButtonClick', output)
+
+    def test_action_buttons_hidden_when_small(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None, small=True)
+        self.assertNotIn('ActionButtonClick', output)
+
+    def test_filter_button_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn("action=&#x27;filter&#x27;", output)
+
+    def test_filter_label_changes_with_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('Find One', output)
+
+    def test_filter_label_without_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = False
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('Filter', output)
+
+    def test_loop_dropdown_trigger_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('action-loop', output)
+        self.assertIn('Loop', output)
+
+    def test_delete_button_label_changes_with_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('Delete First', output)
+
+    def test_delete_button_label_without_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = False
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('Delete All', output)
+
+    def test_find_indices_button_label(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('First Index', output)
+
+    def test_count_button_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn("action=&#x27;count&#x27;", output)
+
+    def test_count_disabled_in_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        count_pos = output.find("action=&#x27;count&#x27;, copy=False")
+        self.assertGreater(count_pos, -1)
+        span_end = output.find('</span>', count_pos)
+        context = output[count_pos:span_end]
+        self.assertIn('pointer-events: none', context)
+
+    def test_question_dropdown_button(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('DropdownToggle', output)
+        self.assertIn('?', output)
+
+    def test_copy_buttons_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('copy=True', output)
+
+    def test_buttons_disabled_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('pointer-events: none', output)
+
+
+class TestRowHighlighting(unittest.TestCase):
+    """Test that matching rows are highlighted."""
+
+    def test_matched_rows_have_border(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn('border-left:2px solid', output)
+
+    def test_unmatched_rows_dimmed(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn('opacity:0.4', output)
+
+    def test_all_rows_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn('>10<', output)
+        self.assertIn('>20<', output)
+        self.assertIn('>30<', output)
+
+    def test_no_highlight_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        tr_sections = output.split('<tr')
+        for section in tr_sections[2:]:
+            self.assertNotIn('border-left:2px solid', section.split('</tr>')[0])
+            self.assertNotIn('opacity:0.4', section.split('</tr>')[0])
+
+    def test_first_match_mode_highlights_only_first(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        border_count = output.count('border-left:2px solid')
+        self.assertEqual(border_count, 1)
+        self.assertIn('>10<', output)
+        self.assertIn('>20<', output)
+        self.assertIn('>30<', output)
+
+    def test_no_hidden_rows_message(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertNotIn('rows hidden', output)
+        self.assertNotIn('row hidden', output)
+
+    def test_index_search_highlights_single_row(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '1'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn('border-left:2px solid', output)
+        self.assertIn('>10<', output)
+        self.assertIn('>20<', output)
+        self.assertIn('>30<', output)
+
+
+class TestEnterKeyFilter(unittest.TestCase):
+    """Test that Enter key triggers filter action when search is active."""
+
+    def test_enter_triggers_filter(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_search_key_event('Enter')
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn('item for item in data if item > 15', commands[0][1])
+
+    def test_enter_no_op_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_search_key_event('Enter')
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(commands, [])
+
+    def test_enter_column_commit_takes_priority(self):
+        """When adding a column, Enter commits the column instead of filtering."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['adding_column'] = True
+        model['column_input_value'] = '^.x'
+        event = make_search_key_event('Enter')
+        new_model, commands = update(event, 'data = [...]', 1, model, lst,
+                                     mock_get_visualizer, eval_in_scope=eval)
+        self.assertFalse(new_model['adding_column'])
+        self.assertEqual(commands, [])
+
+
+class TestCmdDeleteKey(unittest.TestCase):
+    """Test that Cmd+Backspace triggers delete action."""
+
+    def test_cmd_backspace_triggers_delete(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_search_key_event('Backspace', meta=True)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn('not (item > 15)', commands[0][1])
+
+    def test_cmd_backspace_no_op_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_search_key_event('Backspace', meta=True)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(commands, [])
+
+
+class TestLoopDropdown(unittest.TestCase):
+    """Test loop dropdown with 3 loop variants."""
+
+    def test_loop_dropdown_rendered(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('Loop', output)
+        self.assertIn('action-loop', output)
+
+    def test_loop_dropdown_options_when_open(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['openDropdown'] = {'id': 'action-loop'}
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('loop_no_idx', output)
+        self.assertIn('loop_orig_idx', output)
+        self.assertIn('loop_new_idx', output)
+
+    def test_loop_dropdown_disabled_in_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        loop_pos = output.find('Loop')
+        self.assertGreater(loop_pos, -1)
+        context = output[max(0, loop_pos - 200):loop_pos + 200]
+        self.assertIn('pointer-events: none', context)
+
+
+class TestSearchInitModel(unittest.TestCase):
+    """Test that init_model includes search-related fields."""
+
+    def test_model_has_search_field(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIsNone(model.get('search'))
+
+    def test_model_has_first_match_field(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertFalse(model.get('first_match', False))
+
+    def test_model_without_get_visualizer_has_search_fields(self):
+        lst = [1, 2, 3]
+        model = init_model(lst)
+        self.assertIn('search', model)
+        self.assertIn('first_match', model)
+
+
+class TestScrollToMatch(unittest.TestCase):
+    """Test snc-scroll-to-match attribute on first match row."""
+
+    def test_scroll_to_match_after_search_input(self):
+        """SearchBoxInput sets _scroll_to_match, first match row gets attribute."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        event = make_search_input_event('^ > 15')
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertTrue(new_model.get('_scroll_to_match'))
+        output = visualize(lst, new_model, mock_get_visualizer, eval)
+        self.assertIn('snc-scroll-to-match', output)
+
+    def test_scroll_to_match_on_first_matched_row_only(self):
+        """Attribute appears on the first matched row, not subsequent matches."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 10'
+        model['_scroll_to_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertEqual(output.count('snc-scroll-to-match'), 1)
+
+    def test_no_scroll_to_match_without_flag(self):
+        """Without _scroll_to_match flag, no attribute even with matches."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertNotIn('snc-scroll-to-match', output)
+
+    def test_no_scroll_to_match_without_search(self):
+        """No attribute when there's no search."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['_scroll_to_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertNotIn('snc-scroll-to-match', output)
+
+    def test_no_scroll_to_match_when_no_results(self):
+        """No attribute when search has no matches."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 100'
+        model['_scroll_to_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertNotIn('snc-scroll-to-match', output)
+
+    def test_scroll_to_match_cleared_on_other_events(self):
+        """Non-search events clear _scroll_to_match flag."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['_scroll_to_match'] = True
+        event = make_first_match_toggle_event()
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertFalse(new_model.get('_scroll_to_match'))
+
+    def test_scroll_to_match_with_first_match_mode(self):
+        """In first-match mode, attribute still appears on the single match."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        model['_scroll_to_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertEqual(output.count('snc-scroll-to-match'), 1)
+
+    def test_scroll_to_match_on_tr_element(self):
+        """The attribute should be on a <tr> element."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['_scroll_to_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        idx = output.find('snc-scroll-to-match')
+        preceding = output[max(0, idx - 60):idx]
+        self.assertIn('<tr', preceding)
+
+
 if __name__ == '__main__':
     unittest.main()

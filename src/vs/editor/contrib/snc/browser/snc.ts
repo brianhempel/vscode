@@ -621,7 +621,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			|| savedWidgetScrollLeft !== 0
 			|| savedScrollOffsets.some((offset) => offset.top !== 0 || offset.left !== 0);
 		const autoFocusEl = this.domNode.querySelector('[autofocus]') as HTMLElement | null;
-		if (shouldRestoreScroll || focusedIndex >= 0 || autoFocusEl) {
+		const hasScrollToMatch = this.domNode.querySelector('[snc-scroll-to-match]') !== null;
+		if (shouldRestoreScroll || focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
 			// Defer to next frame so layout/DOM updates settle, and ensure only the
 			// latest update in a burst is allowed to restore scroll/focus.
 			dom.getWindow(this.domNode).requestAnimationFrame(() => {
@@ -640,6 +641,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						newScrollableElements[i].scrollTop = savedScrollOffsets[i].top;
 						newScrollableElements[i].scrollLeft = savedScrollOffsets[i].left;
 					}
+				}
+
+				// Scroll to first search match (after scroll restoration so we can
+				// check whether it's already visible at the restored position)
+				const matchTarget = this.domNode.querySelector('[snc-scroll-to-match]') as HTMLElement | null;
+				if (matchTarget) {
+					this.scrollToFirstMatch(matchTarget);
 				}
 
 				// Autofocus: focus the [autofocus] element when it's newly appearing.
@@ -673,6 +681,38 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			});
 		}
 		return true;
+	}
+
+	private scrollToFirstMatch(matchTarget: HTMLElement): void {
+		let container: HTMLElement | null = matchTarget.parentElement;
+		while (container && container !== this.domNode) {
+			if (container.scrollHeight > container.clientHeight
+				|| container.scrollWidth > container.clientWidth) {
+				break;
+			}
+			container = container.parentElement;
+		}
+		if (!container || container === this.domNode) {
+			return;
+		}
+
+		const targetRect = matchTarget.getBoundingClientRect();
+		const containerRect = container.getBoundingClientRect();
+
+		// Vertical: if not fully visible, align to top of container
+		if (targetRect.top < containerRect.top || targetRect.bottom > containerRect.bottom) {
+			container.scrollTop += targetRect.top - containerRect.top - 2;
+		}
+
+		// Horizontal: if not fully visible
+		if (targetRect.left < containerRect.left || targetRect.right > containerRect.right) {
+			// First try scrolling all the way left
+			container.scrollLeft = 0;
+			const newRect = matchTarget.getBoundingClientRect();
+			if (newRect.left < containerRect.left || newRect.right > containerRect.right) {
+				container.scrollLeft = newRect.left - containerRect.left - 2;
+			}
+		}
 	}
 
 	usesBlockLayout(): boolean {

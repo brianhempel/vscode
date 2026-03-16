@@ -551,10 +551,10 @@ def text_group_span(chars: list, start_index: int) -> str:
     text = ''.join(html.escape(c) if c in HTML_ESCAPE_CHARS else c for c in chars)
     return f'<span snc-text-start="{start_index}" style="letter-spacing:1px;">{text}</span>'
 
-def char_span(string, index, is_special, highlight=None, model=None):
-    return ''.join(char_span_els(string, index, is_special, highlight, model))
+def char_span(string, index, is_special, highlight=None, model=None, scroll_to=False):
+    return ''.join(char_span_els(string, index, is_special, highlight, model, scroll_to))
 
-def char_span_els(string, index, is_special, highlight=None, model=None) -> List[str]:
+def char_span_els(string, index, is_special, highlight=None, model=None, scroll_to=False) -> List[str]:
     """Render a character span with optional selection highlighting.
 
     Args:
@@ -628,13 +628,14 @@ def char_span_els(string, index, is_special, highlight=None, model=None) -> List
 
     # snc-mouse="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
     # (this abbreviation speeds up the string visualization quite a bit)
+    scroll_attr = ' snc-scroll-to-match' if scroll_to else ''
     if styles or pat_html or repetition_html: # yes this branching speeds it up slightly
         # return f'{pat_html}<span snc-mouse="{index}" style="padding-right:1px;{styles}">{html.escape(string) if string in HTML_ESCAPE_CHARS else string}</span>{repetition_html}'
-        return [pat_html, '<span snc-mouse="', str(index), '" style="height:100%;display:inline-block"><span style="padding-right:1px;', styles, '">', html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span></span>', repetition_html]
+        return [pat_html, '<span snc-mouse="', str(index), '"', scroll_attr, ' style="height:100%;display:inline-block"><span style="padding-right:1px;', styles, '">', html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span></span>', repetition_html]
     else:
         # Yes, keep {styles} bc string interning, I think
         # return f'<span snc-mouse="{index}" style="padding-right:1px;{styles}">{html.escape(string) if string in HTML_ESCAPE_CHARS else string}</span>'
-        return ['<span snc-mouse="', str(index), '" style="height:100%;display:inline-block"><span style="padding-right:1px;', styles, '">', html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span></span>']
+        return ['<span snc-mouse="', str(index), '"', scroll_attr, ' style="height:100%;display:inline-block"><span style="padding-right:1px;', styles, '">', html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span></span>']
 
 
     # return f'{pat_html}<span snc-mouse="{index}" style="padding-right:1px;{styles}">{html.escape(string) if string in HTML_ESCAPE_CHARS else string}</span>{repetition_html}'
@@ -2475,18 +2476,18 @@ def strip_capturing_groups(pattern: str) -> str:
 
 
 
-def vis_char_with_index_els(char, i, highlight_by_index, model=None) -> Tuple[List[str], int]:
+def vis_char_with_index_els(char, i, highlight_by_index, model=None, scroll_to=False) -> Tuple[List[str], int]:
     if char == '\n':
         return ([
-            *char_span_els('$', i, True, highlight_by_index.get(i), model),
+            *char_span_els('$', i, True, highlight_by_index.get(i), model, scroll_to),
             *char_span_els('\\n', i+1, True, highlight_by_index.get(i+1), model),
             '\n  ',
             *char_span_els('^', i+2, True, highlight_by_index.get(i+2), model)
         ], i + 3)
     elif char == '\t':
-        return (char_span_els('\\t', i, True, highlight_by_index.get(i), model), i + 1)
+        return (char_span_els('\\t', i, True, highlight_by_index.get(i), model, scroll_to), i + 1)
 
-    return (char_span_els(char, i, False, highlight_by_index.get(i), model), i + 1)
+    return (char_span_els(char, i, False, highlight_by_index.get(i), model, scroll_to), i + 1)
 
 def vis_char_with_index(char, i, highlight_by_index, model=None):
     """Visualize a character with optional highlighting.
@@ -2842,12 +2843,15 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         for i in range(start, end):
             highlight_by_index[i] = highlight
 
+    scroll_to_match = model.get('_scroll_to_match', False) if model else False
+    first_match_index = highlights[0][0] if (scroll_to_match and highlights) else None
+
     # Build character sequence with highlighting
     char_els = []
 
     # Prefix markers are selectable with internal indices 0 (\A) and 1 (^)
-    char_els.append(char_span('\\A', 0, True, highlight_by_index.get(0), model))
-    char_els.append(char_span('^', 1, True, highlight_by_index.get(1), model))
+    char_els.append(char_span('\\A', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index)))
+    char_els.append(char_span('^', 1, True, highlight_by_index.get(1), model, scroll_to=(1 == first_match_index)))
 
     hover_idx = model.get('hoverIdx') if model and not model.get('dragging') else None
     group_chars = []
@@ -2874,13 +2878,13 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             index += 1
         else:
             flush_group()
-            char_htmls, index = vis_char_with_index_els(char, index, highlight_by_index, model)
+            char_htmls, index = vis_char_with_index_els(char, index, highlight_by_index, model, scroll_to=(index == first_match_index))
             char_els.extend(char_htmls)
 
     flush_group()
 
     # (must match internal index scheme for 1:1 correspondence with extract_by_internal_indices)
-    char_els.append(char_span('$', index, True, highlight_by_index.get(index), model))
+    char_els.append(char_span('$', index, True, highlight_by_index.get(index), model, scroll_to=(index == first_match_index)))
     index += 1
     char_els.append(char_span('\\Z', index, True, highlight_by_index.get(index), model))
     index += 1
@@ -3081,7 +3085,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
     string_div_style = (
         'line-height: 28px;'
-        f'max-height: {(max_height or 600) - 32}px;'
+        f'max-height: {(max_height or 400) - 32}px;'
         f'max-width: {max_width or 800}px;'
         'overflow: auto;'
         'scrollbar-width: thin;'
@@ -3773,6 +3777,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
     make_python_event = eval(event['pythonEventStr'])
     event_json = event['eventJSON']
     msg = make_python_event(event_json) if callable(make_python_event) else make_python_event
+    model['_scroll_to_match'] = False
 
     match msg:
         case HandleMouseDown(segment_index=seg_idx, side=side):
@@ -4091,6 +4096,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             current_regex = model.get('search')
             new_regex = val if val else None
             if new_regex != current_regex:
+                model['_scroll_to_match'] = True
                 model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
                 model['redoHistory'] = []
                 model['search'] = new_regex
