@@ -134,6 +134,10 @@ class DropdownToggle:
 class CopyToClipboard:
     text: str
 
+@dataclass(frozen=True, slots=True)
+class ChangeSelectedText:
+    text: str
+
 
 # === Dotfile operations ===
 
@@ -304,10 +308,38 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
     kind, term = parsed
 
     if kind == 'slice':
-        start, stop = term
+        slice_start_raw, slice_stop_raw = term
+        _eval = eval_in_scope or (lambda c: ast.literal_eval(c))
+        try:
+            start_val = _eval(slice_start_raw) if slice_start_raw else None
+        except Exception:
+            start_val = None
+        try:
+            stop_val = _eval(slice_stop_raw) if slice_stop_raw else None
+        except Exception:
+            stop_val = None
+        start_is_list = _is_list_of_ints(start_val)
+        stop_is_list = _is_list_of_ints(stop_val)
+        if start_is_list or stop_is_list:
+            ctx = {
+                'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+                'is_broadcast_slice': True,
+                'has_start_list': start_is_list, 'has_stop_list': stop_is_list,
+                'is_predicate': False, 'is_index': False, 'is_slice': False,
+                'is_multi_index': False, 'is_first': first,
+            }
+            if start_is_list:
+                ctx['start_list_expr'] = slice_start_raw
+            else:
+                ctx['slice_start'] = slice_start_raw
+            if stop_is_list:
+                ctx['stop_list_expr'] = slice_stop_raw
+            else:
+                ctx['slice_stop'] = slice_stop_raw
+            return ctx
         return {
             'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
-            'is_slice': True, 'slice_start': start, 'slice_stop': stop,
+            'is_slice': True, 'slice_start': slice_start_raw, 'slice_stop': slice_stop_raw,
             'is_index': False, 'is_predicate': False, 'is_multi_index': False,
             'is_first': True,
         }
@@ -363,6 +395,22 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         'is_index': False, 'is_slice': False, 'is_multi_index': False,
         'is_first': first,
     }
+
+
+def _ctx_to_model(ctx: dict, model: dict) -> None:
+    """Apply parsed DSL context to model state (reverse of _get_search_context)."""
+    if ctx.get('is_index'):
+        model['search'] = ctx.get('index_expr', '')
+    elif ctx.get('is_slice'):
+        start = ctx.get('slice_start', '')
+        stop = ctx.get('slice_stop', '')
+        model['search'] = f'{start}:{stop}'
+    elif ctx.get('is_multi_index'):
+        model['search'] = ctx.get('indices_expr', '')
+    elif ctx.get('is_predicate'):
+        pred = ctx.get('predicate_expr', '')
+        model['search'] = re.sub(r'\bitem\b', '^', pred)
+    model['first_match'] = bool(ctx.get('is_first'))
 
 
 # === Code generation ===
@@ -460,6 +508,81 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
 
+    if ctx.get('is_broadcast_slice'):
+        has_start = ctx.get('has_start_list')
+        has_stop = ctx.get('has_stop_list')
+        if has_start and has_stop:
+            iter_expr = f'{src}[i:j] for i, j in zip({ctx["start_list_expr"]}, {ctx["stop_list_expr"]})'
+            count_expr = ctx['start_list_expr']
+        elif has_start:
+            stop = ctx.get('slice_stop', '')
+            iter_expr = f'{src}[i:{stop}] for i in {ctx["start_list_expr"]}' if stop else f'{src}[i:] for i in {ctx["start_list_expr"]}'
+            count_expr = ctx['start_list_expr']
+        else:
+            start = ctx.get('slice_start', '')
+            iter_expr = f'{src}[{start}:i] for i in {ctx["stop_list_expr"]}' if start else f'{src}[:i] for i in {ctx["stop_list_expr"]}'
+            count_expr = ctx['stop_list_expr']
+        match action:
+            case 'filter':
+                code = f'[{iter_expr}]'
+            case 'loop_no_idx':
+                code = f'for item in [{iter_expr}]:\n    pass'
+            case 'loop_orig_idx':
+                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+            case 'loop_new_idx':
+                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+            case 'delete':
+                if has_start and has_stop:
+                    code = f'[item for i, item in enumerate({src}) if i not in set().union(*[range(s, e) for s, e in zip({ctx["start_list_expr"]}, {ctx["stop_list_expr"]})])]'
+                elif has_start:
+                    stop = ctx.get('slice_stop', '')
+                    stop_expr = stop if stop else f'len({src})'
+                    code = f'[item for i, item in enumerate({src}) if i not in set().union(*[range(s, {stop_expr}) for s in {ctx["start_list_expr"]}])]'
+                else:
+                    start = ctx.get('slice_start', '')
+                    start_expr = start if start else '0'
+                    code = f'[item for i, item in enumerate({src}) if i not in set().union(*[range({start_expr}, e) for e in {ctx["stop_list_expr"]}])]'
+            case 'count':
+                code = f'len({count_expr})'
+            case 'any':
+                code = f'len({count_expr}) > 0'
+            case 'all':
+                code = f'len({count_expr}) == len({src})'
+            case 'find_indices':
+                if has_start:
+                    code = ctx['start_list_expr']
+                else:
+                    code = f'[0] * len({ctx["stop_list_expr"]})'
+            case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_multi_pair'):
+        pairs = ctx['pairs_expr']
+        iter_expr = f'{src}[i:j] for i, j in {pairs}'
+        match action:
+            case 'filter':
+                code = f'[{iter_expr}]'
+            case 'loop_no_idx':
+                code = f'for item in [{iter_expr}]:\n    pass'
+            case 'loop_orig_idx':
+                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+            case 'loop_new_idx':
+                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+            case 'delete':
+                code = f'[item for i, item in enumerate({src}) if i not in set().union(*[range(s, e) for s, e in {pairs}])]'
+            case 'count':
+                code = f'len({pairs})'
+            case 'any':
+                code = f'len({pairs}) > 0'
+            case 'all':
+                code = f'len({pairs}) == len({src})'
+            case 'find_indices':
+                code = f'[i for i, j in {pairs}]'
+            case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
     if ctx.get('is_predicate'):
         pred = ctx['predicate_expr']
         match action:
@@ -501,6 +624,16 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     return None
 
 
+def _emit_linked_update(expr: str, model: dict, commands: list) -> None:
+    """Append a ChangeSelectedText command only if the full text is valid Python."""
+    text = (model.get('linked_prefix') or '') + expr
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return
+    commands.append(ChangeSelectedText(text=text))
+
+
 # === Matching indices for highlighting ===
 
 def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> list:
@@ -516,6 +649,31 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
 
     if kind == 'slice':
         start_s, stop_s = term
+        _eval = eval_in_scope or (lambda c: ast.literal_eval(c))
+        try:
+            start_val = _eval(start_s) if start_s else None
+        except Exception:
+            start_val = None
+        try:
+            stop_val = _eval(stop_s) if stop_s else None
+        except Exception:
+            stop_val = None
+        start_is_list = _is_list_of_ints(start_val)
+        stop_is_list = _is_list_of_ints(stop_val)
+        if start_is_list or stop_is_list:
+            matched = set()
+            if start_is_list and stop_is_list:
+                for s, e in zip(start_val, stop_val):
+                    matched.update(range(max(0, s), min(e, len(lst))))
+            elif start_is_list:
+                e = int(stop_s) if stop_s else len(lst)
+                for s in start_val:
+                    matched.update(range(max(0, s), min(e, len(lst))))
+            else:
+                s = int(start_s) if start_s else 0
+                for e in stop_val:
+                    matched.update(range(max(0, s), min(e, len(lst))))
+            return sorted(matched)
         try:
             start = int(start_s) if start_s else 0
         except (ValueError, TypeError):
@@ -546,6 +704,12 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
 
     if _is_list_of_ints(val):
         return [i for i in val if 0 <= i < len(lst)]
+
+    if _is_list_of_int_pairs(val):
+        matched = set()
+        for s, e in val:
+            matched.update(range(max(0, s), min(e, len(lst))))
+        return sorted(matched)
 
     predicate_with_caret = search
     if needs_implicit_caret(search):
@@ -612,6 +776,9 @@ _SEARCH_DEFAULTS = {
     'search': None,
     'first_match': False,
     'openDropdown': None,
+    'linked_action': None,
+    'linked_source_expr': None,
+    'linked_prefix': None,
 }
 
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
@@ -773,7 +940,7 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
 SEARCH_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="none" stroke="#000000" stroke-width="1.5" d="M11.5 11.5L14 14M6.5 11a4.5 4.5 0 100-9 4.5 4.5 0 000 9z"/></svg>'
 
 
-def _render_search_box(model, max_width=None):
+def _render_search_box(model, max_width=None, eval_in_scope=None):
     """Render the search box below the table."""
     search_value = model.get('search') or ''
     search_input_event = "lambda e: SearchBoxInput(value=e.get('value', ''))"
@@ -793,11 +960,22 @@ def _render_search_box(model, max_width=None):
     first_match = bool(model.get('first_match', False))
     search = model.get('search')
 
-    # Force 1st on for index/slice searches
+    # Force 1st on for plain slice searches (not broadcast slices)
     if search:
         parsed = parse_search_term(search)
         if parsed and parsed[0] == 'slice':
-            first_match = True
+            start_s, stop_s = parsed[1]
+            _sb_eval = eval_in_scope or (lambda c: ast.literal_eval(c))
+            try:
+                sv = _sb_eval(start_s) if start_s else None
+            except Exception:
+                sv = None
+            try:
+                ev = _sb_eval(stop_s) if stop_s else None
+            except Exception:
+                ev = None
+            if not (_is_list_of_ints(sv) or _is_list_of_ints(ev)):
+                first_match = True
 
     fm_event = repr(FirstMatchToggle())
     first_match_toggle_html = (
@@ -857,16 +1035,29 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     has_search = search is not None and search != ''
     first = bool(model.get('first_match', False))
 
-    # Force 1st for index/slice
+    # Force 1st for plain index/slice (not broadcast)
+    is_index_search = False
     if has_search:
         parsed = parse_search_term(search)
         if parsed and parsed[0] == 'slice':
-            first = True
+            start_s, stop_s = parsed[1]
+            _btn_eval = eval_in_scope or (lambda c: ast.literal_eval(c))
+            try:
+                sv = _btn_eval(start_s) if start_s else None
+            except Exception:
+                sv = None
+            try:
+                ev = _btn_eval(stop_s) if stop_s else None
+            except Exception:
+                ev = None
+            if not (_is_list_of_ints(sv) or _is_list_of_ints(ev)):
+                first = True
         elif parsed and parsed[0] == 'expr':
             try:
                 val = eval(parsed[1]) if eval_in_scope is None else eval_in_scope(parsed[1])
                 if isinstance(val, int) and not isinstance(val, bool):
                     first = True
+                    is_index_search = True
             except Exception:
                 pass
 
@@ -907,8 +1098,12 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     btn_with_copy = btn_base + 'border-radius: 3px 0 0 3px;'
     disabled_style = 'opacity: 0.35; pointer-events: none;'
 
+    linked_action = model.get('linked_action')
+    linked_highlight = 'background: #264f78; color: #ccc; border-color: #aaa;'
+
     def action_btn(label, action, enabled=True, title='', extra_style=''):
-        style = btn_with_copy + ('' if enabled else disabled_style) + extra_style
+        active = linked_highlight if linked_action == action else ''
+        style = btn_with_copy + ('' if enabled else disabled_style) + active + extra_style
         event = repr(ActionButtonClick(action=action, copy=False))
         title_attr = f' title="{html.escape(title)}"' if title else ''
         return f'<span class="snc-hoverable" snc-mouse-down="{html.escape(event)}" style="margin-left: 3px;{style}"{title_attr}>{label}</span>'
@@ -1017,13 +1212,22 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     delete_lbl = 'Delete First' if first else 'Delete All'
     parts.append(btn_group(delete_lbl, 'delete', has_search, 'Delete matches'))
 
-    # 5. Find Indices
+    # 5. Find Indices (disabled for single-index searches — the index is already known)
     indices_lbl = 'First Index' if first else 'Find Indices'
-    parts.append(btn_group(indices_lbl, 'find_indices', has_search, 'Indices of matches'))
+    parts.append(btn_group(indices_lbl, 'find_indices', has_search and not is_index_search, 'Indices of matches'))
 
     # 6. Count
     count_label = f'Count ({match_count})'
     parts.append(btn_group(count_label, 'count', has_search and not first, 'Count of matches'))
+
+    if linked_action:
+        unlink_event = repr(Unlink())
+        unlink_style = btn_base + 'color: #e0a060;'
+        parts.append(
+            f'<span class="snc-hoverable" snc-mouse-down="{html.escape(unlink_event)}"'
+            f' style="margin-left: 6px;{unlink_style}" title="Unlink from selected code">'
+            f'\u26d3\ufe0e Unlink</span>'
+        )
 
     return (
         f'<div style="margin-top: 4px; white-space: normal;'
@@ -1170,7 +1374,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         search_box_html = ''
         action_buttons_html = ''
     else:
-        search_box_html = _render_search_box(model, max_width)
+        search_box_html = _render_search_box(model, max_width, eval_in_scope)
         action_buttons_html = _render_action_buttons(model, lst, eval_in_scope, max_width)
 
     strs.append(search_box_html)
@@ -1359,18 +1563,24 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
                 elif key == 'Enter' and model.get('search'):
-                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
-                    if ctx:
-                        result = generate_action('filter', ctx)
-                        if result:
-                            commands.append(result)
+                    if model.get('linked_action'):
+                        model['linked_action'] = 'filter'
+                    else:
+                        ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                        if ctx:
+                            result = generate_action('filter', ctx)
+                            if result:
+                                commands.append(result)
 
             elif key == 'Backspace' and event_json.get('metaKey', False):
-                ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
-                if ctx:
-                    result = generate_action('delete', ctx)
-                    if result:
-                        commands.append(result)
+                if model.get('linked_action'):
+                    model['linked_action'] = 'delete'
+                else:
+                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                    if ctx:
+                        result = generate_action('delete', ctx)
+                        if result:
+                            commands.append(result)
 
             elif key == 'Escape':
                 if model.get('openDropdown'):
@@ -1397,13 +1607,52 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
 
         case ActionButtonClick(action=action, copy=copy):
             model['openDropdown'] = None
-            ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
-            if ctx:
-                result = generate_action(action, ctx)
-                if result:
-                    if copy:
-                        commands.append(CopyToClipboard(text=result[1]))
-                    else:
-                        commands.append(result)
+            if model.get('linked_action') and not copy:
+                model['linked_action'] = action
+                ctx = _get_search_context(model, source_code, source_line,
+                                          source_expr=model['linked_source_expr'],
+                                          eval_in_scope=eval_in_scope)
+                if ctx:
+                    result = generate_action(action, ctx)
+                    if result:
+                        _emit_linked_update(result[1], model, commands)
+            else:
+                ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                if ctx:
+                    result = generate_action(action, ctx)
+                    if result:
+                        if copy:
+                            commands.append(CopyToClipboard(text=result[1]))
+                        else:
+                            commands.append(result)
+
+        case EditorTextSelect(text=selected_text):
+            from list_visualizer_grammar import parse_generated_code_or_assignment
+            parsed, prefix = parse_generated_code_or_assignment(selected_text)
+            if parsed and parsed.get('action') and parsed.get('source_expr'):
+                valid = True
+                if source_code and source_line:
+                    _, line_var = extract_expression_from_line(source_code, source_line)
+                    if line_var and parsed['source_expr'] != line_var:
+                        valid = False
+                if valid:
+                    _ctx_to_model(parsed, model)
+                    model['linked_action'] = parsed['action']
+                    model['linked_source_expr'] = parsed['source_expr']
+                    model['linked_prefix'] = prefix
+
+        case Unlink():
+            model['linked_action'] = None
+            model['linked_source_expr'] = None
+            model['linked_prefix'] = None
+
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
+        ctx = _get_search_context(model, source_code, source_line,
+                                  source_expr=model['linked_source_expr'],
+                                  eval_in_scope=eval_in_scope)
+        if ctx:
+            result = generate_action(model['linked_action'], ctx)
+            if result:
+                _emit_linked_update(result[1], model, commands)
 
     return (model, commands)

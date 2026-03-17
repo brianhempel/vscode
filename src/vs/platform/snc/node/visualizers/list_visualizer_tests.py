@@ -1726,6 +1726,45 @@ class TestGetSearchContext(unittest.TestCase):
         self.assertTrue(ctx['is_predicate'])
         self.assertEqual(ctx['predicate_expr'], 'item.startswith("a")')
 
+    # --- Broadcast slice contexts ---
+
+    def test_broadcast_slice_start_list(self):
+        model = {'search': '[1,2,4]:', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_broadcast_slice'])
+        self.assertTrue(ctx['has_start_list'])
+        self.assertFalse(ctx['has_stop_list'])
+        self.assertEqual(ctx['start_list_expr'], '[1,2,4]')
+
+    def test_broadcast_slice_stop_list(self):
+        model = {'search': ':[3,5,7]', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_broadcast_slice'])
+        self.assertFalse(ctx['has_start_list'])
+        self.assertTrue(ctx['has_stop_list'])
+        self.assertEqual(ctx['stop_list_expr'], '[3,5,7]')
+
+    def test_broadcast_slice_both_lists(self):
+        model = {'search': '[0,1]:[3,2]', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_broadcast_slice'])
+        self.assertTrue(ctx['has_start_list'])
+        self.assertTrue(ctx['has_stop_list'])
+        self.assertEqual(ctx['start_list_expr'], '[0,1]')
+        self.assertEqual(ctx['stop_list_expr'], '[3,2]')
+
+    # --- Int-pair context ---
+
+    def test_multi_pair_context(self):
+        model = {'search': '[(0,2),(3,5)]', 'first_match': False}
+        ctx = _get_search_context(model, source_code='data = [...]', source_line=1, eval_in_scope=eval)
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx['is_multi_pair'])
+        self.assertEqual(ctx['pairs_expr'], '[(0,2),(3,5)]')
+
 
 class TestGenerateAction(unittest.TestCase):
     """Test generate_action produces correct code for each action type."""
@@ -1947,6 +1986,183 @@ class TestGenerateAction(unittest.TestCase):
         result = generate_action('delete', self._predicate_ctx())
         name, _ = result
         self.assertEqual(name, 'data')
+
+    # --- Broadcast slice generation ---
+
+    def _broadcast_start_ctx(self, starts='[1,2,4]', stop='', src='data'):
+        return {
+            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': False,
+            'start_list_expr': starts, 'slice_stop': stop,
+            'is_predicate': False, 'is_index': False, 'is_slice': False,
+            'is_multi_index': False, 'is_first': False,
+        }
+
+    def _broadcast_stop_ctx(self, start='', stops='[3,5,7]', src='data'):
+        return {
+            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'is_broadcast_slice': True, 'has_start_list': False, 'has_stop_list': True,
+            'stop_list_expr': stops, 'slice_start': start,
+            'is_predicate': False, 'is_index': False, 'is_slice': False,
+            'is_multi_index': False, 'is_first': False,
+        }
+
+    def _broadcast_both_ctx(self, starts='[0,1]', stops='[3,2]', src='data'):
+        return {
+            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': True,
+            'start_list_expr': starts, 'stop_list_expr': stops,
+            'is_predicate': False, 'is_index': False, 'is_slice': False,
+            'is_multi_index': False, 'is_first': False,
+        }
+
+    def _multi_pair_ctx(self, pairs='[(0,2),(3,5)]', src='data'):
+        return {
+            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'is_multi_pair': True, 'pairs_expr': pairs,
+            'is_predicate': False, 'is_index': False, 'is_slice': False,
+            'is_multi_index': False, 'is_first': False,
+        }
+
+    def test_filter_broadcast_start(self):
+        result = generate_action('filter', self._broadcast_start_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[data[i:] for i in [1,2,4]]')
+
+    def test_filter_broadcast_stop(self):
+        result = generate_action('filter', self._broadcast_stop_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[data[:i] for i in [3,5,7]]')
+
+    def test_filter_broadcast_both(self):
+        result = generate_action('filter', self._broadcast_both_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[data[i:j] for i, j in zip([0,1], [3,2])]')
+
+    def test_filter_broadcast_start_with_fixed_stop(self):
+        result = generate_action('filter', self._broadcast_start_ctx(stop='5'))
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[data[i:5] for i in [1,2,4]]')
+
+    def test_filter_broadcast_stop_with_fixed_start(self):
+        result = generate_action('filter', self._broadcast_stop_ctx(start='1'))
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[data[1:i] for i in [3,5,7]]')
+
+    def test_filter_multi_pair(self):
+        result = generate_action('filter', self._multi_pair_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[data[i:j] for i, j in [(0,2),(3,5)]]')
+
+    def test_delete_broadcast_start(self):
+        result = generate_action('delete', self._broadcast_start_ctx(starts='[2]'))
+        self.assertIsNotNone(result)
+
+    def test_delete_multi_pair(self):
+        result = generate_action('delete', self._multi_pair_ctx())
+        self.assertIsNotNone(result)
+
+    def test_count_broadcast_start(self):
+        result = generate_action('count', self._broadcast_start_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'len([1,2,4])')
+
+    def test_count_broadcast_both(self):
+        result = generate_action('count', self._broadcast_both_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'len([0,1])')
+
+    def test_count_multi_pair(self):
+        result = generate_action('count', self._multi_pair_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'len([(0,2),(3,5)])')
+
+    def test_find_indices_broadcast_start(self):
+        result = generate_action('find_indices', self._broadcast_start_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[1,2,4]')
+
+    def test_find_indices_multi_pair(self):
+        result = generate_action('find_indices', self._multi_pair_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, '[i for i, j in [(0,2),(3,5)]]')
+
+    def test_loop_no_idx_broadcast_start(self):
+        result = generate_action('loop_no_idx', self._broadcast_start_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertIn('for item in [data[i:]', code)
+
+    def test_loop_no_idx_multi_pair(self):
+        result = generate_action('loop_no_idx', self._multi_pair_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertIn('for item in [data[i:j]', code)
+
+    def test_any_broadcast_start(self):
+        result = generate_action('any', self._broadcast_start_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'len([1,2,4]) > 0')
+
+    def test_all_broadcast_both(self):
+        result = generate_action('all', self._broadcast_both_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'len([0,1]) == len(data)')
+
+
+# === Matching tests for broadcast/pair ===
+
+class TestBroadcastAndPairMatching(unittest.TestCase):
+    """Test _get_matching_indices handles broadcast slices and int pairs."""
+
+    def test_broadcast_start_list_matching(self):
+        lst = list(range(10))
+        indices = _get_matching_indices('[1,3]:', lst, eval)
+        self.assertIn(1, indices)
+        self.assertIn(3, indices)
+        self.assertIn(9, indices)
+        self.assertNotIn(0, indices)
+
+    def test_broadcast_stop_list_matching(self):
+        lst = list(range(10))
+        indices = _get_matching_indices(':[3,5]', lst, eval)
+        self.assertIn(0, indices)
+        self.assertIn(4, indices)
+        self.assertNotIn(5, indices)
+
+    def test_broadcast_both_lists_matching(self):
+        lst = list(range(10))
+        indices = _get_matching_indices('[0,5]:[3,8]', lst, eval)
+        self.assertIn(0, indices)
+        self.assertIn(2, indices)
+        self.assertIn(5, indices)
+        self.assertIn(7, indices)
+        self.assertNotIn(3, indices)
+        self.assertNotIn(8, indices)
+
+    def test_multi_pair_matching(self):
+        lst = list(range(10))
+        indices = _get_matching_indices('[(1,3),(6,8)]', lst, eval)
+        self.assertIn(1, indices)
+        self.assertIn(2, indices)
+        self.assertIn(6, indices)
+        self.assertIn(7, indices)
+        self.assertNotIn(0, indices)
+        self.assertNotIn(3, indices)
+        self.assertNotIn(8, indices)
 
 
 # === Event handling tests ===
@@ -2184,6 +2400,17 @@ class TestActionButtonsRendering(unittest.TestCase):
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('First Index', output)
+
+    def test_find_indices_disabled_for_index_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '1'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        find_idx_pos = output.find("action=&#x27;find_indices&#x27;, copy=False")
+        self.assertGreater(find_idx_pos, -1)
+        span_end = output.find('</span>', find_idx_pos)
+        context = output[find_idx_pos:span_end]
+        self.assertIn('pointer-events: none', context)
 
     def test_count_button_present(self):
         lst = [10, 20, 30]
@@ -2483,6 +2710,551 @@ class TestScrollToMatch(unittest.TestCase):
         idx = output.find('snc-scroll-to-match')
         preceding = output[max(0, idx - 60):idx]
         self.assertIn('<tr', preceding)
+
+
+# =============================================================================
+# Linked Editing Tests (bidirectional parsing integration)
+# =============================================================================
+
+from visualizer_utils import EditorTextSelect, Unlink
+
+
+def make_editor_text_select_event(text):
+    """Create an EditorTextSelect event."""
+    return {
+        'pythonEventStr': repr(EditorTextSelect(text=text)),
+        'eventJSON': {},
+    }
+
+
+def make_unlink_event():
+    """Create an Unlink event."""
+    return {
+        'pythonEventStr': repr(Unlink()),
+        'eventJSON': {},
+    }
+
+
+class TestCtxToModel(unittest.TestCase):
+    """Test _ctx_to_model sets model search/first_match from parsed context."""
+
+    def test_predicate_ctx_to_model(self):
+        from list_visualizer import _ctx_to_model
+        model = {'search': None, 'first_match': False}
+        ctx = {'is_predicate': True, 'predicate_expr': 'item > 100', 'is_first': False}
+        _ctx_to_model(ctx, model)
+        self.assertEqual(model['search'], '^ > 100')
+        self.assertFalse(model['first_match'])
+
+    def test_predicate_first_ctx_to_model(self):
+        from list_visualizer import _ctx_to_model
+        model = {'search': None, 'first_match': False}
+        ctx = {'is_predicate': True, 'predicate_expr': 'item > 100', 'is_first': True}
+        _ctx_to_model(ctx, model)
+        self.assertTrue(model['first_match'])
+
+    def test_index_ctx_to_model(self):
+        from list_visualizer import _ctx_to_model
+        model = {'search': None, 'first_match': False}
+        ctx = {'is_index': True, 'index_expr': '5'}
+        _ctx_to_model(ctx, model)
+        self.assertEqual(model['search'], '5')
+
+    def test_slice_ctx_to_model(self):
+        from list_visualizer import _ctx_to_model
+        model = {'search': None, 'first_match': False}
+        ctx = {'is_slice': True, 'slice_start': '2', 'slice_stop': '5'}
+        _ctx_to_model(ctx, model)
+        self.assertEqual(model['search'], '2:5')
+
+    def test_multi_index_ctx_to_model(self):
+        from list_visualizer import _ctx_to_model
+        model = {'search': None, 'first_match': False}
+        ctx = {'is_multi_index': True, 'indices_expr': '[1,3,5]'}
+        _ctx_to_model(ctx, model)
+        self.assertEqual(model['search'], '[1,3,5]')
+
+    def test_predicate_with_method_call(self):
+        from list_visualizer import _ctx_to_model
+        model = {'search': None, 'first_match': False}
+        ctx = {'is_predicate': True, 'predicate_expr': 'item.startswith("a")', 'is_first': False}
+        _ctx_to_model(ctx, model)
+        self.assertEqual(model['search'], '^.startswith("a")')
+
+
+class TestEditorTextSelectLinkedEditing(unittest.TestCase):
+    """Test EditorTextSelect event enters linked mode and ChangeSelectedText works."""
+
+    def setUp(self):
+        self.source_code = 'data = [1, 2, 3, 4, 5]'
+        self.source_line = 1
+        self.lst = [1, 2, 3, 4, 5]
+
+    def test_editor_text_select_enters_linked_mode(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'filter')
+        self.assertEqual(model.get('linked_source_expr'), 'data')
+        self.assertEqual(model.get('linked_prefix'), '')
+
+    def test_editor_text_select_sets_search(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertIsNotNone(model.get('search'))
+
+    def test_editor_text_select_assignment_form(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('result = [item for item in data if item > 3]')
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'filter')
+        self.assertEqual(model.get('linked_prefix'), 'result = ')
+
+    def test_unlink_clears_linked_state(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertIsNotNone(model.get('linked_action'))
+        event = make_unlink_event()
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertIsNone(model.get('linked_action'))
+        self.assertIsNone(model.get('linked_source_expr'))
+        self.assertIsNone(model.get('linked_prefix'))
+
+    def test_linked_action_button_emits_change_selected_text(self):
+        from list_visualizer import ChangeSelectedText
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        event = make_action_button_event('delete')
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'delete')
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertTrue(len(change_cmds) > 0)
+
+    def test_linked_search_change_emits_change_selected_text(self):
+        from list_visualizer import ChangeSelectedText
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        event = make_search_input_event('^ > 2')
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertTrue(len(change_cmds) > 0)
+
+    def test_linked_enter_changes_action_to_filter(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        model['linked_action'] = 'delete'
+        event = make_search_key_event('Enter')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'filter')
+
+    def test_linked_cmd_backspace_changes_action_to_delete(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in data if item > 3]')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        event = make_search_key_event('Backspace', meta=True)
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'delete')
+
+    def test_editor_text_select_mismatched_source_ignored(self):
+        """EditorTextSelect with wrong source_expr should be ignored."""
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event('[item for item in other_var if item > 3]')
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertIsNone(model.get('linked_action'))
+
+    def test_nonlinked_action_button_emits_new_code(self):
+        """Without linked mode, action buttons emit NewCode tuples, not ChangeSelectedText."""
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        model['search'] = '^ > 3'
+        event = make_action_button_event('filter')
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        tuple_cmds = [c for c in commands if isinstance(c, tuple)]
+        self.assertTrue(len(tuple_cmds) > 0)
+
+
+# =============================================================================
+# DSL Grammar Roundtrip Tests (bidirectional parsing)
+# =============================================================================
+
+class _ListActionTestBase(unittest.TestCase):
+    """Base class for list visualizer DSL grammar roundtrip tests."""
+
+    def setUp(self):
+        from list_visualizer_grammar import LIST_VIZ_GRAMMAR, generate_action as grammar_generate, parse_generated_code
+        from bidirectional_dsl import generate, parse
+        self.grammar = LIST_VIZ_GRAMMAR
+        self.raw_generate = generate
+        self.raw_parse = parse
+        self.generate_action = grammar_generate
+        self.parse_generated_code = parse_generated_code
+
+    def _gen(self, action, ctx):
+        gen_ctx = {k: v for k, v in ctx.items() if v is not None}
+        gen_ctx['action'] = action
+        if ctx.get('is_slice'):
+            gen_ctx['has_slice_start'] = bool(ctx.get('slice_start'))
+            gen_ctx['has_slice_stop'] = bool(ctx.get('slice_stop'))
+        return self.raw_generate(self.grammar, self.grammar['Action'], gen_ctx)
+
+    _GRAMMAR_KEYS = frozenset({
+        'action', 'is_predicate', 'is_index', 'is_slice', 'is_multi_index',
+        'is_first', 'source_expr', 'predicate_expr', 'index_expr',
+        'slice_start', 'slice_stop', 'indices_expr',
+        'has_slice_start', 'has_slice_stop',
+    })
+
+    def _roundtrip(self, action, ctx):
+        result = self._gen(action, ctx)
+        self.assertIsNotNone(result, f"Generation failed for {action}")
+        code = result[0]
+        parsed = self.raw_parse(self.grammar, self.grammar['Action'], code)
+        self.assertIsNotNone(parsed, f"Failed to parse: {code}")
+        self.assertEqual(parsed.get('action'), action,
+                         f"Parsed action {parsed.get('action')!r} != {action!r} for: {code}")
+        gen_ctx = {k: v for k, v in ctx.items() if v is not None}
+        gen_ctx['action'] = action
+        for key in self._GRAMMAR_KEYS:
+            if key not in gen_ctx:
+                continue
+            expected = gen_ctx[key]
+            actual = parsed.get(key)
+            if expected is False and actual is None:
+                continue
+            if key in parsed:
+                self.assertEqual(actual, expected,
+                                 f"Parsed {key}={actual!r} != {expected!r} for: {code}")
+        regen = self._gen(action, parsed)
+        self.assertIsNotNone(regen, f"Regeneration failed from parsed context")
+        self.assertEqual(regen[0], code, f"Roundtrip mismatch")
+
+
+class TestListGrammarFilter(_ListActionTestBase):
+    """Roundtrip tests for filter action."""
+
+    def test_roundtrip_filter_predicate(self):
+        self._roundtrip('filter', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_filter_predicate_first(self):
+        self._roundtrip('filter', {
+            'is_predicate': True, 'is_first': True,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_filter_index(self):
+        self._roundtrip('filter', {
+            'is_index': True, 'is_slice': False, 'is_multi_index': False,
+            'index_expr': '5', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_filter_slice(self):
+        self._roundtrip('filter', {
+            'is_slice': True, 'is_index': False, 'is_multi_index': False,
+            'slice_start': '2', 'slice_stop': '5', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_filter_multi_index(self):
+        self._roundtrip('filter', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_filter_paren_source(self):
+        self._roundtrip('filter', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 0', 'source_expr': '(get_list())',
+        })
+
+
+class TestListGrammarDelete(_ListActionTestBase):
+    """Roundtrip tests for delete action."""
+
+    def test_roundtrip_delete_predicate(self):
+        self._roundtrip('delete', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_delete_predicate_first(self):
+        self._roundtrip('delete', {
+            'is_predicate': True, 'is_first': True,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_delete_index(self):
+        self._roundtrip('delete', {
+            'is_index': True, 'is_slice': False, 'is_multi_index': False,
+            'index_expr': '5', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_delete_slice_both(self):
+        self._roundtrip('delete', {
+            'is_slice': True, 'is_index': False, 'is_multi_index': False,
+            'slice_start': '2', 'slice_stop': '5', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_delete_slice_start_only(self):
+        self._roundtrip('delete', {
+            'is_slice': True, 'is_index': False, 'is_multi_index': False,
+            'slice_start': '2', 'slice_stop': '', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_delete_slice_stop_only(self):
+        self._roundtrip('delete', {
+            'is_slice': True, 'is_index': False, 'is_multi_index': False,
+            'slice_start': '', 'slice_stop': '5', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_delete_multi_index(self):
+        self._roundtrip('delete', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+
+class TestListGrammarFindIndices(_ListActionTestBase):
+    """Roundtrip tests for find_indices action."""
+
+    def test_roundtrip_find_indices_predicate(self):
+        self._roundtrip('find_indices', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_find_indices_predicate_first(self):
+        self._roundtrip('find_indices', {
+            'is_predicate': True, 'is_first': True,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_generate_find_indices_index(self):
+        """Bare-expression patterns can't roundtrip (too greedy for parse) but must generate."""
+        result = self.generate_action('find_indices', {
+            'is_index': True, 'is_slice': False, 'is_multi_index': False,
+            'index_expr': '5', 'source_expr': 'data', 'var_name': 'data', 'suggest_base': 'data',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1], '5')
+
+    def test_roundtrip_find_indices_slice(self):
+        self._roundtrip('find_indices', {
+            'is_slice': True, 'is_index': False, 'is_multi_index': False,
+            'slice_start': '2', 'slice_stop': '5', 'source_expr': 'data',
+        })
+
+    def test_find_indices_slice_empty_start_generates_and_parses(self):
+        """Empty start generates list(range(0, ...)) which parses back with start='0'."""
+        result = self.generate_action('find_indices', {
+            'is_slice': True, 'is_index': False, 'is_multi_index': False,
+            'slice_start': '', 'slice_stop': '5', 'source_expr': 'data',
+            'var_name': 'data', 'suggest_base': 'data',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1], 'list(range(0, 5))')
+        parsed = self.parse_generated_code(result[1])
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'find_indices')
+
+    def test_generate_find_indices_multi_index(self):
+        """Bare-expression patterns can't roundtrip (too greedy for parse) but must generate."""
+        result = self.generate_action('find_indices', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data', 'var_name': 'data', 'suggest_base': 'data',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1], '[1,3,5]')
+
+
+class TestListGrammarCount(_ListActionTestBase):
+    """Roundtrip tests for count action."""
+
+    def test_roundtrip_count_predicate(self):
+        self._roundtrip('count', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_count_multi_index(self):
+        self._roundtrip('count', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+
+class TestListGrammarAnyAll(_ListActionTestBase):
+    """Roundtrip tests for any/all actions."""
+
+    def test_roundtrip_any_predicate(self):
+        self._roundtrip('any', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_all_predicate(self):
+        self._roundtrip('all', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_if_any_predicate(self):
+        self._roundtrip('if_any', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_if_all_predicate(self):
+        self._roundtrip('if_all', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_any_multi_index(self):
+        self._roundtrip('any', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_all_multi_index(self):
+        self._roundtrip('all', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+
+class TestListGrammarLoop(_ListActionTestBase):
+    """Roundtrip tests for loop actions."""
+
+    def test_roundtrip_loop_no_idx_predicate(self):
+        self._roundtrip('loop_no_idx', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_loop_orig_idx_predicate(self):
+        self._roundtrip('loop_orig_idx', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_loop_new_idx_predicate(self):
+        self._roundtrip('loop_new_idx', {
+            'is_predicate': True, 'is_first': False,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'item > 100', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_loop_no_idx_multi_index(self):
+        self._roundtrip('loop_no_idx', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_loop_orig_idx_multi_index(self):
+        self._roundtrip('loop_orig_idx', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_loop_new_idx_multi_index(self):
+        self._roundtrip('loop_new_idx', {
+            'is_multi_index': True, 'is_index': False, 'is_slice': False,
+            'indices_expr': '[1,3,5]', 'source_expr': 'data',
+        })
+
+
+class TestListGrammarParse(_ListActionTestBase):
+    """Test parse_generated_code on known code strings."""
+
+    def test_parse_filter_predicate(self):
+        result = self.parse_generated_code('[item for item in data if item > 100]')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'filter')
+        self.assertEqual(result['source_expr'], 'data')
+        self.assertEqual(result['predicate_expr'], 'item > 100')
+
+    def test_parse_filter_predicate_first(self):
+        result = self.parse_generated_code('next((item for item in data if item > 100), None)')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'filter')
+        self.assertTrue(result.get('is_first'))
+
+    def test_parse_filter_index(self):
+        result = self.parse_generated_code('data[5]')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'filter')
+        self.assertEqual(result['index_expr'], '5')
+
+    def test_parse_filter_slice(self):
+        result = self.parse_generated_code('data[2:5]')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'filter')
+
+    def test_parse_delete_predicate(self):
+        result = self.parse_generated_code('[item for item in data if not (item > 100)]')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'delete')
+
+    def test_parse_delete_index(self):
+        result = self.parse_generated_code('data[:5] + data[5+1:]')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'delete')
+
+    def test_parse_count_predicate(self):
+        result = self.parse_generated_code('sum(1 for item in data if item > 100)')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'count')
+
+    def test_parse_any_predicate(self):
+        result = self.parse_generated_code('any(item > 100 for item in data)')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'any')
+
+    def test_parse_all_predicate(self):
+        result = self.parse_generated_code('all(item > 100 for item in data)')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'all')
+
+    def test_parse_loop_no_idx_predicate(self):
+        result = self.parse_generated_code('for item in (item for item in data if item > 100):\n    pass')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'loop_no_idx')
+
+    def test_parse_find_indices_predicate(self):
+        result = self.parse_generated_code('[i for i, item in enumerate(data) if item > 100]')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'find_indices')
+
+    def test_parse_nonmatching_returns_none(self):
+        result = self.parse_generated_code('print("hello")')
+        self.assertIsNone(result)
+
+    def test_parse_assignment_form(self):
+        from list_visualizer_grammar import parse_generated_code_or_assignment
+        ctx, prefix = parse_generated_code_or_assignment('result = [item for item in data if item > 100]')
+        self.assertIsNotNone(ctx)
+        self.assertEqual(prefix, 'result = ')
+        self.assertEqual(ctx['action'], 'filter')
 
 
 if __name__ == '__main__':
