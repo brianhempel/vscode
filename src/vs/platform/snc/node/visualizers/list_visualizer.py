@@ -808,7 +808,10 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, s
     for i, item in enumerate(lst):
         for col in columns:
             try:
-                cell_value = eval_caret_expr(col, item, eval_in_scope)
+                if source_expr is not None and eval_in_scope is not None:
+                    cell_value = eval_in_scope(replace_caret_in_py_exp(col, f'{source_expr}[{i}]'))
+                else:
+                    cell_value = eval_caret_expr(col, item, eval_in_scope)
             except Exception:
                 cell_value = None
             if cell_value is not None:
@@ -1321,7 +1324,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         for col in columns:
             composite_key = f"{i}{CELL_KEY_SEP}{col}"
             try:
-                cell_value = eval_caret_expr(col, item, eval_in_scope)
+                if source_expr is not None and eval_in_scope is not None:
+                    cell_value = eval_in_scope(replace_caret_in_py_exp(col, f'{source_expr}[{i}]'))
+                else:
+                    cell_value = eval_caret_expr(col, item, eval_in_scope)
             except Exception:
                 cell_value = None
 
@@ -1387,10 +1393,12 @@ def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=N
     return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
 
 
-def _table_child_value_getter(key, lst, eval_in_scope=None):
+def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
-    item = lst[int(row_key)]
-    return eval_caret_expr(field_key, item, eval_in_scope)
+    idx = int(row_key)
+    if source_expr is not None and eval_in_scope is not None:
+        return eval_in_scope(replace_caret_in_py_exp(field_key, f'{source_expr}[{idx}]'))
+    return eval_caret_expr(field_key, lst[idx], eval_in_scope)
 
 
 def update(event, source_code: str, source_line: int, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
@@ -1415,7 +1423,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
     if isinstance(msg, ChildEvent):
         new_model, commands = route_child_event(
             event, model, value,
-            child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope),
+            child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope, model.get('_source_expr')),
             get_visualizer=get_visualizer,
             source_code=source_code,
             source_line=source_line,
