@@ -243,15 +243,134 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 # Parsing
 # ---------------------------------------------------------------------------
 
+def _source_text(code_line: str, node: ast.AST | None) -> str:
+    if node is None:
+        return ''
+    return ast.get_source_segment(code_line, node) or ast.unparse(node)
+
+
+def _parse_generated_join(code_line: str) -> dict | None:
+    try:
+        expr = ast.parse(code_line, mode='eval').body
+    except SyntaxError:
+        return None
+
+    if not isinstance(expr, ast.Call) or expr.keywords or len(expr.args) != 1:
+        return None
+    if not isinstance(expr.func, ast.Attribute) or expr.func.attr != 'join':
+        return None
+
+    try:
+        sep_val = ast.literal_eval(expr.func.value)
+    except Exception:
+        return None
+    if not isinstance(sep_val, str):
+        return None
+
+    gen = expr.args[0]
+    if not isinstance(gen, ast.GeneratorExp) or len(gen.generators) != 1:
+        return None
+    comp = gen.generators[0]
+    if comp.is_async:
+        return None
+    if not isinstance(gen.elt, ast.Call) or gen.elt.keywords:
+        return None
+    if not isinstance(gen.elt.func, ast.Name) or gen.elt.func.id != 'str' or len(gen.elt.args) != 1:
+        return None
+
+    item_expr = gen.elt.args[0]
+    join_separator = _source_text(code_line, expr.func.value)
+
+    if (
+        isinstance(comp.target, ast.Name) and comp.target.id == 'item'
+        and isinstance(item_expr, ast.Name) and item_expr.id == 'item'
+    ):
+        if isinstance(comp.iter, ast.Subscript) and isinstance(comp.iter.slice, ast.Slice) and comp.iter.slice.step is None and not comp.ifs:
+            return {
+                'action': 'join',
+                'source_expr': _source_text(code_line, comp.iter.value),
+                'join_separator': join_separator,
+                'is_slice': True,
+                'slice_start': _source_text(code_line, comp.iter.slice.lower),
+                'slice_stop': _source_text(code_line, comp.iter.slice.upper),
+                'is_index': False,
+                'is_predicate': False,
+                'is_multi_index': False,
+                'is_first': False,
+            }
+        if len(comp.ifs) == 1:
+            return {
+                'action': 'join',
+                'source_expr': _source_text(code_line, comp.iter),
+                'join_separator': join_separator,
+                'is_predicate': True,
+                'predicate_expr': _source_text(code_line, comp.ifs[0]),
+                'is_index': False,
+                'is_slice': False,
+                'is_multi_index': False,
+                'is_first': False,
+            }
+        if not comp.ifs:
+            return {
+                'action': 'join',
+                'source_expr': _source_text(code_line, comp.iter),
+                'join_separator': join_separator,
+                'is_whole_list': True,
+                'is_predicate': False,
+                'is_index': False,
+                'is_slice': False,
+                'is_multi_index': False,
+                'is_first': False,
+            }
+        return None
+
+    if (
+        isinstance(comp.target, ast.Name) and comp.target.id == 'i'
+        and not comp.ifs
+        and isinstance(item_expr, ast.Subscript)
+        and isinstance(item_expr.slice, ast.Name) and item_expr.slice.id == 'i'
+    ):
+        return {
+            'action': 'join',
+            'source_expr': _source_text(code_line, item_expr.value),
+            'join_separator': join_separator,
+            'is_multi_index': True,
+            'indices_expr': _source_text(code_line, comp.iter),
+            'is_index': False,
+            'is_slice': False,
+            'is_predicate': False,
+            'is_first': False,
+        }
+
+    return None
+
+
 def parse_generated_code(code_line: str) -> dict | None:
-    return parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Action'], code_line)
+    ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Action'], code_line)
+    if ctx is not None:
+        return ctx
+    return _parse_generated_join(code_line)
 
 
 def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str]:
     ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Assignment'], code_line)
     if ctx is not None and 'assign_var_name' in ctx:
         return (ctx, f"{ctx['assign_var_name']} = ")
-    ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Action'], code_line)
+    try:
+        module = ast.parse(code_line, mode='exec')
+        if (
+            len(module.body) == 1
+            and isinstance(module.body[0], ast.Assign)
+            and len(module.body[0].targets) == 1
+            and isinstance(module.body[0].targets[0], ast.Name)
+        ):
+            rhs_text = _source_text(code_line, module.body[0].value)
+            rhs_ctx = parse_generated_code(rhs_text)
+            if rhs_ctx is not None:
+                return (rhs_ctx, f"{module.body[0].targets[0].id} = ")
+    except SyntaxError:
+        pass
+    ctx = parse_generated_code(code_line)
     if ctx is not None:
         return (ctx, '')
     return (None, '')

@@ -45,6 +45,15 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
                    {'is_expr': True}),
     ], {}),
 
+    Alt("FindallExpr", [
+        BiTemplate("RegexFindall",
+                   "re.findall(r'{regex_pattern:RawContent}', {source_expr:VarOrExpr}, flags={:RegexFlags})",
+                   {'is_expr': False}),
+        BiTemplate("ExprFindall",
+                   "re.findall(re.escape({expr:Something}), {source_expr:VarOrExpr}{:ExprKwFlags})",
+                   {'is_expr': True}),
+    ], {}),
+
     # --- Slice edge sub-rules (conditional '' vs v[:start]) ---
 
     Alt("SliceLeft", [
@@ -102,6 +111,19 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
                    "for i, mtch in enumerate({:FinditerExpr}):\n    pass",
                    {'has_replace': False}),
     ], {}),
+
+    Alt("MatchStringsAction", [
+        BiTemplate("MatchStringsFirst",
+                   "next(iter({:FindallExpr}), None)",
+                   {'is_first': True, 'is_index': False, 'is_slice': False}),
+        BiTemplate("MatchStringsList",
+                   "{:FindallExpr}",
+                   {'is_first': False, 'is_index': False, 'is_slice': False}),
+    ], {'has_replace': False}),
+
+    BiTemplate("LoopMatchStringsAction",
+               "for i, s in enumerate({:FindallExpr}):\n    pass",
+               {}),
 
     Alt("AnyAction", [
         BiTemplate("AnyReplace",
@@ -322,6 +344,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         Alt("ActionDelete", ["DeleteAction"], {'action': 'delete'}),
         Alt("ActionMultiLoop", ["MultiLoopAction"], {'action': 'loop'}),
         Alt("ActionLoop", ["LoopAction"], {'action': 'loop'}),
+        Alt("ActionLoopMatchStrings", ["LoopMatchStringsAction"], {'action': 'loop_match_strings'}),
         Alt("ActionIfAny", ["IfAnyAction"], {'action': 'if_any'}),
         Alt("ActionIfAll", ["IfAllAction"], {'action': 'if_all'}),
         Alt("ActionMultiFilter", ["MultiFilterAction"], {'action': 'filter'}),
@@ -332,6 +355,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         Alt("ActionAll", ["AllAction"], {'action': 'all'}),
         Alt("ActionSplit", ["SplitAction"], {'action': 'split'}),
         Alt("ActionFindIndices", ["FindIndicesAction"], {'action': 'find_indices'}),
+        Alt("ActionMatchStrings", ["MatchStringsAction"], {'action': 'match_strings'}),
         Alt("ActionMultiFindOrMap", ["MultiTransformAction", "MultiGetAction"], {'action': 'find_or_map'}),
         Alt("ActionFindOrMap", ["TransformAction", "GetAction"], {'action': 'find_or_map'}),
         # MultiFindIndices last: its patterns are greedy catch-alls
@@ -348,7 +372,7 @@ _SUGGEST_SUFFIXES = {
     'any': 'any', 'all': 'all', 'count': 'count',
     'filter': 'filtered', 'split': 'parts', 'find_indices': 'indices',
 }
-_STATEMENT_ACTIONS = frozenset({'loop', 'if_any', 'if_all'})
+_STATEMENT_ACTIONS = frozenset({'loop', 'loop_match_strings', 'if_any', 'if_all'})
 _BARE_NAME_ACTIONS = frozenset({'replace', 'delete'})
 
 
@@ -380,6 +404,10 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
         if ctx.get('has_replace'):
             return _suggest_name(ctx, 'transformed')
         return _suggest_name_for_get(ctx)
+    if action == 'match_strings':
+        if ctx.get('is_first'):
+            return _suggest_name(ctx, 'substring')
+        return _suggest_name(ctx, 'strings')
     if action in _BARE_NAME_ACTIONS:
         return _suggest_name_bare(ctx)
     suffix = _SUGGEST_SUFFIXES.get(action)

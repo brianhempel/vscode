@@ -71,6 +71,11 @@
 	cursor: pointer !important;
 }
 
+/* Highlight the draggable border/padding zone of snc-py-exp wrappers */
+.snc-py-exp-drag-hover {
+	border-color: rgba(127, 127, 127, 0.5) !important;
+}
+
 /* Drop target highlight for snc-input elements during snc-py-exp drag */
 .editor-instance .snc-drop-target {
 	border-color: #569cd6 !important;

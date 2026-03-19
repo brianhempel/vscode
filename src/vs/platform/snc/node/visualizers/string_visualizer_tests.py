@@ -6819,6 +6819,119 @@ class TestActionButtonLoop(unittest.TestCase):
 
 
 # =============================================================================
+# Action Button: Match Strings Tests
+# =============================================================================
+
+class TestActionButtonMatchStrings(unittest.TestCase):
+    """Test Match Strings action button."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.model['search'] = '/hello/'
+        self.source_code = "x = 'hello world'"
+        self.source_line = 1
+
+    def test_match_strings_all(self):
+        """Match Strings produces re.findall(...)."""
+        _, commands = update(make_action_button_event('match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertEqual(expr, "re.findall(r'hello', x, flags=re.M)")
+
+    def test_match_strings_first(self):
+        """Match Strings in first-match mode produces next(iter(re.findall(...)), None)."""
+        self.model['search'] = '/hello/1'
+        _, commands = update(make_action_button_event('match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertEqual(expr, "next(iter(re.findall(r'hello', x, flags=re.M)), None)")
+
+    def test_match_strings_expr_search(self):
+        """Match Strings with string search uses re.escape."""
+        self.model['search'] = "'hello'"
+        _, commands = update(make_action_button_event('match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        _, expr = commands[0]
+        self.assertIn("re.findall(re.escape('hello')", expr)
+
+    def test_match_strings_disabled_in_replace_mode(self):
+        """Match Strings produces no command in replace mode (has_replace=True prevents generation)."""
+        self.model['replace_visible'] = True
+        self.model['replace_text'] = "^[0].upper()"
+        _, commands = update(make_action_button_event('match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(commands, [])
+
+    def test_match_strings_suggest_name(self):
+        """Match Strings suggests x_strings."""
+        _, commands = update(make_action_button_event('match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0], 'x_strings')
+
+    def test_copy_match_strings(self):
+        """copy=True produces CopyToClipboard."""
+        _, commands = update(make_action_button_event('match_strings', copy=True),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        self.assertIsInstance(cmd, CopyToClipboard)
+        self.assertIn("re.findall(", cmd.text)
+
+    def test_match_strings_no_search_does_nothing(self):
+        """No search pattern produces no commands."""
+        self.model['search'] = None
+        _, commands = update(make_action_button_event('match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(commands, [])
+
+
+# =============================================================================
+# Action Button: Loop Match Strings Tests
+# =============================================================================
+
+class TestActionButtonLoopMatchStrings(unittest.TestCase):
+    """Test Loop Match Strings action button."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.model['search'] = '/hello/'
+        self.source_code = "x = 'hello world'"
+        self.source_line = 1
+
+    def test_loop_match_strings(self):
+        """Loop Match Strings produces for loop with enumerate(re.findall(...))."""
+        _, commands = update(make_action_button_event('loop_match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertIsNone(suggest_name)
+        self.assertIn("for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):", expr)
+        self.assertIn("\n    pass", expr)
+
+    def test_loop_match_strings_suggest_name_none(self):
+        """Loop Match Strings returns suggest_name=None (statement)."""
+        _, commands = update(make_action_button_event('loop_match_strings'),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        self.assertIsNone(commands[0][0])
+
+    def test_copy_loop_match_strings(self):
+        """copy=True produces CopyToClipboard with loop code."""
+        _, commands = update(make_action_button_event('loop_match_strings', copy=True),
+                            self.source_code, self.source_line, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        self.assertIsInstance(cmd, CopyToClipboard)
+        self.assertIn("for i, s in enumerate(re.findall(", cmd.text)
+
+
+# =============================================================================
 # Action Button: Any Tests
 # =============================================================================
 
@@ -7412,9 +7525,66 @@ class TestActionButtonRendering(unittest.TestCase):
         model['search'] = '/hello/'
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Find Matches', html_output)
+        self.assertIn('Match Strings', html_output)
         self.assertIn('Replace All', html_output)
         self.assertIn('Delete All', html_output)
         self.assertIn('Find Indices', html_output)
+
+    def test_match_strings_label_in_first_mode(self):
+        """In first-match mode, Match Strings becomes First Substring."""
+        model = init_model(self.value)
+        model['search'] = '/hello/1'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('First Substring', html_output)
+        self.assertNotIn('Match Strings', html_output)
+
+    def test_match_strings_before_find_matches(self):
+        """Match Strings button appears before Find Matches in the HTML."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        ms_pos = html_output.index('Match Strings')
+        fm_pos = html_output.index('Find Matches')
+        self.assertLess(ms_pos, fm_pos)
+
+    def test_match_strings_disabled_in_replace_mode(self):
+        """Match Strings button is disabled (grayed out) in replace mode."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        model['replace_visible'] = True
+        model['replace_text'] = "'world'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        ms_match = re_mod.search(r"action=&#x27;match_strings&#x27;.*?style=\"(.*?)\"", html_output)
+        self.assertIsNotNone(ms_match)
+        self.assertIn('opacity: 0.35', ms_match.group(1))
+
+    def test_match_strings_enabled_without_replace(self):
+        """Match Strings button is enabled when not in replace mode."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as re_mod
+        ms_match = re_mod.search(r"action=&#x27;match_strings&#x27;.*?style=\"(.*?)\"", html_output)
+        self.assertIsNotNone(ms_match)
+        self.assertNotIn('opacity: 0.35', ms_match.group(1))
+
+    def test_loop_dropdown_renders(self):
+        """Loop is a dropdown with 'Match Strings' and 'Matches' options when open."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        model['openDropdown'] = {'id': 'action-loop'}
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn("action=&#x27;loop_match_strings&#x27;", html_output)
+        self.assertIn("action=&#x27;loop&#x27;", html_output)
+
+    def test_loop_dropdown_closed_by_default(self):
+        """Loop dropdown is closed by default (no panel)."""
+        model = init_model(self.value)
+        model['search'] = '/hello/'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Loop', html_output)
+        self.assertNotIn("action=&#x27;loop_match_strings&#x27;", html_output)
 
     def test_loop_disabled_in_first_match_mode(self):
         """Loop button is disabled in first-match mode."""
@@ -7422,9 +7592,9 @@ class TestActionButtonRendering(unittest.TestCase):
         model['search'] = '/hello/1'
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Loop', html_output)
-        # Loop action should exist but be disabled (opacity: 0.35)
+        # Loop dropdown toggle should be disabled (opacity: 0.35)
         import re as re_mod
-        loop_match = re_mod.search(r"action=&#x27;loop&#x27;.*?style=\"(.*?)\"", html_output)
+        loop_match = re_mod.search(r"DropdownToggle\(dropdown_id=&#x27;action-loop&#x27;\).*?style=\"(.*?)\"", html_output)
         self.assertIsNotNone(loop_match)
         self.assertIn('opacity: 0.35', loop_match.group(1))
 
@@ -7433,9 +7603,8 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = '/hello/'
         html_output = visualize(self.value, model, None, None, max_width=400)
-        # Both action and copy buttons for loop - check the action button doesn't have disabled style
         import re as re_mod
-        loop_match = re_mod.search(r"action=&#x27;loop&#x27;.*?style=\"(.*?)\"", html_output)
+        loop_match = re_mod.search(r"DropdownToggle\(dropdown_id=&#x27;action-loop&#x27;\).*?style=\"(.*?)\"", html_output)
         self.assertIsNotNone(loop_match)
         self.assertNotIn('opacity: 0.35', loop_match.group(1))
 
@@ -8863,6 +9032,118 @@ class TestDSLLoopAction(_ActionTestBase):
         self.assertEqual(parsed['action'], 'loop')
 
 
+class TestDSLMatchStringsAction(_ActionTestBase):
+    """Test match_strings action via Action rule."""
+
+    ACTION = 'match_strings'
+
+    def test_match_strings_all(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+        })
+        self.assertEqual(result[0], "re.findall(r'hello', x, flags=re.M)")
+
+    def test_match_strings_first(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+        })
+        self.assertEqual(result[0], "next(iter(re.findall(r'hello', x, flags=re.M)), None)")
+
+    def test_match_strings_expr(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'expr': "'hello'", 'source_expr': 'x',
+        })
+        self.assertEqual(result[0], "re.findall(re.escape('hello'), x)")
+
+    def test_match_strings_ci(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': True,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+        })
+        self.assertEqual(result[0], "re.findall(r'hello', x, flags=re.M|re.I)")
+
+    def test_match_strings_not_generated_with_replace(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': True,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+            'replace_expr': 'mtch.group().upper()',
+        })
+        self.assertIsNone(result)
+
+    def test_roundtrip_match_strings_all(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': r'\d+', 'source_expr': 'data',
+        })
+
+    def test_roundtrip_match_strings_first(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+        })
+
+    def test_roundtrip_match_strings_expr(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'expr': "'hello'", 'source_expr': 'x',
+        })
+
+    def test_parse_known_match_strings(self):
+        parsed = self._parse_action("re.findall(r'hello', x, flags=re.M)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'match_strings')
+
+    def test_parse_known_match_strings_first(self):
+        parsed = self._parse_action("next(iter(re.findall(r'hello', x, flags=re.M)), None)")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'match_strings')
+
+
+class TestDSLLoopMatchStringsAction(_ActionTestBase):
+    """Test loop_match_strings action via Action rule."""
+
+    ACTION = 'loop_match_strings'
+
+    def test_loop_match_strings(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+        })
+        self.assertEqual(result[0], "for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):\n    pass")
+
+    def test_loop_match_strings_expr(self):
+        result = self._gen(self.ACTION, {
+            'is_expr': True, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'expr': "'hello'", 'source_expr': 'x',
+        })
+        self.assertEqual(result[0], "for i, s in enumerate(re.findall(re.escape('hello'), x)):\n    pass")
+
+    def test_roundtrip_loop_match_strings(self):
+        self._roundtrip(self.ACTION, {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False, 'has_replace': False,
+            'regex_pattern': r'\d+', 'source_expr': 'data',
+        })
+
+    def test_parse_known_loop_match_strings(self):
+        parsed = self._parse_action("for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):\n    pass")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'loop_match_strings')
+
+
 class TestDSLBooleanActions(_ActionTestBase):
     """Test any, all, if_any, if_all actions via Action rule."""
 
@@ -9332,6 +9613,37 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
 
     def test_generate_action_loop_returns_none_name(self):
         result = self.generate_action('loop', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertIsNone(result[0])
+
+    def test_generate_action_match_strings(self):
+        result = self.generate_action('match_strings', {
+            'is_expr': False, 'is_first': False, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_strings')
+        self.assertEqual(result[1], "re.findall(r'hello', x, flags=re.M)")
+
+    def test_generate_action_match_strings_first(self):
+        result = self.generate_action('match_strings', {
+            'is_expr': False, 'is_first': True, 'is_ci': False,
+            'is_index': False, 'is_slice': False,
+            'regex_pattern': 'hello', 'source_expr': 'x',
+            'var_name': 'x', 'suggest_base': 'x',
+        })
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'x_substring')
+        self.assertEqual(result[1], "next(iter(re.findall(r'hello', x, flags=re.M)), None)")
+
+    def test_generate_action_loop_match_strings_returns_none_name(self):
+        result = self.generate_action('loop_match_strings', {
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',

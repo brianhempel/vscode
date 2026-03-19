@@ -15,7 +15,8 @@ from list_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
-    ColumnKeyDown, COLUMN_DOTFILE_NAME,
+    ColumnKeyDown, COLUMN_DOTFILE_NAME, CELL_KEY_SEP,
+    CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_item_type_key, _get_column_suggestions, _get_all_possible_columns,
 )
@@ -2122,6 +2123,155 @@ class TestGenerateAction(unittest.TestCase):
         _, code = result
         self.assertEqual(code, 'len([0,1]) == len(data)')
 
+    # --- Whole list (no search) ---
+
+    def _whole_list_ctx(self, src='data'):
+        return {
+            'source_expr': src,
+            'var_name': src,
+            'suggest_base': src,
+            'is_whole_list': True,
+            'is_predicate': False,
+            'is_index': False,
+            'is_slice': False,
+            'is_multi_index': False,
+            'is_first': False,
+        }
+
+    def test_whole_list_loop_no_idx(self):
+        result = generate_action('loop_no_idx', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'for item in data:\n    pass')
+
+    def test_whole_list_loop_orig_idx(self):
+        result = generate_action('loop_orig_idx', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'for i, item in enumerate(data):\n    pass')
+
+    def test_whole_list_loop_new_idx(self):
+        result = generate_action('loop_new_idx', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'for i, item in enumerate(data):\n    pass')
+
+    def test_whole_list_any(self):
+        result = generate_action('any', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'any(data)')
+
+    def test_whole_list_all(self):
+        result = generate_action('all', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'all(data)')
+
+    def test_whole_list_if_any(self):
+        result = generate_action('if_any', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'if any(data):\n    pass')
+
+    def test_whole_list_if_all(self):
+        result = generate_action('if_all', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'if all(data):\n    pass')
+
+    def test_whole_list_count(self):
+        result = generate_action('count', self._whole_list_ctx())
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, 'sum(1 for item in data if item)')
+
+    def test_whole_list_filter_returns_none(self):
+        result = generate_action('filter', self._whole_list_ctx())
+        self.assertIsNone(result)
+
+    def test_whole_list_delete_returns_none(self):
+        result = generate_action('delete', self._whole_list_ctx())
+        self.assertIsNone(result)
+
+    def test_whole_list_find_indices_returns_none(self):
+        result = generate_action('find_indices', self._whole_list_ctx())
+        self.assertIsNone(result)
+
+    def test_whole_list_suggest_names(self):
+        result = generate_action('count', self._whole_list_ctx())
+        name, _ = result
+        self.assertEqual(name, 'data_count')
+        result = generate_action('any', self._whole_list_ctx())
+        name, _ = result
+        self.assertEqual(name, 'data_any')
+        result = generate_action('loop_no_idx', self._whole_list_ctx())
+        name, _ = result
+        self.assertIsNone(name)
+
+    # --- Join ---
+
+    def test_join_predicate(self):
+        ctx = self._predicate_ctx()
+        ctx['join_separator'] = "', '"
+        result = generate_action('join', ctx)
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, "', '.join(str(item) for item in data if item > 100)")
+
+    def test_join_predicate_empty_sep(self):
+        ctx = self._predicate_ctx()
+        ctx['join_separator'] = "''"
+        result = generate_action('join', ctx)
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, "''.join(str(item) for item in data if item > 100)")
+
+    def test_join_whole_list(self):
+        ctx = self._whole_list_ctx()
+        ctx['join_separator'] = "', '"
+        result = generate_action('join', ctx)
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, "', '.join(str(item) for item in data)")
+
+    def test_join_multi_index(self):
+        ctx = self._multi_index_ctx()
+        ctx['join_separator'] = "','"
+        result = generate_action('join', ctx)
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, "','.join(str(data[i]) for i in [1,3,5])")
+
+    def test_join_slice(self):
+        ctx = self._slice_ctx()
+        ctx['join_separator'] = "'\\n'"
+        result = generate_action('join', ctx)
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, "'\\n'.join(str(item) for item in data[2:5])")
+
+    def test_join_index_returns_none(self):
+        ctx = self._index_ctx()
+        ctx['join_separator'] = "','"
+        result = generate_action('join', ctx)
+        self.assertIsNone(result)
+
+    def test_join_suggest_name(self):
+        ctx = self._predicate_ctx()
+        ctx['join_separator'] = "','"
+        result = generate_action('join', ctx)
+        name, _ = result
+        self.assertEqual(name, 'data_joined')
+
+    def test_join_bare_expression(self):
+        ctx = self._predicate_ctx()
+        ctx['join_separator'] = 'chr(10)'
+        result = generate_action('join', ctx)
+        self.assertIsNotNone(result)
+        _, code = result
+        self.assertEqual(code, "chr(10).join(str(item) for item in data if item > 100)")
+
 
 # === Matching tests for broadcast/pair ===
 
@@ -2240,7 +2390,7 @@ class TestActionButtonClick(unittest.TestCase):
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
 
-    def test_no_search_no_command(self):
+    def test_no_search_filter_no_command(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = None
@@ -2248,6 +2398,132 @@ class TestActionButtonClick(unittest.TestCase):
         _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(commands, [])
+
+    def test_no_search_loop_emits_code(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_action_button_event('loop_no_idx', copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn('for item in data', commands[0][1])
+
+    def test_no_search_count_emits_code(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_action_button_event('count', copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn('sum(1 for item in data if item)', commands[0][1])
+
+    def test_no_search_any_emits_code(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_action_button_event('any', copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertEqual(commands[0][1], 'any(data)')
+
+    def test_no_search_copy_emits_clipboard(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_action_button_event('count', copy=True)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], CopyToClipboard)
+        self.assertIn('sum(1 for item in data if item)', commands[0].text)
+
+    def test_join_action_with_search_emits_code(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_action_button_event("join:','", copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn("','.join(str(item) for item in data if item > 15)", commands[0][1])
+
+    def test_join_action_no_search_emits_code(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        event = make_action_button_event("join:', '", copy=False)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn("', '.join(str(item) for item in data)", commands[0][1])
+
+    def test_join_copy_emits_clipboard(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        event = make_action_button_event("join:'\\n'", copy=True)
+        _, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                             mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], CopyToClipboard)
+
+    def test_join_custom_input_stored_in_dropdown(self):
+        from list_visualizer import JoinSeparatorInput
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'action-join'}
+        event = {
+            'pythonEventStr': "lambda e: JoinSeparatorInput(value=e.get('value', ''))",
+            'eventJSON': {'type': 'input', 'value': "' | '"},
+        }
+        new_model, _ = update(event, '', 1, model, lst, mock_get_visualizer)
+        self.assertEqual(new_model['openDropdown']['customSep'], "' | '")
+
+    def test_join_enter_key_with_custom_sep(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['openDropdown'] = {'id': 'action-join', 'customSep': "' | '"}
+        event = make_search_key_event('Enter')
+        new_model, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                                     mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn("' | '.join(str(item) for item in data if item > 15)", commands[0][1])
+        self.assertIsNone(new_model.get('openDropdown'))
+
+    def test_join_enter_key_no_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        model['openDropdown'] = {'id': 'action-join', 'customSep': "','"}
+        event = make_search_key_event('Enter')
+        new_model, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                                     mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn("','.join(str(item) for item in data)", commands[0][1])
+        self.assertIsNone(new_model.get('openDropdown'))
+
+    def test_join_enter_key_default_sep(self):
+        """Enter with join dropdown open but no custom input uses default ''."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        model['openDropdown'] = {'id': 'action-join'}
+        event = make_search_key_event('Enter')
+        new_model, commands = update(event, 'data = [10, 20, 30]', 1, model, lst,
+                                     mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(len(commands) > 0)
+        self.assertIn("''.join(str(item) for item in data)", commands[0][1])
 
 
 class TestDropdownToggle(unittest.TestCase):
@@ -2446,12 +2722,54 @@ class TestActionButtonsRendering(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('copy=True', output)
 
-    def test_buttons_disabled_without_search(self):
+    def test_filter_disabled_without_search(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = None
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('pointer-events: none', output)
+        filter_pos = output.find("action=&#x27;filter&#x27;, copy=False")
+        self.assertGreater(filter_pos, -1)
+        span_end = output.find('</span>', filter_pos)
+        context = output[filter_pos:span_end]
+        self.assertIn('pointer-events: none', context)
+
+    def test_loop_enabled_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, None)
+        loop_pos = output.find('Loop')
+        self.assertGreater(loop_pos, -1)
+        context = output[max(0, loop_pos - 200):loop_pos + 200]
+        self.assertNotIn('pointer-events: none', context)
+
+    def test_question_enabled_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, None)
+        q_pos = output.find('? \u25be')
+        self.assertGreater(q_pos, -1)
+        context = output[max(0, q_pos - 200):q_pos + 200]
+        self.assertNotIn('pointer-events: none', context)
+
+    def test_count_enabled_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, None)
+        count_pos = output.find("action=&#x27;count&#x27;, copy=False")
+        self.assertGreater(count_pos, -1)
+        span_end = output.find('</span>', count_pos)
+        context = output[count_pos:span_end]
+        self.assertNotIn('pointer-events: none', context)
+
+    def test_count_shows_list_length_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn('Count (3)', output)
 
 
 class TestRowHighlighting(unittest.TestCase):
@@ -2612,6 +2930,87 @@ class TestLoopDropdown(unittest.TestCase):
         self.assertGreater(loop_pos, -1)
         context = output[max(0, loop_pos - 200):loop_pos + 200]
         self.assertIn('pointer-events: none', context)
+
+    def test_loop_dropdown_options_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        model['openDropdown'] = {'id': 'action-loop'}
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('loop_no_idx', output)
+        self.assertIn('loop_orig_idx', output)
+        self.assertIn('loop_new_idx', output)
+
+
+class TestJoinDropdown(unittest.TestCase):
+    """Test Join dropdown button rendering and behavior."""
+
+    def test_join_dropdown_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('Join', output)
+        self.assertIn('action-join', output)
+
+    def test_join_dropdown_disabled_in_first_match(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        join_pos = output.find('Join')
+        self.assertGreater(join_pos, -1)
+        context = output[max(0, join_pos - 200):join_pos + 200]
+        self.assertIn('pointer-events: none', context)
+
+    def test_join_dropdown_enabled_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, None)
+        join_pos = output.find('Join')
+        self.assertGreater(join_pos, -1)
+        context = output[max(0, join_pos - 200):join_pos + 200]
+        self.assertNotIn('pointer-events: none', context)
+
+    def test_join_dropdown_highlighted_when_linked(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['linked_action'] = 'join'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        join_pos = output.find('Join')
+        self.assertGreater(join_pos, -1)
+        context = output[max(0, join_pos - 250):join_pos + 250]
+        self.assertIn('background: #264f78; color: #ccc; border-color: #aaa;', context)
+
+    def test_join_dropdown_options_when_open(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['openDropdown'] = {'id': 'action-join'}
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn("join:&#x27;&#x27;", output)
+        self.assertIn("join:&#x27; &#x27;", output)
+        self.assertIn("join:&#x27;,&#x27;", output)
+
+    def test_join_custom_input_present(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model['openDropdown'] = {'id': 'action-join'}
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('JoinSeparatorInput', output)
+
+    def test_join_dropdown_options_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        model['openDropdown'] = {'id': 'action-join'}
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn("join:", output)
+        self.assertIn('JoinSeparatorInput', output)
 
 
 class TestSearchInitModel(unittest.TestCase):
@@ -2811,6 +3210,14 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         self.assertEqual(model.get('linked_action'), 'filter')
         self.assertEqual(model.get('linked_prefix'), 'result = ')
 
+    def test_editor_text_select_join_whole_list_enters_linked_mode(self):
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event("''.join(str(item) for item in data)")
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'join')
+        self.assertEqual(model.get('linked_source_expr'), 'data')
+        self.assertEqual(model.get('linked_prefix'), '')
+
     def test_unlink_clears_linked_state(self):
         model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
         event = make_editor_text_select_event('[item for item in data if item > 3]')
@@ -2832,6 +3239,18 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         self.assertEqual(model.get('linked_action'), 'delete')
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertTrue(len(change_cmds) > 0)
+
+    def test_linked_join_menu_updates_selected_text(self):
+        from list_visualizer import ChangeSelectedText
+        model = init_model(self.lst, mock_get_visualizer, source_code=self.source_code, source_line=self.source_line)
+        event = make_editor_text_select_event("''.join(str(item) for item in data)")
+        model, _ = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        event = make_action_button_event("join:', '")
+        model, commands = update(event, self.source_code, self.source_line, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_action'), 'join')
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertEqual(change_cmds[0].text, "', '.join(str(item) for item in data)")
 
     def test_linked_search_change_emits_change_selected_text(self):
         from list_visualizer import ChangeSelectedText
@@ -3255,6 +3674,149 @@ class TestListGrammarParse(_ListActionTestBase):
         self.assertIsNotNone(ctx)
         self.assertEqual(prefix, 'result = ')
         self.assertEqual(ctx['action'], 'filter')
+
+    def test_parse_join_whole_list(self):
+        result = self.parse_generated_code("''.join(str(item) for item in data)")
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'join')
+        self.assertEqual(result['source_expr'], 'data')
+
+    def test_parse_join_assignment_form(self):
+        from list_visualizer_grammar import parse_generated_code_or_assignment
+        ctx, prefix = parse_generated_code_or_assignment("result = ''.join(str(item) for item in data)")
+        self.assertIsNotNone(ctx)
+        self.assertEqual(prefix, 'result = ')
+        self.assertEqual(ctx['action'], 'join')
+
+
+class TestChildNewCodeBecomesColumn(unittest.TestCase):
+    """When a nested visualizer in a table cell produces NewCode, it becomes a column."""
+
+    def setUp(self):
+        self.orig_cwd = os.getcwd()
+        self.tmp_dir = tempfile.mkdtemp()
+        os.chdir(self.tmp_dir)
+
+    def tearDown(self):
+        os.chdir(self.orig_cwd)
+        shutil.rmtree(self.tmp_dir)
+
+    def _make_newcode_vis(self, commands_to_return):
+        """Create a mock visualizer that returns the given commands from update()."""
+        class NewCodeVis:
+            def can_visualize(self, v): return isinstance(v, str)
+            def get_fields(self, v): return None
+            def init_model(self, v, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+                return {'handledKeys': []}
+            def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None, small=False):
+                return '<span snc-mouse-down="X">x</span>'
+            def update(self, event, sc, sl, model, value, gv=None, eval_in_scope=None):
+                return (model, list(commands_to_return))
+        return NewCodeVis()
+
+    def _get_vis_for(self, str_vis):
+        def get_vis(v):
+            if isinstance(v, dict): return _mock_dict_vis
+            if isinstance(v, str): return str_vis
+            return _mock_int_vis
+        return get_vis
+
+    def test_child_newcode_tuple_becomes_column(self):
+        nc_vis = self._make_newcode_vis([('result', "len(^['name'])")])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, get_vis)
+        original_columns = list(model['columns'])
+        event = make_child_mouse_event("0\x00^['name']", 'X')
+        new_model, commands = update(event, 'x = [{"name": "Alice"}]', 1, model, lst, get_vis)
+
+        self.assertEqual(commands, [], "NewCode tuple should not propagate as a command")
+        self.assertIn("len(^['name'])", new_model['columns'],
+                       "NewCode expr should be added as a new column")
+
+    def test_child_newcode_tuple_not_inserted_to_buffer(self):
+        nc_vis = self._make_newcode_vis([('filtered', '[x for x in ^]')])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = ['hello', 'world']
+        model = init_model(lst, get_vis)
+        event = make_child_mouse_event('0\x00^', 'X')
+        _, commands = update(event, 'x = ["hello", "world"]', 1, model, lst, get_vis)
+
+        for cmd in commands:
+            self.assertFalse(
+                isinstance(cmd, tuple) and len(cmd) == 2,
+                "No (suggest_var_name, expr) tuples should reach the command list")
+
+    def test_child_copy_to_clipboard_passes_through(self):
+        nc_vis = self._make_newcode_vis([CopyToClipboard(text='hello')])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, get_vis)
+        event = make_child_mouse_event("0\x00^['name']", 'X')
+        _, commands = update(event, '', 1, model, lst, get_vis)
+
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], CopyToClipboard)
+        self.assertEqual(commands[0].text, 'hello')
+
+    def test_child_change_selected_text_passes_through(self):
+        nc_vis = self._make_newcode_vis([ChangeSelectedText(text='new_text')])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, get_vis)
+        event = make_child_mouse_event("0\x00^['name']", 'X')
+        _, commands = update(event, '', 1, model, lst, get_vis)
+
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+
+    def test_child_receives_column_as_source_code(self):
+        """The child should receive the cell's column caret expr as source_code."""
+        captured = {}
+        class CapturingVis:
+            def can_visualize(self, v): return isinstance(v, str)
+            def get_fields(self, v): return None
+            def init_model(self, v, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+                return {'handledKeys': []}
+            def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None, small=False):
+                return '<span snc-mouse-down="X">x</span>'
+            def update(self, event, sc, sl, model, value, gv=None, eval_in_scope=None):
+                captured['source_code'] = sc
+                captured['source_line'] = sl
+                return (model, [])
+
+        cap_vis = CapturingVis()
+        get_vis = self._get_vis_for(cap_vis)
+
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, get_vis)
+        event = make_child_mouse_event("0\x00^['name']", 'X')
+        update(event, 'x = [{"name": "Alice"}]', 1, model, lst, get_vis)
+
+        self.assertEqual(captured['source_code'], "^['name']",
+                         "Child should receive column caret expr as source_code")
+        self.assertEqual(captured['source_line'], 1)
+
+    def test_mixed_commands_only_newcode_intercepted(self):
+        """When child returns both NewCode and CopyToClipboard, only NewCode is intercepted."""
+        nc_vis = self._make_newcode_vis([
+            ('result', "^['name'].upper()"),
+            CopyToClipboard(text='copied'),
+        ])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, get_vis)
+        event = make_child_mouse_event("0\x00^['name']", 'X')
+        new_model, commands = update(event, '', 1, model, lst, get_vis)
+
+        self.assertEqual(len(commands), 1, "Only CopyToClipboard should pass through")
+        self.assertIsInstance(commands[0], CopyToClipboard)
+        self.assertIn("^['name'].upper()", new_model['columns'])
 
 
 if __name__ == '__main__':

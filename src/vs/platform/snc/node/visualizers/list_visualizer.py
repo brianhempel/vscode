@@ -128,6 +128,11 @@ class DropdownToggle:
     """User toggled a dropdown menu (e.g. the ? menu)."""
     dropdown_id: str
 
+@dataclass(frozen=True, slots=True)
+class JoinSeparatorInput:
+    """User typed in the custom separator text box in the Join dropdown."""
+    value: str
+
 # === Command types ===
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +250,14 @@ def _is_valid_python_expression(s: str) -> bool:
         ast.parse(s, mode='eval')
         return True
     except SyntaxError:
-        return False
+        pass
+    if '^' in s:
+        try:
+            ast.parse(replace_caret_in_py_exp(s, '_crt_'), mode='eval')
+            return True
+        except SyntaxError:
+            pass
+    return False
 
 
 def parse_search_term(search: str | None) -> tuple | None:
@@ -397,6 +409,27 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
     }
 
 
+def _get_whole_list_context(model: dict, source_code: str = None, source_line: int = None,
+                            *, source_expr: str = None) -> dict | None:
+    """Build a context dict representing the whole list (no search filter)."""
+    if source_expr:
+        var_name = source_expr
+        suggest_base = source_expr
+    else:
+        if not source_code or not source_line:
+            return None
+        expr, var_name = extract_expression_from_line(source_code, source_line)
+        source_expr = var_name if var_name else f"({expr})"
+        suggest_base = var_name if var_name else "result"
+
+    return {
+        'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+        'is_whole_list': True,
+        'is_predicate': False, 'is_index': False, 'is_slice': False,
+        'is_multi_index': False, 'is_first': False,
+    }
+
+
 def _ctx_to_model(ctx: dict, model: dict) -> None:
     """Apply parsed DSL context to model state (reverse of _get_search_context)."""
     if ctx.get('is_index'):
@@ -418,6 +451,7 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
 _SUGGEST_SUFFIXES = {
     'any': 'any', 'all': 'all', 'count': 'count',
     'filter': 'filtered', 'find_indices': 'indices',
+    'join': 'joined',
 }
 _STATEMENT_ACTIONS = frozenset({'loop', 'loop_no_idx', 'loop_orig_idx', 'loop_new_idx', 'if_any', 'if_all'})
 
@@ -479,6 +513,9 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
             case 'find_indices':
                 stop_expr = stop if stop else f'len({src})'
                 code = f'list(range({start or "0"}, {stop_expr}))'
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(item) for item in {src}[{start}:{stop}])'
             case _:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
@@ -504,6 +541,9 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 code = f'len({indices}) > 0'
             case 'all':
                 code = f'len({indices}) == len({src})'
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str({src}[i]) for i in {indices})'
             case _:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
@@ -617,6 +657,34 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                     code = f'[i for i, item in enumerate({src}) if {pred}]'
             case 'count':
                 code = f'sum(1 for item in {src} if {pred})'
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(item) for item in {src} if {pred})'
+            case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_whole_list'):
+        match action:
+            case 'loop_no_idx':
+                code = f'for item in {src}:\n    pass'
+            case 'loop_orig_idx':
+                code = f'for i, item in enumerate({src}):\n    pass'
+            case 'loop_new_idx':
+                code = f'for i, item in enumerate({src}):\n    pass'
+            case 'any':
+                code = f'any({src})'
+            case 'all':
+                code = f'all({src})'
+            case 'if_any':
+                code = f'if any({src}):\n    pass'
+            case 'if_all':
+                code = f'if all({src}):\n    pass'
+            case 'count':
+                code = f'sum(1 for item in {src} if item)'
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(item) for item in {src})'
             case _:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
@@ -1070,6 +1138,8 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
             match_count = len(_get_matching_indices(search, lst, eval_in_scope))
         except Exception:
             pass
+    elif not has_search:
+        match_count = len(lst)
 
     btn_base = (
         'border: 1px solid #3c3c3c;'
@@ -1128,7 +1198,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     # 2. Loop dropdown
     open_dropdown = model.get('openDropdown')
     loop_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-loop'
-    loop_enabled = has_search and not first
+    loop_enabled = not (has_search and first)
 
     loop_toggle_event = repr(DropdownToggle('action-loop'))
     loop_disabled = '' if loop_enabled else disabled_style
@@ -1172,7 +1242,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     predicate_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-predicate'
 
     toggle_event = repr(DropdownToggle('action-predicate'))
-    q_disabled = '' if has_search else disabled_style
+    q_disabled = ''
     q_style = btn_base + ('background: #264f78; color: #ccc; border-color: #aaa;' if predicate_dropdown_open else '') + q_disabled
     q_btn = f'<span class="snc-hoverable" snc-mouse-down="{html.escape(toggle_event)}" style="margin-left: 3px;{q_style}" title="Boolean queries">? \u25be</span>'
 
@@ -1191,10 +1261,10 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
                 f'</div>'
             )
 
-        dropdown_opts.append(dropdown_row('Any', 'any', has_search))
-        dropdown_opts.append(dropdown_row('All', 'all', has_search and not first))
-        dropdown_opts.append(dropdown_row('If Any', 'if_any', has_search))
-        dropdown_opts.append(dropdown_row('If All', 'if_all', has_search and not first))
+        dropdown_opts.append(dropdown_row('Any', 'any', True))
+        dropdown_opts.append(dropdown_row('All', 'all', not (has_search and first)))
+        dropdown_opts.append(dropdown_row('If Any', 'if_any', True))
+        dropdown_opts.append(dropdown_row('If All', 'if_all', not (has_search and first)))
 
         dropdown_panel = (
             '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
@@ -1215,13 +1285,72 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     delete_lbl = 'Delete First' if first else 'Delete All'
     parts.append(btn_group(delete_lbl, 'delete', has_search, 'Delete matches'))
 
-    # 5. Find Indices (disabled for single-index searches — the index is already known)
+    # 5. Join dropdown
+    join_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-join'
+    join_enabled = not (has_search and first)
+
+    join_toggle_event = repr(DropdownToggle('action-join'))
+    join_disabled = '' if join_enabled else disabled_style
+    join_active = linked_highlight if linked_action == 'join' else ''
+    join_btn_style = btn_base + ('background: #264f78; color: #ccc; border-color: #aaa;' if join_dropdown_open else '') + join_disabled + join_active
+    join_btn = f'<span class="snc-hoverable" snc-mouse-down="{html.escape(join_toggle_event)}" style="margin-left: 3px;{join_btn_style}" title="Join list items into a string">Join \u25be</span>'
+
+    if join_dropdown_open and join_enabled:
+        join_opts = []
+        join_opt_style = 'padding: 3px 6px; display: flex; align-items: center; gap: 2px;'
+
+        join_presets = ["''", "' '", "'\\n'", "','", "'\\t'"]
+
+        for sep_expr in join_presets:
+            act_action = f'join:{sep_expr}'
+            act_event = repr(ActionButtonClick(action=act_action, copy=False))
+            cp_event = repr(ActionButtonClick(action=act_action, copy=True))
+            join_opts.append(
+                f'<div style="{join_opt_style}" class="snc-dropdown-option">'
+                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{html.escape(sep_expr)}</span>'
+                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(cp_event)}" style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
+                f'</div>'
+            )
+
+        custom_sep = open_dropdown.get('customSep', "''") if open_dropdown else "''"
+        custom_input_event = "lambda e: JoinSeparatorInput(value=e.get('value', ''))"
+        custom_act_action = f'join:{custom_sep}'
+        custom_cp_event = repr(ActionButtonClick(action=custom_act_action, copy=True))
+        join_opts.append(
+            f'<div style="{join_opt_style}" class="snc-dropdown-option">'
+            f'<input type="text" snc-input="{html.escape(custom_input_event)}" '
+            f'value="{html.escape(custom_sep)}" '
+            f'placeholder="expr" '
+            f'spellcheck="false" '
+            f'style="width: 50px; background: #1e1e1e; color: #dcdcaa; border: 1px solid #3c3c3c; '
+            f'border-radius: 2px; padding: 1px 3px; font-size: 10px; font-family: inherit; outline: none;" />'
+            f'<span class="snc-hoverable" snc-mouse-down="{html.escape(custom_cp_event)}" '
+            f'style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
+            f'</div>'
+        )
+
+        join_panel = (
+            '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
+            'position: absolute;left: 0;top: 100%;'
+            'background: #252526;border: 1px solid #3c3c3c;border-radius: 3px;'
+            'z-index: 100;min-width: 80px;'
+            'box-shadow: 0 2px 8px rgba(0,0,0,0.4);font-size: 11px;line-height: 1.4;'
+            f'">{"".join(join_opts)}</div>'
+        )
+        join_btn = (
+            f'<span class="snc-dropdown-trigger" style="position: relative; display: inline-block;">'
+            f'{join_btn}{join_panel}</span>'
+        )
+
+    parts.append(join_btn)
+
+    # 6. Find Indices (disabled for single-index searches — the index is already known)
     indices_lbl = 'First Index' if first else 'Find Indices'
     parts.append(btn_group(indices_lbl, 'find_indices', has_search and not is_index_search, 'Indices of matches'))
 
-    # 6. Count
+    # 7. Count
     count_label = f'Count ({match_count})'
-    parts.append(btn_group(count_label, 'count', has_search and not first, 'Count of matches'))
+    parts.append(btn_group(count_label, 'count', not (has_search and first), 'Count of matches'))
 
     if linked_action:
         unlink_event = repr(Unlink())
@@ -1361,7 +1490,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     strs.append('</td>')
                 else:
                     strs.append('<td style="padding:0;">')
-                    strs.append(f'<div{cell_exp_attr} style="padding:3px 8px;cursor:grab;">')
+                    strs.append(f'<div{cell_exp_attr} style="padding:2px 7px;border:1px solid transparent;border-radius:3px;cursor:grab;">')
                     strs.append('<div draggable="false" style="cursor:auto;">')
                     strs.append(wrap_child_prefix(composite_key))
                     strs.extend(cell_htmls)
@@ -1421,16 +1550,27 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
         return (model, [])
 
     if isinstance(msg, ChildEvent):
+        _row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
         new_model, commands = route_child_event(
             event, model, value,
             child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope, model.get('_source_expr')),
             get_visualizer=get_visualizer,
-            source_code=source_code,
-            source_line=source_line,
+            source_code=cell_col,
+            source_line=1,
             eval_in_scope=eval_in_scope,
         )
+        filtered_commands: List[Any] = []
+        type_key = _get_item_type_key(value) if value else None
+        for cmd in commands:
+            if isinstance(cmd, tuple) and len(cmd) == 2:
+                _suggest_var_name, expr = cmd
+                new_model['columns'].append(expr)
+                if type_key:
+                    save_columns_to_dotfile(type_key, new_model['columns'])
+            else:
+                filtered_commands.append(cmd)
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
-        return (new_model, commands)
+        return (new_model, filtered_commands)
 
     commands: List[Any] = []
     type_key = _get_item_type_key(value) if value else None
@@ -1570,15 +1710,29 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     model['editing_column_index'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
-                elif key == 'Enter' and model.get('search'):
-                    if model.get('linked_action'):
-                        model['linked_action'] = 'filter'
-                    else:
+                elif key == 'Enter':
+                    dd = model.get('openDropdown')
+                    if dd and dd.get('id') == 'action-join':
+                        custom_sep = dd.get('customSep', "''")
+                        action = 'join'
                         ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                        if ctx is None:
+                            ctx = _get_whole_list_context(model, source_code, source_line)
                         if ctx:
-                            result = generate_action('filter', ctx)
+                            ctx['join_separator'] = custom_sep
+                            result = generate_action(action, ctx)
                             if result:
                                 commands.append(result)
+                        model['openDropdown'] = None
+                    elif model.get('search'):
+                        if model.get('linked_action'):
+                            model['linked_action'] = 'filter'
+                        else:
+                            ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                            if ctx:
+                                result = generate_action('filter', ctx)
+                                if result:
+                                    commands.append(result)
 
             elif key == 'Backspace' and event_json.get('metaKey', False):
                 if model.get('linked_action'):
@@ -1613,20 +1767,42 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             else:
                 model['openDropdown'] = {'id': did}
 
+        case JoinSeparatorInput(value=val):
+            dd = model.get('openDropdown')
+            if dd and dd.get('id') == 'action-join':
+                dd['customSep'] = val
+
         case ActionButtonClick(action=action, copy=copy):
             model['openDropdown'] = None
+            join_sep = None
+            if action.startswith('join:'):
+                join_sep = action[5:]
+                action = 'join'
             if model.get('linked_action') and not copy:
                 model['linked_action'] = action
                 ctx = _get_search_context(model, source_code, source_line,
                                           source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
+                if ctx is None:
+                    ctx = _get_whole_list_context(
+                        model,
+                        source_code,
+                        source_line,
+                        source_expr=model['linked_source_expr'],
+                    )
                 if ctx:
+                    if join_sep is not None:
+                        ctx['join_separator'] = join_sep
                     result = generate_action(action, ctx)
                     if result:
                         _emit_linked_update(result[1], model, commands)
             else:
                 ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                if ctx is None:
+                    ctx = _get_whole_list_context(model, source_code, source_line)
                 if ctx:
+                    if join_sep is not None:
+                        ctx['join_separator'] = join_sep
                     result = generate_action(action, ctx)
                     if result:
                         if copy:

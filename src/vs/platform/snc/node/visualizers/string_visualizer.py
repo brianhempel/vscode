@@ -151,7 +151,7 @@ class CaptureGroupsToggle:
 
 @dataclass(frozen=True, slots=True)
 class ActionButtonClick:
-    action: str  # 'find_or_map', 'replace', 'delete', 'loop', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'find_indices', 'split'
+    action: str  # 'match_strings', 'find_or_map', 'replace', 'delete', 'loop', 'loop_match_strings', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'find_indices', 'split'
     copy: bool   # True → CopyToClipboard, False → NewCode
 
 @dataclass(frozen=True, slots=True)
@@ -1206,12 +1206,19 @@ def _find_closing_delimiter(search: str | None) -> int | None:
 
 
 def _is_valid_python_expression(s: str) -> bool:
-    """Check if s parses as a valid Python expression."""
+    """Check if s parses as a valid Python expression (supports ^ caret syntax)."""
     try:
         ast.parse(s, mode='eval')
         return True
     except SyntaxError:
-        return False
+        pass
+    if '^' in s:
+        try:
+            ast.parse(replace_caret_in_py_exp(s, '_crt_'), mode='eval')
+            return True
+        except SyntaxError:
+            pass
+    return False
 
 
 def parse_slice_parts(search: str | None) -> tuple | None:
@@ -2718,7 +2725,11 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     # Build button groups
     parts = []
 
-    # 1. Get/Transform + Copy
+    # 1. Match Strings / First Substring (not applicable in replace mode)
+    ms_lbl = 'First Substring' if first else 'Match Strings'
+    parts.append(btn_group(ms_lbl, 'match_strings', has_search and not has_replace, 'Get matched strings'))
+
+    # 2. Get/Transform + Copy
     if has_replace:
         lbl = 'Map First Match \u23ce' if first else 'Map Matches \u23ce'
         parts.append(btn_group(lbl, 'find_or_map', has_search, 'Map expression over matches (Enter)'))
@@ -2726,15 +2737,54 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         lbl = 'First Match \u23ce' if first else 'Find Matches \u23ce'
         parts.append(btn_group(lbl, 'find_or_map', has_search, 'Find matches (Enter)'))
 
-    # 2. Replace + Copy (grayed out when not in replace mode)
+    # 3. Replace + Copy (grayed out when not in replace mode)
     replace_lbl = 'Replace First \u2318R' if first else 'Replace All \u2318R'
     parts.append(btn_group(replace_lbl, 'replace', has_search and has_replace, 'Replace matches (\u2318R)'))
 
-    # 3. Loop + Copy (disabled in first-match mode)
-    parts.append(btn_group('Loop', 'loop', has_search and not first, 'For loop over matches'))
-
-    # 4. ? dropdown button
+    # 4. Loop dropdown (disabled in first-match mode)
     open_dropdown = model.get('openDropdown') if model else None
+    loop_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-loop'
+    loop_enabled = has_search and not first
+
+    loop_toggle_event = repr(DropdownToggle('action-loop'))
+    loop_disabled = '' if loop_enabled else disabled_style
+    loop_btn_style = btn_base + ('background: #264f78; color: #ccc; border-color: #aaa;' if loop_dropdown_open else '') + loop_disabled
+    loop_btn = f'<span class="snc-hoverable" snc-mouse-down="{html.escape(loop_toggle_event)}" style="margin-left: 3px;{loop_btn_style}" title="For loop over matches">Loop \u25be</span>'
+
+    if loop_dropdown_open and loop_enabled:
+        loop_opts = []
+        loop_opt_style = 'padding: 3px 6px; display: flex; align-items: center; gap: 2px;'
+
+        def loop_row(label, action):
+            active = linked_highlight if linked_action == action else ''
+            act_event = repr(ActionButtonClick(action=action, copy=False))
+            cp_event = repr(ActionButtonClick(action=action, copy=True))
+            return (
+                f'<div style="{loop_opt_style}{active}" class="snc-dropdown-option">'
+                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
+                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(cp_event)}" style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
+                f'</div>'
+            )
+
+        loop_opts.append(loop_row('Match Strings', 'loop_match_strings'))
+        loop_opts.append(loop_row('Matches', 'loop'))
+
+        loop_panel = (
+            '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
+            'position: absolute;left: 0;top: 100%;'
+            'background: #252526;border: 1px solid #3c3c3c;border-radius: 3px;'
+            'z-index: 100;min-width: 120px;'
+            'box-shadow: 0 2px 8px rgba(0,0,0,0.4);font-size: 11px;line-height: 1.4;'
+            f'">{"".join(loop_opts)}</div>'
+        )
+        loop_btn = (
+            f'<span class="snc-dropdown-trigger" style="position: relative; display: inline-block;">'
+            f'{loop_btn}{loop_panel}</span>'
+        )
+
+    parts.append(loop_btn)
+
+    # 5. ? dropdown button
     predicate_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-predicate'
 
     # Build ? button with dropdown
