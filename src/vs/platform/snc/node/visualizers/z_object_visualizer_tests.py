@@ -35,23 +35,23 @@ class _GenericVis:
     """Fallback visualizer for tests (matches GenericVisualizer in python_runner)."""
     def can_visualize(self, value):
         return True
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return html_module.escape(repr(value))
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
 class _ZObjectVisAdapter:
     """Adapter wrapping the z_object_visualizer module as a visualizer object."""
     def can_visualize(self, value):
         return z_object_visualizer.can_visualize(value)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
-        return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
-        return z_object_visualizer.update(event, source_code, source_line, model, value, get_visualizer, eval_in_scope=eval_in_scope)
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        return z_object_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
 _generic_vis = _GenericVis()
 _zobj_vis = _ZObjectVisAdapter()
@@ -457,7 +457,7 @@ class TestUpdate(unittest.TestCase):
         """Passing None event returns model unchanged."""
         obj = TestObj()
         model = init_model(obj)
-        new_model, commands = update(None, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(None, ('x', 'x'), model, obj)
         self.assertEqual(new_model, model)
         self.assertEqual(commands, [])
 
@@ -465,7 +465,7 @@ class TestUpdate(unittest.TestCase):
         """Passing empty event dict returns model unchanged."""
         obj = TestObj()
         model = init_model(obj)
-        new_model, commands = update({}, "x = TestObj()", 1, model, obj)
+        new_model, commands = update({}, ('x', 'x'), model, obj)
         self.assertEqual(new_model, model)
         self.assertEqual(commands, [])
 
@@ -476,7 +476,7 @@ class TestUpdate(unittest.TestCase):
         model['fields'] = ['^.x']
 
         event = make_mouse_down_event(repr(AddFieldClick()))
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertTrue(new_model['adding_field'])
         self.assertEqual(new_model['input_value'], '')
@@ -489,7 +489,7 @@ class TestUpdate(unittest.TestCase):
         model['adding_field'] = True
 
         event = make_input_event('^.na')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['input_value'], '^.na')
 
@@ -503,7 +503,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_mouse_down_event(repr(FieldSelect(accessor='^.name')))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn('^.name', new_model['fields'])
         self.assertFalse(new_model['adding_field'])
@@ -519,7 +519,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_mouse_down_event(repr(FieldSelect(accessor='^.name')))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'][0], '^.name')
         self.assertEqual(new_model['fields'][1], '^.y')
@@ -533,7 +533,7 @@ class TestUpdate(unittest.TestCase):
         model['fields'] = ['^.x', '^.name']
 
         event = make_mouse_down_event(repr(FieldClick(index=0)), detail=2)
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['editing_index'], 0)
         self.assertEqual(new_model['input_value'], '^.x')
@@ -546,7 +546,7 @@ class TestUpdate(unittest.TestCase):
         model['fields'] = ['^.x', '^.name']
 
         event = make_mouse_down_event(repr(FieldClick(index=0)), detail=1)
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['editing_index'])
 
@@ -560,7 +560,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn('^.name', new_model['fields'])
         self.assertFalse(new_model['adding_field'])
@@ -576,7 +576,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'][0], '^.name')
         self.assertIsNone(new_model['editing_index'])
@@ -590,7 +590,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = ''
 
         event = make_key_down_event('Enter')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(len(new_model['fields']), 1)
         self.assertFalse(new_model['adding_field'])
@@ -603,7 +603,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '^.na'
 
         event = make_key_down_event('Escape')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertFalse(new_model['adding_field'])
         self.assertEqual(new_model['input_value'], '')
@@ -617,7 +617,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '^.foo'
 
         event = make_key_down_event('Escape')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['editing_index'])
         self.assertEqual(new_model['input_value'], '')
@@ -633,7 +633,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_mouse_down_event(repr(FieldSelect(accessor='^.name')))
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             # Should save with the updated fields list
             saved_fields = mock_save.call_args[0][1]
@@ -649,7 +649,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
 
     def test_none_model_gets_initialized(self):
@@ -657,7 +657,7 @@ class TestUpdate(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
         event = make_mouse_down_event(repr(AddFieldClick()))
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
         self.assertIsNotNone(new_model)
         self.assertTrue(new_model['adding_field'])
 
@@ -670,7 +670,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '^.'
 
         event = make_key_down_event('ArrowDown')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['selected_suggestion_index'], 0)
 
@@ -688,7 +688,7 @@ class TestUpdate(unittest.TestCase):
         model['selected_suggestion_index'] = last_idx
 
         event = make_key_down_event('ArrowDown')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['selected_suggestion_index'], 0)
 
@@ -701,7 +701,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '^.'
 
         event = make_key_down_event('ArrowUp')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         from z_object_visualizer import _get_autocomplete_suggestions
         suggestions = _get_autocomplete_suggestions(obj, [], '^.')
@@ -718,7 +718,7 @@ class TestUpdate(unittest.TestCase):
         model['selected_suggestion_index'] = 0
 
         event = make_key_down_event('ArrowUp')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         from z_object_visualizer import _get_autocomplete_suggestions
         suggestions = _get_autocomplete_suggestions(obj, [], '^.')
@@ -740,7 +740,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn(expected_field, new_model['fields'])
         self.assertFalse(new_model['adding_field'])
@@ -755,7 +755,7 @@ class TestUpdate(unittest.TestCase):
         model['selected_suggestion_index'] = None
 
         event = make_input_event('^.na')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         # ^.name matches '^.na' and is not in fields, so first suggestion should be selected
         self.assertEqual(new_model['selected_suggestion_index'], 0)
@@ -768,7 +768,7 @@ class TestUpdate(unittest.TestCase):
         model['selected_suggestion_index'] = 0
 
         event = make_input_event('^.zzzzz')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['selected_suggestion_index'])
 
@@ -780,7 +780,7 @@ class TestUpdate(unittest.TestCase):
         model['selected_suggestion_index'] = 0
 
         event = make_input_event('')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['selected_suggestion_index'])
 
@@ -797,7 +797,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_key_down_event('Tab')
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn(expected_field, new_model['fields'])
         self.assertFalse(new_model['adding_field'])
@@ -810,7 +810,7 @@ class TestUpdate(unittest.TestCase):
         model['fields'] = ['^.x']
 
         event = make_key_down_event('ArrowDown')
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
         self.assertIsNone(new_model['selected_suggestion_index'])
 
     def test_remove_field_removes_from_list(self):
@@ -821,7 +821,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=1)))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['^.x', '^.y'])
 
@@ -833,7 +833,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=0)))
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             saved_fields = mock_save.call_args[0][1]
             self.assertEqual(saved_fields, ['^.name'])
@@ -845,7 +845,7 @@ class TestUpdate(unittest.TestCase):
         model['fields'] = ['^.x']
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=5)))
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['^.x'])
 
@@ -859,7 +859,7 @@ class TestUpdate(unittest.TestCase):
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=0)))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['editing_index'])
         self.assertEqual(new_model['input_value'], '')
@@ -906,7 +906,7 @@ class TestDragReorder(unittest.TestCase):
         model['fields'] = ['^.x', '^.name', '^.y']
 
         event = make_mouse_down_event(repr(DragStart(index=1)))
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['drag_from_index'], 1)
 
@@ -918,7 +918,7 @@ class TestDragReorder(unittest.TestCase):
         model['drag_from_index'] = 2
 
         event = make_mouse_move_event(repr(DragOver(index=0)), buttons=1)
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['drag_over_index'], 0)
 
@@ -931,7 +931,7 @@ class TestDragReorder(unittest.TestCase):
         model['drag_over_index'] = 0
 
         event = make_mouse_move_event(repr(DragOver(index=1)), buttons=0)
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['drag_from_index'])
         self.assertIsNone(new_model['drag_over_index'])
@@ -943,7 +943,7 @@ class TestDragReorder(unittest.TestCase):
         model['fields'] = ['^.x', '^.name', '^.y']
 
         event = make_mouse_move_event(repr(DragOver(index=1)), buttons=1)
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model.get('drag_over_index'))
 
@@ -957,7 +957,7 @@ class TestDragReorder(unittest.TestCase):
 
         event = make_mouse_up_event(repr(DragEnd(index=2)))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['^.name', '^.y', '^.x'])
         self.assertIsNone(new_model['drag_from_index'])
@@ -973,7 +973,7 @@ class TestDragReorder(unittest.TestCase):
 
         event = make_mouse_up_event(repr(DragEnd(index=0)))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['^.y', '^.x', '^.name'])
         self.assertIsNone(new_model['drag_from_index'])
@@ -988,7 +988,7 @@ class TestDragReorder(unittest.TestCase):
         model['drag_over_index'] = 1
 
         event = make_mouse_up_event(repr(DragEnd(index=1)))
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['^.x', '^.name', '^.y'])
 
@@ -1002,7 +1002,7 @@ class TestDragReorder(unittest.TestCase):
 
         event = make_mouse_up_event(repr(DragEnd(index=2)))
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
-            new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+            new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
 
     def test_drag_end_without_drag_is_noop(self):
@@ -1012,7 +1012,7 @@ class TestDragReorder(unittest.TestCase):
         model['fields'] = ['^.x', '^.name', '^.y']
 
         event = make_mouse_up_event(repr(DragEnd(index=1)))
-        new_model, commands = update(event, "x = TestObj()", 1, model, obj)
+        new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['^.x', '^.name', '^.y'])
 
@@ -1145,11 +1145,11 @@ class MockInteractiveVis:
     """A mock interactive visualizer for composition tests."""
     def can_visualize(self, value):
         return isinstance(value, str)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return {'vis_type': 'mock_interactive', 'handledKeys': ['Escape']}
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
         return f'<span snc-mouse-down="MockClick()">{html_module.escape(repr(value))}</span>'
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         model = dict(model)
         model['updated'] = True
         return (model, [])
@@ -1232,7 +1232,7 @@ class TestComposition(unittest.TestCase):
             'pythonEventStr': repr(ce),
             'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
         }
-        new_model, _ = update(event, '', 1, model, obj, _interactive_get_visualizer)
+        new_model, _ = update(event, None, model, obj, _interactive_get_visualizer)
         child_model = new_model['children'].get('^.greeting')
         self.assertIsNotNone(child_model)
         self.assertTrue(child_model.get('updated', False))
@@ -1246,7 +1246,7 @@ class TestComposition(unittest.TestCase):
             'pythonEventStr': repr(RemoveFieldClick(index=greeting_idx)),
             'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
         }
-        new_model, _ = update(event, '', 1, model, obj, _interactive_get_visualizer)
+        new_model, _ = update(event, None, model, obj, _interactive_get_visualizer)
         self.assertNotIn('^.greeting', new_model.get('fields', []))
         self.assertNotIn('^.greeting', new_model.get('children', {}))
 
@@ -1266,21 +1266,21 @@ class TestComposition(unittest.TestCase):
             'pythonEventStr': repr(DragStart(index=0)),
             'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
         }
-        model, _ = update(event_start, '', 1, model, obj, _interactive_get_visualizer)
+        model, _ = update(event_start, None, model, obj, _interactive_get_visualizer)
 
         # Drag over index 1
         event_over = {
             'pythonEventStr': repr(DragOver(index=1)),
             'eventJSON': {'type': 'mousemove', 'buttons': 1},
         }
-        model, _ = update(event_over, '', 1, model, obj, _interactive_get_visualizer)
+        model, _ = update(event_over, None, model, obj, _interactive_get_visualizer)
 
         # End drag
         event_end = {
             'pythonEventStr': repr(DragEnd(index=1)),
             'eventJSON': {'type': 'mouseup', 'button': 0, 'buttons': 0},
         }
-        model, _ = update(event_end, '', 1, model, obj, _interactive_get_visualizer)
+        model, _ = update(event_end, None, model, obj, _interactive_get_visualizer)
 
         # Fields should be reordered
         self.assertEqual(model['fields'][0], second_field)

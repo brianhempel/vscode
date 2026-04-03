@@ -17,7 +17,7 @@ This visualizer follows the Elm architecture with three core functions:
    - Returns the initial model state, loading saved fields from dotfile
    - Falls back to DEFAULT_FIELDS_FOR_TYPE, then non-trivial dir() names
 
-3. update(event, source_code, source_line, model, value) -> (new_model, commands)
+3. update(event, var_and_exp, model, value) -> (new_model, commands)
    - Processes UI events (click, input, keyboard) and returns updated model
    - Saves field configuration to dotfile on commit
 
@@ -202,7 +202,7 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None):
 
 # === Elm architecture functions ===
 
-def init_model(value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
     """
     Initialize the model state for a new visualization.
 
@@ -247,14 +247,13 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, source_code=None,
     }
 
 
-def update(event, source_code: str, source_line: int, model: dict, value, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
+def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
     """
     Update model based on event. Returns (new_model, commands) tuple.
 
     Args:
         event: The UI event to process
-        source_code: The full source code of the file
-        source_line: The line number where this value is visualized
+        var_and_exp: (var_name | None, expression) tuple from the source line
         model: The current model state
         value: The object being visualized
     """
@@ -276,7 +275,7 @@ def update(event, source_code: str, source_line: int, model: dict, value, get_vi
             return eval_caret_expr(accessor_key, _obj, eval_in_scope)
         new_model, child_cmds = route_child_event(
             event, model, value, _child_value_getter, get_visualizer,
-            source_code=source_code, source_line=source_line,
+            var_and_exp=var_and_exp,
             eval_in_scope=eval_in_scope,
         )
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)

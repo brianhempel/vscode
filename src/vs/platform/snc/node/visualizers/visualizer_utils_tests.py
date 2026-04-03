@@ -115,11 +115,11 @@ class TestRouteChildEvent(unittest.TestCase):
         class MockVis:
             def can_visualize(self, value):
                 return True
-            def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+            def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
                 return {'mock': True}
             def visualize(self, value, model, get_visualizer):
                 return '<span>mock</span>'
-            def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
+            def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
                 return (updated_model, commands or [])
         return MockVis()
 
@@ -142,7 +142,7 @@ class TestRouteChildEvent(unittest.TestCase):
 
         new_model, commands = route_child_event(
             event, model, value, child_value_getter, get_vis,
-            source_code='x = [1,2]', source_line=1
+            var_and_exp=('x', 'x')
         )
         self.assertEqual(new_model['children']['0'], 'child_updated')
 
@@ -159,7 +159,6 @@ class TestRouteChildEvent(unittest.TestCase):
 
         new_model, commands = route_child_event(
             event, model, value, lambda k: value[int(k)], get_vis,
-            source_code='', source_line=1
         )
         self.assertEqual(new_model['children']['0'], 'new_child')
 
@@ -176,7 +175,6 @@ class TestRouteChildEvent(unittest.TestCase):
 
         _, commands = route_child_event(
             event, model, value, lambda k: value[int(k)], get_vis,
-            source_code='', source_line=1
         )
         self.assertEqual(commands, ['cmd1', 'cmd2'])
 
@@ -188,11 +186,11 @@ class TestAggregateHandledKeys(unittest.TestCase):
         class Vis:
             def can_visualize(self, value):
                 return True
-            def init_model(self, value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+            def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
                 return {'handledKeys': keys}
             def visualize(self, value, model, get_visualizer):
                 return ''
-            def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None):
+            def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
                 return (model, [])
         return Vis()
 

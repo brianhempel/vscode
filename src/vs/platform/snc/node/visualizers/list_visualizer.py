@@ -15,7 +15,7 @@ This visualizer follows the Elm architecture with three core functions:
    - Auto-detects columns from item fields, or defaults to ['^'] (the item)
    - Loads saved column configuration from dotfile
 
-3. update(event, source_code, source_line, model, value) -> (new_model, commands)
+3. update(event, var_and_exp, model, value) -> (new_model, commands)
    - Processes UI events (click, input, keyboard, drag) and returns updated model
    - Routes child events to cell visualizers
    - Handles column management events
@@ -52,7 +52,6 @@ from visualizer_utils import (
     route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
-    extract_expression_from_line,
     load_dotfile_list, save_dotfile_list,
     get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
@@ -292,7 +291,7 @@ def _is_list_of_int_pairs(val) -> bool:
                     for x in val))
 
 
-def _get_search_context(model: dict, source_code: str = None, source_line: int = None,
+def _get_search_context(model: dict, var_and_exp=None,
                         *, source_expr: str = None, eval_in_scope=None) -> dict | None:
     """Build search context dict from model + source info.
 
@@ -306,9 +305,9 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         var_name = source_expr
         suggest_base = source_expr
     else:
-        if not source_code or not source_line:
+        if var_and_exp is None:
             return None
-        expr, var_name = extract_expression_from_line(source_code, source_line)
+        var_name, expr = var_and_exp
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
 
@@ -409,16 +408,16 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
     }
 
 
-def _get_whole_list_context(model: dict, source_code: str = None, source_line: int = None,
+def _get_whole_list_context(model: dict, var_and_exp=None,
                             *, source_expr: str = None) -> dict | None:
     """Build a context dict representing the whole list (no search filter)."""
     if source_expr:
         var_name = source_expr
         suggest_base = source_expr
     else:
-        if not source_code or not source_line:
+        if var_and_exp is None:
             return None
-        expr, var_name = extract_expression_from_line(source_code, source_line)
+        var_name, expr = var_and_exp
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
 
@@ -852,14 +851,14 @@ _SEARCH_DEFAULTS = {
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
-def init_model(lst, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
                 **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
     source_expr = None
-    if source_code and source_line:
-        expr, var_name = extract_expression_from_line(source_code, source_line)
+    if var_and_exp:
+        var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
     type_key = _get_item_type_key(lst)
@@ -1530,7 +1529,7 @@ def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):
     return eval_caret_expr(field_key, lst[idx], eval_in_scope)
 
 
-def update(event, source_code: str, source_line: int, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
+def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
     if event is None or not isinstance(event, dict) or not event.get('pythonEventStr'):
         return (model, [])
 
@@ -1555,8 +1554,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             event, model, value,
             child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope, model.get('_source_expr')),
             get_visualizer=get_visualizer,
-            source_code=cell_col,
-            source_line=1,
+            var_and_exp=(None, cell_col),
             eval_in_scope=eval_in_scope,
         )
         filtered_commands: List[Any] = []
@@ -1715,9 +1713,9 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     if dd and dd.get('id') == 'action-join':
                         custom_sep = dd.get('customSep', "''")
                         action = 'join'
-                        ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                        ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                         if ctx is None:
-                            ctx = _get_whole_list_context(model, source_code, source_line)
+                            ctx = _get_whole_list_context(model, var_and_exp)
                         if ctx:
                             ctx['join_separator'] = custom_sep
                             result = generate_action(action, ctx)
@@ -1728,7 +1726,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                         if model.get('linked_action'):
                             model['linked_action'] = 'filter'
                         else:
-                            ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                            ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                             if ctx:
                                 result = generate_action('filter', ctx)
                                 if result:
@@ -1738,7 +1736,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 if model.get('linked_action'):
                     model['linked_action'] = 'delete'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                    ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
@@ -1780,14 +1778,13 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                 action = 'join'
             if model.get('linked_action') and not copy:
                 model['linked_action'] = action
-                ctx = _get_search_context(model, source_code, source_line,
+                ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
                 if ctx is None:
                     ctx = _get_whole_list_context(
                         model,
-                        source_code,
-                        source_line,
+                        var_and_exp,
                         source_expr=model['linked_source_expr'],
                     )
                 if ctx:
@@ -1797,9 +1794,9 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
                     if result:
                         _emit_linked_update(result[1], model, commands)
             else:
-                ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx is None:
-                    ctx = _get_whole_list_context(model, source_code, source_line)
+                    ctx = _get_whole_list_context(model, var_and_exp)
                 if ctx:
                     if join_sep is not None:
                         ctx['join_separator'] = join_sep
@@ -1815,8 +1812,8 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             parsed, prefix = parse_generated_code_or_assignment(selected_text)
             if parsed and parsed.get('action') and parsed.get('source_expr'):
                 valid = True
-                if source_code and source_line:
-                    _, line_var = extract_expression_from_line(source_code, source_line)
+                if var_and_exp:
+                    line_var = var_and_exp[0]
                     if line_var and parsed['source_expr'] != line_var:
                         valid = False
                 if valid:
@@ -1831,7 +1828,7 @@ def update(event, source_code: str, source_line: int, model: Any, value, get_vis
             model['linked_prefix'] = None
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
-        ctx = _get_search_context(model, source_code, source_line,
+        ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
         if ctx:

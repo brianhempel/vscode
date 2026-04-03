@@ -134,34 +134,6 @@ def eval_caret_expr(field_expr: str, value, eval_in_scope=None):
     return eval(replace_caret_in_py_exp(field_expr, '_v'))
 
 
-# =============================================================================
-# Source code analysis
-# =============================================================================
-
-def extract_expression_from_line(source_code: str, line_number: int) -> Tuple[str, 'str | None']:
-    """
-    Extract the expression being visualized from the source line.
-
-    Returns:
-        (expression, variable_name) where variable_name is set if it's a simple assignment
-    """
-    lines = source_code.split('\n')
-    if line_number < 1 or line_number > len(lines):
-        return ("result", None)
-
-    line = lines[line_number - 1].strip()
-
-    assignment_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?!=)(.+)$', line)
-    if assignment_match:
-        var_name = assignment_match.group(1)
-        return (var_name, var_name)
-
-    if '#' in line:
-        line = line[:line.index('#')].strip()
-
-    return (line if line else "result", None)
-
-
 @dataclass(frozen=True, slots=True)
 class ChildEvent:
     """Envelope wrapping a child visualizer's event for parent routing."""
@@ -201,8 +173,7 @@ def route_child_event(
     value: Any,
     child_value_getter: Callable[[str], Any],
     get_visualizer: Callable[[Any], Any],
-    source_code: str = '',
-    source_line: int = 0,
+    var_and_exp=None,
     eval_in_scope=None,
 ) -> Tuple[dict, List[Any]]:
     """Unwrap a ChildEvent and dispatch to the appropriate child visualizer.
@@ -213,8 +184,7 @@ def route_child_event(
         value: The parent's value (e.g. the list or object).
         child_value_getter: Maps child_key -> child value.
         get_visualizer: The standard visualizer resolver.
-        source_code: Source code context for the child update.
-        source_line: Source line context for the child update.
+        var_and_exp: (var_name | None, expression) tuple for source context.
         eval_in_scope: Evaluator for the user's code scope.
 
     Returns:
@@ -243,7 +213,7 @@ def route_child_event(
 
     inner_event = {'pythonEventStr': msg.py_ev_str, 'eventJSON': event_json}
     new_child_model, commands = child_vis.update(
-        inner_event, source_code, source_line, child_model, child_value, get_visualizer,
+        inner_event, var_and_exp, child_model, child_value, get_visualizer,
         eval_in_scope=eval_in_scope,
     )
 

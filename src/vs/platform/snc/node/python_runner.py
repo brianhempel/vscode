@@ -39,7 +39,7 @@ class Visualizer(Protocol):
     can_visualize: Callable[[Any], bool]
     visualize: Callable[..., str]  # (value, model, get_visualizer, **kwargs) -> str
     init_model: Callable[[Any, Callable[[Any], Any]], Any]  # takes value, get_visualizer
-    update: Callable[[Any, Any, Any, Any, Any, Callable[[Any], Any]], Any]  # takes ui_event, source code, source line, model, value, get_visualizer; returns (new model, commands)
+    update: Callable[[Any, Any, Any, Any, Callable[[Any], Any]], Any]  # takes ui_event, var_and_exp, model, value, get_visualizer; returns (new model, commands)
 
 
 # Global state for logging - shared between the logging functions and main execution
@@ -53,6 +53,7 @@ _loaded_visualizers: List[tuple[str, float, Visualizer]] = []
 
 # Source code context for visualizers (set before execution)
 _source_code: str = ""
+
 
 # Prefer the original stdout stream for streaming messages; fall back to sys.stdout.
 try:
@@ -98,13 +99,13 @@ class GenericVisualizer(Visualizer):
     def can_visualize(value) -> bool:
         return True
 
-    def init_model(value, get_visualizer, eval_in_scope=None, source_code=None, source_line=None) -> Any:
+    def init_model(value, get_visualizer, eval_in_scope=None, var_and_exp=None) -> Any:
         return None
 
     def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> str:
         return html.escape(repr(value))
 
-    def update(event: Any, source_code: str, source_line: int, model: Any, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
+    def update(event: Any, var_and_exp, model: Any, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
         return (model, [])
 
 # Wrapper that adds dummy `init_model` and `update` functions to static visualizers
@@ -119,14 +120,14 @@ class VisualizerOfStaticVisualizer():
     def can_visualize(self, value) -> bool:
         return self.vis.can_visualize(value)
 
-    def init_model(self, value, get_visualizer, eval_in_scope=None, source_code=None, source_line=None) -> Any:
+    def init_model(self, value, get_visualizer, eval_in_scope=None, var_and_exp=None) -> Any:
         return GenericVisualizer.init_model(value, get_visualizer)
 
     def visualize(self, value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> str:
         return self.vis.visualize(value)
 
-    def update(self, event, source_code, source_line, model, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
-        return GenericVisualizer.update(event, source_code, source_line, model, value, get_visualizer)
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
+        return GenericVisualizer.update(event, var_and_exp, model, value, get_visualizer)
 
 
 def _type_fingerprint(value: Any, depth: int = 3) -> str:
@@ -247,7 +248,7 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     return edits
 
 
-def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None) -> None:
+def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None) -> None:
     """
     Log any runtime value for visualization using the custom visualizer system.
 
@@ -256,6 +257,9 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         value: The value to be logged (can be any type including error messages)
         last_line_in_containing_loop: The last line of the loop containing this value (None if not in a loop)
         eval_in_scope: Optional callable to eval expressions in the user's code scope
+        var_and_exp: (var_name | None, expression_text) tuple, passed from the AST
+            transformer which knows the assignment target and expression for each
+            logged value.
     """
     global execution_step, line_emit_counter
     execution_step += 1
@@ -289,13 +293,13 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
                 del model['_type_fingerprint']
         else:
             model = vis.init_model(value, get_visualizer,
-                                   eval_in_scope=eval_in_scope, source_code=_source_code, source_line=line)
+                                   eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
 
         # Only replay events when the cached model was reused; if the type
         # changed the old events belong to a different visualizer.
         if fingerprint_matches and 'events' in item_model_and_events:
             for ev in item_model_and_events['events']:
-                model, cmds = vis.update(ev, _source_code, line, model, value, get_visualizer,
+                model, cmds = vis.update(ev, var_and_exp, model, value, get_visualizer,
                                          eval_in_scope=eval_in_scope)
                 commands.extend(cmds)
 
@@ -358,7 +362,7 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         except Exception:
             pass
 
-def log_and_return(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None) -> Any:
+def log_and_return(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None) -> Any:
     """
     Log a value for visualization and return it unchanged.
 
@@ -367,11 +371,12 @@ def log_and_return(line: int, value: Any, last_line_in_containing_loop: int | No
         value: The value to be logged and returned
         last_line_in_containing_loop: The last line of the loop containing this value (None if not in a loop)
         eval_in_scope: Optional callable to eval expressions in the user's code scope
+        var_and_exp: (var_name | None, expression_text) from the AST transformer
 
     Returns:
         The same value that was passed in, unchanged
     """
-    log_value(line, value, last_line_in_containing_loop, eval_in_scope)
+    log_value(line, value, last_line_in_containing_loop, eval_in_scope, var_and_exp=var_and_exp)
     return value
 
 def _emit_vis_load_warning(warning_msg: str) -> None:
@@ -522,10 +527,11 @@ class CodeTransformer(ast.NodeTransformer):
     Adds an underscore to the function to avoid infinite loop when we run it on this file itself.
     """
 
-    def __init__(self):
+    def __init__(self, source_code: str = ''):
         """Initialize the transformer with a counter for generating unique temp variables."""
         self.temp_var_counter = 0  # Used to generate unique temporary variable names
         self.loop_context_stack = []  # Stack of loop end lines
+        self.source_code = source_code
 
     def _get_temp_var(self) -> str:
         """
@@ -550,6 +556,16 @@ class CodeTransformer(ast.NodeTransformer):
             The end line of the innermost loop, or None if not in a loop
         """
         return self.loop_context_stack[-1] if self.loop_context_stack else None
+
+    def _source_segment(self, node: ast.AST) -> str:
+        """Get the original source text for an AST node, falling back to ast.unparse."""
+        seg = ast.get_source_segment(self.source_code, node) if self.source_code else None
+        if seg:
+            return seg
+        try:
+            return ast.unparse(node)
+        except Exception:
+            return "result"
 
     def _calculate_loop_end_line(self, body_statements: List[ast.stmt]) -> int:
         """
@@ -611,7 +627,8 @@ class CodeTransformer(ast.NodeTransformer):
             end_col_offset=end_col
         )
 
-    def _create_log_call(self, func_name: str, line: int, var_name: str, lineno: int, col_offset: int) -> ast.Expr:
+    def _create_log_call(self, func_name: str, line: int, var_name: str, lineno: int, col_offset: int,
+                         var_and_exp: 'tuple[str | None, str] | None' = None) -> ast.Expr:
         """
         Helper to create a logging function call with loop context information.
 
@@ -621,6 +638,8 @@ class CodeTransformer(ast.NodeTransformer):
             var_name: The variable name containing the value to log
             lineno: Line number for the AST node
             col_offset: Column offset for the AST node
+            var_and_exp: (original_var_name | None, expression_text) to embed
+                as a keyword argument in the generated call
 
         Returns:
             An AST expression statement containing the function call with valid location ranges
@@ -675,12 +694,29 @@ class CodeTransformer(ast.NodeTransformer):
         if current_loop_end is not None:
             call_end_col += 2 + len(str(current_loop_end))  # Account for third argument
 
+        keywords = [_eval_in_scope_keyword(lineno, col_offset)]
+        if var_and_exp is not None:
+            vn, ex = var_and_exp
+            tuple_node = ast.Tuple(
+                elts=[
+                    ast.Constant(value=vn, lineno=lineno, col_offset=col_offset,
+                                 end_lineno=lineno, end_col_offset=col_offset),
+                    ast.Constant(value=ex, lineno=lineno, col_offset=col_offset,
+                                 end_lineno=lineno, end_col_offset=col_offset),
+                ],
+                ctx=ast.Load(), lineno=lineno, col_offset=col_offset,
+                end_lineno=lineno, end_col_offset=col_offset,
+            )
+            keywords.append(ast.keyword(
+                arg='var_and_exp', value=tuple_node,
+                lineno=lineno, col_offset=col_offset,
+                end_lineno=lineno, end_col_offset=col_offset,
+            ))
+
         call_node = ast.Call(
             func=func_node,
             args=args,
-            keywords=[
-                _eval_in_scope_keyword(lineno, col_offset),
-            ],
+            keywords=keywords,
             lineno=lineno,
             col_offset=col_offset,
             end_lineno=lineno,
@@ -774,8 +810,12 @@ class CodeTransformer(ast.NodeTransformer):
             end_col_offset=node.col_offset + 20 + len(temp_var)
         )
 
-        # Create logging call: _log_value(line, temp_var)
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col)
+        # Create logging call: _log_value(line, temp_var, var_and_exp=...)
+        vae = None
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            vn = node.targets[0].id
+            vae = (vn, vn)
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
 
         # Return all three statements as a list
         return [temp_assign, original_assign, log_call]
@@ -851,8 +891,8 @@ class CodeTransformer(ast.NodeTransformer):
             end_col_offset=node.col_offset + 20 + len(temp_var)
         )
 
-        # Create logging call: _log_value(line, temp_var)
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col)
+        vae = (node.target.id, node.target.id) if isinstance(node.target, ast.Name) else None
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
 
         # Return all three statements as a list
         return [temp_assign, original_assign, log_call]
@@ -869,8 +909,8 @@ class CodeTransformer(ast.NodeTransformer):
         # Create assignment: temp_var = condition
         temp_assign = self._create_assignment(temp_var, node.test, node.lineno, temp_col)
 
-        # Create logging call: _log_value(line, temp_var)
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col)
+        vae = (None, self._source_segment(node.test))
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
 
         # Transform the body and orelse recursively using helper
         new_body = self._transform_statement_list(node.body)
@@ -937,12 +977,11 @@ class CodeTransformer(ast.NodeTransformer):
             # Transform the body recursively first
             new_body = []
 
-            # Add logging calls for all target variables (handles both simple and tuple unpacking)
             target_names = self._extract_target_names(node.target)
             for i, var_name in enumerate(target_names):
-                # Use different column offsets for multiple variables to avoid conflicts
                 col_offset = node.col_offset + (i * 50)
-                log_call = self._create_log_call('_log_value', node.lineno, var_name, node.lineno, col_offset)
+                vae = (var_name, var_name)
+                log_call = self._create_log_call('_log_value', node.lineno, var_name, node.lineno, col_offset, var_and_exp=vae)
                 new_body.append(log_call)
 
             # Add the original body statements (transformed) using helper
@@ -1025,8 +1064,8 @@ class CodeTransformer(ast.NodeTransformer):
         # Create assignment to temp variable: temp_var = expression
         temp_assign = self._create_assignment(temp_var, node.value, node.lineno, temp_col)
 
-        # Create logging call: _log_value(line, temp_var)
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col)
+        vae = (None, self._source_segment(node.value))
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
 
         # Create temp variable name node for the original expression
         temp_var_node = ast.Name(
@@ -1101,21 +1140,35 @@ class CodeTransformer(ast.NodeTransformer):
                     )
                     log_args.append(loop_end_const)
 
+                arg_seg = self._source_segment(arg)
+                vn, ex = (None, arg_seg)
+                vae_tuple = ast.Tuple(
+                    elts=[
+                        ast.Constant(value=vn, lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0),
+                        ast.Constant(value=ex, lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0),
+                    ],
+                    ctx=ast.Load(), lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0,
+                )
                 log_and_return_call = ast.Call(
                     func=ast.Name(
                         id='_log_and_return',
                         ctx=ast.Load(),
                         lineno=node.lineno,
-                        col_offset=node.col_offset + (i * 20),  # Offset each call to avoid conflicts
+                        col_offset=node.col_offset + (i * 20),
                         end_lineno=node.lineno,
                         end_col_offset=node.col_offset + (i * 20) + 15
                     ),
                     args=log_args,
-                    keywords=[_eval_in_scope_keyword(node.lineno, node.col_offset)],
+                    keywords=[
+                        _eval_in_scope_keyword(node.lineno, node.col_offset),
+                        ast.keyword(arg='var_and_exp', value=vae_tuple,
+                                    lineno=node.lineno, col_offset=0,
+                                    end_lineno=node.lineno, end_col_offset=0),
+                    ],
                     lineno=node.lineno,
                     col_offset=node.col_offset + (i * 20),
                     end_lineno=node.lineno,
-                    end_col_offset=node.col_offset + (i * 20) + 50  # Rough estimate
+                    end_col_offset=node.col_offset + (i * 20) + 50
                 )
 
                 new_args.append(log_and_return_call)
@@ -1189,7 +1242,20 @@ class CodeTransformer(ast.NodeTransformer):
                         ),
                         none_constant
                     ],
-                    keywords=[_eval_in_scope_keyword(node.lineno, 2000)],
+                    keywords=[
+                        _eval_in_scope_keyword(node.lineno, 2000),
+                        ast.keyword(
+                            arg='var_and_exp',
+                            value=ast.Tuple(
+                                elts=[
+                                    ast.Constant(value=None, lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0),
+                                    ast.Constant(value='return', lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0),
+                                ],
+                                ctx=ast.Load(), lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0,
+                            ),
+                            lineno=node.lineno, col_offset=0, end_lineno=node.lineno, end_col_offset=0,
+                        ),
+                    ],
                     lineno=node.lineno,
                     col_offset=2000,
                     end_lineno=node.lineno,
@@ -1223,8 +1289,8 @@ class CodeTransformer(ast.NodeTransformer):
         # Create assignment to temp variable: temp_var = return_expression
         temp_assign = self._create_assignment(temp_var, node.value, node.lineno, temp_col)
 
-        # Create logging call: _log_value(line, temp_var)
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col)
+        vae = (None, self._source_segment(node.value))
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
 
         # Create temp variable name node for the return statement
         temp_var_node = ast.Name(
@@ -1355,7 +1421,7 @@ def split_leading_imports(source_code: str):
     import_code = compile(import_module, filename='<string>', mode='exec')
 
     # Transform and compile body with logging
-    transformer = CodeTransformer()
+    transformer = CodeTransformer(source_code)
     new_body = []
     for stmt in body_stmts:
         transformed = transformer.visit(stmt)
@@ -1403,7 +1469,7 @@ def transform_code_to_ast(source_code: str) -> ast.Module:
     # Transform the AST using our custom transformer
     # This is where the magic happens - assignments, conditionals, and loops
     # get transformed to include logging calls
-    transformer = CodeTransformer()
+    transformer = CodeTransformer(source_code)
 
     # Transform each statement in the module
     # Some transformations return single nodes, others return lists of nodes

@@ -57,7 +57,6 @@ from string_visualizer import (
     is_adjacent_right,
     is_adjacent_left,
     synthesize_fuzzy_pattern,
-    find_available_variable_name,
     _eval_count_via_grammar,
     char_to_regex_literal,
     DC1, DC2, DC3, DC4,  # Sentinel characters
@@ -160,7 +159,7 @@ class TestBasics(unittest.TestCase):
         value = "test"
         model = init_model(value)
 
-        new_model, commands = update(None, "x = 'test'", 1, model, value)
+        new_model, commands = update(None, ('x', 'x'), model, value)
 
         self.assertEqual(new_model, model)
         self.assertEqual(commands, [])
@@ -170,7 +169,7 @@ class TestBasics(unittest.TestCase):
         value = "test"
         model = init_model(value)
 
-        new_model, commands = update({}, "x = 'test'", 1, model, value)
+        new_model, commands = update({}, ('x', 'x'), model, value)
 
         self.assertEqual(new_model, model)
         self.assertEqual(commands, [])
@@ -181,7 +180,7 @@ class TestBasics(unittest.TestCase):
         model = init_model(value)
 
         event = {'pythonEventStr': '', 'eventJSON': {}}
-        new_model, commands = update(event, "x = 'test'", 1, model, value)
+        new_model, commands = update(event, ('x', 'x'), model, value)
 
         self.assertEqual(new_model, model)
         self.assertEqual(commands, [])
@@ -191,7 +190,7 @@ class TestBasics(unittest.TestCase):
         event = make_mouse_down_event(5, top_half=True)
         value = "hello world"
 
-        new_model, commands = update(event, "x = 'hello world'", 1, None, value)
+        new_model, commands = update(event, ('x', 'x'), None, value)
 
         self.assertIsNotNone(new_model)
         self.assertEqual(new_model['anchorIdx'], 5)
@@ -215,14 +214,13 @@ class TestSingleLiteralSelection(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_mouse_down_top_half_starts_literal_selection(self):
         """MouseDown in top half sets up literal drag state."""
         event = make_mouse_down_event(5, top_half=True)
 
-        model, commands = update(event, self.source_code, self.source_line, self.model, self.value)
+        model, commands = update(event, self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['anchorIdx'], 5)
         self.assertEqual(model['cursorIdx'], 5)
@@ -234,10 +232,10 @@ class TestSingleLiteralSelection(unittest.TestCase):
     def test_mouse_move_updates_cursor_for_literal(self):
         """MouseMove updates cursorIdx during literal drag."""
         model, _ = update(make_mouse_down_event(5, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
 
         model, _ = update(make_mouse_move_event(8),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['anchorIdx'], 5)
         self.assertEqual(model['cursorIdx'], 8)
@@ -248,11 +246,11 @@ class TestSingleLiteralSelection(unittest.TestCase):
         """MouseUp finalizes 'hello' selection (indices 2-6) into /(hello)/."""
         # Select indices 2-6: h(2), e(3), l(4), l(5), o(6)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, commands = update(make_mouse_up_event(6),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
         self.assertIsNone(model['anchorIdx'])
@@ -264,29 +262,29 @@ class TestSingleLiteralSelection(unittest.TestCase):
     def test_single_char_selection(self):
         """Click and release on same index selects single char 'h' -> /(h)/."""
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_up_event(2),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/h/')
 
     def test_world_selection(self):
         """Select 'world' (indices 8-12) -> /(world)/."""
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/world/')
 
     def test_space_selection(self):
         """Select just the space at index 7 -> /(\\ )/."""
         model, _ = update(make_mouse_down_event(7, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/\\ /')
 
@@ -301,14 +299,13 @@ class TestSingleFuzzySelection(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_mouse_down_bottom_half_starts_fuzzy_selection(self):
         """MouseDown in bottom half starts a fuzzy selection."""
         event = make_mouse_down_event(5, top_half=False)
 
-        model, commands = update(event, self.source_code, self.source_line, self.model, self.value)
+        model, commands = update(event, self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['anchorIdx'], 5)
         self.assertEqual(model['anchorType'], 'fuzzy')
@@ -317,11 +314,11 @@ class TestSingleFuzzySelection(unittest.TestCase):
     def test_mouse_move_updates_cursor_for_fuzzy(self):
         """MouseMove updates cursorIdx for fuzzy selection (needed for pattern synthesis)."""
         model, _ = update(make_mouse_down_event(5, top_half=False),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         self.assertEqual(model['cursorIdx'], 5)
 
         model, _ = update(make_mouse_move_event(10),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Cursor tracks mouse for fuzzy (used to synthesize pattern from drag range)
         self.assertEqual(model['cursorIdx'], 10)
@@ -334,9 +331,9 @@ class TestSingleFuzzySelection(unittest.TestCase):
         - So [a-z]+ would overshoot; falls back to [a-z]{1}
         """
         model, _ = update(make_mouse_down_event(5, top_half=False),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_up_event(5),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
         self.assertEqual(model['search'], '/[a-z]{1}/')
@@ -352,9 +349,9 @@ class TestSingleFuzzySelection(unittest.TestCase):
         - Fresh selection (no existing regex) -> uses + quantifier
         """
         model, _ = update(make_mouse_down_event(7, top_half=False),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
         self.assertEqual(model['search'], r'/\s+/')
@@ -373,14 +370,14 @@ class TestSingleFuzzySelection(unittest.TestCase):
         """
         value = "abc 123 xyz"
         model = init_model(value)
-        source_code = "x = 'abc 123 xyz'"
+        var_and_exp = ('x', 'x')
 
         model, _ = update(make_mouse_down_event(6, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], r'/\d+/')
 
@@ -395,18 +392,17 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_extend_hello_with_fuzzy(self):
         """Extend 'hello' selection with fuzzy -> /(hello)(\s*)/."""
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello/')
 
@@ -416,9 +412,9 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
 
         # Extend with fuzzy at end
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
         self.assertEqual(model['undoHistory'], [None, '/hello/'])
@@ -427,19 +423,19 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         """Extend 'hello' with space literal -> /(hello)(\\ )/."""
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
 
         # Extend with single space (click and release at same position)
         model, _ = update(make_mouse_down_event(end_idx, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello)(\\ )/')
 
@@ -447,11 +443,11 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         """Chain: hello -> fuzzy -> world gives /(hello)(.*)(world)/."""
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello/')
 
@@ -459,9 +455,9 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         self.assertEqual(end_idx, 7)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -470,11 +466,11 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         # and drag to index 12 (end of 'world')
         # Augmented indices: 7=' ', 8=w, 9=o, 10=r, 11=l, 12=d, 13=$, 14=\Z
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*world/')
 
@@ -486,28 +482,27 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         # Use a multiline string where (.*) stops at newline
         self.value = "hello\nworld"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello\\nworld'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
         # Augmented: 0=\A, 1=^, 2=h, 3=e, 4=l, 5=l, 6=o, 7=$, 8=\n, 9=^, 10=w, 11=o, 12=r, 13=l, 14=d, 15=$, 16=\Z
 
     def test_chain_hello_fuzzy_world_with_newline(self):
         """Chain hello -> fuzzy (stops at $) -> $\\n^ -> world."""
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello/')
 
         # Extend with fuzzy (will stop at $ because .* doesn't match newline by default)
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello.*/')
 
@@ -518,9 +513,9 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
 
         # Extend with \n at index 8
         model, _ = update(make_mouse_down_event(end_idx, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello.*\\n/')
 
@@ -535,8 +530,7 @@ class TestExtendLeft(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_click_immediately_left_of_literal_extends_with_fuzzy(self):
         """Click char immediately left of literal selection extends it with fuzzy.
@@ -552,11 +546,11 @@ class TestExtendLeft(unittest.TestCase):
         """
         # Select "world" (indices 8-12)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/world/')
 
@@ -567,9 +561,9 @@ class TestExtendLeft(unittest.TestCase):
         # Click on index 7 (the space immediately to the left) with fuzzy (bottom half)
         # This should extend left, NOT reset the selection
         model, _ = update(make_mouse_down_event(7, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Should prepend fuzzy: /(\s*)(world)/
         self.assertEqual(model['search'], '/\\s*world/')
@@ -579,11 +573,11 @@ class TestExtendLeft(unittest.TestCase):
         """Select 'world', then prepend fuzzy -> /(\s*)(world)/."""
         # Select "world" (indices 8-12)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/world/')
 
@@ -593,9 +587,9 @@ class TestExtendLeft(unittest.TestCase):
 
         # Prepend with fuzzy by clicking the char immediately to the left (start_idx - 1 = 7)
         model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(start_idx - 1),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/\\s*world/')
         self.assertEqual(model['undoHistory'], [None, '/world/'])
@@ -604,11 +598,11 @@ class TestExtendLeft(unittest.TestCase):
         """Select 'world', prepend by dragging left selects 'o ' -> /(o\\ )(world)/."""
         # Select "world"
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
         self.assertEqual(start_idx, 8)
@@ -616,11 +610,11 @@ class TestExtendLeft(unittest.TestCase):
         # Prepend by clicking at the char immediately to the left (start_idx - 1 = 7)
         # and dragging left to index 6. This selects indices 6, 7 = 'o', ' '
         model, _ = update(make_mouse_down_event(start_idx - 1, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(o\\ )(world)/')
 
@@ -635,24 +629,23 @@ class TestClickInsideFuzzy(unittest.TestCase):
     def setUp(self):
         self.value = "hello world goodbye"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world goodbye'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_click_inside_fuzzy_starts_new_segment(self):
         """Clicking inside a realized fuzzy region starts a new drag."""
         # Create hello + (.*) pattern
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -674,7 +667,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Click inside fuzzy to start new segment
         model, _ = update(make_mouse_down_event(click_idx, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Should start a new drag, resetting the regex
         self.assertTrue(model['dragging'])
@@ -694,17 +687,17 @@ class TestClickInsideFuzzy(unittest.TestCase):
         """
         # Create hello + (.*) pattern
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -722,12 +715,12 @@ class TestClickInsideFuzzy(unittest.TestCase):
         # Click inside the fuzzy region and START dragging (don't release yet)
         click_idx = fuzzy_start + 3
         model, _ = update(make_mouse_down_event(click_idx, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Drag to another position still inside the fuzzy region
         drag_idx = click_idx + 2
         model, _ = update(make_mouse_move_event(drag_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Model should still be dragging with the in-progress selection
         self.assertTrue(model['dragging'])
@@ -767,11 +760,11 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Step 1: Select "hello" (indices 2-6) = (1)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, self.model, self.value)
+                         self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello/')
 
@@ -779,20 +772,20 @@ class TestClickInsideFuzzy(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         self.assertEqual(end_idx, 7)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
         # Step 3: Click inside the fuzzy on "world" (indices 8-12) = (2)
         # This is a click-drag to select "world"
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Expected: (1)(\s*)(2) = /hello\s*world/
         # Bug would produce: (\s*)(2)(1) = /(\s*)(world)(hello)/ - WRONG!
@@ -827,15 +820,15 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Step 1: Select "world" (indices 8-12)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(12),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(12),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/world/')
 
@@ -843,9 +836,9 @@ class TestClickInsideFuzzy(unittest.TestCase):
         first_start = get_first_segment_start_internal_idx(model['search'], value)
         self.assertEqual(first_start, 8)
         model, _ = update(make_mouse_down_event(first_start - 1, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(first_start - 1),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\s*world/')
 
@@ -863,11 +856,11 @@ class TestClickInsideFuzzy(unittest.TestCase):
         self.assertTrue(3 < fuzzy_start)
 
         model, _ = update(make_mouse_down_event(3, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # In canonical format, clicking before the fuzzy region starts a new selection
         # (index 3 is before the \s* fuzzy at the space character)
@@ -886,31 +879,31 @@ class TestClickInsideFuzzy(unittest.TestCase):
         """
         value = 'ABC'
         model = init_model(value)
-        source_code = "x = 'ABC'"
+        var_and_exp = ('x', 'x')
 
         # Augmented: 0=\A, 1=^, 2=A, 3=B, 4=C, 5=$, 6=\Z
 
         # Click (1): literal C (index 4)
         model, _ = update(make_mouse_down_event(4, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(4),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/C/')
 
         # Click (2): fuzzy B (extend left from C)
         first_start = get_first_segment_start_internal_idx(model['search'], value)
         self.assertEqual(first_start, 4)
         model, _ = update(make_mouse_down_event(first_start - 1, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(first_start - 1),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/[A-Z]{1}C/')
 
         # Click (3): literal A (inside fuzzy at index 2)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(2),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Expected: A + fuzzy + C - A first, then fuzzy for B, then C
         # Bug was: (.*)(A)(C) - wrong order
@@ -927,17 +920,16 @@ class TestKeyboardEvents(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def _create_hello_selection(self, model):
         """Helper to create /(hello)/ selection."""
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         return model
 
     def test_escape_clears_selection(self):
@@ -946,7 +938,7 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertEqual(model['search'], '/hello/')
 
         model, commands = update(make_key_down_event('Escape'),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['search'])
         self.assertIsNone(model['anchorIdx'])
@@ -960,7 +952,7 @@ class TestKeyboardEvents(unittest.TestCase):
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -970,7 +962,7 @@ class TestKeyboardEvents(unittest.TestCase):
     def test_enter_without_selection_does_nothing(self):
         """Enter without selection produces no commands."""
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
 
         self.assertEqual(commands, [])
 
@@ -979,7 +971,7 @@ class TestKeyboardEvents(unittest.TestCase):
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -988,11 +980,10 @@ class TestKeyboardEvents(unittest.TestCase):
 
     def test_enter_suggests_name_regardless_of_collision(self):
         """Enter key suggests var name without collision resolution (harness handles that)."""
-        source_code = "x = 'hello world'\nx_matches = 'already used'\nx_matches2 = 'also used'"
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Enter'),
-                                source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -1001,11 +992,10 @@ class TestKeyboardEvents(unittest.TestCase):
 
     def test_backspace_suggests_name_regardless_of_collision(self):
         """Backspace key suggests var name without collision resolution (harness handles that)."""
-        source_code = "x = 'hello world'\nx2 = 'already used'\nx3 = 'also used'"
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -1015,7 +1005,7 @@ class TestKeyboardEvents(unittest.TestCase):
     def test_backspace_without_selection_does_nothing(self):
         """Backspace without selection produces no commands."""
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
 
         self.assertEqual(commands, [])
 
@@ -1026,16 +1016,16 @@ class TestKeyboardEvents(unittest.TestCase):
         # Add fuzzy segment
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
         self.assertEqual(model['undoHistory'], [None, '/hello/'])
 
         # Undo
         model, commands = update(make_key_down_event('z', meta_key=True),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello/')
         self.assertEqual(model['undoHistory'], [None])
@@ -1049,18 +1039,18 @@ class TestKeyboardEvents(unittest.TestCase):
         # Add fuzzy segment
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
 
         # Undo
         model, _ = update(make_key_down_event('z', meta_key=True),
-                         self.source_code, self.source_line, model, self.value)
+                         self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
         # Redo
         model, commands = update(make_key_down_event('z', meta_key=True, shift_key=True),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
         self.assertEqual(model['undoHistory'], [None, '/hello/'])
@@ -1070,7 +1060,7 @@ class TestKeyboardEvents(unittest.TestCase):
     def test_undo_with_empty_history_does_nothing(self):
         """Cmd-Z with empty undo history does nothing."""
         model, commands = update(make_key_down_event('z', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
 
         self.assertIsNone(model['search'])
         self.assertEqual(model['undoHistory'], [])
@@ -1079,7 +1069,7 @@ class TestKeyboardEvents(unittest.TestCase):
     def test_redo_with_empty_history_does_nothing(self):
         """Cmd-Shift-Z with empty redo history does nothing."""
         model, commands = update(make_key_down_event('z', meta_key=True, shift_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
 
         self.assertIsNone(model['search'])
         self.assertEqual(commands, [])
@@ -1096,15 +1086,15 @@ class TestEdgeCases(unittest.TestCase):
         """Selection from index 0 includes \\A anchor -> /(\\A^he)/."""
         value = "hello"
         model = init_model(value)
-        source_code = "x = 'hello'"
+        var_and_exp = ('x', 'x')
 
         # Select indices 0-3: \A(0), ^(1), h(2), e(3)
         model, _ = update(make_mouse_down_event(0, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(3),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(3),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\A^he/')
 
@@ -1112,15 +1102,15 @@ class TestEdgeCases(unittest.TestCase):
         """Selection from index 1 includes ^ anchor -> /(^hel)/."""
         value = "hello"
         model = init_model(value)
-        source_code = "x = 'hello'"
+        var_and_exp = ('x', 'x')
 
         # Select indices 1-4: ^(1), h(2), e(3), l(4)
         model, _ = update(make_mouse_down_event(1, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(4),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(4),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/^hel/')
 
@@ -1128,15 +1118,15 @@ class TestEdgeCases(unittest.TestCase):
         """Selection of 'hello' in 'hello\\nworld' -> /(hello)/."""
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Augmented: 0=\A, 1=^, 2=h, 3=e, 4=l, 5=l, 6=o, 7=$, 8=\n, 9=^, 10=w...
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello/')
 
@@ -1144,16 +1134,16 @@ class TestEdgeCases(unittest.TestCase):
         """Selection spanning newline in 'hi\\nbye' -> /(hi$\\n^b)/."""
         value = "hi\nbye"
         model = init_model(value)
-        source_code = "x = 'hi\\nbye'"
+        var_and_exp = ('x', 'x')
 
         # Augmented: 0=\A, 1=^, 2=h, 3=i, 4=$, 5=\n, 6=^, 7=b, 8=y, 9=e, 10=$, 11=\Z
         # Select indices 2-7: h(2), i(3), $(4), \n(5), ^(6), b(7)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(7),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(7),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hi$\\n^b/')
 
@@ -1161,19 +1151,19 @@ class TestEdgeCases(unittest.TestCase):
         """MouseMove with buttons=0 finalizes segment."""
         value = "hello"
         model = init_model(value)
-        source_code = "x = 'hello'"
+        var_and_exp = ('x', 'x')
 
         # Start drag
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(5),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertTrue(model['dragging'])
 
         # Mouse released outside (buttons=0)
         model, _ = update(make_mouse_move_event(5, buttons=0),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertFalse(model['dragging'])
         self.assertEqual(model['search'], '/hell/')
@@ -1182,15 +1172,15 @@ class TestEdgeCases(unittest.TestCase):
         """Selection on empty string selects anchors -> /(\\A^)/."""
         value = ""
         model = init_model(value)
-        source_code = "x = ''"
+        var_and_exp = ('x', 'x')
 
         # Augmented for "": 0=\A, 1=^, 2=$, 3=\Z
         model, _ = update(make_mouse_down_event(0, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(1),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(1),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\A^/')
 
@@ -1198,21 +1188,21 @@ class TestEdgeCases(unittest.TestCase):
         """Clicking away from extension points resets selection."""
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Create initial selection
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello/')
 
         # Click somewhere NOT an extension point (index 10 = 'r' in world)
         model, _ = update(make_mouse_down_event(10, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Selection should be reset, new drag started (no flags to preserve)
         self.assertIsNone(model['search'])
@@ -1223,14 +1213,14 @@ class TestEdgeCases(unittest.TestCase):
         """A fresh drag with /hello/i preserves the i flag as ``i."""
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Create selection with case-insensitive flag
         model['search'] = '/hello/i'
 
         # Click somewhere NOT an extension point to start fresh drag
         model, _ = update(make_mouse_down_event(10, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Flags should be preserved as bare backtick form
         self.assertEqual(model['search'], '``i')
@@ -1240,12 +1230,12 @@ class TestEdgeCases(unittest.TestCase):
         """A fresh drag with /hello/i1 preserves both flags as ``i1."""
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         model['search'] = '/hello/i1'
 
         model, _ = update(make_mouse_down_event(10, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '``i1')
 
@@ -1253,17 +1243,17 @@ class TestEdgeCases(unittest.TestCase):
         """After fresh drag preserving flags, completing selection carries flags to new regex."""
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         model['search'] = '/hello/i'
 
         # Fresh drag on "world" (indices 8-12)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(12),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(12),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # New regex should have the i flag preserved
         self.assertEqual(model['search'], '/world/i')
@@ -1272,20 +1262,20 @@ class TestEdgeCases(unittest.TestCase):
         """Toggle 1st with no search, then drag should carry flag to new regex."""
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Toggle 1st with no search
         model, _ = update(make_first_match_toggle_event(),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '``1')
 
         # Drag to select "hello" (indices 2-6)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello/1')
 
@@ -1559,7 +1549,7 @@ class TestDropdownToggle(unittest.TestCase):
         self.assertIsNone(model.get('openDropdown'))
 
         event = make_dropdown_toggle_event('fuzzy-pattern-0')
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         self.assertIsNotNone(model.get('openDropdown'))
         self.assertEqual(model['openDropdown']['id'], 'fuzzy-pattern-0')
@@ -1571,7 +1561,7 @@ class TestDropdownToggle(unittest.TestCase):
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_dropdown_toggle_event('fuzzy-pattern-0')
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         self.assertIsNone(model.get('openDropdown'))
 
@@ -1581,7 +1571,7 @@ class TestDropdownToggle(unittest.TestCase):
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_dropdown_toggle_event('fuzzy-pattern-1')
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         self.assertIsNotNone(model.get('openDropdown'))
         self.assertEqual(model['openDropdown']['id'], 'fuzzy-pattern-1')
@@ -1592,7 +1582,7 @@ class TestDropdownToggle(unittest.TestCase):
         model = init_model("hello")
 
         event = make_dropdown_toggle_event('fuzzy-pattern-5')
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         self.assertEqual(model['openDropdown']['segmentIndex'], 5)
 
@@ -1609,7 +1599,7 @@ class TestDropdownSelect(unittest.TestCase):
 
         # Select \s (character class only, no quantifier)
         event = make_dropdown_select_event('fuzzy-pattern-1', r'\s')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # Result should be \s* (preserves the * from .*)
         self.assertEqual(model['search'], r'/hello\s*world/')
@@ -1622,7 +1612,7 @@ class TestDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('fuzzy-pattern-0', r'\d*')
-        model, _ = update(event, '', 1, model, "test")
+        model, _ = update(event, None, model, "test")
 
         self.assertIsNone(model.get('openDropdown'))
 
@@ -1634,7 +1624,7 @@ class TestDropdownSelect(unittest.TestCase):
 
         # Select \w (character class only), quantifier * is preserved
         event = make_dropdown_select_event('fuzzy-pattern-0', r'\w')
-        model, _ = update(event, '', 1, model, "test")
+        model, _ = update(event, None, model, "test")
 
         self.assertEqual(model['undoHistory'], ['/(.*)/']),
         self.assertEqual(model['search'], r'/\w*/')
@@ -1646,7 +1636,7 @@ class TestDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('fuzzy-pattern-1', r'\d*')
-        model, _ = update(event, '', 1, model, "test")
+        model, _ = update(event, None, model, "test")
 
         # Regex should remain unchanged
         self.assertEqual(model['search'], '/(.*)/')
@@ -1663,7 +1653,7 @@ class TestDropdownCloseBehavior(unittest.TestCase):
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_mouse_down_event(3, top_half=True)
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         self.assertIsNone(model.get('openDropdown'))
 
@@ -1674,7 +1664,7 @@ class TestDropdownCloseBehavior(unittest.TestCase):
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_key_down_event('Escape')
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         # Dropdown should be closed
         self.assertIsNone(model.get('openDropdown'))
@@ -1688,7 +1678,7 @@ class TestDropdownCloseBehavior(unittest.TestCase):
         model['openDropdown'] = None
 
         event = make_key_down_event('Escape')
-        model, _ = update(event, '', 1, model, "hello")
+        model, _ = update(event, None, model, "hello")
 
         # Selection should be cleared
         self.assertIsNone(model.get('search'))
@@ -2369,21 +2359,21 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select ^ literal at index 1
         model, _ = update(make_mouse_down_event(1, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(1),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/^/')
 
         # Extend with .* fuzzy
         last_end = get_last_segment_end_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(last_end, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(last_end),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/^[a-z]{1}/')
 
         # Verify last_end (one past the last segment's last char)
@@ -2392,9 +2382,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Click \n at index 8 (past $ at 7) — THIS WAS THE BUG
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Click at index 8 is far from last_end=3, starts new selection for \n
         self.assertEqual(model['search'], '/\\n/')
@@ -2408,15 +2398,15 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello" (indices 2-6)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/hello/')
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
@@ -2424,9 +2414,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Click \n at 8 (skips $ at 7)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/(hello)(\\n)/')
 
@@ -2441,15 +2431,15 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello"
         model = init_model(value)
-        source_code = "x = 'hello'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/hello/')
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
@@ -2457,9 +2447,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Click \Z at 8 (past $ at 7)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/(hello)(\\Z)/')
 
@@ -2470,24 +2460,24 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/hello/')
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
 
         # Click \n at 8 with fuzzy (bottom half) — skips $ at 7
         model, _ = update(make_mouse_down_event(8, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -2502,15 +2492,15 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select "world" at indices 10-14
         model, _ = update(make_mouse_down_event(10, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(14),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(14),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/world/')
 
         first_start = get_first_segment_start_internal_idx(model['search'], value)
@@ -2518,9 +2508,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Click \n at 8 (past ^ at 9)
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Should extend left (includes \n and ^ which is between)
         self.assertEqual(model['search'], '/(\\n^)(world)/')
@@ -2536,15 +2526,15 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello"
         model = init_model(value)
-        source_code = "x = 'hello'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/hello/')
 
         first_start = get_first_segment_start_internal_idx(model['search'], value)
@@ -2552,9 +2542,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Click \A at 0 (past ^ at 1)
         model, _ = update(make_mouse_down_event(0, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(0),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Should extend left with \A and ^
         self.assertEqual(model['search'], '/(\\A^)(hello)/')
@@ -2569,20 +2559,20 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select "world"
         model, _ = update(make_mouse_down_event(10, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(14),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(14),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/world/')
 
         # Click $ at 7 — there's \n (real char) between $ and the selection
         model, _ = update(make_mouse_down_event(7, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Should reset, not extend
         self.assertIsNone(model['search'])
@@ -2594,24 +2584,24 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/hello/')
 
         # Click \n at 8 (skips $ at 7) and drag to ^ at 9
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(9),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(9),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Should extend with \n^ (both selected by the drag)
         self.assertEqual(model['search'], '/(hello)(\\n^)/')
@@ -2625,21 +2615,21 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello\nworld"
         model = init_model(value)
-        source_code = "x = 'hello\\nworld'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Click \n at 8
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(8),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         # Should be just \n, NOT $\n
         self.assertEqual(model['search'], '/(hello)(\\n)/')
@@ -2651,23 +2641,23 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello" (indices 2-6)
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/hello/')
 
         # Extend with fuzzy at exact end
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(end_idx),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -2678,23 +2668,23 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         """
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Select "world"
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(12),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(12),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         self.assertEqual(model['search'], '/world/')
 
         # Extend left at first_start - 1 (standard adjacency)
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(start_idx - 1),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\s*world/')
 
@@ -2724,13 +2714,12 @@ class TestSearchBoxBasics(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_typing_regex_sets_selection_regex(self):
         """Typing a regex in the search box sets search directly."""
         model, commands = update(make_search_box_input_event('/hello/'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/hello/')
         self.assertEqual(commands, [])
@@ -2738,7 +2727,7 @@ class TestSearchBoxBasics(unittest.TestCase):
     def test_typing_regex_with_groups_sets_selection_regex(self):
         """Typing a regex with capturing groups works."""
         model, commands = update(make_search_box_input_event('/(hello)(.*)(world)/'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/(hello)(.*)(world)/')
 
@@ -2748,32 +2737,32 @@ class TestSearchBoxBasics(unittest.TestCase):
         self.model['undoHistory'] = [None]
 
         model, _ = update(make_search_box_input_event(''),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertIsNone(model['search'])
 
     def test_typing_saves_undo_history(self):
         """Each search box change saves the previous value to undo history."""
         model, _ = update(make_search_box_input_event('/hello/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['undoHistory'], [None])  # Previous was None
 
         model, _ = update(make_search_box_input_event('/hello world/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['undoHistory'], [None, '/hello/'])
 
     def test_same_value_does_not_add_to_undo(self):
         """Typing the same value again doesn't add duplicate undo entries."""
         model, _ = update(make_search_box_input_event('/hello/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['undoHistory'], [None])
 
         # Same value again
         model, _ = update(make_search_box_input_event('/hello/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['undoHistory'], [None])  # No duplicate
 
@@ -2785,7 +2774,7 @@ class TestSearchBoxBasics(unittest.TestCase):
         self.model['insertAfterSegment'] = 1
 
         model, _ = update(make_search_box_input_event('/hello/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertIsNone(model['anchorIdx'])
         self.assertIsNone(model['cursorIdx'])
@@ -2795,14 +2784,14 @@ class TestSearchBoxBasics(unittest.TestCase):
     def test_invalid_regex_still_stored(self):
         """An invalid regex is still stored so the user can keep editing."""
         model, _ = update(make_search_box_input_event('/[unclosed/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/[unclosed/')
 
     def test_search_box_value_without_delimiters(self):
         """Value without / delimiters is stored as-is (future search types)."""
         model, _ = update(make_search_box_input_event('hello'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], 'hello')
 
@@ -2836,15 +2825,15 @@ class TestSearchBoxVisualize(unittest.TestCase):
         """After a mouse selection, the search box reflects the built regex."""
         value = "hello world"
         model = init_model(value)
-        source_code = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         # Select "hello" by mouse
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
-                         source_code, 1, model, value)
+                         var_and_exp, model, value)
 
         html = visualize(value, model, None, None)
         self.assertIn('/hello/', html)
@@ -2861,8 +2850,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_type_regex_then_extend_with_mouse(self):
         """Type a regex in the search box, then extend it with mouse selection.
@@ -2871,7 +2859,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         """
         # Type regex in search box
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/(hello)/')
 
@@ -2880,9 +2868,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         self.assertIsNotNone(end_idx)
 
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -2893,7 +2881,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         """
         # Type regex with fuzzy segment in the search box
         model, _ = update(make_search_box_input_event('/(hello)(.*)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/(hello)(.*)/')
 
@@ -2904,11 +2892,11 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         self.assertIsNotNone(fuzzy_info)
 
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello.*world/')
 
@@ -2919,7 +2907,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         """
         # Type regex
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/(hello)/')
 
@@ -2930,9 +2918,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         # is_adjacent_right(8, 7, value) == True because 8 >= 7 and idx == last_end + 1
         # So let's click at 10 ('r') which is NOT adjacent to index 7
         model, _ = update(make_mouse_down_event(10, top_half=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(10),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # Should reset and create a fresh single-char selection
         self.assertEqual(model['search'], '/r/')
@@ -2944,7 +2932,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         """
         # Type regex in search box
         model, _ = update(make_search_box_input_event('/(world)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], '/(world)/')
 
@@ -2953,9 +2941,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         self.assertIsNotNone(start_idx)
 
         model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(start_idx - 1),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/\\s*world/')
 
@@ -2966,17 +2954,16 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def _select_hello(self, model):
         """Helper to create /(hello)/ via mouse selection."""
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         return model
 
     def _select_hello_fuzzy_world(self, model):
@@ -2986,17 +2973,17 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         # Add fuzzy
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # Add "world" inside fuzzy
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         return model
 
     def test_mouse_selection_then_edit_in_search_box(self):
@@ -3006,7 +2993,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         # Now tweak the regex via search box
         model, _ = update(make_search_box_input_event('/(hell)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hell)/')
         self.assertEqual(model['undoHistory'], [None, '/hello/'])
@@ -3017,7 +3004,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         self.assertEqual(model['search'], '/hello/')
 
         model, _ = update(make_search_box_input_event(''),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['search'])
         self.assertEqual(model['undoHistory'], [None, '/hello/'])
@@ -3032,7 +3019,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         # Edit in search box to shorten the pattern
         model, _ = update(make_search_box_input_event('/(hel)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hel)/')
 
@@ -3041,9 +3028,9 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         self.assertIsNotNone(end_idx)
 
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hel[a-z]{1}/')
 
@@ -3054,7 +3041,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         # Edit the pattern in the search box to change \s* to \s+
         model, _ = update(make_search_box_input_event(r'/(hello)(\s+)(world)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r'/(hello)(\s+)(world)/')
 
@@ -3069,30 +3056,30 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         # Select "world" with mouse
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(12),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(12),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/world/')
 
         # Edit in search box
         model, _ = update(make_search_box_input_event('/(world!)/'),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
         self.assertEqual(model['search'], '/(world!)/')
 
         # Fix back
         model, _ = update(make_search_box_input_event('/(world)/'),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
         self.assertEqual(model['search'], '/(world)/')
 
         # Extend left with fuzzy
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(start_idx - 1),
-                          self.source_code, self.source_line, model, value)
+                          self.var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\s*world/')
 
@@ -3103,19 +3090,18 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_undo_search_box_edit(self):
         """Cmd-Z after a search box edit restores the previous regex."""
         # Type a regex
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/(hello)/')
 
         # Undo
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['search'])
         self.assertEqual(model['undoHistory'], [])
@@ -3124,16 +3110,16 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
     def test_redo_search_box_edit(self):
         """Cmd-Shift-Z after undoing a search box edit restores the regex."""
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         # Undo
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertIsNone(model['search'])
 
         # Redo
         model, _ = update(make_key_down_event('z', meta_key=True, shift_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello)/')
 
@@ -3146,56 +3132,56 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
         """
         # Mouse: select hello
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
         # Mouse: extend with fuzzy
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello\\s*/')
 
         # Search box: refine to /(hello)(.*)(world)/
         model, _ = update(make_search_box_input_event('/(hello)(.*)(world)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/(hello)(.*)(world)/')
         self.assertEqual(model['undoHistory'], [None, '/hello/', '/hello\\s*/'])
 
         # Undo 1: back to /hello\s*/
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello\\s*/')
 
         # Undo 2: back to /hello/
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
         # Undo 3: back to None
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertIsNone(model['search'])
 
     def test_search_box_edit_clears_redo_history(self):
         """A search box edit after an undo clears the redo history."""
         # Create a regex
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         # Undo it
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['redoHistory'], ['/(hello)/'])
 
         # Type something new in search box - should clear redo
         model, _ = update(make_search_box_input_event('/(world)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/(world)/')
         self.assertEqual(model['redoHistory'], [])
 
@@ -3206,16 +3192,15 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_enter_after_search_box_regex(self):
         """Enter generates (suggest_name, expr) using the regex typed in the search box."""
         model, _ = update(make_search_box_input_event('/(hello)(.*)(world)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -3225,10 +3210,10 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
     def test_enter_after_search_box_simple_regex(self):
         """Enter generates (suggest_name, expr) for a simple regex without groups."""
         model, _ = update(make_search_box_input_event('/hello/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -3237,12 +3222,11 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
 
     def test_enter_after_search_box_suggests_name_regardless_of_collision(self):
         """Search-box Enter path suggests name without collision resolution."""
-        source_code = "x = 'hello world'\nx_matches = 'already used'"
         model, _ = update(make_search_box_input_event('/hello/'),
-                          source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         model, commands = update(make_key_down_event('Enter'),
-                                source_code, self.source_line, model, self.value)
+                                self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -3259,33 +3243,31 @@ class TestSingleQuoteEscaping(unittest.TestCase):
     def test_literal_selection_with_single_quote_stores_escaped(self):
         value = "it's here"
         model = init_model(value)
-        source_code = 'x = "it\'s here"'
-        source_line = 1
+        var_and_exp = ('x', 'x')
 
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(5),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(5),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
 
         self.assertEqual(model['search'], "/it\\'s/")
 
     def test_enter_with_single_quote_generates_valid_raw_string(self):
         value = "it's here"
         model = init_model(value)
-        source_code = 'x = "it\'s here"'
-        source_line = 1
+        var_and_exp = ('x', 'x')
 
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(5),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(5),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
 
         model, commands = update(make_key_down_event('Enter'),
-                                source_code, source_line, model, value)
+                                var_and_exp, model, value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("r'it\\'s'", expr)
@@ -3293,41 +3275,31 @@ class TestSingleQuoteEscaping(unittest.TestCase):
     def test_backspace_with_single_quote_generates_valid_raw_string(self):
         value = "it's here"
         model = init_model(value)
-        source_code = 'x = "it\'s here"'
-        source_line = 1
+        var_and_exp = ('x', 'x')
 
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(5),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(5),
-                         source_code, source_line, model, value)
+                         var_and_exp, model, value)
 
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                source_code, source_line, model, value)
+                                var_and_exp, model, value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("r'it\\'s'", expr)
 
 
-class TestFindAvailableVariableName(unittest.TestCase):
-    """Unit tests for variable-name collision helper."""
-
-    def test_returns_desired_name_when_unused(self):
-        source_code = "x = 'hello world'"
-        self.assertEqual(find_available_variable_name(source_code, "x_match"), "x_match")
-
-    def test_increments_suffix_until_name_is_available(self):
-        source_code = "x_match = 1\nx_match2 = 2\nx_match3 = 3"
-        self.assertEqual(find_available_variable_name(source_code, "x_match"), "x_match4")
+class TestBareExpressionSuggestions(unittest.TestCase):
+    """Tests for suggested variable names with bare expressions."""
 
     def test_bare_expression_suggests_result_matches(self):
         """For a bare expression (not an assignment), suggested name is result_matches."""
-        source_code = "print('hello world')"
         model = init_model("hello world")
         model['search'] = '/hello/'
         model, commands = update(make_key_down_event('Enter'),
-                                source_code, 1, model, "hello world")
+                                (None, "print('hello world')"), model, "hello world")
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "result_matches")
@@ -3335,11 +3307,10 @@ class TestFindAvailableVariableName(unittest.TestCase):
 
     def test_bare_expression_suggests_result_for_delete(self):
         """For a bare expression, Backspace suggests 'result' as var name."""
-        source_code = "print('hello world')"
         model = init_model("hello world")
         model['search'] = '/hello/'
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                source_code, 1, model, "hello world")
+                                (None, "print('hello world')"), model, "hello world")
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "result")
@@ -3352,16 +3323,15 @@ class TestSearchBoxEscape(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_escape_clears_search_box_typed_regex(self):
         """Escape clears a regex that was typed in the search box."""
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         model, _ = update(make_key_down_event('Escape'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['search'])
         # The typed regex should be in undo history (recoverable)
@@ -3424,8 +3394,7 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_mouse_then_searchbox_then_mouse_then_searchbox(self):
         """Multiple alternations between mouse and search box.
@@ -3437,30 +3406,30 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
         """
         # Mouse: select "hello"
         model, _ = update(make_mouse_down_event(2, top_half=True),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
         # Search box: add fuzzy
         model, _ = update(make_search_box_input_event('/(hello)(.*)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/(hello)(.*)/')
 
         # Mouse: click inside fuzzy to add "world"
         model, _ = update(make_mouse_down_event(8, top_half=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(12),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello.*world/')
 
         # Search box: tweak fuzzy to \s+
         model, _ = update(make_search_box_input_event(r'/(hello)(\s+)(world)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], r'/(hello)(\s+)(world)/')
 
         # Verify the full undo history
@@ -3475,32 +3444,32 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
         """Switching input methods doesn't break the undo chain."""
         # Search box
         model, _ = update(make_search_box_input_event('/(hello)/'),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
 
         # Mouse extend
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello\\s*/')
 
         # Search box again
         model, _ = update(make_search_box_input_event('/(hello)(\\d+)/'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/(hello)(\\d+)/')
 
         # Undo all the way back
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello\\s*/')
 
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/(hello)/')
 
         model, _ = update(make_key_down_event('z', meta_key=True),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertIsNone(model['search'])
 
     def test_incremental_typing_in_search_box(self):
@@ -3514,7 +3483,7 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
         steps = ['/', '/h', '/he', '/hel', '/hell', '/hello', '/hello/']
         for step_value in steps:
             model, _ = update(make_search_box_input_event(step_value),
-                              self.source_code, self.source_line, model, self.value)
+                              self.var_and_exp, model, self.value)
             self.assertEqual(model['search'], step_value)
 
         # Only the changing values should be in undo history
@@ -3648,8 +3617,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     # --- Handle drag start ---
 
@@ -3659,7 +3627,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, commands = update(make_handle_mouse_down_event(0, 'right'),
-                                 self.source_code, self.source_line, model, self.value)
+                                 self.var_and_exp, model, self.value)
 
         self.assertIsNotNone(model.get('handleDrag'))
         self.assertEqual(model['handleDrag']['segmentIndex'], 0)
@@ -3672,7 +3640,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, commands = update(make_handle_mouse_down_event(0, 'left'),
-                                 self.source_code, self.source_line, model, self.value)
+                                 self.var_and_exp, model, self.value)
 
         self.assertIsNotNone(model.get('handleDrag'))
         self.assertEqual(model['handleDrag']['segmentIndex'], 0)
@@ -3686,9 +3654,9 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(8),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['handleDrag']['cursorIdx'], 8)
 
@@ -3698,9 +3666,9 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(8),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # The normal drag state should not be set
         self.assertIsNone(model.get('anchorIdx'))
@@ -3714,11 +3682,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertIsNone(model.get('handleDrag'))
 
@@ -3730,11 +3698,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello\\ )/')
 
@@ -3745,11 +3713,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # hello is internal [2,7). Drag right handle to index 5 (second l).
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(5),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(5),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hell)/')
 
@@ -3762,11 +3730,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # ello matches internal [3,7). Drag left handle to index 2 (h).
         model, _ = update(make_handle_mouse_down_event(0, 'left'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(2),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(2),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello)/')
 
@@ -3777,11 +3745,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # hello is internal [2,7). Drag left handle to index 3 (e).
         model, _ = update(make_handle_mouse_down_event(0, 'left'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(3),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(3),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(ello)/')
 
@@ -3794,11 +3762,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # h is internal [2,3). Drag right handle to index 1 (past start).
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(1),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(1),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # Should stay as /(h)/ - at least 1 char
         self.assertEqual(model['search'], '/(h)/')
@@ -3810,11 +3778,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # h is internal [2,3). Drag left handle to index 3 (past end).
         model, _ = update(make_handle_mouse_down_event(0, 'left'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(3),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(3),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # Should stay as /(h)/ - at least 1 char
         self.assertEqual(model['search'], '/(h)/')
@@ -3828,11 +3796,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # Drag right handle of hello to include space.
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello\\ )(.*)(world)/')
 
@@ -3843,11 +3811,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # world is internal [8,13). Drag left handle to index 7 (space).
         model, _ = update(make_handle_mouse_down_event(2, 'left'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello)(.*)(\\ world)/')
 
@@ -3859,11 +3827,11 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertIn('/(hello)/', model['undoHistory'])
 
@@ -3875,13 +3843,13 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # Drag right handle to 8 then back to 6 (original last char index).
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(8),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello)/')
         self.assertEqual(model.get('undoHistory', []), undo_before)
@@ -3894,9 +3862,9 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # Still in handle-drag mode (no mouse-up yet).
         self.assertIsNotNone(model.get('handleDrag'))
@@ -3916,13 +3884,13 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model['search'] = '/(hello)/'
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(7),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         # Mouse released outside - buttons=0
         model, _ = update(make_mouse_move_event(8, buttons=0),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
 
         self.assertIsNone(model.get('handleDrag'))
         self.assertEqual(model['search'], '/(hello\\ )/')
@@ -4151,7 +4119,7 @@ class TestRepetitionDropdownToggle(unittest.TestCase):
         self.assertIsNone(model.get('openDropdown'))
 
         event = make_dropdown_toggle_event('repetition-0')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertIsNotNone(model.get('openDropdown'))
         self.assertEqual(model['openDropdown']['id'], 'repetition-0')
@@ -4164,7 +4132,7 @@ class TestRepetitionDropdownToggle(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_toggle_event('repetition-0')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertIsNone(model.get('openDropdown'))
 
@@ -4175,7 +4143,7 @@ class TestRepetitionDropdownToggle(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_toggle_event('repetition-2')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['openDropdown']['id'], 'repetition-2')
         self.assertEqual(model['openDropdown']['segmentIndex'], 2)
@@ -4199,7 +4167,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '*')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/hello.*world/')
         self.assertIsNone(model.get('openDropdown'))
@@ -4211,7 +4179,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '+')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/hello.+world/')
         self.assertIsNone(model.get('openDropdown'))
@@ -4223,7 +4191,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '?')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/hello.?world/')
         self.assertIsNone(model.get('openDropdown'))
@@ -4235,7 +4203,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '1')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/hello.world/')
         self.assertIsNone(model.get('openDropdown'))
@@ -4247,7 +4215,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('repetition-0', '+')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # (?:hello)+ gets a group because it contains (?:)
         self.assertEqual(model['search'], '/((?:hello)+).*world/')
@@ -4260,7 +4228,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '+')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertIn('/hello.*world/', model['undoHistory'])
 
@@ -4271,7 +4239,7 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('repetition-1', '+')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # Regex unchanged
         self.assertEqual(model['search'], '/hello.*/')
@@ -4297,7 +4265,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'exact', '3')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/.{3}/')
         # Dropdown should remain open for further edits
@@ -4312,7 +4280,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '3', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'exact', '')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # Should not crash; dropdown state updated but regex may not change
         self.assertIsNotNone(model.get('openDropdown'))
@@ -4327,14 +4295,14 @@ class TestRepetitionInput(unittest.TestCase):
 
         # Set min to 2
         event = make_repetition_input_event('repetition-0', 'min', '2')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # With only min, should produce {2,}
         self.assertEqual(model['openDropdown']['rangeMin'], '2')
 
         # Set max to 5
         event = make_repetition_input_event('repetition-0', 'max', '5')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/.{2,5}/')
         self.assertEqual(model['openDropdown']['rangeMax'], '5')
@@ -4347,7 +4315,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'min', '2')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/.{2,}/')
 
@@ -4360,7 +4328,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'max', '5')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # rangeMax only is not a valid quantifier on its own; regex unchanged
         self.assertEqual(model['openDropdown']['rangeMax'], '5')
@@ -4373,7 +4341,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'exact', '3')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertIn('/.*/', model['undoHistory'])
 
@@ -4386,7 +4354,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'exact', 'abc')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         # Non-numeric value should not change regex
         self.assertEqual(model['search'], original_regex)
@@ -4399,7 +4367,7 @@ class TestRepetitionInput(unittest.TestCase):
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'exact', '3')
-        model, _ = update(event, '', 1, model, "hello world")
+        model, _ = update(event, None, model, "hello world")
 
         self.assertEqual(model['search'], '/((?:hello){3})/')
 
@@ -4473,8 +4441,7 @@ class TestHoverPreview(unittest.TestCase):
 
     def setUp(self):
         self.value = "hello world"
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
         self.model = init_model(self.value)
 
     # --- Model state tests ---
@@ -4482,7 +4449,7 @@ class TestHoverPreview(unittest.TestCase):
     def test_mousemove_no_buttons_top_half_sets_literal_hover(self):
         """MouseMove with buttons=0 and top half sets hoverIdx and hoverType='literal'."""
         event = make_mouse_move_event(5, buttons=0, top_half=True)
-        model, _ = update(event, self.source_code, self.source_line, self.model, self.value)
+        model, _ = update(event, self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['hoverIdx'], 5)
         self.assertEqual(model['hoverType'], 'literal')
@@ -4490,7 +4457,7 @@ class TestHoverPreview(unittest.TestCase):
     def test_mousemove_no_buttons_bottom_half_sets_fuzzy_hover(self):
         """MouseMove with buttons=0 and bottom half sets hoverType='fuzzy'."""
         event = make_mouse_move_event(5, buttons=0, top_half=False)
-        model, _ = update(event, self.source_code, self.source_line, self.model, self.value)
+        model, _ = update(event, self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['hoverIdx'], 5)
         self.assertEqual(model['hoverType'], 'fuzzy')
@@ -4499,12 +4466,12 @@ class TestHoverPreview(unittest.TestCase):
         """MouseDown clears hoverIdx and hoverType."""
         # First set hover state
         event = make_mouse_move_event(5, buttons=0, top_half=True)
-        model, _ = update(event, self.source_code, self.source_line, self.model, self.value)
+        model, _ = update(event, self.var_and_exp, self.model, self.value)
         self.assertEqual(model['hoverIdx'], 5)
 
         # MouseDown should clear it
         event = make_mouse_down_event(5, top_half=True)
-        model, _ = update(event, self.source_code, self.source_line, model, self.value)
+        model, _ = update(event, self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['hoverIdx'])
         self.assertIsNone(model['hoverType'])
@@ -4513,11 +4480,11 @@ class TestHoverPreview(unittest.TestCase):
         """MouseMove with buttons=1 (dragging) does not set hover state."""
         # Start a drag
         event = make_mouse_down_event(3, top_half=True)
-        model, _ = update(event, self.source_code, self.source_line, self.model, self.value)
+        model, _ = update(event, self.var_and_exp, self.model, self.value)
 
         # Move with button held - should NOT set hover
         event = make_mouse_move_event(5, buttons=1, top_half=True)
-        model, _ = update(event, self.source_code, self.source_line, model, self.value)
+        model, _ = update(event, self.var_and_exp, model, self.value)
 
         self.assertIsNone(model.get('hoverIdx'))
         self.assertIsNone(model.get('hoverType'))
@@ -4798,51 +4765,50 @@ class TestFirstMatchToggle(unittest.TestCase):
     def setUp(self):
         self.value = "hello world hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_toggle_from_many_to_first(self):
         """Toggling from many-match adds /1 postfix."""
         self.model['search'] = '/hello/'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/1')
 
     def test_toggle_from_first_to_many(self):
         """Toggling from first-match removes /1 postfix."""
         self.model['search'] = '/hello/1'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
     def test_toggle_with_no_search_creates_bare_flags(self):
         """Toggling with no search creates bare backtick form with flag."""
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '``1')
 
     def test_toggle_off_bare_flags_returns_to_none(self):
         """Toggling off the only flag on bare form returns search to None."""
         self.model['search'] = '``1'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIsNone(model['search'])
 
     def test_toggle_saves_undo(self):
         """Toggling saves to undo history."""
         self.model['search'] = '/hello/'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIn('/hello/', model['undoHistory'])
 
     def test_double_toggle_roundtrip(self):
         """Toggling twice returns to original state."""
         self.model['search'] = '/hello/'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/1')
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
 
@@ -4895,14 +4861,13 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_many_match_enter_generates_finditer(self):
         """Default many-match Enter generates list(re.finditer(...))."""
         self.model['search'] = '/hello/'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_matches")
@@ -4912,7 +4877,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
         """First-match Enter generates re.search(...)."""
         self.model['search'] = '/hello/1'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_match")
@@ -4923,7 +4888,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
         """First-match Enter with grouped pattern uses re.search."""
         self.model['search'] = '/(hello)(.*)(world)/1'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIn("re.search(", expr)
@@ -4935,14 +4900,13 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_many_match_backspace_generates_sub(self):
         """Default many-match Backspace generates re.sub without count."""
         self.model['search'] = '/hello/'
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -4953,7 +4917,7 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
         """First-match Backspace generates re.sub with count=1."""
         self.model['search'] = '/hello/1'
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -5006,7 +4970,7 @@ class TestSearchBoxValueWithPostfix(unittest.TestCase):
         """Typing /hello/1 in the search box sets first-match mode."""
         model = init_model("hello world")
         model, _ = update(make_search_box_input_event('/hello/1'),
-                          "x = 'hello world'", 1, model, "hello world")
+                          ('x', 'x'), model, "hello world")
         self.assertEqual(model['search'], '/hello/1')
         self.assertTrue(is_first_match_mode(model['search']))
 
@@ -5123,63 +5087,62 @@ class TestCaseSensitiveToggle(unittest.TestCase):
     def setUp(self):
         self.value = "Hello hello HELLO"
         self.model = init_model(self.value)
-        self.source_code = "x = 'Hello hello HELLO'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_toggle_to_case_insensitive(self):
         """Toggling from case-sensitive adds i flag."""
         self.model['search'] = '/hello/'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/i')
 
     def test_toggle_to_case_sensitive(self):
         """Toggling from case-insensitive removes i flag."""
         self.model['search'] = '/hello/i'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
     def test_toggle_preserves_first_match_flag(self):
         """Toggling case preserves the 1 flag."""
         self.model['search'] = '/hello/1'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/1i')
 
     def test_toggle_off_preserves_first_match_flag(self):
         """Toggling case off with 1 flag preserves 1."""
         self.model['search'] = '/hello/1i'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/1')
 
     def test_toggle_with_no_search_creates_bare_flags(self):
         """Toggling with no search creates bare backtick form with i flag."""
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '``i')
 
     def test_toggle_off_bare_flags_returns_to_none(self):
         """Toggling off the only flag on bare form returns search to None."""
         self.model['search'] = '``i'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIsNone(model['search'])
 
     def test_toggle_saves_undo(self):
         self.model['search'] = '/hello/'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIn('/hello/', model['undoHistory'])
 
     def test_double_toggle_roundtrip(self):
         self.model['search'] = '/hello/'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/i')
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello/')
 
 
@@ -5214,14 +5177,13 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "Hello hello"
         self.model = init_model(self.value)
-        self.source_code = "x = 'Hello hello'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_case_sensitive_enter_no_re_I(self):
         """Case-sensitive Enter should NOT include re.I in flags."""
         self.model['search'] = '/hello/'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertNotIn('re.I', expr)
@@ -5230,7 +5192,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
         """Case-insensitive Enter should include re.I in flags."""
         self.model['search'] = '/hello/i'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('re.I', expr)
@@ -5240,7 +5202,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
         """Case-insensitive + first-match Enter uses re.search with re.I."""
         self.model['search'] = '/hello/1i'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIn('re.search(', expr)
@@ -5254,13 +5216,12 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "Hello hello"
         self.model = init_model(self.value)
-        self.source_code = "x = 'Hello hello'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_case_sensitive_backspace_no_re_I(self):
         self.model['search'] = '/hello/'
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertNotIn('re.I', expr)
@@ -5268,7 +5229,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
     def test_case_insensitive_backspace_has_re_I(self):
         self.model['search'] = '/hello/i'
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('re.I', expr)
@@ -5278,7 +5239,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
         """Case-insensitive + first-match Backspace uses count=1 and re.I."""
         self.model['search'] = '/hello/1i'
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('count=1', expr)
@@ -5378,14 +5339,13 @@ class TestCaptureGroupsToggle(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_toggle_on_adds_c_flag_and_groups(self):
         """Toggling on adds 'c' flag and fully groups the pattern."""
         self.model['search'] = '/hello.*world/'
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIn('c', get_search_flags(model['search']))
         self.assertEqual(model['search'], '/(hello)(.*)(world)/c')
 
@@ -5393,7 +5353,7 @@ class TestCaptureGroupsToggle(unittest.TestCase):
         """Toggling off removes 'c' flag and re-canonicalizes."""
         self.model['search'] = '/(hello)(.*)(world)/c'
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertNotIn('c', get_search_flags(model['search']))
         self.assertEqual(model['search'], '/hello.*world/')
 
@@ -5401,34 +5361,34 @@ class TestCaptureGroupsToggle(unittest.TestCase):
         """Toggling c preserves existing i and 1 flags."""
         self.model['search'] = '/hello/1i'
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/(hello)/1ic')
 
     def test_toggle_off_preserves_other_flags(self):
         """Toggling c off preserves i and 1 flags."""
         self.model['search'] = '/(hello)/1ic'
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/hello/1i')
 
     def test_toggle_with_no_search_does_nothing(self):
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIsNone(model['search'])
 
     def test_toggle_saves_undo(self):
         self.model['search'] = '/hello/'
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIn('/hello/', model['undoHistory'])
 
     def test_double_toggle_roundtrip(self):
         self.model['search'] = '/hello.*world/'
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '/(hello)(.*)(world)/c')
         model, _ = update(make_capture_groups_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello.*world/')
 
 
@@ -5502,14 +5462,13 @@ class TestCaptureGroupsCodeGeneration(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_enter_with_c_flag_preserves_groups_in_code(self):
         """Enter with 'c' flag generates code with capture groups."""
         self.model['search'] = '/(hello)(.*)(world)/c'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('(hello)', expr)
@@ -5519,7 +5478,7 @@ class TestCaptureGroupsCodeGeneration(unittest.TestCase):
         """Enter without 'c' flag strips capture groups from code."""
         self.model['search'] = '/(hello)(.*)(world)/'
         model, commands = update(make_key_down_event('Enter'),
-                                self.source_code, self.source_line, self.model, self.value)
+                                self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("hello.*world", expr)
@@ -5533,15 +5492,15 @@ class TestCaptureGroupsBuildPreviewRegex(unittest.TestCase):
         """When 'c' is in the current search flags, new selections keep all groups."""
         value = "hello world"
         model = init_model(value)
-        source = "x = 'hello world'"
+        var_and_exp = ('x', 'x')
 
         model['search'] = '/(hello)/c'
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
 
         model, _ = update(make_mouse_down_event(end_idx, top_half=False),
-                          source, 1, model, value)
+                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(end_idx),
-                          source, 1, model, value)
+                          var_and_exp, model, value)
 
         self.assertIn('c', get_search_flags(model['search']))
         inner = get_regex_inner_pattern(model['search'])
@@ -5715,36 +5674,35 @@ class TestToggleFlagWithStrings(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_toggle_first_match_on_string(self):
         self.model['search'] = "'hello'"
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], "'hello'1")
 
     def test_toggle_case_on_string(self):
         self.model['search'] = "'hello'"
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], "'hello'i")
 
     def test_toggle_both_flags_on_string(self):
         self.model['search'] = "'hello'"
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], "'hello'1i")
 
     def test_toggle_roundtrip_on_string(self):
         self.model['search'] = "'hello'"
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], "'hello'i")
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], "'hello'")
 
 
@@ -5823,13 +5781,12 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_many_match_case_sensitive(self):
         self.model['search'] = "'hello'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_matches")
@@ -5840,7 +5797,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
     def test_first_match_case_sensitive(self):
         self.model['search'] = "'hello'1"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_match")
@@ -5850,7 +5807,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
     def test_many_match_case_insensitive(self):
         self.model['search'] = "'hello'i"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.finditer(", expr)
@@ -5859,7 +5816,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
     def test_first_match_case_insensitive(self):
         self.model['search'] = "'hello'1i"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIn("re.search(", expr)
@@ -5870,7 +5827,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
         """Double-quote string literal preserved in generated code."""
         self.model['search'] = '"hello"'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('re.escape("hello")', expr)
@@ -5882,13 +5839,12 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_many_match_case_sensitive(self):
         self.model['search'] = "'hello'"
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -5898,7 +5854,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
     def test_first_match_case_sensitive(self):
         self.model['search'] = "'hello'1"
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn(".replace('hello', '', 1)", expr)
@@ -5906,7 +5862,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
     def test_many_match_case_insensitive(self):
         self.model['search'] = "'hello'i"
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.sub(", expr)
@@ -5916,7 +5872,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
     def test_first_match_case_insensitive(self):
         self.model['search'] = "'hello'1i"
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.sub(", expr)
@@ -6033,34 +5989,33 @@ class TestToggleFlagBareWrapsInBackticks(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_toggle_first_match_on_bare(self):
         self.model['search'] = 's'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '`s`1')
 
     def test_toggle_case_on_bare(self):
         self.model['search'] = 's'
         model, _ = update(make_case_sensitive_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '`s`i')
 
     def test_toggle_on_backtick(self):
         self.model['search'] = '`s`'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '`s`1')
 
     def test_toggle_roundtrip_backtick(self):
         self.model['search'] = '`s`'
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['search'], '`s`1')
         model, _ = update(make_first_match_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '`s`')
 
 
@@ -6114,13 +6069,12 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_backtick_many_cs(self):
         self.model['search'] = '`s`'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         name, expr = commands[0]
         self.assertEqual(name, 'x_matches')
@@ -6130,7 +6084,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
     def test_backtick_first_ci(self):
         self.model['search'] = '`s`1i'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         name, expr = commands[0]
         self.assertEqual(name, 'x_match')
@@ -6140,7 +6094,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
     def test_bare_many_cs(self):
         self.model['search'] = 's'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         name, expr = commands[0]
         self.assertIn('re.finditer(re.escape(s)', expr)
@@ -6148,7 +6102,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
     def test_bare_complex_expression(self):
         self.model['search'] = 'x.lower()'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('re.escape(x.lower())', expr)
@@ -6159,13 +6113,12 @@ class TestExpressionSearchBackspaceCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_backtick_many_cs(self):
         self.model['search'] = '`s`'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         name, expr = commands[0]
         self.assertEqual(name, 'x')
@@ -6174,14 +6127,14 @@ class TestExpressionSearchBackspaceCodeGen(unittest.TestCase):
     def test_backtick_first_cs(self):
         self.model['search'] = '`s`1'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         _, expr = commands[0]
         self.assertIn(".replace(s, '', 1)", expr)
 
     def test_backtick_many_ci(self):
         self.model['search'] = '`s`i'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         _, expr = commands[0]
         self.assertIn('re.sub(re.escape(s)', expr)
         self.assertIn('re.I', expr)
@@ -6189,7 +6142,7 @@ class TestExpressionSearchBackspaceCodeGen(unittest.TestCase):
     def test_backtick_first_ci(self):
         self.model['search'] = '`s`1i'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         _, expr = commands[0]
         self.assertIn('re.sub(re.escape(s)', expr)
         self.assertIn('count=1', expr)
@@ -6225,23 +6178,22 @@ class TestReplaceToggle(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_toggle_shows_replace_box(self):
         """Clicking disclosure triangle shows the replace box."""
         self.assertFalse(self.model.get('replace_visible', False))
         model, _ = update(make_replace_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertTrue(model['replace_visible'])
 
     def test_toggle_twice_hides_replace_box(self):
         """Clicking disclosure triangle twice hides the replace box."""
         model, _ = update(make_replace_toggle_event(),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertTrue(model['replace_visible'])
         model, _ = update(make_replace_toggle_event(),
-                          self.source_code, self.source_line, model, self.value)
+                          self.var_and_exp, model, self.value)
         self.assertFalse(model['replace_visible'])
 
 
@@ -6252,20 +6204,19 @@ class TestReplaceBoxInput(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['replace_visible'] = True
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_typing_updates_replace_text(self):
         """Typing in replace box updates replace_text."""
         model, _ = update(make_replace_box_input_event("'world'"),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['replace_text'], "'world'")
 
     def test_clearing_replace_box(self):
         """Clearing the replace box sets replace_text to None."""
         self.model['replace_text'] = "'world'"
         model, _ = update(make_replace_box_input_event(''),
-                          self.source_code, self.source_line, self.model, self.value)
+                          self.var_and_exp, self.model, self.value)
         self.assertIsNone(model['replace_text'])
 
 
@@ -6281,15 +6232,14 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['replace_visible'] = True
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_regex_replace_many_match(self):
         """Regex search + replacement produces list comprehension."""
         self.model['search'] = '/hello/'
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6300,7 +6250,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/1'
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6312,7 +6262,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/i'
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.M|re.I", expr)
@@ -6323,7 +6273,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = "'hello'"
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6335,7 +6285,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = "'hello'1"
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("next(", expr)
@@ -6345,7 +6295,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = "'hello'i"
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.I", expr)
@@ -6355,7 +6305,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '`s`'
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6366,7 +6316,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/'
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("mtch[0].upper() for mtch in", expr)
@@ -6376,7 +6326,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/'
         self.model['replace_text'] = "`^[0].upper()`"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("mtch[0].upper() for mtch in", expr)
@@ -6386,7 +6336,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/'
         self.model['replace_text'] = "^.group(1)"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("mtch.group(1) for mtch in", expr)
@@ -6396,7 +6346,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/'
         self.model['replace_text'] = 'some_func(^[0])'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("some_func(mtch[0]) for mtch in", expr)
@@ -6406,7 +6356,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = '/hello/'
         self.model['replace_text'] = None
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         # With no replace text, Enter does Get (list of matches)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -6418,7 +6368,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['replace_visible'] = False
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_matches")
@@ -6429,7 +6379,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = "'hello'"
         self.model['replace_text'] = '"world"'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('"world" for mtch in', expr)
@@ -6439,7 +6389,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = "'hello'"
         self.model['replace_text'] = "f'hi {name}'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("f'hi {name}' for mtch in", expr)
@@ -6449,7 +6399,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.model['search'] = None
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
 
@@ -6458,8 +6408,7 @@ class TestReplaceBoxVisualize(unittest.TestCase):
 
     def setUp(self):
         self.value = "hello world"
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_disclosure_triangle_present(self):
         """Disclosure triangle is present in non-small visualize output."""
@@ -6547,13 +6496,12 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_get_button_non_replace(self):
         """ActionButtonClick('find_or_map') with regex produces finditer."""
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_matches")
@@ -6563,7 +6511,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         """With 1st mode, Get produces re.search."""
         self.model['search'] = '/hello/1'
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_match")
@@ -6574,7 +6522,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6586,7 +6534,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6595,7 +6543,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
     def test_enter_key_non_replace_unchanged(self):
         """Enter still produces Get in non-replace mode."""
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_matches")
@@ -6606,7 +6554,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_transformed")
@@ -6616,7 +6564,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
     def test_copy_find_or_map(self):
         """copy=True produces CopyToClipboard command."""
         _, commands = update(make_action_button_event('find_or_map', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6626,7 +6574,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         """Get with string search uses re.escape."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.escape('hello')", expr)
@@ -6635,7 +6583,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         """No search pattern produces no commands."""
         self.model['search'] = None
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
 
@@ -6652,13 +6600,12 @@ class TestActionButtonReplace(unittest.TestCase):
         self.model['search'] = '/hello/'
         self.model['replace_visible'] = True
         self.model['replace_text'] = "'world'"
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_replace_button(self):
         """Replace button produces re.sub with lambda."""
         _, commands = update(make_action_button_event('replace'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -6668,7 +6615,7 @@ class TestActionButtonReplace(unittest.TestCase):
         """Replace with first-match includes count=1."""
         self.model['search'] = '/hello/1'
         _, commands = update(make_action_button_event('replace'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, count=1, flags=re.M)")
@@ -6677,13 +6624,13 @@ class TestActionButtonReplace(unittest.TestCase):
         """Replace button does nothing when not in replace mode."""
         self.model['replace_visible'] = False
         _, commands = update(make_action_button_event('replace'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
     def test_cmd_r_key(self):
         """Cmd-R produces same as replace button."""
         _, commands = update(make_key_down_event('r', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -6692,7 +6639,7 @@ class TestActionButtonReplace(unittest.TestCase):
     def test_copy_replace(self):
         """copy=True produces CopyToClipboard with re.sub expr."""
         _, commands = update(make_action_button_event('replace', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6702,7 +6649,7 @@ class TestActionButtonReplace(unittest.TestCase):
         """Replace with string search uses re.escape."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('replace'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.sub(re.escape('hello')", expr)
@@ -6719,13 +6666,12 @@ class TestActionButtonDelete(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_delete_button(self):
         """Delete button produces re.sub with empty string."""
         _, commands = update(make_action_button_event('delete'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -6734,7 +6680,7 @@ class TestActionButtonDelete(unittest.TestCase):
     def test_cmd_backspace_key(self):
         """Cmd-Backspace produces delete code."""
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x")
@@ -6743,13 +6689,13 @@ class TestActionButtonDelete(unittest.TestCase):
     def test_plain_backspace_no_longer_deletes(self):
         """Plain Backspace key no longer produces delete commands."""
         _, commands = update(make_key_down_event('Backspace'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
     def test_copy_delete(self):
         """copy=True produces CopyToClipboard with delete expr."""
         _, commands = update(make_action_button_event('delete', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6759,7 +6705,7 @@ class TestActionButtonDelete(unittest.TestCase):
         """Delete with string search, case-sensitive uses .replace()."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('delete'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "x.replace('hello', '')")
@@ -6776,13 +6722,12 @@ class TestActionButtonLoop(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_loop_non_replace(self):
         """Loop produces for loop with enumerate(re.finditer(...))."""
         _, commands = update(make_action_button_event('loop'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
@@ -6794,7 +6739,7 @@ class TestActionButtonLoop(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('loop'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
@@ -6804,14 +6749,14 @@ class TestActionButtonLoop(unittest.TestCase):
     def test_loop_suggest_name_none(self):
         """Loop returns suggest_name=None for multiline code."""
         _, commands = update(make_action_button_event('loop'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsNone(commands[0][0])
 
     def test_copy_loop(self):
         """copy=True produces CopyToClipboard with loop code."""
         _, commands = update(make_action_button_event('loop', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6829,13 +6774,12 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_match_strings_all(self):
         """Match Strings produces re.findall(...)."""
         _, commands = update(make_action_button_event('match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(expr, "re.findall(r'hello', x, flags=re.M)")
@@ -6844,7 +6788,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         """Match Strings in first-match mode produces next(iter(re.findall(...)), None)."""
         self.model['search'] = '/hello/1'
         _, commands = update(make_action_button_event('match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(expr, "next(iter(re.findall(r'hello', x, flags=re.M)), None)")
@@ -6853,7 +6797,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         """Match Strings with string search uses re.escape."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.findall(re.escape('hello')", expr)
@@ -6863,20 +6807,20 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
     def test_match_strings_suggest_name(self):
         """Match Strings suggests x_strings."""
         _, commands = update(make_action_button_event('match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0][0], 'x_strings')
 
     def test_copy_match_strings(self):
         """copy=True produces CopyToClipboard."""
         _, commands = update(make_action_button_event('match_strings', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6886,7 +6830,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         """No search pattern produces no commands."""
         self.model['search'] = None
         _, commands = update(make_action_button_event('match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
 
@@ -6901,13 +6845,12 @@ class TestActionButtonLoopMatchStrings(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_loop_match_strings(self):
         """Loop Match Strings produces for loop with enumerate(re.findall(...))."""
         _, commands = update(make_action_button_event('loop_match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
@@ -6917,14 +6860,14 @@ class TestActionButtonLoopMatchStrings(unittest.TestCase):
     def test_loop_match_strings_suggest_name_none(self):
         """Loop Match Strings returns suggest_name=None (statement)."""
         _, commands = update(make_action_button_event('loop_match_strings'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsNone(commands[0][0])
 
     def test_copy_loop_match_strings(self):
         """copy=True produces CopyToClipboard with loop code."""
         _, commands = update(make_action_button_event('loop_match_strings', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6942,13 +6885,12 @@ class TestActionButtonAny(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_any_non_replace(self):
         """Any in non-replace mode produces bool(re.search(...))."""
         _, commands = update(make_action_button_event('any'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_any")
@@ -6959,7 +6901,7 @@ class TestActionButtonAny(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('any'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_any")
@@ -6968,7 +6910,7 @@ class TestActionButtonAny(unittest.TestCase):
     def test_copy_any(self):
         """copy=True produces CopyToClipboard."""
         _, commands = update(make_action_button_event('any', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -6977,7 +6919,7 @@ class TestActionButtonAny(unittest.TestCase):
         """Any with string search."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('any'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.search(re.escape('hello')", expr)
@@ -6994,15 +6936,14 @@ class TestActionButtonAll(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_all_replace_mode(self):
         """All in replace mode produces all(EXPR for mtch in ...)."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('all'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_all")
@@ -7011,7 +6952,7 @@ class TestActionButtonAll(unittest.TestCase):
     def test_all_non_replace_returns_nothing(self):
         """All not in replace mode produces no commands."""
         _, commands = update(make_action_button_event('all'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
     def test_copy_all(self):
@@ -7019,7 +6960,7 @@ class TestActionButtonAll(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('all', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], CopyToClipboard)
 
@@ -7035,13 +6976,12 @@ class TestActionButtonIfAny(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_if_any_non_replace(self):
         """If Any in non-replace produces if re.search(...):\\n    pass."""
         _, commands = update(make_action_button_event('if_any'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
@@ -7053,7 +6993,7 @@ class TestActionButtonIfAny(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('if_any'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
@@ -7063,7 +7003,7 @@ class TestActionButtonIfAny(unittest.TestCase):
     def test_copy_if_any(self):
         """Copy If Any copies just the boolean expression."""
         _, commands = update(make_action_button_event('if_any', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -7083,15 +7023,14 @@ class TestActionButtonIfAll(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_if_all_replace_mode(self):
         """If All in replace mode produces if all(...):\\n    pass."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('if_all'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
@@ -7101,7 +7040,7 @@ class TestActionButtonIfAll(unittest.TestCase):
     def test_if_all_non_replace_returns_nothing(self):
         """If All not in replace mode produces no commands."""
         _, commands = update(make_action_button_event('if_all'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(commands, [])
 
     def test_copy_if_all(self):
@@ -7109,7 +7048,7 @@ class TestActionButtonIfAll(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('if_all', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -7128,13 +7067,12 @@ class TestActionButtonCount(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_count_non_replace(self):
         """Count produces sum(1 for _ in re.finditer(...))."""
         _, commands = update(make_action_button_event('count'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_count")
@@ -7145,7 +7083,7 @@ class TestActionButtonCount(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('count'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_count")
@@ -7154,7 +7092,7 @@ class TestActionButtonCount(unittest.TestCase):
     def test_copy_count(self):
         """copy=True produces CopyToClipboard."""
         _, commands = update(make_action_button_event('count', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], CopyToClipboard)
 
@@ -7162,7 +7100,7 @@ class TestActionButtonCount(unittest.TestCase):
         """Count with string search."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('count'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.escape('hello')", expr)
@@ -7181,13 +7119,12 @@ class TestActionButtonFilter(unittest.TestCase):
         self.model['search'] = '/\\w+/'
         self.model['replace_visible'] = True
         self.model['replace_text'] = "len(^[0]) > 4"
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_filter_generates_list_comprehension_with_predicate(self):
         """Filter produces [mtch for mtch in re.finditer(...) if EXPR]."""
         _, commands = update(make_action_button_event('filter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_filtered")
@@ -7198,13 +7135,13 @@ class TestActionButtonFilter(unittest.TestCase):
         self.model['replace_visible'] = False
         self.model['replace_text'] = None
         _, commands = update(make_action_button_event('filter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 0)
 
     def test_copy_filter(self):
         """copy=True produces CopyToClipboard."""
         _, commands = update(make_action_button_event('filter', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], CopyToClipboard)
         self.assertIn('for mtch in', commands[0].text)
@@ -7213,7 +7150,7 @@ class TestActionButtonFilter(unittest.TestCase):
         """Filter with string search."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('filter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.escape('hello')", expr)
@@ -7221,9 +7158,9 @@ class TestActionButtonFilter(unittest.TestCase):
 
     def test_filter_suggest_name_no_var(self):
         """Filter without var name uses 'result_filtered'."""
-        self.source_code = "f('hello world')"
+        self.var_and_exp = (None, "f('hello world')")
         _, commands = update(make_action_button_event('filter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, _ = commands[0]
         self.assertEqual(suggest_name, "result_filtered")
@@ -7232,7 +7169,7 @@ class TestActionButtonFilter(unittest.TestCase):
         """Filter with first-match uses next(..., None)."""
         self.model['search'] = '/\\w+/1'
         _, commands = update(make_action_button_event('filter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("next(", expr)
@@ -7250,13 +7187,12 @@ class TestActionButtonFindIndices(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/\\w+/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_find_indices_no_replace_generates_start_list(self):
         """Find Indices without replace produces [mtch.start() for mtch in ...]."""
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_indices")
@@ -7267,7 +7203,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "len(^[0]) > 4"
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_indices")
@@ -7277,7 +7213,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         """Find Indices with first-match uses next(..., None)."""
         self.model['search'] = '/\\w+/1'
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("next(", expr)
@@ -7289,7 +7225,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "len(^[0]) > 4"
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("next(", expr)
@@ -7299,7 +7235,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
     def test_copy_find_indices(self):
         """copy=True produces CopyToClipboard."""
         _, commands = update(make_action_button_event('find_indices', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], CopyToClipboard)
         self.assertIn('mtch.start()', commands[0].text)
@@ -7308,7 +7244,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         """Find Indices with string search."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("re.escape('hello')", expr)
@@ -7316,9 +7252,9 @@ class TestActionButtonFindIndices(unittest.TestCase):
 
     def test_find_indices_suggest_name_no_var(self):
         """Find Indices without var name uses 'result_indices'."""
-        self.source_code = "f('hello world')"
+        self.var_and_exp = (None, "f('hello world')")
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, _ = commands[0]
         self.assertEqual(suggest_name, "result_indices")
@@ -7335,13 +7271,12 @@ class TestActionButtonSplit(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '/hello/'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_split_regex(self):
         """Split with regex produces re.split(...)."""
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_parts")
@@ -7351,7 +7286,7 @@ class TestActionButtonSplit(unittest.TestCase):
         """Split with first-match uses maxsplit=1."""
         self.model['search'] = '/hello/1'
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "re.split(r'hello', x, maxsplit=1, flags=re.M)")
@@ -7360,7 +7295,7 @@ class TestActionButtonSplit(unittest.TestCase):
         """Split with string search uses str.split()."""
         self.model['search'] = "'hello'"
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "x.split('hello')")
@@ -7369,7 +7304,7 @@ class TestActionButtonSplit(unittest.TestCase):
         """Split with string search and first-match uses maxsplit=1."""
         self.model['search'] = "'hello'1"
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "x.split('hello', 1)")
@@ -7378,7 +7313,7 @@ class TestActionButtonSplit(unittest.TestCase):
         """Split with string search + case-insensitive uses re.split."""
         self.model['search'] = "'hello'i"
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "re.split(re.escape('hello'), x, flags=re.I)")
@@ -7387,7 +7322,7 @@ class TestActionButtonSplit(unittest.TestCase):
         """Split with regex + case-insensitive."""
         self.model['search'] = '/hello/i'
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertEqual(expr, "re.split(r'hello', x, flags=re.M|re.I)")
@@ -7395,7 +7330,7 @@ class TestActionButtonSplit(unittest.TestCase):
     def test_copy_split(self):
         """copy=True produces CopyToClipboard with split expr."""
         _, commands = update(make_action_button_event('split', copy=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         cmd = commands[0]
         self.assertIsInstance(cmd, CopyToClipboard)
@@ -7403,9 +7338,9 @@ class TestActionButtonSplit(unittest.TestCase):
 
     def test_split_suggest_name_no_var(self):
         """Split without var name uses 'result_parts'."""
-        self.source_code = "f('hello world')"
+        self.var_and_exp = (None, "f('hello world')")
         _, commands = update(make_action_button_event('split'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, _ = commands[0]
         self.assertEqual(suggest_name, "result_parts")
@@ -7476,8 +7411,7 @@ class TestActionButtonRendering(unittest.TestCase):
 
     def setUp(self):
         self.value = "hello world"
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_buttons_present_non_small(self):
         """Action buttons render in non-small mode."""
@@ -7876,7 +7810,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model['replace_text'] = "^[0].upper()"
         model['openDropdown'] = {'id': 'action-predicate'}
         event = make_action_button_event('any')
-        new_model, _ = update(event, "x = 'hello world'", 1, model, self.value)
+        new_model, _ = update(event, ('x', 'x'), model, self.value)
         self.assertIsNone(new_model.get('openDropdown'))
 
 
@@ -8409,14 +8343,13 @@ class TestIndexSliceCodeGen(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_index_enter_generates_indexing(self):
         """Enter with index search '5' generates x[5]."""
         self.model['search'] = '5'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('x[5]', expr)
@@ -8425,7 +8358,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         """Enter with slice search '5:10' generates x[5:10]."""
         self.model['search'] = '5:10'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('x[5:10]', expr)
@@ -8434,7 +8367,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         """Enter with slice '5:' generates x[5:]."""
         self.model['search'] = '5:'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('x[5:]', expr)
@@ -8443,7 +8376,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         """Enter with slice ':5' generates x[:5]."""
         self.model['search'] = ':5'
         _, commands = update(make_key_down_event('Enter'),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('x[:5]', expr)
@@ -8452,7 +8385,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         """Backspace with index search '5' generates x[:5] + x[6:]."""
         self.model['search'] = '5'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('x[:5]', expr)
@@ -8462,7 +8395,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         """Backspace with slice '5:10' generates x[:5] + x[10:]."""
         self.model['search'] = '5:10'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
-                            self.source_code, self.source_line, self.model, self.value)
+                            self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn('x[:5]', expr)
@@ -8473,49 +8406,49 @@ class TestLenIndicator(unittest.TestCase):
     """Tests for the len() indicator displayed at the end of a string visualization.
 
     The source expression for the len indicator comes from the model's _source_expr
-    key, which is set by init_model() via extract_expression_from_line using the
-    source_code and source_line — not from the source_expr parameter passed by
-    the AST rewriter (which contains internal temp variable names like _snc_temp_1).
+    key, which is set by init_model() via the var_and_exp tuple — not from the
+    source_expr parameter passed by the AST rewriter (which contains internal
+    temp variable names like _snc_temp_1).
     """
 
     def test_len_indicator_from_assignment(self):
         """init_model extracts var name from assignment and visualize uses it."""
-        model = init_model("hello", source_code='str1 = "hello"', source_line=1)
+        model = init_model("hello", var_and_exp=('str1', 'str1'))
         html_output = visualize("hello", model, None, None)
         self.assertIn('snc-py-exp="len(str1)"', html_output)
         self.assertNotIn('_snc_temp', html_output)
         self.assertIn('>5<', html_output)
 
-    def test_len_indicator_absent_without_source_code(self):
-        """Without source_code/source_line, no len snc-py-exp should appear."""
+    def test_len_indicator_absent_without_var_and_exp(self):
+        """Without var_and_exp, no len snc-py-exp should appear."""
         model = init_model("hello")
         html_output = visualize("hello", model, None, None)
         self.assertNotIn('snc-py-exp', html_output)
 
     def test_len_indicator_empty_string(self):
         """Empty string should show len indicator with 0."""
-        model = init_model("", source_code='s = ""', source_line=1)
+        model = init_model("", var_and_exp=('s', 's'))
         html_output = visualize("", model, None, None)
         self.assertIn('snc-py-exp="len(s)"', html_output)
         self.assertIn('>0<', html_output)
 
     def test_len_indicator_small_mode(self):
         """Len indicator should still appear in small mode."""
-        model = init_model("hi", source_code='s = "hi"', source_line=1)
+        model = init_model("hi", var_and_exp=('s', 's'))
         html_output = visualize("hi", model, None, None, small=True)
         self.assertIn('snc-py-exp="len(s)"', html_output)
         self.assertIn('>2<', html_output)
 
     def test_len_indicator_draggable(self):
         """The len indicator element should have draggable=true."""
-        model = init_model("abc", source_code='x = "abc"', source_line=1)
+        model = init_model("abc", var_and_exp=('x', 'x'))
         html_output = visualize("abc", model, None, None)
         self.assertIn('draggable="true"', html_output)
         self.assertIn('snc-py-exp="len(x)"', html_output)
 
     def test_len_indicator_bare_expression(self):
         """For a bare expression line, _source_expr is the whole expression."""
-        model = init_model("hello", source_code='x = 1\nmy_func()', source_line=2)
+        model = init_model("hello", var_and_exp=(None, 'my_func()'))
         self.assertEqual(model['_source_expr'], 'my_func()')
 
 # =============================================================================
@@ -9857,13 +9790,12 @@ class TestMultiIndexActionButtons(unittest.TestCase):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.model['search'] = '[0,0,4,-1]'
-        self.source_code = "x = 'hello world'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_find_or_map_multi_index(self):
         """Get button produces [x[i] for i in INDICES]."""
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
@@ -9875,7 +9807,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^.upper()"
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9884,7 +9816,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
     def test_count_multi_index(self):
         """Count produces len(INDICES)."""
         _, commands = update(make_action_button_event('count'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9893,7 +9825,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
     def test_copy_multi_index(self):
         """copy=True produces CopyToClipboard."""
         _, commands = update(make_action_button_event('find_or_map', copy=True),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], CopyToClipboard)
@@ -9901,7 +9833,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
     def test_loop_multi_index(self):
         """Loop produces for i, mtch in enumerate(...)."""
         _, commands = update(make_action_button_event('loop'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9912,7 +9844,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^ != 'h'"
         _, commands = update(make_action_button_event('filter'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9922,7 +9854,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
     def test_find_indices_multi_index(self):
         """Find Indices for multi-index returns the index list itself."""
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9940,13 +9872,12 @@ class TestBroadcastSliceActionButtons(unittest.TestCase):
         self.value = "hello"
         self.model = init_model(self.value)
         self.model['search'] = '[2,3]:'
-        self.source_code = "x = 'hello'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_find_or_map_broadcast_left(self):
         """Get with left-list broadcast produces [x[i:] for i in [2,3]]."""
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9956,7 +9887,7 @@ class TestBroadcastSliceActionButtons(unittest.TestCase):
         """Get with both-lists broadcast produces zip form."""
         self.model['search'] = '[0,1]:[3,2]'
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9966,7 +9897,7 @@ class TestBroadcastSliceActionButtons(unittest.TestCase):
         """Get with right-list broadcast produces [x[:i] for i in [3,2]]."""
         self.model['search'] = ':[3,2]'
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -9984,13 +9915,12 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
         self.value = "hello"
         self.model = init_model(self.value)
         self.model['search'] = '[(2,3),(0,4)]'
-        self.source_code = "x = 'hello'"
-        self.source_line = 1
+        self.var_and_exp = ('x', 'x')
 
     def test_find_or_map_multi_pair(self):
         """Get produces [x[i:j] for i, j in PAIRS]."""
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -10001,7 +9931,7 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['replace_text'] = "len(^)"
         _, commands = update(make_action_button_event('find_or_map'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -10010,7 +9940,7 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
     def test_find_indices_multi_pair(self):
         """Find Indices for pairs returns [i for i, j in PAIRS]."""
         _, commands = update(make_action_button_event('find_indices'),
-                            self.source_code, self.source_line, self.model, self.value,
+                            self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
@@ -10199,7 +10129,7 @@ class TestScrollToMatch(unittest.TestCase):
         value = "hello world"
         model = init_model(value)
         model, _ = update(make_search_box_input_event('/world/'),
-                          "x = 'hello world'", 1, model, value)
+                          ('x', 'x'), model, value)
         self.assertTrue(model.get('_scroll_to_match'))
         html = visualize(value, model, None, None)
         self.assertIn('snc-scroll-to-match', html)
@@ -10244,7 +10174,7 @@ class TestScrollToMatch(unittest.TestCase):
         model = init_model(value)
         model['_scroll_to_match'] = True
         event = make_mouse_down_event(5, top_half=True)
-        new_model, _ = update(event, "x = 'hello world'", 1, model, value)
+        new_model, _ = update(event, ('x', 'x'), model, value)
         self.assertFalse(new_model.get('_scroll_to_match'))
 
     def test_scroll_to_match_not_set_on_same_search(self):
@@ -10253,7 +10183,7 @@ class TestScrollToMatch(unittest.TestCase):
         model = init_model(value)
         model['search'] = '/hello/'
         model, _ = update(make_search_box_input_event('/hello/'),
-                          "x = 'hello world'", 1, model, value)
+                          ('x', 'x'), model, value)
         self.assertFalse(model.get('_scroll_to_match'))
 
 

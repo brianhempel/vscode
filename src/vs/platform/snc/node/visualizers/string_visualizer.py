@@ -18,7 +18,7 @@ This visualizer follows the Elm architecture with three core functions:
 2. init_model() -> dict
    - Returns the initial model state for a new visualization
 
-3. update(event, source_code, source_line, model) -> (new_model, commands)
+3. update(event, var_and_exp, model) -> (new_model, commands)
    - Processes UI events (mouse, keyboard) and returns updated model
    - May return commands (like NewCode) for VS Code to execute
 
@@ -81,7 +81,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import replace_caret_in_py_exp, extract_expression_from_line, EditorTextSelect, Unlink, STRING, GRAY, BLUE
+from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, STRING, GRAY, BLUE
 
 # === Command types (Elm-style commands for VS Code to execute) ===
 
@@ -2420,38 +2420,6 @@ def is_adjacent_left(idx: int, first_start: int, string_value: str) -> bool:
     return len(skipped) > 0 and all(c in _SENTINEL_CHARS for c in skipped)
 
 
-# === Source code analysis functions ===
-# extract_expression_from_line is imported from visualizer_utils
-
-
-def find_available_variable_name(source_code: str, desired_name: str) -> str:
-    """
-    Find a non-colliding variable name in source_code.
-
-    Uses a simple regex over-approximation of identifiers. If desired_name is
-    already used, tries desired_name + "2", then + "3", etc. If desired_name
-    already ends with digits (e.g. "x2"), increments that numeric suffix.
-    """
-    existing_names = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', source_code))
-    if desired_name not in existing_names:
-        return desired_name
-
-    suffix_match = re.match(r'^(.*?)(\d+)$', desired_name)
-    if suffix_match:
-        base_name = suffix_match.group(1)
-        next_suffix = int(suffix_match.group(2)) + 1
-    else:
-        base_name = desired_name
-        next_suffix = 2
-
-    while True:
-        candidate = f"{base_name}{next_suffix}"
-        if candidate not in existing_names:
-            return candidate
-        next_suffix += 1
-
-
-
 
 def strip_capturing_groups(pattern: str) -> str:
     """
@@ -3481,18 +3449,17 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
     )
 
 
-def init_model(value, get_visualizer=None, eval_in_scope=None, source_code=None, source_line=None):
+def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
     """
     Initialize the model state for a new visualization.
 
     Args:
         value: The string value being visualized (not stored in model)
-        source_code: The full source code of the file
-        source_line: The line number where this value is visualized
+        var_and_exp: (var_name | None, expression) tuple from the source line
     """
     source_expr = None
-    if source_code and source_line:
-        expr, var_name = extract_expression_from_line(source_code, source_line)
+    if var_and_exp:
+        var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
     return {
@@ -3627,13 +3594,13 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     model['redoHistory'] = []
 
 
-def _get_search_context(model: dict, source_code: str = None, source_line: int = None, *, source_expr: str = None, eval_in_scope=None) -> dict | None:
-    """Extract common search context from model and source code.
+def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = None, eval_in_scope=None) -> dict | None:
+    """Extract common search context from model and source info.
 
     Returns None if no valid search pattern or source info is available.
     Otherwise returns a dict with all values needed to build code expressions.
 
-    If source_expr is provided, source_code/source_line are not needed
+    If source_expr is provided, var_and_exp is not needed
     (used by the count preview which doesn't have source context).
     """
     selection_regex = model.get('search')
@@ -3649,9 +3616,9 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
         suggest_base = source_expr
         var_name = source_expr
     else:
-        if not source_code or not source_line:
+        if var_and_exp is None:
             return None
-        expr, var_name = extract_expression_from_line(source_code, source_line)
+        var_name, expr = var_and_exp
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
 
@@ -3803,14 +3770,13 @@ def _get_search_context(model: dict, source_code: str = None, source_line: int =
 from string_visualizer_grammar import generate_action, generate_copy_expr_for_if, parse_generated_code_or_assignment
 
 
-def update(event, source_code: str, source_line: int, model: dict, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
+def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
     """
     Update model based on event. Returns (new_model, commands) tuple.
 
     Args:
         event: The UI event to process
-        source_code: The full source code of the file
-        source_line: The line number where this value is visualized
+        var_and_exp: (var_name | None, expression) tuple from the source line
         model: The current model state
         value: The string value being visualized
 
@@ -3822,7 +3788,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
     if event is None or event.get('pythonEventStr', '') == '' or event.get('eventJSON', '') == '':
         return (model, commands)
     if model is None:
-        model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
+        model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
 
     make_python_event = eval(event['pythonEventStr'])
     event_json = event['eventJSON']
@@ -3900,7 +3866,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 # Fresh start: reset selection, preserving linked-editing state and search flags
                 saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_prefix'))
                 saved_flags = get_search_flags(model.get('search'))
-                model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, source_code=source_code, source_line=source_line)
+                model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
                 model['linked_action'], model['linked_source_expr'], model['linked_prefix'] = saved_linked
                 if saved_flags:
                     model['search'] = '``' + saved_flags
@@ -3948,7 +3914,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 elif model.get('linked_action'):
                     model['linked_action'] = 'find_or_map'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                    ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('find_or_map', ctx)
                         if result:
@@ -3960,7 +3926,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 elif model.get('linked_action'):
                     model['linked_action'] = 'delete'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                    ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
@@ -3970,7 +3936,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                 if model.get('linked_action'):
                     model['linked_action'] = 'replace'
                 else:
-                    ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                    ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('replace', ctx)
                         if result:
@@ -4166,8 +4132,8 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             parsed, prefix = parse_generated_code_or_assignment(selected_text)
             if parsed and parsed.get('action') and parsed.get('source_expr'):
                 valid = True
-                if source_code and source_line:
-                    _, line_var = extract_expression_from_line(source_code, source_line)
+                if var_and_exp:
+                    line_var = var_and_exp[0]
                     if line_var and parsed['source_expr'] != line_var:
                         valid = False
                 if valid:
@@ -4185,7 +4151,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
             model['openDropdown'] = None
             if model.get('linked_action') and not copy:
                 model['linked_action'] = action
-                ctx = _get_search_context(model, source_code, source_line,
+                ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
                 if ctx:
@@ -4193,7 +4159,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                     if result:
                         _emit_linked_update(result[1], model, commands)
             else:
-                ctx = _get_search_context(model, source_code, source_line, eval_in_scope=eval_in_scope)
+                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx:
                     if copy and action in ('if_any', 'if_all'):
                         bool_expr = generate_copy_expr_for_if(action, ctx)
@@ -4208,7 +4174,7 @@ def update(event, source_code: str, source_line: int, model: dict, value: str, g
                             commands.append(result)
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
-        ctx = _get_search_context(model, source_code, source_line,
+        ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
         if ctx:
