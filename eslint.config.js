@@ -147,7 +147,8 @@ export default defineConfig(
 	{
 		files: [
 			'src/vs/platform/snc/**/*.{ts,js,mjs,cjs}',
-			'src/vs/editor/contrib/snc/**/*.{ts,js,mjs,cjs}'
+			'src/vs/editor/contrib/snc/**/*.{ts,js,mjs,cjs}',
+			'ui_testing_tools/**/*.{ts,js,mjs,cjs}'
 		],
 		rules: {
 			'header/header': 'off'

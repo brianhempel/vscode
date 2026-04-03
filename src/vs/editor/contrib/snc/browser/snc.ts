@@ -1050,6 +1050,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Trigger initial visualization when controller is created
 		this.triggerInitialVisualization();
+
+		// Exposed for ui_testing_tools/ CDP scripts (buffer.js, scroll.js).
+		// Monaco only renders visible lines in the DOM, so CDP can't read the
+		// full text buffer or control scroll position without model access.
+		(globalThis as any)._sncEditor = editor;
 	}
 
 	getProgram(): string {
