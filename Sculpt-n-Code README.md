@@ -39,15 +39,15 @@ See `Scuplt-n-Code README 2.md` for more architecture details.
 
 ## Committing
 
-Currently, one big commit to streamline rebasing. Amend that commit.
+Need to use `--no-verify` to avoid automated checks.
 
 ```
 git add .
-git commit --no-verify --amend -m 'message'
+git commit --no-verify -m 'message'
 git push -f
 ```
 
-After that, to update on latest VS Code see below. Currently can't move up because I need a C++20 compiler for tree-sitter on the newer versions of node.
+After that, to update on latest VS Code see below. Currently can't move up because I need a C++20 compiler for tree-sitter on the newer versions of `node`.
 
 ```
 git fetch ms --tags
