@@ -219,15 +219,15 @@ export const FONT_VARIATION_TRANSLATE = 'translate';
 /**
  * @internal
  */
-export const DEFAULT_WINDOWS_FONT_FAMILY = 'Consolas, \'Courier New\', monospace';
+export const DEFAULT_WINDOWS_FONT_FAMILY = '\'Pragmasevka\', Consolas, \'Courier New\', monospace';
 /**
  * @internal
  */
-export const DEFAULT_MAC_FONT_FAMILY = 'Menlo, Monaco, \'Courier New\', monospace';
+export const DEFAULT_MAC_FONT_FAMILY = '\'Pragmasevka\', Menlo, Monaco, \'Courier New\', monospace';
 /**
  * @internal
  */
-export const DEFAULT_LINUX_FONT_FAMILY = '\'Droid Sans Mono\', monospace';
+export const DEFAULT_LINUX_FONT_FAMILY = '\'Pragmasevka\', \'Droid Sans Mono\', monospace';
 /**
  * @internal
  */
@@ -237,7 +237,8 @@ export const EDITOR_FONT_DEFAULTS = {
 	),
 	fontWeight: 'normal',
 	fontSize: (
-		platform.isMacintosh ? 12 : 14
+		// platform.isMacintosh ? 12 : 14
+		14
 	),
 	lineHeight: 0,
 	letterSpacing: 0,

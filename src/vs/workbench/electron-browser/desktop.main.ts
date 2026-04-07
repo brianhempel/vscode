@@ -68,6 +68,7 @@ import { IDefaultAccountService } from '../../platform/defaultAccount/common/def
 import { DefaultAccountService } from '../services/accounts/browser/defaultAccount.js';
 import { AccountPolicyService, IAccountPolicyGateService } from '../services/policies/common/accountPolicyService.js';
 import { MultiplexPolicyService } from '../../platform/policy/common/multiplexPolicyService.js';
+import { timeout } from '../../base/common/async.js';
 
 export class DesktopMain extends Disposable {
 
@@ -128,6 +129,8 @@ export class DesktopMain extends Disposable {
 		// (fixes https://github.com/microsoft/vscode/issues/187982)
 		this.applyWindowZoomLevel(services.configurationService);
 
+		await this.waitForConfiguredEditorFont(services.configurationService);
+
 		// Create Workbench
 		const workbench = new Workbench(mainWindow.document.body, {
 			extraClasses: this.getExtraClasses(),
@@ -142,6 +145,26 @@ export class DesktopMain extends Disposable {
 
 		// Window
 		this._register(instantiationService.createInstance(NativeWindow));
+	}
+
+	private async waitForConfiguredEditorFont(configurationService: IConfigurationService): Promise<void> {
+		const fontFaceSet = mainWindow.document.fonts;
+		if (!fontFaceSet || typeof fontFaceSet.load !== 'function') {
+			return;
+		}
+
+		const editorConfig = configurationService.getValue<{ fontFamily?: string; fontWeight?: string; fontSize?: number }>('editor');
+		const primaryFontFamily = editorConfig.fontFamily?.split(',')[0]?.trim();
+		if (!primaryFontFamily || !/pragmasevka/i.test(primaryFontFamily)) {
+			return;
+		}
+
+		const fontWeight = editorConfig.fontWeight ?? 'normal';
+		const fontSize = editorConfig.fontSize ?? 14;
+		await Promise.race([
+			fontFaceSet.load(`${fontWeight} ${fontSize}px ${primaryFontFamily}`, 'i'),
+			timeout(3000)
+		]);
 	}
 
 	private applyWindowZoomLevel(configurationService: IConfigurationService) {
