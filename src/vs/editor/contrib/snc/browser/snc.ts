@@ -49,6 +49,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private pyExpCurrentTarget: Element | null = null;
 	private pyExpTooltipDragInProgress = false;
 	private lastMouseDownTarget: Node | null = null;
+	private actionTooltip: HTMLElement | null = null;
+	private actionTooltipTimer: any = null;
+	private actionTooltipHideTimer: any = null;
+	private actionTooltipTarget: Element | null = null;
+	private hoverMenu: HTMLElement | null = null;
+	private hoverMenuTrigger: Element | null = null;
+	private hoverMenuHideTimer: any = null;
+	private hoverMenuListeners: IDisposable[] = [];
 
 	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, clipboardService: IClipboardService) {
 		super();
@@ -252,6 +260,56 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.schedulePyExpTooltipHide();
 		}));
 
+		// Tooltip on hover for action buttons with data-action-expr
+		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
+			const btn = this.findAncestorWithAttr(ev.target as Node, 'data-action-expr');
+			if (btn && btn.getAttribute('data-action-expr')) {
+				clearTimeout(this.actionTooltipHideTimer);
+				if (btn !== this.actionTooltipTarget) {
+					this.hideActionTooltip();
+					this.actionTooltipTarget = btn;
+					this.actionTooltipTimer = setTimeout(() => {
+						this.showActionTooltip(btn);
+					}, 200);
+				}
+			} else if (this.actionTooltipTarget) {
+				this.scheduleActionTooltipHide();
+			}
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
+			const relatedTarget = ev.relatedTarget as Node | null;
+			if (this.actionTooltip && relatedTarget && this.actionTooltip.contains(relatedTarget)) {
+				return;
+			}
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'data-action-expr')) {
+				return;
+			}
+			if (this.actionTooltipTarget) {
+				this.actionTooltipTarget = null;
+			}
+			this.scheduleActionTooltipHide();
+		}));
+
+		// Hover-to-open dropdown menus (data-hover-menu panels inside .snc-dropdown-trigger)
+		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
+			const trigger = this.findAncestorWithClass(ev.target as Node, 'snc-dropdown-trigger');
+			if (trigger && !trigger.classList.contains('dimmed')) {
+				clearTimeout(this.hoverMenuHideTimer);
+				if (trigger !== this.hoverMenuTrigger) {
+					this.hideHoverMenu();
+					this.hoverMenuTrigger = trigger;
+					this.showHoverMenu(trigger);
+				}
+			}
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
+			if (!this.hoverMenuTrigger) { return; }
+			const relatedTarget = ev.relatedTarget as Node | null;
+			if (relatedTarget && this.hoverMenu && this.hoverMenu.contains(relatedTarget)) { return; }
+			if (relatedTarget && this.findAncestorWithClass(relatedTarget, 'snc-dropdown-trigger') === this.hoverMenuTrigger) { return; }
+			this.scheduleHoverMenuHide();
+		}));
+
 		// Add the widget to the editor
 		this.editor.addOverlayWidget(this);
 	}
@@ -263,6 +321,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		let el: Element | null = node?.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node?.parentElement ?? null);
 		while (el && el !== this.domNode) {
 			if (el.hasAttribute(attr)) {
+				return el;
+			}
+			el = el.parentElement;
+		}
+		return null;
+	}
+
+	private findAncestorWithClass(node: Node | null, className: string): Element | null {
+		let el: Element | null = node?.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node?.parentElement ?? null);
+		while (el && el !== this.domNode) {
+			if (el.classList.contains(className)) {
 				return el;
 			}
 			el = el.parentElement;
@@ -402,6 +471,163 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		if (this.pyExpTooltip) {
 			this.pyExpTooltip.remove();
 			this.pyExpTooltip = null;
+		}
+	}
+
+	private showActionTooltip(target: Element): void {
+		this.hideActionTooltip();
+
+		const expression = target.getAttribute('data-action-expr');
+		const actionName = target.getAttribute('data-action-name') || '';
+		if (!expression) { return; }
+
+		const rect = target.getBoundingClientRect();
+		const tooltip = document.createElement('div');
+		tooltip.className = 'snc-action-tooltip';
+
+		if (actionName) {
+			const nameSpan = document.createElement('span');
+			nameSpan.className = 'snc-action-tooltip-name';
+			nameSpan.textContent = actionName;
+			tooltip.appendChild(nameSpan);
+		}
+
+		const exprSpan = document.createElement('span');
+		exprSpan.className = 'snc-action-tooltip-expr';
+		exprSpan.textContent = expression;
+		exprSpan.draggable = true;
+		exprSpan.style.cursor = 'grab';
+		exprSpan.addEventListener('dragstart', (e) => {
+			if (e.dataTransfer) {
+				e.dataTransfer.setData('text/plain', expression);
+				e.dataTransfer.effectAllowed = 'copy';
+				const dragGhost = document.createElement('div');
+				dragGhost.textContent = expression;
+				dragGhost.className = 'snc-py-exp-drag-ghost';
+				document.body.appendChild(dragGhost);
+				e.dataTransfer.setDragImage(dragGhost, 0, 0);
+				setTimeout(() => dragGhost.remove(), 0);
+			}
+		});
+		tooltip.appendChild(exprSpan);
+
+		const copyBtn = document.createElement('button');
+		copyBtn.className = 'snc-copy-btn';
+		copyBtn.textContent = '\u{29C9}';
+		copyBtn.title = 'Copy to clipboard';
+		copyBtn.addEventListener('mousedown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.clipboardService.writeText(expression);
+			copyBtn.textContent = '\u2713';
+			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
+		});
+		tooltip.appendChild(copyBtn);
+
+		tooltip.addEventListener('mouseenter', () => {
+			clearTimeout(this.actionTooltipHideTimer);
+		});
+		tooltip.addEventListener('mouseleave', () => {
+			this.scheduleActionTooltipHide();
+		});
+
+		tooltip.style.left = `${rect.left}px`;
+		tooltip.style.top = `${rect.top - 32}px`;
+
+		this.editor.getContainerDomNode().appendChild(tooltip);
+		this.actionTooltip = tooltip;
+
+		const tooltipRect = tooltip.getBoundingClientRect();
+		if (tooltipRect.top < 0) {
+			tooltip.style.top = `${rect.bottom + 4}px`;
+		}
+	}
+
+	private scheduleActionTooltipHide(): void {
+		clearTimeout(this.actionTooltipTimer);
+		clearTimeout(this.actionTooltipHideTimer);
+		this.actionTooltipHideTimer = setTimeout(() => {
+			this.hideActionTooltip();
+		}, 200);
+	}
+
+	private hideActionTooltip(): void {
+		clearTimeout(this.actionTooltipTimer);
+		clearTimeout(this.actionTooltipHideTimer);
+		this.actionTooltipTarget = null;
+		if (this.actionTooltip) {
+			this.actionTooltip.remove();
+			this.actionTooltip = null;
+		}
+	}
+
+	private showHoverMenu(trigger: Element): void {
+		const panel = trigger.querySelector('.snc-dropdown-panel[data-hover-menu]') as HTMLElement;
+		if (!panel) { return; }
+
+		const triggerRect = trigger.getBoundingClientRect();
+		const align = panel.getAttribute('snc-dropdown-align') || 'left';
+
+		const clone = panel.cloneNode(true) as HTMLElement;
+		clone.classList.add('snc-hover-menu');
+		clone.style.display = '';
+		clone.removeAttribute('data-hover-menu');
+
+		if (align === 'right') {
+			clone.style.right = `${window.innerWidth - triggerRect.right}px`;
+		} else {
+			clone.style.left = `${triggerRect.left}px`;
+		}
+		clone.style.top = `${triggerRect.bottom + 2}px`;
+
+		// Wire up event listeners on the hoisted panel
+		const wrapEvent = (raw: string, attrEl: Element): string => {
+			return this.wrapWithChildKeys(raw, attrEl.parentElement, this.domNode);
+		};
+
+		this.hoverMenuListeners.push(
+			dom.addDisposableListener(clone, 'mousedown', (ev: MouseEvent) => {
+				const node = ev.target as Node;
+				let el: Element | null = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node.parentElement);
+				while (el && el !== clone.parentElement) {
+					if (el.hasAttribute('snc-mouse-down')) {
+						const raw = el.getAttribute('snc-mouse-down') ?? '';
+						this.onPointerEvent(wrapEvent(raw, el), ev);
+						break;
+					}
+					el = el.parentElement;
+				}
+			})
+		);
+
+		clone.addEventListener('mouseenter', () => {
+			clearTimeout(this.hoverMenuHideTimer);
+		});
+		clone.addEventListener('mouseleave', () => {
+			this.scheduleHoverMenuHide();
+		});
+
+		this.editor.getContainerDomNode().appendChild(clone);
+		this.hoverMenu = clone;
+	}
+
+	private scheduleHoverMenuHide(): void {
+		clearTimeout(this.hoverMenuHideTimer);
+		this.hoverMenuHideTimer = setTimeout(() => {
+			this.hideHoverMenu();
+		}, 150);
+	}
+
+	private hideHoverMenu(): void {
+		clearTimeout(this.hoverMenuHideTimer);
+		this.hoverMenuTrigger = null;
+		for (const d of this.hoverMenuListeners) {
+			d.dispose();
+		}
+		this.hoverMenuListeners = [];
+		if (this.hoverMenu) {
+			this.hoverMenu.remove();
+			this.hoverMenu = null;
 		}
 	}
 
@@ -644,8 +870,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			return false;
 		}
 
-		// Dismiss any active py-exp tooltip since the DOM is being replaced
+		// Dismiss any active tooltips/menus since the DOM is being replaced
 		this.hidePyExpTooltip();
+		this.hideHoverMenu();
 
 		// Any pending focus restoration from an older render should be ignored.
 		const currentFocusRestoreVersion = ++this.focusRestoreVersion;
@@ -819,10 +1046,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 * position it as a fixed overlay in the editor container.
 	 */
 	private hoistDropdownPanel(): void {
-		const panel = this.domNode.querySelector('.snc-dropdown-panel') as HTMLElement;
+		const panel = this.domNode.querySelector('.snc-dropdown-panel:not([data-hover-menu])') as HTMLElement;
 		if (!panel) { return; }
 
-		const trigger = this.domNode.querySelector('.snc-dropdown-trigger') as HTMLElement;
+		const trigger = panel.closest('.snc-dropdown-trigger') as HTMLElement;
 		if (!trigger) { return; }
 
 		// Get trigger's viewport position before moving anything
@@ -963,6 +1190,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 */
 	override dispose(): void {
 		this.hidePyExpTooltip();
+		this.hideActionTooltip();
+		this.hideHoverMenu();
 		this.cleanupHoistedDropdown();
 		this.editor.removeOverlayWidget(this);
 		super.dispose();

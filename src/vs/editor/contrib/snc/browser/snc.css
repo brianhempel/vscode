@@ -75,7 +75,7 @@
 	display: flex;
 	padding: 5px;
 	border-top: 1px solid var(--border-color);
- 	align-items: baseline;
+ 	align-items: center;
 	gap: 5px;
 }
 
@@ -152,6 +152,9 @@
 	justify-content: center;
 	border-radius: 3px;
 	padding: 3px;
+
+	border: 1px solid rgba(0, 0, 0, 0.3);
+	/* background: rgba(0, 0, 0, 0.06); */
 
 	&:hover {
 		color: black;
@@ -269,6 +272,26 @@
   overflow: auto;
 }
 
+.snc-dropdown-trigger {
+	position: relative;
+	display: inline-flex;
+}
+
+.snc-dropdown-trigger > .snc-dropdown-panel[data-hover-menu] {
+	display: none;
+}
+
+.snc-dropdown-trigger.dimmed {
+	pointer-events: none;
+	opacity: 0.5;
+}
+
+/* Hoisted hover menu panel (positioned by TypeScript) */
+.snc-hover-menu {
+	position: fixed;
+	z-index: 10000;
+}
+
 .snc-dropdown-option {
 	padding: 1px 4px;
   border-radius: 3px;
@@ -374,4 +397,83 @@
 	color: #ffffff;
 	border-color: #3c3c3c;
 	background: #2a2a2a;
+}
+
+/* Action button tooltip (expression preview on hover) */
+.snc-action-tooltip {
+	position: fixed;
+	background: #1e1e1e;
+	border: 1px solid #3c3c3c;
+	border-radius: 4px;
+	padding: 4px 8px;
+	font-family: monospace;
+	font-size: 11px;
+	font-style: normal;
+	color: #aaa;
+	z-index: 10001;
+	pointer-events: auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.snc-action-tooltip-name {
+	color: #888;
+	font-family: sans-serif;
+	font-size: 10px;
+	padding-right: 4px;
+	border-right: 1px solid #3c3c3c;
+}
+
+.snc-action-tooltip-expr {
+	color: #ce9178;
+}
+
+.snc-action-tooltip .snc-copy-btn {
+	cursor: pointer;
+	color: #aaa;
+	font-size: 12px;
+	padding: 2px 4px;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	background: none;
+	line-height: 1;
+}
+
+.snc-action-tooltip .snc-copy-btn:hover {
+	color: #ffffff;
+	border-color: #3c3c3c;
+	background: #2a2a2a;
+}
+
+/* Linked state for action buttons */
+.action-button.linked {
+	color: #e0a060;
+}
+
+/* Copy button inside dropdown options */
+.snc-dropdown-copy {
+	cursor: pointer;
+	color: #888;
+	font-size: 10px;
+	padding: 1px 3px;
+	border-radius: 2px;
+	opacity: 0;
+}
+
+.snc-dropdown-option:hover .snc-dropdown-copy {
+	opacity: 1;
+}
+
+.snc-dropdown-copy:hover {
+	color: #fff;
+	background: rgba(0, 0, 0, 0.15);
+}
+
+/* Dimmed dropdown option */
+.snc-dropdown-option.dimmed {
+	opacity: 0.35;
+	pointer-events: none;
 }
