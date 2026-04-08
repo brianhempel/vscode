@@ -183,7 +183,7 @@ ICONS = {}
 # Amadine's SVG export uses style="..."
 # Expand to fill="...", stroke="...", etc. so CSS can override.
 STYLE_RE = re.compile(r'\bstyle="([^"]+)"', flags=re.M)
-for icon in ["bin", "caps", "boolean-any", "boolean-all", "filter", "match-first", "regex-group", "split", "loop", "replace", "search", "search-str", "search-idx", "search-match"]:
+for icon in ["bin", "caps", "boolean-any", "boolean-all", "exists", "filter", "match-first", "regex-group", "split", "loop", "replace", "search", "search-str", "search-idx", "search-match"]:
     with open(os.path.join(os.path.dirname(__file__), f'icons/{icon}.svg'), 'r') as f:
         svg_content = f.read().replace('<?xml version="1.0" encoding="utf-8"?>\n', '').replace('<svg ', '<svg class="search-icon"')
         ICONS[icon] = STYLE_RE.sub(lambda mtch: ' '.join([f'{k}="{v}"' for attr in mtch[1].rstrip(";").split(';') for k,v in [attr.split(":",2)]]), svg_content)
@@ -2738,54 +2738,6 @@ def _dropdown_row(label: str, action: str, enabled: bool) -> str:
     )
 
 
-def _render_replace_action_buttons(model: dict, value: str, eval_in_scope, max_width=None) -> str:
-    """Replace row buttons: replace, filter, All, If All."""
-    selection_regex = model.get('search')
-    has_search = selection_regex is not None and selection_regex != ''
-    replace_visible = bool(model.get('replace_visible', False))
-    replace_text = bool(model.get('replace_text'))
-    has_replace = replace_visible and replace_text
-    first = is_first_match_mode(selection_regex) if has_search else False
-    linked_action = model.get('linked_action')
-    match_count = _eval_count_via_grammar(selection_regex, value, model, eval_in_scope) if has_search else 0
-
-    def expr(action):
-        return _preview_expr(model, action, eval_in_scope)
-
-    def btn(label, action, enabled=True, title=''):
-        return _action_btn(label, action, enabled, title,
-                           expr(action) if enabled else '',
-                           linked=linked_action == action)
-
-    parts = []
-    parts.append(btn(ICONS["replace"], 'replace', has_search and has_replace, 'Replace matches'))
-    parts.append(btn(ICONS["filter"], 'filter', has_search and has_replace, 'Filter matches by predicate'))
-
-    # All / If All predicate dropdown
-    _, all_val = _compute_predicate_previews(
-        selection_regex, value, replace_visible, model.get('replace_text'), match_count, eval_in_scope
-    ) if has_search else (None, None)
-    all_suffix = f' ({all_val})' if all_val is not None else ''
-
-    all_panel = (
-        '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{_dropdown_row(f"All{all_suffix}", "all", has_search and has_replace and not first)}'
-        f'{_dropdown_row(f"If All{all_suffix}", "if_all", has_search and has_replace and not first)}'
-        f'</div>'
-    )
-    all_btn = (
-        f'<span class="snc-dropdown-trigger {"" if has_search and has_replace else "dimmed"}">'
-        f'<span class="action-button">∀?</span>'
-        f'{all_panel}</span>'
-    )
-    parts.append(all_btn)
-
-    return (
-        f'<div class="action-buttons action-replace-buttons">'
-        f'{"".join(parts)}'
-        f'</div>'
-    )
-
 def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=None) -> str:
     """Render the action button bar below the search/replace boxes."""
     selection_regex = model.get('search')
@@ -2810,21 +2762,23 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     parts = []
 
-    parts.append(_action_btn(f'{match_count}', 'count', has_search,
+    parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', has_search,
                              'Count of matches', expr('count') if has_search else ''))
     # parts.append('<div class="action-button-divider"></div>')
 
+    magnifying_glass_icon = '<span class="search-icon" style="width:10px;font-family:Pragmasevka;font-size:12px"></span>' # Pragmasevka's Nerf Font regions have the glyph
+
     ms_title = 'First Substring' if first else 'Match Strings'
-    parts.append(btn(' <sub>&nbsp;str</sub>', 'match_strings', has_search and not has_replace, ms_title))
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace, ms_title))
 
     if has_replace:
         fm_title = 'Map First Match' if first else 'Map Matches'
     else:
         fm_title = 'First Match' if first else 'Find Matches'
-    parts.append(btn(' <sub>&nbsp;mtch</sub>', 'find_or_map', has_search, fm_title))
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Match Objs</span></sub>', 'find_or_map', has_search, fm_title))
 
     idx_title = 'First Index' if first else 'Find Indices'
-    parts.append(btn(' <sub>&nbsp;i</sub>', 'find_indices', has_search, idx_title))
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Idxs</span>', 'find_indices', has_search, idx_title))
 
     # Loop dropdown (shown on hover via CSS)
     loop_enabled = has_search and not first
@@ -2842,48 +2796,55 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     loop_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{loop_row("Loop over matched strings", "loop_match_strings")}'
-        f'{loop_row("Loop over match objects", "loop")}'
+        f'{loop_row("Over matched strings", "loop_match_strings")}'
+        f'{loop_row("Over match objects", "loop")}'
         f'</div>'
     )
     loop_btn = (
         f'<span class="snc-dropdown-trigger {"" if loop_enabled else "dimmed"}">'
-        f'<span class="action-button">{ICONS['loop']}</span>'
+        f'<span class="action-button">{ICONS['loop']}<span class="text">Loop</span></span>'
         f'{loop_panel}</span>'
     )
     parts.append(loop_btn)
 
-    # Any / If Any predicate dropdown
-    any_val, _ = _compute_predicate_previews(
+    # Predicate dropdown (Any/If Any/All/If All)
+    any_val, all_val = _compute_predicate_previews(
         selection_regex, value, replace_visible, model.get('replace_text'), match_count, eval_in_scope
     ) if has_search else (None, None)
     any_suffix = f' ({any_val})' if any_val is not None else ''
+    all_suffix = f' ({all_val})' if all_val is not None else ''
 
-    any_panel = (
+    predicate_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
         f'{_dropdown_row(f"Any{any_suffix}", "any", has_search)}'
         f'{_dropdown_row(f"If Any{any_suffix}", "if_any", has_search)}'
+        f'{_dropdown_row(f"All{all_suffix}", "all", has_search and has_replace and not first)}'
+        f'{_dropdown_row(f"If All{all_suffix}", "if_all", has_search and has_replace and not first)}'
         f'</div>'
     )
-    any_btn = (
+    predicate_btn = (
         f'<span class="snc-dropdown-trigger {"" if has_search else "dimmed"}">'
-        f'<span class="action-button">∃?</span>'
-        f'{any_panel}</span>'
+        f'<span class="action-button">{ICONS["exists"]}<span class="text">Any/All</span></span>'
+        f'{predicate_panel}</span>'
     )
-    parts.append(any_btn)
+    parts.append(predicate_btn)
 
-    parts.append(btn(ICONS["bin"], 'delete', has_search, 'Delete matches'))
+    parts.append(btn(f'{ICONS["bin"]}<span class="text">Delete</span>', 'delete', has_search, 'Delete matches'))
     # parts.append(btn('a┆b', 'split', has_search, 'Split string at matches'))
-    parts.append(btn('>┆<', 'split', has_search, 'Split string at matches'))
-    # parts.append(btn('<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;">b</span>', 'split', has_search, 'Split string at matches'))
+    # parts.append(btn('>┆<', 'split', has_search, 'Split string at matches'))
+    parts.append(btn('<span style="font-family:Pragmasevka;margin-right:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span><span style="font-family:Pragmasevka;">┆</span><span style="font-family:Pragmasevka;margin-left:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;margin-right:3px">b</span><span class="text">Split</span>', 'split', has_search, 'Split string at matches'))
     # parts.append(btn('<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0;border-width:1px 0px 1px 0;">bc</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;">b</span>', 'split', has_search, 'Split string at matches'))
+
+    parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace</span>', 'replace', has_search and has_replace, 'Replace matches'))
+    parts.append(btn(f'{ICONS["filter"]}<span class="text">Filter</span>', 'filter', has_search and has_replace, 'Filter matches by predicate'))
 
     if linked_action:
         unlink_event = repr(Unlink())
         parts.append(
             f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
-            f'>\u26d3\ufe0e Unlink</span>'
+            f'><span class="search-icon" style="width:9px">\u26d3\ufe0e</span><span class="text">Unlink</span></span>'
         )
+
 
     return (
         f'<div class="action-buttons">'
@@ -3055,20 +3016,18 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             "" if small else _render_action_buttons(model, value, eval_in_scope, max_width)
         )
 
-        replace_buttons_html = (
-            "" if not replace_visible else _render_replace_action_buttons(model, value, eval_in_scope, max_width)
-        )
-
         search_box_html = (
             f'<div class="search-box {"expanded" if replace_visible else ""}">'
+            f'<div class="search-box-row">'
             f"{discolure_button}"
             f'<div class="search-replace-container">'
             f"{search_input_html}"
             f"{replace_box_html}"
             f"</div>"
-            f'<div class="action-buttons-container">'
+            f"</div>"
+            f'<div class="search-box-row">'
+            f'<div class="disclosure-button-spacer"></div>'
             f'{action_buttons_html}'
-            f'{replace_buttons_html}'
             f"</div>"
             f"</div>"
             f"</div>"
