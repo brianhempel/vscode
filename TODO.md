@@ -1,0 +1,8 @@
+- clean up a bit
+- fix up tooltips
+- fix up dropdowns
+- restore clickable match obj helpers (just show match obj between find/replace?)
+- restore repetition modifiers
+- literal and fuzzy selection as tool buttons
+- remove \A \Z
+
