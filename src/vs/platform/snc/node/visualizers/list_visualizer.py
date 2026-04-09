@@ -1481,7 +1481,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     strs.append('<td style="padding:0 8px;">')
                     strs.append(wrap_child_prefix(composite_key))
                     if cell_exp_attr:
-                        strs.append(f'<span{cell_exp_attr} style="cursor:grab;">')
+                        strs.append(f'<span{cell_exp_attr} class="py-exp-grab">')
                     strs.extend(cell_htmls)
                     if cell_exp_attr:
                         strs.append('</span>')
@@ -1489,8 +1489,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     strs.append('</td>')
                 else:
                     strs.append('<td style="padding:0;">')
-                    strs.append(f'<div{cell_exp_attr} style="padding:2px 7px;border:1px solid transparent;border-radius:3px;cursor:grab;">')
-                    strs.append('<div draggable="false" style="cursor:auto;">')
+                    strs.append(f'<div{cell_exp_attr} class="py-exp-cell">')
+                    strs.append('<div draggable="false" class="py-exp-inner">')
                     strs.append(wrap_child_prefix(composite_key))
                     strs.extend(cell_htmls)
                     strs.append(wrap_child_suffix)

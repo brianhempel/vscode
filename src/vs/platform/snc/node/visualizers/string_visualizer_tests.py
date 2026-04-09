@@ -59,11 +59,13 @@ from string_visualizer import (
     synthesize_fuzzy_pattern,
     _eval_count_via_grammar,
     char_to_regex_literal,
-    DC1, DC2, DC3, DC4,  # Sentinel characters
+    DC2, DC3,  # Sentinel characters
     _render_transform_preview,
     _eval_index_or_slice_match,
     _find_matches,
     is_index_or_slice_search,
+    _action_btn,
+    _dropdown_row,
 )
 
 
@@ -71,16 +73,24 @@ from string_visualizer import (
 # Test Helpers
 # =============================================================================
 
-def make_mouse_down_event(index: int, top_half: bool = True) -> dict:
+def _legacy_internal_index(index: int) -> int:
+    """Map the old test-only \\A/^/.../$/\\Z index space to the current visible one."""
+    return max(index - 1, 0)
+
+
+def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool = True) -> dict:
     """Create a MouseDown event dict.
 
     Args:
         index: The character index clicked
         top_half: If True, click is in top half (literal). If False, bottom half (fuzzy).
     """
+    if legacy_index:
+        index = _legacy_internal_index(index)
     return {
         'pythonEventStr': repr(MouseDown(index)),
         'eventJSON': {
+            'altKey': not top_half,
             'offsetY': 5 if top_half else 15,  # top half < 10, bottom half >= 10
             'elementHeight': 20,
             'buttons': 1,
@@ -88,7 +98,7 @@ def make_mouse_down_event(index: int, top_half: bool = True) -> dict:
     }
 
 
-def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = None) -> dict:
+def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = None, legacy_index: bool = True) -> dict:
     """Create a MouseMove event dict.
 
     Args:
@@ -97,6 +107,8 @@ def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = 
         top_half: If provided, include offsetY/elementHeight for hover detection.
                   True = top half (literal), False = bottom half (fuzzy).
     """
+    if legacy_index:
+        index = _legacy_internal_index(index)
     event_json: dict = {
         'buttons': buttons,
     }
@@ -109,8 +121,10 @@ def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = 
     }
 
 
-def make_mouse_up_event(index: int) -> dict:
+def make_mouse_up_event(index: int, legacy_index: bool = True) -> dict:
     """Create a MouseUp event dict."""
+    if legacy_index:
+        index = _legacy_internal_index(index)
     return {
         'pythonEventStr': repr(MouseUp(index)),
         'eventJSON': {
@@ -193,8 +207,8 @@ class TestBasics(unittest.TestCase):
         new_model, commands = update(event, ('x', 'x'), None, value)
 
         self.assertIsNotNone(new_model)
-        self.assertEqual(new_model['anchorIdx'], 5)
-        self.assertEqual(new_model['cursorIdx'], 5)
+        self.assertEqual(new_model['anchorIdx'], _legacy_internal_index(5))
+        self.assertEqual(new_model['cursorIdx'], _legacy_internal_index(5))
         self.assertEqual(new_model['anchorType'], 'literal')
         self.assertTrue(new_model['dragging'])
         self.assertEqual(commands, [])
@@ -222,8 +236,8 @@ class TestSingleLiteralSelection(unittest.TestCase):
 
         model, commands = update(event, self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['anchorIdx'], 5)
-        self.assertEqual(model['cursorIdx'], 5)
+        self.assertEqual(model['anchorIdx'], _legacy_internal_index(5))
+        self.assertEqual(model['cursorIdx'], _legacy_internal_index(5))
         self.assertEqual(model['anchorType'], 'literal')
         self.assertTrue(model['dragging'])
         self.assertIsNone(model['search'])  # Not finalized yet
@@ -237,8 +251,8 @@ class TestSingleLiteralSelection(unittest.TestCase):
         model, _ = update(make_mouse_move_event(8),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['anchorIdx'], 5)
-        self.assertEqual(model['cursorIdx'], 8)
+        self.assertEqual(model['anchorIdx'], _legacy_internal_index(5))
+        self.assertEqual(model['cursorIdx'], _legacy_internal_index(8))
         self.assertTrue(model['dragging'])
         self.assertIsNone(model['search'])  # Still not finalized
 
@@ -307,7 +321,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
 
         model, commands = update(event, self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['anchorIdx'], 5)
+        self.assertEqual(model['anchorIdx'], _legacy_internal_index(5))
         self.assertEqual(model['anchorType'], 'fuzzy')
         self.assertTrue(model['dragging'])
 
@@ -315,13 +329,13 @@ class TestSingleFuzzySelection(unittest.TestCase):
         """MouseMove updates cursorIdx for fuzzy selection (needed for pattern synthesis)."""
         model, _ = update(make_mouse_down_event(5, top_half=False),
                          self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['cursorIdx'], 5)
+        self.assertEqual(model['cursorIdx'], _legacy_internal_index(5))
 
         model, _ = update(make_mouse_move_event(10),
                          self.var_and_exp, model, self.value)
 
         # Cursor tracks mouse for fuzzy (used to synthesize pattern from drag range)
-        self.assertEqual(model['cursorIdx'], 10)
+        self.assertEqual(model['cursorIdx'], _legacy_internal_index(10))
 
     def test_mouse_up_finalizes_fuzzy_segment(self):
         """MouseUp finalizes fuzzy segment with synthesized pattern.
@@ -408,12 +422,12 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
 
         # Get end index for extending
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        self.assertEqual(end_idx, 7)
+        self.assertEqual(end_idx, _legacy_internal_index(7))
 
         # Extend with fuzzy at end
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -432,9 +446,9 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
 
         # Extend with single space (click and release at same position)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=True),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=True),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/(hello)(\\ )/')
@@ -453,10 +467,10 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
 
         # Extend with fuzzy at end of hello (index 7)
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        self.assertEqual(end_idx, 7)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        self.assertEqual(end_idx, _legacy_internal_index(7))
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -499,9 +513,9 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
 
         # Extend with fuzzy (will stop at $ because .* doesn't match newline by default)
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello.*/')
@@ -509,12 +523,12 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         # The (.*) after "hello" matches the $ anchor (index 7)
         # So fuzzy spans 7-8, end_idx is 8
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        self.assertEqual(end_idx, 8)
+        self.assertEqual(end_idx, _legacy_internal_index(8))
 
         # Extend with \n at index 8
-        model, _ = update(make_mouse_down_event(end_idx, top_half=True),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=True),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello.*\\n/')
@@ -556,7 +570,7 @@ class TestExtendLeft(unittest.TestCase):
 
         # Get start index - this is 8 (the 'w')
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
-        self.assertEqual(start_idx, 8)
+        self.assertEqual(start_idx, _legacy_internal_index(8))
 
         # Click on index 7 (the space immediately to the left) with fuzzy (bottom half)
         # This should extend left, NOT reset the selection
@@ -583,12 +597,12 @@ class TestExtendLeft(unittest.TestCase):
 
         # Get start index for prepending
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
-        self.assertEqual(start_idx, 8)
+        self.assertEqual(start_idx, _legacy_internal_index(8))
 
         # Prepend with fuzzy by clicking the char immediately to the left (start_idx - 1 = 7)
-        model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
+        model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(start_idx - 1),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/\\s*world/')
@@ -605,11 +619,11 @@ class TestExtendLeft(unittest.TestCase):
                          self.var_and_exp, model, self.value)
 
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
-        self.assertEqual(start_idx, 8)
+        self.assertEqual(start_idx, _legacy_internal_index(8))
 
         # Prepend by clicking at the char immediately to the left (start_idx - 1 = 7)
         # and dragging left to index 6. This selects indices 6, 7 = 'o', ' '
-        model, _ = update(make_mouse_down_event(start_idx - 1, top_half=True),
+        model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=True),
                          self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_move_event(6),
                          self.var_and_exp, model, self.value)
@@ -642,9 +656,9 @@ class TestClickInsideFuzzy(unittest.TestCase):
                          self.var_and_exp, model, self.value)
 
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -666,7 +680,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         self.assertIsNone(fuzzy_info)  # canonical format doesn't expose groups to this helper
 
         # Click inside fuzzy to start new segment
-        model, _ = update(make_mouse_down_event(click_idx, top_half=True),
+        model, _ = update(make_mouse_down_event(click_idx, legacy_index=False, top_half=True),
                          self.var_and_exp, model, self.value)
 
         # Should start a new drag, resetting the regex
@@ -694,9 +708,9 @@ class TestClickInsideFuzzy(unittest.TestCase):
                          self.var_and_exp, model, self.value)
 
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -714,12 +728,12 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Click inside the fuzzy region and START dragging (don't release yet)
         click_idx = fuzzy_start + 3
-        model, _ = update(make_mouse_down_event(click_idx, top_half=True),
+        model, _ = update(make_mouse_down_event(click_idx, legacy_index=False, top_half=True),
                          self.var_and_exp, model, self.value)
 
         # Drag to another position still inside the fuzzy region
         drag_idx = click_idx + 2
-        model, _ = update(make_mouse_move_event(drag_idx),
+        model, _ = update(make_mouse_move_event(drag_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         # Model should still be dragging with the in-progress selection
@@ -770,10 +784,10 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Step 2: Extend with fuzzy at end of hello
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        self.assertEqual(end_idx, 7)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        self.assertEqual(end_idx, _legacy_internal_index(7))
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -834,10 +848,10 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Step 2: Prepend with fuzzy (click at first_start - 1 = 7)
         first_start = get_first_segment_start_internal_idx(model['search'], value)
-        self.assertEqual(first_start, 8)
-        model, _ = update(make_mouse_down_event(first_start - 1, top_half=False),
+        self.assertEqual(first_start, _legacy_internal_index(8))
+        model, _ = update(make_mouse_down_event(first_start - 1, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(first_start - 1),
+        model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\s*world/')
@@ -892,10 +906,10 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Click (2): fuzzy B (extend left from C)
         first_start = get_first_segment_start_internal_idx(model['search'], value)
-        self.assertEqual(first_start, 4)
-        model, _ = update(make_mouse_down_event(first_start - 1, top_half=False),
+        self.assertEqual(first_start, _legacy_internal_index(4))
+        model, _ = update(make_mouse_down_event(first_start - 1, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(first_start - 1),
+        model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False),
                          var_and_exp, model, value)
         self.assertEqual(model['search'], '/[A-Z]{1}C/')
 
@@ -1015,9 +1029,9 @@ class TestKeyboardEvents(unittest.TestCase):
 
         # Add fuzzy segment
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -1038,9 +1052,9 @@ class TestKeyboardEvents(unittest.TestCase):
 
         # Add fuzzy segment
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
         # Undo
@@ -1082,37 +1096,37 @@ class TestKeyboardEvents(unittest.TestCase):
 class TestEdgeCases(unittest.TestCase):
     """Test edge cases: anchors, newlines, mouse released outside."""
 
-    def test_selection_starting_at_backslash_A_anchor(self):
-        """Selection from index 0 includes \\A anchor -> /(\\A^he)/."""
+    def test_selection_starting_at_visible_start_anchor(self):
+        """Selection from index 0 includes ^ anchor -> /(^he)/."""
         value = "hello"
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        # Select indices 0-3: \A(0), ^(1), h(2), e(3)
-        model, _ = update(make_mouse_down_event(0, top_half=True),
+        # Select indices 0-2: ^(0), h(1), e(2)
+        model, _ = update(make_mouse_down_event(0, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(3),
+        model, _ = update(make_mouse_move_event(2, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(3),
+        model, _ = update(make_mouse_up_event(2, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/\\A^he/')
+        self.assertEqual(model['search'], '/^he/')
 
-    def test_selection_starting_at_caret_anchor(self):
-        """Selection from index 1 includes ^ anchor -> /(^hel)/."""
+    def test_selection_starting_at_first_char(self):
+        """Selection from first visible char excludes the ^ anchor."""
         value = "hello"
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        # Select indices 1-4: ^(1), h(2), e(3), l(4)
-        model, _ = update(make_mouse_down_event(1, top_half=True),
+        # Select indices 1-3: h(1), e(2), l(3)
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(4),
+        model, _ = update(make_mouse_move_event(3, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(4),
+        model, _ = update(make_mouse_up_event(3, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/^hel/')
+        self.assertEqual(model['search'], '/hel/')
 
     def test_selection_with_newlines_before_newline(self):
         """Selection of 'hello' in 'hello\\nworld' -> /(hello)/."""
@@ -1120,12 +1134,12 @@ class TestEdgeCases(unittest.TestCase):
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        # Augmented: 0=\A, 1=^, 2=h, 3=e, 4=l, 5=l, 6=o, 7=$, 8=\n, 9=^, 10=w...
-        model, _ = update(make_mouse_down_event(2, top_half=True),
+        # Augmented: 0=^, 1=h, 2=e, 3=l, 4=l, 5=o, 6=$, 7=\n, 8=^, 9=w...
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(6),
+        model, _ = update(make_mouse_move_event(5, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(6),
+        model, _ = update(make_mouse_up_event(5, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello/')
@@ -1136,13 +1150,13 @@ class TestEdgeCases(unittest.TestCase):
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        # Augmented: 0=\A, 1=^, 2=h, 3=i, 4=$, 5=\n, 6=^, 7=b, 8=y, 9=e, 10=$, 11=\Z
-        # Select indices 2-7: h(2), i(3), $(4), \n(5), ^(6), b(7)
-        model, _ = update(make_mouse_down_event(2, top_half=True),
+        # Augmented: 0=^, 1=h, 2=i, 3=$, 4=\n, 5=^, 6=b, 7=y, 8=e, 9=$
+        # Select indices 1-6: h(1), i(2), $(3), \n(4), ^(5), b(6)
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(7),
+        model, _ = update(make_mouse_move_event(6, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(7),
+        model, _ = update(make_mouse_up_event(6, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hi$\\n^b/')
@@ -1154,35 +1168,35 @@ class TestEdgeCases(unittest.TestCase):
         var_and_exp = ('x', 'x')
 
         # Start drag
-        model, _ = update(make_mouse_down_event(2, top_half=True),
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(5),
+        model, _ = update(make_mouse_move_event(4, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertTrue(model['dragging'])
 
         # Mouse released outside (buttons=0)
-        model, _ = update(make_mouse_move_event(5, buttons=0),
+        model, _ = update(make_mouse_move_event(4, legacy_index=False, buttons=0),
                          var_and_exp, model, value)
 
         self.assertFalse(model['dragging'])
         self.assertEqual(model['search'], '/hell/')
 
     def test_empty_string_anchor_selection(self):
-        """Selection on empty string selects anchors -> /(\\A^)/."""
+        """Selection on empty string selects visible anchors -> /(^$)/."""
         value = ""
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        # Augmented for "": 0=\A, 1=^, 2=$, 3=\Z
-        model, _ = update(make_mouse_down_event(0, top_half=True),
+        # Augmented for "": 0=^, 1=$
+        model, _ = update(make_mouse_down_event(0, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(1),
+        model, _ = update(make_mouse_move_event(1, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(1),
+        model, _ = update(make_mouse_up_event(1, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/\\A^/')
+        self.assertEqual(model['search'], '/^$/')
 
     def test_fresh_click_resets_selection(self):
         """Clicking away from extension points resets selection."""
@@ -1191,22 +1205,22 @@ class TestEdgeCases(unittest.TestCase):
         var_and_exp = ('x', 'x')
 
         # Create initial selection
-        model, _ = update(make_mouse_down_event(2, top_half=True),
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(6),
+        model, _ = update(make_mouse_move_event(5, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(6),
+        model, _ = update(make_mouse_up_event(5, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello/')
 
-        # Click somewhere NOT an extension point (index 10 = 'r' in world)
-        model, _ = update(make_mouse_down_event(10, top_half=True),
+        # Click somewhere NOT an extension point (index 9 = 'r' in world)
+        model, _ = update(make_mouse_down_event(9, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
 
         # Selection should be reset, new drag started (no flags to preserve)
         self.assertIsNone(model['search'])
-        self.assertEqual(model['anchorIdx'], 10)
+        self.assertEqual(model['anchorIdx'], 9)
         self.assertTrue(model['dragging'])
 
     def test_fresh_drag_preserves_case_insensitive_flag(self):
@@ -1219,7 +1233,7 @@ class TestEdgeCases(unittest.TestCase):
         model['search'] = '/hello/i'
 
         # Click somewhere NOT an extension point to start fresh drag
-        model, _ = update(make_mouse_down_event(10, top_half=True),
+        model, _ = update(make_mouse_down_event(9, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
 
         # Flags should be preserved as bare backtick form
@@ -1234,7 +1248,7 @@ class TestEdgeCases(unittest.TestCase):
 
         model['search'] = '/hello/i1'
 
-        model, _ = update(make_mouse_down_event(10, top_half=True),
+        model, _ = update(make_mouse_down_event(9, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '``i1')
@@ -1247,12 +1261,12 @@ class TestEdgeCases(unittest.TestCase):
 
         model['search'] = '/hello/i'
 
-        # Fresh drag on "world" (indices 8-12)
-        model, _ = update(make_mouse_down_event(8, top_half=True),
+        # Fresh drag on "world" (indices 7-11)
+        model, _ = update(make_mouse_down_event(7, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(12),
+        model, _ = update(make_mouse_move_event(11, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(12),
+        model, _ = update(make_mouse_up_event(11, legacy_index=False),
                          var_and_exp, model, value)
 
         # New regex should have the i flag preserved
@@ -1269,12 +1283,12 @@ class TestEdgeCases(unittest.TestCase):
                          var_and_exp, model, value)
         self.assertEqual(model['search'], '``1')
 
-        # Drag to select "hello" (indices 2-6)
-        model, _ = update(make_mouse_down_event(2, top_half=True),
+        # Drag to select "hello" (indices 1-5)
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(6),
+        model, _ = update(make_mouse_move_event(5, legacy_index=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(6),
+        model, _ = update(make_mouse_up_event(5, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello/1')
@@ -1301,20 +1315,20 @@ class TestTwoPhaseMatching(unittest.TestCase):
         string_value = "a\n\nb"
         # Pattern matches both newlines
         # In original: \n\n is at positions 1-3 (string indices)
-        # Internal indices: a=2, $=3, \n=4, ^=5, $=6, \n=7, ^=8, b=9
-        # The two \n chars are at internal 4 and 7
+        # Internal indices: ^=0, a=1, $=2, \n=3, ^=4, $=5, \n=6, ^=7, b=8, $=9
+        # The two \n chars are at internal 3 and 6
 
         highlights = parse_regex_for_highlighting(r'/(\n+)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
 
         # Should span both newlines
-        # First \n is at string index 1 -> internal 4
-        # Second \n is at string index 2 -> internal 7
-        # End should be after second \n (including ^ marker) -> 9
+        # First \n is at string index 1 -> internal 3
+        # Second \n is at string index 2 -> internal 6
+        # End should be after second \n (including ^ marker) -> 8
         self.assertEqual(seg_type, 'literal')
-        self.assertEqual(start, 4)  # First \n
-        self.assertEqual(end, 9)    # After second \n and its ^ marker
+        self.assertEqual(start, 3)  # First \n
+        self.assertEqual(end, 8)    # After second \n and its ^ marker
 
     def test_literal_two_newlines_matches(self):
         """
@@ -1342,78 +1356,78 @@ class TestTwoPhaseMatching(unittest.TestCase):
         The internal index span should correspond to 5 characters.
         """
         string_value = "hello"
-        # Internal indices: \A=0, ^=1, h=2, e=3, l=4, l=5, o=6, $=7, \Z=8
+        # Internal indices: ^=0, h=1, e=2, l=3, l=4, o=5, $=6
         highlights = parse_regex_for_highlighting(r'/(.+)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        self.assertEqual(start, 2)  # 'h' at internal index 2
-        self.assertEqual(end, 7)    # After 'o' at internal index 6, so end is 7
+        self.assertEqual(start, 1)  # 'h' at internal index 1
+        self.assertEqual(end, 6)    # After 'o' at internal index 5, so end is 6
 
     def test_backreference_matches_correctly(self):
         """
         A pattern with backreference (.)\\1 should find repeated chars correctly.
         """
         string_value = "xaay"
-        # Internal indices: \A=0, ^=1, x=2, a=3, a=4, y=5, $=6, \Z=7
+        # Internal indices: ^=0, x=1, a=2, a=3, y=4, $=5
         highlights = parse_regex_for_highlighting(r'/((.)\2)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        # "aa" is at string positions 1-3, internal indices 3-5
-        self.assertEqual(start, 3)  # First 'a'
-        self.assertEqual(end, 5)    # After second 'a'
+        # "aa" is at string positions 1-3, internal indices 2-4
+        self.assertEqual(start, 2)  # First 'a'
+        self.assertEqual(end, 4)    # After second 'a'
 
     def test_lookbehind_newline_works(self):
         """
         A pattern with (?<=\\n)x should match 'x' after a newline.
         """
         string_value = "a\nxb"
-        # Internal indices: \A=0, ^=1, a=2, $=3, \n=4, ^=5, x=6, b=7, $=8, \Z=9
+        # Internal indices: ^=0, a=1, $=2, \n=3, ^=4, x=5, b=6, $=7
         highlights = parse_regex_for_highlighting(r'/((?<=\n)x)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        # 'x' is at string index 2, internal index 6
-        self.assertEqual(start, 6)
-        self.assertEqual(end, 7)
+        # 'x' is at string index 2, internal index 5
+        self.assertEqual(start, 5)
+        self.assertEqual(end, 6)
 
     def test_lookahead_before_newline_works(self):
         """
         A pattern with x(?=\\n) should match 'x' before a newline.
         """
         string_value = "ax\nb"
-        # Internal indices: \A=0, ^=1, a=2, x=3, $=4, \n=5, ^=6, b=7, $=8, \Z=9
+        # Internal indices: ^=0, a=1, x=2, $=3, \n=4, ^=5, b=6, $=7
         highlights = parse_regex_for_highlighting(r'/(x(?=\n))/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        # 'x' is at string index 1, internal index 3
-        self.assertEqual(start, 3)
-        self.assertEqual(end, 4)
+        # 'x' is at string index 1, internal index 2
+        self.assertEqual(start, 2)
+        self.assertEqual(end, 3)
 
     def test_word_boundary_correct_positions(self):
         """
         A pattern with word boundaries should return correct internal positions.
         """
         string_value = "hello world"
-        # Internal indices: \A=0, ^=1, h=2, e=3, l=4, l=5, o=6, ' '=7, w=8, o=9, r=10, l=11, d=12, $=13, \Z=14
+        # Internal indices: ^=0, h=1, e=2, l=3, l=4, o=5, ' '=6, w=7, o=8, r=9, l=10, d=11, $=12
         highlights = parse_regex_for_highlighting(r'/(\bworld\b)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        # "world" is at string positions 6-11, internal indices 8-13
-        self.assertEqual(start, 8)   # 'w'
-        self.assertEqual(end, 13)    # After 'd'
+        # "world" is at string positions 6-11, internal indices 7-12
+        self.assertEqual(start, 7)   # 'w'
+        self.assertEqual(end, 12)    # After 'd'
 
     def test_newline_followed_by_text(self):
         """
         A pattern with \\n followed by text should match correctly.
         """
         string_value = "hello\nworld"
-        # Internal: \A=0, ^=1, h=2, e=3, l=4, l=5, o=6, $=7, \n=8, ^=9, w=10, o=11, r=12, l=13, d=14, $=15, \Z=16
+        # Internal: ^=0, h=1, e=2, l=3, l=4, o=5, $=6, \n=7, ^=8, w=9, o=10, r=11, l=12, d=13, $=14
         highlights = parse_regex_for_highlighting(r'/(\nworld)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        # \n is at string index 5 -> internal 8
-        # "world" ends at string index 10 -> internal 14
-        self.assertEqual(start, 8)   # \n
-        self.assertEqual(end, 15)    # After 'd'
+        # \n is at string index 5 -> internal 7
+        # "world" ends at string index 10 -> internal 13
+        self.assertEqual(start, 7)   # \n
+        self.assertEqual(end, 14)    # After 'd'
 
     def test_fuzzy_pattern_identified_correctly(self):
         """
@@ -1428,14 +1442,14 @@ class TestTwoPhaseMatching(unittest.TestCase):
 
     def test_anchor_at_start_of_string(self):
         """
-        A pattern starting with \\A should include the start anchor in highlights.
+        A pattern starting with \\A should map to the visible start anchor highlight.
         """
         string_value = "hello"
         # Use single backslash for the \A anchor in the regex pattern
         highlights = parse_regex_for_highlighting(r'/(\Ahello)/', string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
-        # Should start at internal index 0 (\A position)
+        # Should start at internal index 0 (^ position)
         self.assertEqual(start, 0)
 
 
@@ -1447,64 +1461,59 @@ class TestComputeInternalLength(unittest.TestCase):
     """Tests for compute_internal_length function."""
 
     def test_empty_string(self):
-        """Empty string has 4 internal positions: \\A, ^, $, \\Z."""
-        self.assertEqual(compute_internal_length(""), 4)
+        """Empty string has 2 internal positions: ^, $."""
+        self.assertEqual(compute_internal_length(""), 2)
 
     def test_single_char(self):
-        """Single char: \\A, ^, char, $, \\Z = 5."""
-        self.assertEqual(compute_internal_length("a"), 5)
+        """Single char: ^, char, $ = 3."""
+        self.assertEqual(compute_internal_length("a"), 3)
 
     def test_simple_string(self):
-        """'hello' = 4 + 5 + 0 = 9."""
-        self.assertEqual(compute_internal_length("hello"), 9)
+        """'hello' = 2 + 5 + 0 = 7."""
+        self.assertEqual(compute_internal_length("hello"), 7)
 
     def test_string_with_newline(self):
-        """'hi\\nbye' = 4 + 6 + 2*1 = 12."""
-        # Internal: \A(0), ^(1), h(2), i(3), $(4), \n(5), ^(6), b(7), y(8), e(9), $(10), \Z(11)
-        self.assertEqual(compute_internal_length("hi\nbye"), 12)
+        """'hi\\nbye' = 2 + 6 + 2*1 = 10."""
+        # Internal: ^(0), h(1), i(2), $(3), \n(4), ^(5), b(6), y(7), e(8), $(9)
+        self.assertEqual(compute_internal_length("hi\nbye"), 10)
 
     def test_string_with_multiple_newlines(self):
-        """'a\\n\\nb' = 4 + 4 + 2*2 = 12."""
-        self.assertEqual(compute_internal_length("a\n\nb"), 12)
+        """'a\\n\\nb' = 2 + 4 + 2*2 = 10."""
+        self.assertEqual(compute_internal_length("a\n\nb"), 10)
 
     def test_only_newline(self):
-        """'\\n' = 4 + 1 + 2 = 7."""
-        self.assertEqual(compute_internal_length("\n"), 7)
+        """'\\n' = 2 + 1 + 2 = 5."""
+        self.assertEqual(compute_internal_length("\n"), 5)
 
 
 class TestExtractByInternalIndices(unittest.TestCase):
     """Tests for extract_by_internal_indices function."""
 
-    def test_extract_anchor_at_start(self):
-        """Extract \\A anchor at index 0."""
+    def test_extract_visible_start_anchor(self):
+        """Extract ^ anchor at index 0."""
         result = extract_by_internal_indices("hello", 0, 1)
-        self.assertEqual(result, DC1)  # \A sentinel
-
-    def test_extract_caret_at_start(self):
-        """Extract ^ anchor at index 1."""
-        result = extract_by_internal_indices("hello", 1, 2)
         self.assertEqual(result, DC2)  # ^ sentinel
 
     def test_extract_first_char(self):
-        """Extract first character at index 2."""
-        result = extract_by_internal_indices("hello", 2, 3)
+        """Extract first character at index 1."""
+        result = extract_by_internal_indices("hello", 1, 2)
         self.assertEqual(result, "h")
 
     def test_extract_substring(self):
         """Extract 'ell' from 'hello'."""
-        # Internal: \A(0), ^(1), h(2), e(3), l(4), l(5), o(6), $(7), \Z(8)
-        result = extract_by_internal_indices("hello", 3, 6)
+        # Internal: ^(0), h(1), e(2), l(3), l(4), o(5), $(6)
+        result = extract_by_internal_indices("hello", 2, 5)
         self.assertEqual(result, "ell")
 
     def test_extract_with_trailing_anchor(self):
         """Extract including $ anchor."""
-        result = extract_by_internal_indices("hi", 4, 5)
+        result = extract_by_internal_indices("hi", 3, 4)
         self.assertEqual(result, DC3)  # $ sentinel
 
     def test_extract_across_newline(self):
         """Extract text spanning a newline."""
-        # Internal: \A(0), ^(1), h(2), i(3), $(4), \n(5), ^(6), b(7), y(8), e(9), $(10), \Z(11)
-        result = extract_by_internal_indices("hi\nbye", 3, 8)
+        # Internal: ^(0), h(1), i(2), $(3), \n(4), ^(5), b(6), y(7), e(8), $(9)
+        result = extract_by_internal_indices("hi\nbye", 2, 7)
         # Should get: i, $, \n, ^, b
         self.assertEqual(result, "i" + DC3 + "\n" + DC2 + "b")
 
@@ -1515,9 +1524,9 @@ class TestExtractByInternalIndices(unittest.TestCase):
 
     def test_extract_full_string_with_anchors(self):
         """Extract entire augmented representation."""
-        # For "ab": \A(0), ^(1), a(2), b(3), $(4), \Z(5) - length 6
-        result = extract_by_internal_indices("ab", 0, 6)
-        self.assertEqual(result, DC1 + DC2 + "ab" + DC3 + DC4)
+        # For "ab": ^(0), a(1), b(2), $(3) - length 4
+        result = extract_by_internal_indices("ab", 0, 4)
+        self.assertEqual(result, DC2 + "ab" + DC3)
 
 
 # =============================================================================
@@ -2207,7 +2216,7 @@ class TestIsAdjacentRight(unittest.TestCase):
 
     def test_exact_adjacent(self):
         """idx == last_end is always adjacent."""
-        self.assertTrue(is_adjacent_right(7, 7, "hello\nworld"))
+        self.assertTrue(is_adjacent_right(_legacy_internal_index(7), _legacy_internal_index(7), "hello\nworld"))
 
     def test_skip_dollar_to_newline(self):
         """Skip $ to reach \\n at end of line.
@@ -2216,16 +2225,16 @@ class TestIsAdjacentRight(unittest.TestCase):
         Internal: ..., o=6, $=7, \\n=8, ...
         last_end=7 (at $), idx=8 (\\n). Skipped: $ (anchor).
         """
-        self.assertTrue(is_adjacent_right(8, 7, "hello\nworld"))
+        self.assertTrue(is_adjacent_right(_legacy_internal_index(8), _legacy_internal_index(7), "hello\nworld"))
 
-    def test_skip_dollar_to_backslash_Z(self):
-        """Skip $ to reach \\Z at end of string.
+    def test_skip_dollar_past_end_is_not_adjacent(self):
+        """There is no visible cell after the final $.
 
         String "hello":
         Internal: ..., o=6, $=7, \\Z=8
         last_end=7 (at $), idx=8 (\\Z). Skipped: $ (anchor).
         """
-        self.assertTrue(is_adjacent_right(8, 7, "hello"))
+        self.assertFalse(is_adjacent_right(_legacy_internal_index(8), _legacy_internal_index(7), "hello"))
 
     def test_skip_caret_after_newline_to_first_char(self):
         """Skip ^ to reach first char of next line.
@@ -2234,7 +2243,7 @@ class TestIsAdjacentRight(unittest.TestCase):
         Internal: ..., \\n=8, ^=9, w=10, ...
         last_end=9 (at ^), idx=10 (w). Skipped: ^ (anchor).
         """
-        self.assertTrue(is_adjacent_right(10, 9, "hello\nworld"))
+        self.assertTrue(is_adjacent_right(_legacy_internal_index(10), _legacy_internal_index(9), "hello\nworld"))
 
     def test_skip_multiple_anchors_between_consecutive_newlines(self):
         """Skip ^$ between consecutive newlines.
@@ -2243,7 +2252,7 @@ class TestIsAdjacentRight(unittest.TestCase):
         Internal: ..., \\n=4, ^=5, $=6, \\n=7, ...
         last_end=5, idx=7. Skipped: ^$ (both anchors).
         """
-        self.assertTrue(is_adjacent_right(7, 5, "a\n\nb"))
+        self.assertTrue(is_adjacent_right(_legacy_internal_index(7), _legacy_internal_index(5), "a\n\nb"))
 
     def test_not_adjacent_over_real_char(self):
         """Cannot skip \\n (a real character, not an anchor).
@@ -2252,19 +2261,19 @@ class TestIsAdjacentRight(unittest.TestCase):
         Internal: ..., $=7, \\n=8, ^=9, ...
         last_end=7, idx=9. Skipped: $\\n — \\n is real.
         """
-        self.assertFalse(is_adjacent_right(9, 7, "hello\nworld"))
+        self.assertFalse(is_adjacent_right(_legacy_internal_index(9), _legacy_internal_index(7), "hello\nworld"))
 
     def test_far_away_not_adjacent(self):
         """Far-away index is not adjacent."""
-        self.assertFalse(is_adjacent_right(12, 7, "hello\nworld"))
+        self.assertFalse(is_adjacent_right(_legacy_internal_index(12), _legacy_internal_index(7), "hello\nworld"))
 
     def test_before_last_end_not_adjacent(self):
         """idx < last_end is not adjacent."""
-        self.assertFalse(is_adjacent_right(5, 7, "hello\nworld"))
+        self.assertFalse(is_adjacent_right(_legacy_internal_index(5), _legacy_internal_index(7), "hello\nworld"))
 
     def test_out_of_bounds_not_adjacent(self):
         """Out-of-bounds idx is not adjacent."""
-        self.assertFalse(is_adjacent_right(100, 7, "hello"))
+        self.assertFalse(is_adjacent_right(_legacy_internal_index(100), _legacy_internal_index(7), "hello"))
 
 
 class TestIsAdjacentLeft(unittest.TestCase):
@@ -2276,7 +2285,7 @@ class TestIsAdjacentLeft(unittest.TestCase):
 
     def test_exact_adjacent(self):
         """idx == first_start - 1 is always adjacent."""
-        self.assertTrue(is_adjacent_left(9, 10, "hello\nworld"))
+        self.assertTrue(is_adjacent_left(_legacy_internal_index(9), _legacy_internal_index(10), "hello\nworld"))
 
     def test_skip_caret_to_newline(self):
         """Skip ^ to reach \\n going left.
@@ -2285,7 +2294,7 @@ class TestIsAdjacentLeft(unittest.TestCase):
         Internal: ..., \\n=8, ^=9, w=10, ...
         first_start=10 (w), idx=8 (\\n). Skipped: ^ (anchor).
         """
-        self.assertTrue(is_adjacent_left(8, 10, "hello\nworld"))
+        self.assertTrue(is_adjacent_left(_legacy_internal_index(8), _legacy_internal_index(10), "hello\nworld"))
 
     def test_skip_caret_to_backslash_A(self):
         """Skip ^ to reach \\A at start of string.
@@ -2294,7 +2303,7 @@ class TestIsAdjacentLeft(unittest.TestCase):
         Internal: \\A=0, ^=1, h=2, ...
         first_start=2 (h), idx=0 (\\A). Skipped: ^ (anchor).
         """
-        self.assertTrue(is_adjacent_left(0, 2, "hello"))
+        self.assertTrue(is_adjacent_left(_legacy_internal_index(0), _legacy_internal_index(2), "hello"))
 
     def test_skip_dollar_to_last_char_of_prev_line(self):
         """Skip $ to reach last char of previous line going left.
@@ -2303,7 +2312,7 @@ class TestIsAdjacentLeft(unittest.TestCase):
         Internal: ..., o=6, $=7, \\n=8, ...
         first_start=8 (\\n), idx=6 (o). Skipped: $ (anchor).
         """
-        self.assertTrue(is_adjacent_left(6, 8, "hello\nworld"))
+        self.assertTrue(is_adjacent_left(_legacy_internal_index(6), _legacy_internal_index(8), "hello\nworld"))
 
     def test_skip_multiple_anchors_between_consecutive_newlines(self):
         """Skip $^ between consecutive newlines going left.
@@ -2314,7 +2323,7 @@ class TestIsAdjacentLeft(unittest.TestCase):
 
         Wait, skipped chars are at indices 5 and 6, which are ^ and $.
         """
-        self.assertTrue(is_adjacent_left(4, 7, "a\n\nb"))
+        self.assertTrue(is_adjacent_left(_legacy_internal_index(4), _legacy_internal_index(7), "a\n\nb"))
 
     def test_not_adjacent_over_real_char(self):
         """Cannot skip \\n (a real character) going left.
@@ -2323,19 +2332,19 @@ class TestIsAdjacentLeft(unittest.TestCase):
         Internal: ..., o=6, $=7, \\n=8, ^=9, w=10, ...
         first_start=10, idx=7. Between: \\n=8, ^=9. \\n is real.
         """
-        self.assertFalse(is_adjacent_left(7, 10, "hello\nworld"))
+        self.assertFalse(is_adjacent_left(_legacy_internal_index(7), _legacy_internal_index(10), "hello\nworld"))
 
     def test_far_away_not_adjacent(self):
         """Far-away index is not adjacent."""
-        self.assertFalse(is_adjacent_left(2, 10, "hello\nworld"))
+        self.assertFalse(is_adjacent_left(_legacy_internal_index(2), _legacy_internal_index(10), "hello\nworld"))
 
     def test_at_first_start_not_adjacent(self):
         """idx == first_start is not adjacent (must be to the left)."""
-        self.assertFalse(is_adjacent_left(10, 10, "hello\nworld"))
+        self.assertFalse(is_adjacent_left(_legacy_internal_index(10), _legacy_internal_index(10), "hello\nworld"))
 
     def test_past_first_start_not_adjacent(self):
         """idx > first_start is not adjacent."""
-        self.assertFalse(is_adjacent_left(11, 10, "hello\nworld"))
+        self.assertFalse(is_adjacent_left(_legacy_internal_index(11), _legacy_internal_index(10), "hello\nworld"))
 
 
 class TestSelectionAdjacencyIntegration(unittest.TestCase):
@@ -2370,15 +2379,15 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Extend with .* fuzzy
         last_end = get_last_segment_end_internal_idx(model['search'], value)
-        model, _ = update(make_mouse_down_event(last_end, top_half=False),
+        model, _ = update(make_mouse_down_event(last_end, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(last_end),
+        model, _ = update(make_mouse_up_event(last_end, legacy_index=False),
                          var_and_exp, model, value)
         self.assertEqual(model['search'], '/^[a-z]{1}/')
 
         # Verify last_end (one past the last segment's last char)
         last_end = get_last_segment_end_internal_idx(model['search'], value)
-        self.assertEqual(last_end, 3)  # one past 'h' match from [a-z]{1}
+        self.assertEqual(last_end, _legacy_internal_index(3))  # one past 'h' match from [a-z]{1}
 
         # Click \n at index 8 (past $ at 7) — THIS WAS THE BUG
         model, _ = update(make_mouse_down_event(8, top_half=True),
@@ -2410,7 +2419,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         self.assertEqual(model['search'], '/hello/')
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
-        self.assertEqual(last_end, 7)
+        self.assertEqual(last_end, _legacy_internal_index(7))
 
         # Click \n at 8 (skips $ at 7)
         model, _ = update(make_mouse_down_event(8, top_half=True),
@@ -2420,8 +2429,8 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         self.assertEqual(model['search'], '/(hello)(\\n)/')
 
-    def test_right_extend_over_dollar_to_backslash_Z(self):
-        """After selecting "hello", clicking \\Z (past $) should extend.
+    def test_right_extend_to_visible_final_dollar(self):
+        """After selecting "hello", clicking the final $ should extend.
 
         String "hello":
         Internal: \\A=0, ^=1, h=2, e=3, l=4, l=5, o=6, $=7, \\Z=8
@@ -2443,15 +2452,15 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         self.assertEqual(model['search'], '/hello/')
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
-        self.assertEqual(last_end, 7)  # at $
+        self.assertEqual(last_end, _legacy_internal_index(7))  # at $
 
-        # Click \Z at 8 (past $ at 7)
-        model, _ = update(make_mouse_down_event(8, top_half=True),
+        # Click the final $ at the end of the string
+        model, _ = update(make_mouse_down_event(7, top_half=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(8),
+        model, _ = update(make_mouse_up_event(7),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/(hello)(\\Z)/')
+        self.assertEqual(model['search'], '/(hello)($)/')
 
     def test_right_extend_fuzzy_over_dollar_to_newline(self):
         """Fuzzy extension over $ to \\n should work too.
@@ -2504,7 +2513,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         self.assertEqual(model['search'], '/world/')
 
         first_start = get_first_segment_start_internal_idx(model['search'], value)
-        self.assertEqual(first_start, 10)
+        self.assertEqual(first_start, _legacy_internal_index(10))
 
         # Click \n at 8 (past ^ at 9)
         model, _ = update(make_mouse_down_event(8, top_half=True),
@@ -2538,7 +2547,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         self.assertEqual(model['search'], '/hello/')
 
         first_start = get_first_segment_start_internal_idx(model['search'], value)
-        self.assertEqual(first_start, 2)
+        self.assertEqual(first_start, _legacy_internal_index(2))
 
         # Click \A at 0 (past ^ at 1)
         model, _ = update(make_mouse_down_event(0, top_half=True),
@@ -2546,8 +2555,8 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(0),
                          var_and_exp, model, value)
 
-        # Should extend left with \A and ^
-        self.assertEqual(model['search'], '/(\\A^)(hello)/')
+        # Should extend left with the visible ^ anchor
+        self.assertEqual(model['search'], '/(^)(hello)/')
 
     def test_no_extend_over_real_characters(self):
         """Should NOT extend when real characters are between click and selection.
@@ -2654,9 +2663,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Extend with fuzzy at exact end
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -2681,9 +2690,9 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
 
         # Extend left at first_start - 1 (standard adjacency)
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
-        model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
+        model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(start_idx - 1),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\s*world/')
@@ -2867,9 +2876,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         self.assertIsNotNone(end_idx)
 
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hello\\s*/')
@@ -2915,7 +2924,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         # This is far enough away that it should start fresh
         # Actually, let's click somewhere definitely not adjacent
         # "hello" ends at index 7, and 'w' is at index 8.
-        # is_adjacent_right(8, 7, value) == True because 8 >= 7 and idx == last_end + 1
+        # is_adjacent_right(_legacy_internal_index(8), _legacy_internal_index(7), value) == True because 8 >= 7 and idx == last_end + 1
         # So let's click at 10 ('r') which is NOT adjacent to index 7
         model, _ = update(make_mouse_down_event(10, top_half=True),
                           self.var_and_exp, model, self.value)
@@ -2940,9 +2949,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
         self.assertIsNotNone(start_idx)
 
-        model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
+        model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(start_idx - 1),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/\\s*world/')
@@ -2972,9 +2981,9 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         # Add fuzzy
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
         # Add "world" inside fuzzy
@@ -3027,9 +3036,9 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         self.assertIsNotNone(end_idx)
 
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], '/hel[a-z]{1}/')
@@ -3076,9 +3085,9 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         # Extend left with fuzzy
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
-        model, _ = update(make_mouse_down_event(start_idx - 1, top_half=False),
+        model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(start_idx - 1),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                           self.var_and_exp, model, value)
 
         self.assertEqual(model['search'], '/\\s*world/')
@@ -3141,9 +3150,9 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
 
         # Mouse: extend with fuzzy
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -3448,9 +3457,9 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
 
         # Mouse extend
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], '/hello\\s*/')
 
@@ -3527,79 +3536,79 @@ class TestResizeLiteralSegment(unittest.TestCase):
 
     def test_expand_right(self):
         """Expand 'hello' right to include space -> 'hello '."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, 2, 8)
+        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
         self.assertEqual(result, '/(hello\\ )/')
 
     def test_collapse_right(self):
         """Collapse 'hello' from right to 'hell'."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, 2, 6)
+        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(6))
         self.assertEqual(result, '/(hell)/')
 
     def test_expand_left(self):
         """Expand 'ello' left to include 'h' -> 'hello'."""
-        result = resize_literal_segment('/(ello)/', 0, self.value, 2, 7)
+        result = resize_literal_segment('/(ello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(7))
         self.assertEqual(result, '/(hello)/')
 
     def test_collapse_left(self):
         """Collapse 'hello' from left to 'ello'."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, 3, 7)
+        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(3), _legacy_internal_index(7))
         self.assertEqual(result, '/(ello)/')
 
     def test_single_char(self):
         """Resize to single char 'h'."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, 2, 3)
+        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(3))
         self.assertEqual(result, '/(h)/')
 
     def test_no_change_if_empty_range(self):
         """Empty range (new_end <= new_start) returns original regex unchanged."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, 5, 5)
+        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(5), _legacy_internal_index(5))
         self.assertEqual(result, '/(hello)/')
 
     def test_multi_segment_resize_first(self):
         """Resize first segment in multi-segment regex."""
-        result = resize_literal_segment('/(hello)(.*)(world)/', 0, self.value, 2, 8)
+        result = resize_literal_segment('/(hello)(.*)(world)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
         self.assertEqual(result, '/(hello\\ )(.*)(world)/')
 
     def test_multi_segment_resize_last(self):
         """Resize last segment in multi-segment regex."""
-        result = resize_literal_segment('/(hello)(.*)(world)/', 2, self.value, 7, 13)
+        result = resize_literal_segment('/(hello)(.*)(world)/', 2, self.value, _legacy_internal_index(7), _legacy_internal_index(13))
         self.assertEqual(result, '/(hello)(.*)(\\ world)/')
 
     def test_preserves_other_segments(self):
         """Other segments are unchanged when one is resized."""
-        result = resize_literal_segment('/(hello)(.*)(world)/', 0, self.value, 2, 3)
+        result = resize_literal_segment('/(hello)(.*)(world)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(3))
         self.assertEqual(result, '/(h)(.*)(world)/')
 
     # --- Canonical ungrouped form (the form actually stored in model) ---
 
     def test_ungrouped_single_expand_right(self):
         """Ungrouped /hello/ expanded right to include space."""
-        result = resize_literal_segment('/hello/', 0, self.value, 2, 8)
+        result = resize_literal_segment('/hello/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
         self.assertEqual(result, '/hello\\ /')
 
     def test_ungrouped_single_collapse_right(self):
         """Ungrouped /hello/ collapsed from right to 'hell'."""
-        result = resize_literal_segment('/hello/', 0, self.value, 2, 6)
+        result = resize_literal_segment('/hello/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(6))
         self.assertEqual(result, '/hell/')
 
     def test_ungrouped_single_collapse_left(self):
         """Ungrouped /hello/ collapsed from left to 'ello'."""
-        result = resize_literal_segment('/hello/', 0, self.value, 3, 7)
+        result = resize_literal_segment('/hello/', 0, self.value, _legacy_internal_index(3), _legacy_internal_index(7))
         self.assertEqual(result, '/ello/')
 
     def test_ungrouped_single_char_expand(self):
         """Ungrouped single char /h/ expanded right."""
-        result = resize_literal_segment('/h/', 0, self.value, 2, 4)
+        result = resize_literal_segment('/h/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(4))
         self.assertEqual(result, '/he/')
 
     def test_ungrouped_multi_segment_resize_first(self):
         """Ungrouped /hello.*world/ resize first literal segment."""
-        result = resize_literal_segment('/hello.*world/', 0, self.value, 2, 8)
+        result = resize_literal_segment('/hello.*world/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
         self.assertEqual(result, '/hello\\ .*world/')
 
     def test_ungrouped_multi_segment_resize_last(self):
         """Ungrouped /hello.*world/ resize last literal segment."""
-        result = resize_literal_segment('/hello.*world/', 2, self.value, 7, 13)
+        result = resize_literal_segment('/hello.*world/', 2, self.value, _legacy_internal_index(7), _legacy_internal_index(13))
         self.assertEqual(result, '/hello.*\\ world/')
 
 
@@ -3658,7 +3667,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_move_event(8),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['handleDrag']['cursorIdx'], 8)
+        self.assertEqual(model['handleDrag']['cursorIdx'], _legacy_internal_index(8))
 
     def test_mouse_move_during_handle_drag_does_not_start_new_selection(self):
         """MouseMove during handle drag should NOT set anchorIdx/cursorIdx on model root."""
@@ -5442,7 +5451,7 @@ class TestCaptureGroupsFlagAwareSegmentFunctions(unittest.TestCase):
     def test_resize_literal_preserves_flags(self):
         """resize_literal_segment with flags doesn't corrupt the pattern."""
         value = "hello world"
-        result = resize_literal_segment('/(hello)/1i', 0, value, 2, 7)
+        result = resize_literal_segment('/(hello)/1i', 0, value, _legacy_internal_index(2), _legacy_internal_index(7))
         self.assertIn('1i', get_search_flags(result))
         inner = get_regex_inner_pattern(result)
         self.assertNotIn('/', inner)
@@ -5497,9 +5506,9 @@ class TestCaptureGroupsBuildPreviewRegex(unittest.TestCase):
         model['search'] = '/(hello)/c'
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
 
-        model, _ = update(make_mouse_down_event(end_idx, top_half=False),
+        model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(end_idx),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           var_and_exp, model, value)
 
         self.assertIn('c', get_search_flags(model['search']))
@@ -7430,16 +7439,18 @@ class TestActionButtonRendering(unittest.TestCase):
         self.assertNotIn('ActionButtonClick', html_output)
 
     def test_get_label_changes_to_map_in_replace_mode(self):
-        """Button label changes from 'Find Matches' to 'Map Matches' in replace mode."""
+        """find_or_map label is 'Match Objs' until replace row is open, then 'Map Matches'."""
         model = init_model(self.value)
         model['search'] = '/hello/'
         html_get = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Find Matches', html_get)
+        self.assertIn('Match&nbsp;Objs', html_get)
+        self.assertNotIn('Map&nbsp;Matches', html_get)
 
         model['replace_visible'] = True
         model['replace_text'] = "'world'"
         html_transform = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Map Matches', html_transform)
+        self.assertIn('Map&nbsp;Matches', html_transform)
+        self.assertNotIn('Match&nbsp;Objs', html_transform)
 
     def test_first_match_mode_labels(self):
         """In first-match mode, buttons show singular labels."""
@@ -8169,16 +8180,16 @@ class TestIndexSearchHighlighting(unittest.TestCase):
         highlights = parse_regex_for_highlighting('0', value, eval_in_scope=lambda c: eval(c))
         self.assertEqual(len(highlights), 1)
         start, end = highlights[0][0], highlights[0][1]
-        self.assertEqual(start, 2)
-        self.assertEqual(end, 3)
+        self.assertEqual(start, _legacy_internal_index(2))
+        self.assertEqual(end, _legacy_internal_index(3))
 
     def test_negative_index(self):
         value = "hello"
         highlights = parse_regex_for_highlighting('-1', value, eval_in_scope=lambda c: eval(c))
         self.assertEqual(len(highlights), 1)
         start, end = highlights[0][0], highlights[0][1]
-        self.assertEqual(start, 6)
-        self.assertEqual(end, 7)
+        self.assertEqual(start, _legacy_internal_index(6))
+        self.assertEqual(end, _legacy_internal_index(7))
 
     def test_out_of_bounds_no_highlights(self):
         value = "hello"
@@ -10185,6 +10196,60 @@ class TestScrollToMatch(unittest.TestCase):
         model, _ = update(make_search_box_input_event('/hello/'),
                           ('x', 'x'), model, value)
         self.assertFalse(model.get('_scroll_to_match'))
+
+
+class TestActionBtn(unittest.TestCase):
+    def test_no_title_parameter(self):
+        """_action_btn should not accept a title parameter."""
+        import inspect
+        sig = inspect.signature(_action_btn)
+        self.assertNotIn('title', sig.parameters)
+
+    def test_no_data_action_name(self):
+        """_action_btn should never emit data-action-name."""
+        result = _action_btn('Count', 'count', enabled=True, expr='len(x)')
+        self.assertNotIn('data-action-name', result)
+
+    def test_expr_attr_still_present(self):
+        """data-action-expr should still be emitted when expr is given."""
+        result = _action_btn('Count', 'count', enabled=True, expr='len(x)')
+        self.assertIn('data-action-expr="len(x)"', result)
+
+    def test_no_expr_attr_when_empty(self):
+        result = _action_btn('Count', 'count', enabled=True)
+        self.assertNotIn('data-action-expr', result)
+
+
+class TestDropdownRow(unittest.TestCase):
+    def test_no_copy_button(self):
+        """_dropdown_row should not contain the snc-dropdown-copy span."""
+        result = _dropdown_row('Any', 'any', True, expr='any(x)')
+        self.assertNotIn('snc-dropdown-copy', result)
+        self.assertNotIn('\u29C9', result)
+
+    def test_has_snc_py_exp(self):
+        """_dropdown_row should emit snc-py-exp with the expression."""
+        result = _dropdown_row('Any', 'any', True, expr='any(x)')
+        self.assertIn('snc-py-exp="any(x)"', result)
+
+    def test_has_right_align(self):
+        """_dropdown_row should emit snc-py-exp-align=right (tooltip to the right of the row)."""
+        result = _dropdown_row('Any', 'any', True, expr='any(x)')
+        self.assertIn('snc-py-exp-align="right"', result)
+
+    def test_no_py_exp_when_no_expr(self):
+        """No snc-py-exp attribute when expr is empty."""
+        result = _dropdown_row('Any', 'any', True)
+        self.assertNotIn('snc-py-exp', result)
+
+    def test_still_has_mouse_down(self):
+        """Click action should still be wired up."""
+        result = _dropdown_row('Any', 'any', True, expr='any(x)')
+        self.assertIn('snc-mouse-down', result)
+
+    def test_dimmed_when_disabled(self):
+        result = _dropdown_row('Any', 'any', False, expr='any(x)')
+        self.assertIn('dimmed', result)
 
 
 if __name__ == '__main__':

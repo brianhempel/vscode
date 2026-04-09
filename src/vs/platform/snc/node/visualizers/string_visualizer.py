@@ -29,13 +29,13 @@ HOW IT WORKS
 RENDERING:
 - The string is displayed character-by-character inside a <div>
 - Special characters (\n, \t) are shown as escape sequences
-- Regex anchors \A and ^ are shown as prefix markers
+- Regex anchors ^ and $ are shown as visible boundary markers
 - Each <span> has snc-mouse-* attributes containing Python code strings
   that get eval'd in the update() function to create typed event objects
 
 INTERNAL INDEXING:
 - Characters use "internal indices" that differ from string indices
-- Index 0: \A marker, Index 1: ^ marker, Index 2+: actual characters
+- Index 0: ^ marker, Index 1+: actual characters
 - Newlines expand to 3 indices: $ (end-of-line), \n, ^ (start-of-line)
 - The build_internal_to_string_mapping() function converts between systems
 
@@ -81,7 +81,8 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, STRING, GRAY, BLUE
+from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, truncate_str
+import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
 
@@ -173,9 +174,6 @@ class RepetitionInput:
 
 
 
-# VS Code theme colors
-STRING = "#ce9178"
-GRAY = "#808080"
 
 # A buncha icons
 ICONS = {}
@@ -205,15 +203,13 @@ FUZZY_PATTERN_OPTIONS = [
     (r"[\S\s]", r"[\S\s]"),
 ]
 
-# Sentinel characters for regex anchors (ASCII Device Control chars)
+# Sentinel characters for visible regex anchors (ASCII Device Control chars)
 # These are inserted into an "augmented string" to enable 1:1 mapping
-# between string positions and visual display indices
-DC1 = chr(0x11)  # \A - start of string anchor
-DC2 = chr(0x12)  # ^  - start of line anchor
-DC3 = chr(0x13)  # $  - end of line anchor
-DC4 = chr(0x14)  # \Z - end of string anchor
+# between string positions and visual display indices.
+DC2 = chr(0x12)  # ^  - start of line/string anchor
+DC3 = chr(0x13)  # $  - end of line/string anchor
 
-_SENTINEL_CHARS = [DC1, DC2, DC3, DC4]
+_SENTINEL_CHARS = [DC2, DC3]
 
 
 def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_char: str | None = '') -> str:
@@ -287,14 +283,10 @@ def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_
 
 def char_to_regex_literal(char: str) -> str:
     """Convert a character (possibly sentinel) to its regex representation."""
-    if char == DC1:
-        return r'\A'
-    elif char == DC2:
+    if char == DC2:
         return '^'
     elif char == DC3:
         return '$'
-    elif char == DC4:
-        return r'\Z'
     elif char == '\n':
         return r'\n'
     elif char == '\t':
@@ -723,22 +715,22 @@ def compute_internal_length(string_value: str) -> int:
     Compute the total internal length for a string's visual representation.
 
     Internal indices include:
-    - 2 prefix anchors (\A at 0, ^ at 1)
+    - 1 prefix anchor (^ at 0)
     - Each character adds 1
     - Each \n adds 2 extra ($ before, ^ after)
-    - 2 suffix anchors ($ and \Z)
+    - 1 suffix anchor ($)
 
-    Formula: 4 + len(string_value) + 2 * newline_count
+    Formula: 2 + len(string_value) + 2 * newline_count
     """
-    return 4 + len(string_value) + 2 * string_value.count('\n')
+    return 2 + len(string_value) + 2 * string_value.count('\n')
 
 
 def extract_by_internal_indices(string_value: str, start: int, end: int) -> str:
     """
     Extract text from string_value by internal visual indices.
 
-    Returns a string where anchors are represented as DC sentinel characters
-    (DC1=\\A, DC2=^, DC3=$, DC4=\\Z) and regular characters are included as-is.
+    Returns a string where visible anchors are represented as DC sentinel
+    characters (DC2=^, DC3=$) and regular characters are included as-is.
     This is suitable for passing to char_to_regex_literal or for display
     after converting sentinels to their text representations.
 
@@ -757,9 +749,7 @@ def extract_by_internal_indices(string_value: str, start: int, end: int) -> str:
     elements = []
     idx = 0
 
-    # Prefix anchors
-    elements.append((idx, DC1))  # \A
-    idx += 1
+    # Prefix anchor
     elements.append((idx, DC2))  # ^
     idx += 1
 
@@ -776,10 +766,8 @@ def extract_by_internal_indices(string_value: str, start: int, end: int) -> str:
             elements.append((idx, char))
             idx += 1
 
-    # Suffix anchors
+    # Suffix anchor
     elements.append((idx, DC3))  # $
-    idx += 1
-    elements.append((idx, DC4))  # \Z
     idx += 1
 
     # Extract the slice
@@ -796,16 +784,14 @@ def build_internal_to_string_mapping(string_value: str) -> List[int]:
     Build a mapping from internal visualizer indices to actual string character indices.
 
     Internal indices:
-    - 0: \A prefix marker (maps to string index 0, start of string)
-    - 1: ^ prefix marker (maps to string index 0, start of string)
-    - 2+: actual characters, but \n expands to 3 indices, \t to 1
+    - 0: ^ prefix marker (maps to string index 0, start of string)
+    - 1+: actual characters, but \n expands to 3 indices, \t to 1
 
     Returns a list where mapping[internal_idx] = string_char_idx.
     """
     mapping = []
 
-    # Prefix markers map to start of string (index 0)
-    mapping.append(0)  # \A -> 0
+    # Prefix marker maps to start of string (index 0)
     mapping.append(0)  # ^ -> 0
 
     string_idx = 0
@@ -844,7 +830,7 @@ def build_string_to_internal_mapping(string_value: str) -> List[int]:
     """
     mapping = []
 
-    internal_idx = 2  # Start after \A (0) and ^ (1)
+    internal_idx = 1  # Start after ^ (0)
 
     for char in string_value:
         if char == '\n':
@@ -2023,13 +2009,13 @@ def _literal_match_highlights(search_text: str, string_value: str,
         str_start, str_end = match.span()
         if str_start == str_end:
             continue
-        internal_start = str_to_internal[str_start] if str_start < len(str_to_internal) else 2
+        internal_start = str_to_internal[str_start] if str_start < len(str_to_internal) else 1
         if str_end > 0 and str_end <= len(str_to_internal):
             internal_end = str_to_internal[str_end - 1] + 1
             if str_end - 1 < len(string_value) and string_value[str_end - 1] == '\n':
                 internal_end += 1
         else:
-            internal_end = str_to_internal[-1] if str_to_internal else 2
+            internal_end = str_to_internal[-1] if str_to_internal else 1
         highlights.append((internal_start, internal_end, 'literal', search_text, (1, 1), None))
 
     return highlights
@@ -2137,7 +2123,7 @@ def _slice_search_highlights(search: str, string_value: str, eval_in_scope) -> l
         if actual_stop - 1 < n and string_value[actual_stop - 1] == '\n':
             internal_end += 1
     else:
-        internal_end = str_to_internal[-1] if str_to_internal else 2
+        internal_end = str_to_internal[-1] if str_to_internal else 1
 
     display = f'{left}:{right}'
     return [(internal_start, internal_end, 'literal', display, (1, 1), None)]
@@ -2172,7 +2158,7 @@ def _slice_range_highlight(actual_start: int, actual_stop: int, string_value: st
         if actual_stop - 1 < n and string_value[actual_stop - 1] == '\n':
             internal_end += 1
     else:
-        internal_end = str_to_internal[-1] if str_to_internal else 2
+        internal_end = str_to_internal[-1] if str_to_internal else 1
     return (internal_start, internal_end, 'literal', display, (1, 1), None)
 
 
@@ -2325,12 +2311,12 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                 if str_start < len(str_to_internal):
                     internal_pos = str_to_internal[str_start]
                 else:
-                    internal_pos = str_to_internal[-1] if str_to_internal else 2
+                    internal_pos = str_to_internal[-1] if str_to_internal else 1
 
                 # For zero-width matches, we're at the boundary BEFORE the character
                 # This corresponds to anchor positions:
                 # - Before a newline: the $ anchor (internal_pos - 1 for \n)
-                # - At string start: could be \A or ^
+                # - At string start: the visible ^ anchor
                 # - At string end: the $ anchor
                 if str_start < len(string_value) and string_value[str_start] == '\n':
                     # We're at the boundary before a newline - that's the $ position
@@ -2339,7 +2325,7 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                     # We're at the end of string - that's the $ position
                     internal_start = internal_pos
                 elif str_start == 0:
-                    # At the very start - position 2 (after \A and ^)
+                    # At the very start - the visible ^ is at position 0
                     internal_start = internal_pos
                 else:
                     # General case: position right after previous char
@@ -2352,7 +2338,7 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                     internal_start = 0
                 if 'AT_BEGINNING' in anchors:
                     if str_start == 0:
-                        internal_start = min(internal_start, 1)
+                        internal_start = 0
                 if 'AT_END' in anchors:
                     internal_end = max(internal_end, internal_start + 1)
                 if 'AT_END_STRING' in anchors:
@@ -2363,7 +2349,7 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                 highlights.append((internal_start, internal_end, seg_type, pattern_display, repetition, segment_index))
             else:
                 # Normal match with content
-                internal_start = str_to_internal[str_start] if str_start < len(str_to_internal) else 2
+                internal_start = str_to_internal[str_start] if str_start < len(str_to_internal) else 1
                 # For end, we need the position AFTER the last matched character
                 if str_end > 0 and str_end <= len(str_to_internal):
                     internal_end = str_to_internal[str_end - 1] + 1
@@ -2372,20 +2358,20 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                         # \n maps to middle of 3 indices ($, \n, ^), so add 1 more to include ^
                         internal_end += 1
                 else:
-                    internal_end = str_to_internal[-1] if str_to_internal else 2
+                    internal_end = str_to_internal[-1] if str_to_internal else 1
 
                 # Extend for leading anchors
                 if 'AT_BEGINNING_STRING' in anchors:
                     internal_start = 0
                 if 'AT_BEGINNING' in anchors and str_start == 0:
-                    internal_start = min(internal_start, 1)
+                    internal_start = 0
 
                 # Extend for trailing anchors
                 if 'AT_END_STRING' in anchors:
                     internal_end = compute_internal_length(string_value)
                 if 'AT_END' in anchors:
                     # $ anchor - extend to include the $ marker
-                    # For end of string, $ is at augmented_len - 2
+                    # For end of string, $ is at augmented_len - 1
                     # For end of line, $ is right before the \n
                     pass  # The current end should already be correct
 
@@ -2450,10 +2436,9 @@ def is_adjacent_right(idx: int, last_end: int, string_value: str) -> bool:
 
     This handles cases like:
     - Extending past $ to reach \\n (at end of line)
-    - Extending past $ to reach \\Z (at end of string)
     - Extending past ^ to reach the first char of the next line
 
-    Anchor characters (\\A, ^, $, \\Z) are zero-width regex positions that
+    Anchor characters (^ and $) are zero-width regex positions that
     appear as visual markers in the UI. They don't represent actual string
     content, so it's natural to allow clicking "through" them to reach the
     next real character.
@@ -2479,7 +2464,7 @@ def is_adjacent_left(idx: int, first_start: int, string_value: str) -> bool:
 
     This handles cases like:
     - Extending past ^ to reach \\n (going left from start of next line)
-    - Extending past ^ to reach \\A (going left from start of string)
+    - Extending past ^ to reach the first char at the start of string
     - Extending past $ to reach the last char of the previous line
     """
     if idx >= first_start:
@@ -2530,7 +2515,7 @@ def vis_char_with_index_els(char, i, highlight_by_index, model=None, scroll_to=F
         return ([
             *char_span_els('$', i, True, highlight_by_index.get(i), model, scroll_to),
             *char_span_els('\\n', i+1, True, highlight_by_index.get(i+1), model),
-            '\n  ',
+            '\n',
             *char_span_els('^', i+2, True, highlight_by_index.get(i+2), model)
         ], i + 3)
     elif char == '\t':
@@ -2696,7 +2681,7 @@ def build_preview_regex(model, string_value: str) -> str | None:
         else:
             return append_segment_to_regex(current_regex, 'literal', selected_text)
 
-def _action_btn(label: str, action: str, enabled: bool = True, title: str = '',
+def _action_btn(label: str, action: str, enabled: bool = True,
                 expr: str = '', linked: bool = False) -> str:
     event = repr(ActionButtonClick(action=action, copy=False))
     cls = 'action-button'
@@ -2704,10 +2689,9 @@ def _action_btn(label: str, action: str, enabled: bool = True, title: str = '',
         cls += ' dimmed'
     if linked:
         cls += ' linked'
-    name_attr = f' data-action-name="{html.escape(title)}"' if title else ''
     expr_attr = f' data-action-expr="{html.escape(expr)}"' if expr else ''
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
-            f'{name_attr}{expr_attr}>{label}</span>')
+            f'{expr_attr}>{label}</span>')
 
 def _preview_expr(model: dict, action: str, eval_in_scope) -> str:
     """Pre-compute the expression that an action button would generate."""
@@ -2725,15 +2709,14 @@ def _preview_expr(model: dict, action: str, eval_in_scope) -> str:
         return ''
 
 
-def _dropdown_row(label: str, action: str, enabled: bool) -> str:
+def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '') -> str:
     act_event = repr(ActionButtonClick(action=action, copy=False))
-    cp_event = repr(ActionButtonClick(action=action, copy=True))
     disabled = '' if enabled else ' dimmed'
+    py_exp_attrs = (f' snc-py-exp="{html.escape(expr)}" snc-py-exp-align="right"'
+                    if expr else '')
     return (
-        f'<div class="snc-dropdown-option{disabled}">'
+        f'<div class="snc-dropdown-option{disabled}"{py_exp_attrs}>'
         f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
-        f'<span class="snc-dropdown-copy" snc-mouse-down="{html.escape(cp_event)}"'
-        f' title="Copy to clipboard">\u29C9</span>'
         f'</div>'
     )
 
@@ -2752,8 +2735,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     def expr(action):
         return _preview_expr(model, action, eval_in_scope)
 
-    def btn(label, action, enabled=True, title=''):
-        return _action_btn(label, action, enabled, title,
+    def btn(label, action, enabled=True):
+        return _action_btn(label, action, enabled,
                            expr(action) if enabled else '',
                            linked=linked_action == action)
 
@@ -2762,37 +2745,24 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     parts = []
 
-    parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', has_search,
-                             'Count of matches', expr('count') if has_search else ''))
+    parts.append(_action_btn(f'<span class="text">Count:&nbsp;{match_count}</span>', 'count', has_search,
+                             expr('count') if has_search else ''))
     # parts.append('<div class="action-button-divider"></div>')
 
     magnifying_glass_icon = '<span class="search-icon" style="width:10px;font-family:Pragmasevka;font-size:12px"></span>' # Pragmasevka's Nerf Font regions have the glyph
 
-    ms_title = 'First Substring' if first else 'Match Strings'
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace, ms_title))
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace))
 
-    if has_replace:
-        fm_title = 'Map First Match' if first else 'Map Matches'
-    else:
-        fm_title = 'First Match' if first else 'Find Matches'
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Match Objs</span></sub>', 'find_or_map', has_search, fm_title))
+    find_or_map_label = 'Map&nbsp;Matches' if replace_visible else 'Match&nbsp;Objs'
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">{find_or_map_label}</span>', 'find_or_map', has_search))
 
-    idx_title = 'First Index' if first else 'Find Indices'
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Idxs</span>', 'find_indices', has_search, idx_title))
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Idxs</span>', 'find_indices', has_search))
 
     # Loop dropdown (shown on hover via CSS)
     loop_enabled = has_search and not first
 
     def loop_row(label, action):
-        act_event = repr(ActionButtonClick(action=action, copy=False))
-        cp_event = repr(ActionButtonClick(action=action, copy=True))
-        return (
-            f'<div class="snc-dropdown-option">'
-            f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
-            f'<span class="snc-dropdown-copy" snc-mouse-down="{html.escape(cp_event)}"'
-            f' title="Copy to clipboard">\u29C9</span>'
-            f'</div>'
-        )
+        return _dropdown_row(label, action, True, expr(action) if loop_enabled else '')
 
     loop_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
@@ -2816,10 +2786,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     predicate_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{_dropdown_row(f"Any{any_suffix}", "any", has_search)}'
-        f'{_dropdown_row(f"If Any{any_suffix}", "if_any", has_search)}'
-        f'{_dropdown_row(f"All{all_suffix}", "all", has_search and has_replace and not first)}'
-        f'{_dropdown_row(f"If All{all_suffix}", "if_all", has_search and has_replace and not first)}'
+        f'{_dropdown_row(f"Any{any_suffix}", "any", has_search, expr("any") if has_search else "")}'
+        f'{_dropdown_row(f"If Any{any_suffix}", "if_any", has_search, expr("if_any") if has_search else "")}'
+        f'{_dropdown_row(f"All{all_suffix}", "all", has_search and has_replace and not first, expr("all") if has_search and has_replace and not first else "")}'
+        f'{_dropdown_row(f"If All{all_suffix}", "if_all", has_search and has_replace and not first, expr("if_all") if has_search and has_replace and not first else "")}'
         f'</div>'
     )
     predicate_btn = (
@@ -2829,14 +2799,14 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     )
     parts.append(predicate_btn)
 
-    parts.append(btn(f'{ICONS["bin"]}<span class="text">Delete</span>', 'delete', has_search, 'Delete matches'))
+    parts.append(btn(f'{ICONS["bin"]}<span class="text">Delete</span>', 'delete', has_search))
     # parts.append(btn('a┆b', 'split', has_search, 'Split string at matches'))
     # parts.append(btn('>┆<', 'split', has_search, 'Split string at matches'))
-    parts.append(btn('<span style="font-family:Pragmasevka;margin-right:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span><span style="font-family:Pragmasevka;">┆</span><span style="font-family:Pragmasevka;margin-left:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;margin-right:3px">b</span><span class="text">Split</span>', 'split', has_search, 'Split string at matches'))
+    parts.append(btn('<span style="font-family:Pragmasevka;margin-right:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span><span style="font-family:Pragmasevka;">┆</span><span style="font-family:Pragmasevka;margin-left:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;margin-right:3px">b</span><span class="text">Split</span>', 'split', has_search))
     # parts.append(btn('<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0;border-width:1px 0px 1px 0;">bc</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;">b</span>', 'split', has_search, 'Split string at matches'))
 
-    parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace</span>', 'replace', has_search and has_replace, 'Replace matches'))
-    parts.append(btn(f'{ICONS["filter"]}<span class="text">Filter</span>', 'filter', has_search and has_replace, 'Filter matches by predicate'))
+    parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace</span>', 'replace', has_search and has_replace))
+    parts.append(btn(f'{ICONS["filter"]}<span class="text">Filter</span>', 'filter', has_search and has_replace))
 
     if linked_action:
         unlink_event = repr(Unlink())
@@ -2875,9 +2845,8 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # Build character sequence with highlighting
     char_els = []
 
-    # Prefix markers are selectable with internal indices 0 (\A) and 1 (^)
-    char_els.append(char_span('\\A', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index)))
-    char_els.append(char_span('^', 1, True, highlight_by_index.get(1), model, scroll_to=(1 == first_match_index)))
+    # Visible start anchor is selectable at internal index 0
+    char_els.append(char_span('^', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index)))
 
     hover_idx = model.get('hoverIdx') if model and not model.get('dragging') else None
     group_chars = []
@@ -2890,7 +2859,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             group_chars = []
             group_start = None
 
-    index = 2
+    index = 1
     for char in value:
         is_plain = (
             char != '\n' and char != '\t'
@@ -2912,8 +2881,6 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # (must match internal index scheme for 1:1 correspondence with extract_by_internal_indices)
     char_els.append(char_span('$', index, True, highlight_by_index.get(index), model, scroll_to=(index == first_match_index)))
     index += 1
-    char_els.append(char_span("\\Z", index, True, highlight_by_index.get(index), model))
-    index += 1
 
     # len() indicator at the top-left of the final character position
     resolved_source_expr = model.get('_source_expr') if model else None
@@ -2921,10 +2888,9 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         len_val = len(value)
         len_expr = f'len({resolved_source_expr})'
         char_els.append(
-            f'<span style="position:relative;display:inline-block;width:0;height:0;vertical-align:top;">'
+            f'<span class="len-anchor">'
             f'<span snc-py-exp="{html.escape(len_expr)}" draggable="true" '
-            f'style="position:absolute;left:3px;top:1px;font-size:7px;color:{BLUE};line-height:7px;'
-            f'cursor:grab;user-select:none;white-space:nowrap;"'
+            f'class="len-indicator"'
             f'>{len_val}</span></span>'
         )
 
@@ -2980,11 +2946,13 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         discolure_button = f'<span snc-mouse-down="{html.escape(replace_toggle_event)}" class="search-button disclosure-button">{disclosure_icon}</span>'
 
         replace_box_html = ""
+        match_preview_html = ""
         preview_html = ""
         if replace_visible:
             replace_text_value = model.get("replace_text") or ""
             replace_input_event = "lambda e: ReplaceBoxInput(value=e.get('value', ''))"
             preview_html = _render_transform_preview(model, value, eval_in_scope)
+            match_preview_html = _render_match_object_preview(model, value, eval_in_scope)
             replace_box_html = (
                 f'<div class="search-box-input-wrapper">'
                 f'<input type="text" tabindex="0"'
@@ -3022,6 +2990,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f"{discolure_button}"
             f'<div class="search-replace-container">'
             f"{search_input_html}"
+            f"{match_preview_html}"
             f"{replace_box_html}"
             f"</div>"
             f"</div>"
@@ -3231,11 +3200,7 @@ def _compute_predicate_previews(selection_regex, value, replace_visible, replace
 
 
 def _trunc_repr(val, max_len=30) -> str:
-    begin_end_size = max_len // 2
-    r = repr(val)
-    if len(r) > max_len:
-        return r[:begin_end_size] + 'U' + r[-begin_end_size + 1:]
-    return r
+    return truncate_str(repr(val), max_len)
 
 
 def _preview_chip(expr: str, val_repr: str, target: str = '.snc-replace-input') -> str:
@@ -3250,6 +3215,52 @@ def _preview_chip(expr: str, val_repr: str, target: str = '.snc-replace-input') 
         f' U {val_repr}'
         f'</span>'
     )
+
+# START HERE some needs some margin fixups
+def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
+    """Render the first regex match as a compact z_object small view between find/replace.
+
+    Returns HTML string with draggable match properties (^[0], ^.start(), ^.end(),
+    and capture groups), or '' if no regex match exists.
+    """
+    selection_regex = model.get('search')
+    if not selection_regex:
+        return ''
+    if is_index_or_slice_search(selection_regex, eval_in_scope):
+        return ''
+
+    matches = _find_matches(selection_regex, value, eval_in_scope)
+    if not matches:
+        return ''
+    m = matches[0]
+    if not isinstance(m, re.Match):
+        return ''
+
+    fields = ['^[0]', '^.start()', '^.end()']
+    grouped_match = None
+    if is_regex_search(selection_regex):
+        inner = get_regex_inner_pattern(selection_regex)
+        if inner:
+            ci = is_case_insensitive(selection_regex)
+            flags = re.M | (re.I if ci else 0)
+            try:
+                grouped_match = re.search(inner, value, flags=flags)
+                if grouped_match and grouped_match.lastindex:
+                    for i in range(1, grouped_match.lastindex + 1):
+                        if grouped_match.group(i) is not None:
+                            fields.append(f'^[{i}]')
+            except Exception:
+                grouped_match = None
+
+    display_match = grouped_match if grouped_match is not None else m
+    match_model = {
+        'fields': fields,
+        '_source_expr': '^',
+        '_add_target': '.search-box-input-replace',
+    }
+    obj_html = z_object_visualizer.visualize(
+        display_match, match_model, None, eval_in_scope, small=True)
+    return f'<div class="match-object-preview">{obj_html}</div>'
 
 
 def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
@@ -3752,7 +3763,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 fuzzy_info = find_fuzzy_segment_at_index(selection_regex, value, idx)
 
             # Check if extending from the right (end of last segment)
-            # Uses broader adjacency: allows skipping over anchor chars ($, ^, \A, \Z)
+            # Uses broader adjacency: allows skipping over visible anchor chars ($, ^)
             if last_end is not None and isinstance(idx, int) and is_adjacent_right(idx, last_end, value):
                 # Keep existing regex, start new segment from where user clicked
                 # (not from last_end, to avoid including skipped anchors in the segment)

@@ -5,22 +5,32 @@
 
 @import "./string-visualizer.css";
 
+.editor-instance {
+	--snc-bg: #fcfcfc;
+	--snc-border-color: #c0c0c0;
+	--snc-text-color: #4A4A4A;
+	--snc-text-muted: #888;
+	--snc-string-color: #315278;
+	--snc-hover-bg: rgba(0, 0, 0, 0.06);
+	--snc-active-bg: rgba(0, 0, 0, 0.1);
+	--snc-panel-shadow: 0.2px 0.3px 0.4px hsl(0deg 0% 63% / 0.36),
+		0.7px 0.9px 1.3px -0.8px hsl(0deg 0% 63% / 0.36),
+		1.8px 2.3px 3.3px -1.7px hsl(0deg 0% 63% / 0.36),
+		4.4px 5.7px 8.1px -2.5px hsl(0deg 0% 63% / 0.36);
+	--snc-ui-widget-font-family: -apple-system, system-ui, sans-serif;
+	--snc-code-font-family: Pragmasevka, monospace;
+}
+
 .monaco-editor .snc-visualization-widget {
-	--string-color: #315278;
-	--border-color: #c0c0c0;
-	--bg: #fcfcfc;
-	--default-font-size: 14px;
-	--menu-font-size: 11px;
-	--ui-widget-font-family: -apple-system, system-ui, sans-serif; /* same as VS Code UI */
-	--code-font-family: Pragmasevka, monospace;
+	--snc-default-font-size: 14px;
+	--snc-menu-font-size: 11px;
 
 	position: absolute;
 	display: inline-block;
 	margin-left: 8px;
-	margin-top: -4px;
-	font-size: var(--default-font-size);
+	font-size: var(--snc-default-font-size);
 	padding: 2px 0px;
-	font-family: var(--code-font-family);
+	font-family: var(--snc-code-font-family);
 	white-space: nowrap;
 	vertical-align: middle;
 	filter: none;
@@ -62,12 +72,12 @@
 }
 
 .search-box-input {
-	color: #315278 !important;
-	border: 1px solid var(--border-color);
+	color: var(--snc-string-color) !important;
+	border: 1px solid var(--snc-border-color);
 	border-radius: 5px;
 	padding: 5px;
 	padding-bottom: 4px;
-	font-size: var(--menu-font-size) !important;
+	font-size: var(--snc-menu-font-size) !important;
 	outline: none;
 	width: -webkit-fill-available;
 }
@@ -77,7 +87,7 @@
 	display: flex;
 	flex-direction: column;
 	padding: 5px;
-	border-top: 1px solid var(--border-color);
+	border-top: 1px solid var(--snc-border-color);
 	gap: 5px;
 }
 
@@ -88,16 +98,13 @@
 }
 
 .visualizer-container {
-	color: var(--string-color);
-	white-space: pre;
 	user-select: none;
-	outline: none;
 	display: flex;
 	flex-direction: column;
 	position: relative;
-	background: var(--bg);
+	background: var(--snc-bg);
 	border-radius: 5px;
-	border: 1px solid var(--border-color);
+	border: 1px solid var(--snc-border-color);
 	margin-bottom: 5px;
 	margin-top: 2px;
 
@@ -140,18 +147,18 @@
 	width: 12px;
 	height: 12px;
 
-	fill: #4A4A4A;
+	fill: var(--snc-text-color);
 
 	path {
-	  fill: #4A4A4A;
+	  fill: var(--snc-text-color);
 	}
 }
 
 .action-button, .search-button {
 	cursor: pointer;
-	color: #4A4A4A;
-	font-size: var(--menu-font-size);
-	font-family: var(--ui-widget-font-family);
+	color: var(--snc-text-color);
+	font-size: var(--snc-menu-font-size);
+	font-family: var(--snc-ui-widget-font-family);
 	letter-spacing: -0.025em;
 	line-height: 1;
 	user-select: none;
@@ -160,21 +167,17 @@
 	justify-content: center;
 	border-radius: 3px;
 
-
-	/* border: 1px solid rgba(0, 0, 0, 0.3); */
-	/* background: rgba(0, 0, 0, 0.06); */
-
 	&:hover {
 		color: black;
-		background: rgba(0, 0, 0, 0.06);
+		background: var(--snc-hover-bg);
 	}
 
 	&:active {
-		background: rgba(0, 0, 0, 0.1);
+		background: var(--snc-active-bg);
 	}
 
 	&.active {
-		background: rgba(0, 0, 0, 0.06);
+		background: var(--snc-hover-bg);
 		color: #3c53a7;
 		> svg {
 			fill: #3c53a7;
@@ -204,7 +207,7 @@
 
 	/* .text {
 		font-size: 11px;
-		font-family: var(--ui-widget-font-family);
+		font-family: var(--snc-ui-widget-font-family);
 		letter-spacing: -0.025em;
 	} */
 }
@@ -229,7 +232,7 @@
 
 .action-buttons {
   display: flex;
-  gap: 10px;
+  gap: 2px;
 	flex-grow: 1;
 	margin-left: -2px;
 	/* justify-content: space-between;
@@ -250,9 +253,9 @@
 }
 
 .transform-preview {
-	color: #4A4A4A;
+	color: var(--snc-text-color);
 	opacity: 0.8;
-	font-size: var(--menu-font-size);
+	font-size: var(--snc-menu-font-size);
 	position: absolute;
 	right: 3px;
 	height: 100%;
@@ -262,7 +265,7 @@
 
 .transform-preview-content {
 	padding: 0px 3px;
-	background: rgba(0, 0, 0, 0.06);
+	background: var(--snc-hover-bg);
 	display: flex;
 	border-radius: 4px;
 }
@@ -279,18 +282,15 @@
 	}
 
 	top: 100%;
-	background: white;
-	border: 1px solid #c0c0c0;
+	background: var(--snc-bg);
+	border: 1px solid var(--snc-border-color);
 	border-radius: 4px;
 	z-index: 100;
 	min-width: 100px;
 	font-size: 11px;
-	font-family: var(--code-font-family);
+	font-family: var(--snc-code-font-family);
 	padding: 3px;
-	box-shadow: 0.2px 0.3px 0.4px hsl(0deg 0% 63% / 0.36),
-    0.7px 0.9px 1.3px -0.8px hsl(0deg 0% 63% / 0.36),
-    1.8px 2.3px 3.3px -1.7px hsl(0deg 0% 63% / 0.36),
-    4.4px 5.7px 8.1px -2.5px hsl(0deg 0% 63% / 0.36);
+	box-shadow: var(--snc-panel-shadow);
 
   width: fit-content;
   margin-top: 5px;
@@ -341,11 +341,11 @@
   align-items: anchor-center;
 
   &:hover {
-  	background: rgba(0, 0, 0, 0.06);
+  	background: var(--snc-hover-bg);
   }
 
  	&:active {
-		background: rgba(0, 0, 0, 0.1);
+		background: var(--snc-active-bg);
 	}
 }
 
@@ -353,7 +353,7 @@
 	border-radius: 4px;
   padding-left: 4px;
   outline: none;
-  border: 1px solid #c0c0c0;
+  border: 1px solid var(--snc-border-color);
   width: 20px;
   height: 12px;
 }
@@ -390,90 +390,45 @@
 	position: fixed;
 	top: -1000px;
 	left: -1000px;
-	background: #1e1e1e;
-	border: 1px solid #3c3c3c;
+	background: var(--snc-bg);
+	border: 1px solid var(--snc-border-color);
 	border-radius: 4px;
 	padding: 4px 8px;
-	font-family: monospace;
+	font-family: var(--snc-code-font-family);
 	font-size: 11px;
-	color: #aaa;
+	color: var(--snc-text-color);
 	white-space: nowrap;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+	box-shadow: var(--snc-panel-shadow);
 	z-index: 10002;
 }
 
-/* Tooltip for snc-py-exp elements (code expression drag-and-drop) */
-.snc-py-exp-tooltip {
+/* Shared tooltip base (py-exp tooltip + action tooltip) */
+.snc-tooltip {
 	position: fixed;
-	background: #1e1e1e;
-	border: 1px solid #3c3c3c;
+	background: var(--snc-bg);
+	border: 1px solid var(--snc-border-color);
 	border-radius: 4px;
 	padding: 4px 8px;
-	font-family: monospace;
+	font-family: var(--snc-code-font-family);
 	font-size: 11px;
 	font-style: normal;
-	color: #aaa;
+	color: var(--snc-text-color);
 	z-index: 10001;
 	pointer-events: auto;
 	display: flex;
 	align-items: center;
 	gap: 6px;
 	white-space: nowrap;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-}
-
-.snc-py-exp-tooltip .snc-copy-btn {
-	cursor: pointer;
-	color: #aaa;
-	font-size: 12px;
-	padding: 2px 4px;
-	border: 1px solid transparent;
-	border-radius: 3px;
-	background: none;
-	line-height: 1;
-}
-
-.snc-py-exp-tooltip .snc-copy-btn:hover {
-	color: #ffffff;
-	border-color: #3c3c3c;
-	background: #2a2a2a;
-}
-
-/* Action button tooltip (expression preview on hover) */
-.snc-action-tooltip {
-	position: fixed;
-	background: #1e1e1e;
-	border: 1px solid #3c3c3c;
-	border-radius: 4px;
-	padding: 4px 8px;
-	font-family: monospace;
-	font-size: 11px;
-	font-style: normal;
-	color: #aaa;
-	z-index: 10001;
-	pointer-events: auto;
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	white-space: nowrap;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-}
-
-.snc-action-tooltip-name {
-	color: #888;
-	font-family: sans-serif;
-	font-size: 10px;
-	padding-right: 4px;
-	border-right: 1px solid #3c3c3c;
+	box-shadow: var(--snc-panel-shadow);
 }
 
 .snc-action-tooltip-expr {
-	color: #ce9178;
+	color: var(--snc-string-color);
 }
 
-.snc-action-tooltip .snc-copy-btn {
+.snc-copy-btn {
 	cursor: pointer;
-	color: #aaa;
+	color: var(--snc-text-muted);
 	font-size: 12px;
 	padding: 2px 4px;
 	border: 1px solid transparent;
@@ -482,10 +437,10 @@
 	line-height: 1;
 }
 
-.snc-action-tooltip .snc-copy-btn:hover {
-	color: #ffffff;
-	border-color: #3c3c3c;
-	background: #2a2a2a;
+.snc-copy-btn:hover {
+	color: black;
+	border-color: var(--snc-border-color);
+	background: var(--snc-hover-bg);
 }
 
 /* Linked state for action buttons */
@@ -493,22 +448,165 @@
 	color: #e0a060;
 }
 
-/* Copy button inside dropdown options */
-.snc-dropdown-copy {
-	cursor: pointer;
-	color: #888;
-	font-size: 10px;
-	padding: 1px 3px;
-	border-radius: 2px;
-}
-
-.snc-dropdown-copy:hover {
-	color: #fff;
-	background: rgba(0, 0, 0, 0.15);
-}
-
 /* Dimmed dropdown option */
 .snc-dropdown-option.dimmed {
 	opacity: 0.35;
 	pointer-events: none;
+}
+
+/* Selected dropdown option (e.g. autocomplete highlight) */
+.snc-dropdown-option.selected {
+	background: var(--snc-active-bg);
+}
+
+/* === Object visualizer === */
+
+.obj-visualizer {
+	font-family: var(--snc-code-font-family);
+	overflow-x: auto;
+	outline: none;
+	margin: 5px 10px;
+	margin-bottom: 3px;
+
+	h4 {
+		color: var(--snc-string-color);
+		margin: 0;
+	}
+
+	table {
+		border-collapse: collapse;
+	}
+
+	.handle {
+		color: var(--snc-text-muted);
+		cursor: grab;
+		opacity: 0.5;
+		user-select: none;
+		padding-right: 0;
+		width: 10px;
+		font-size: 14px;
+		font-style: normal;
+	}
+
+	.remove {
+		color: var(--snc-text-muted);
+		cursor: pointer;
+		opacity: 0.5;
+		user-select: none;
+		padding-right: 2px;
+		width: 12px;
+	}
+
+	.field-name {
+		color: var(--snc-string-color);
+		opacity: 0.7;
+		cursor: pointer;
+		padding-right: 8px;
+	}
+
+	.field-args {
+		opacity: 0.4;
+	}
+
+	.add {
+		color: var(--snc-text-muted);
+		cursor: pointer;
+		text-align: center;
+		opacity: 0.5;
+		user-select: none;
+		height: 5px;
+		min-width: 6em;
+		border: 1px solid var(--snc-border-color);
+	}
+
+	.add-icon {
+		display: inline-block;
+		position: absolute;
+		margin-top: -9px;
+		margin-left: -0.4em;
+		font-size: 8px;
+		font-style: normal;
+	}
+
+	.obj-input {
+		background: var(--snc-bg);
+		color: var(--snc-string-color);
+		border: 1px solid var(--snc-border-color);
+		padding: 1px 4px;
+		font-family: inherit;
+		font-size: inherit;
+		outline: none;
+		width: 120px;
+	}
+
+	.drag-source {
+		opacity: 0.3;
+	}
+
+	.drag-above {
+		border-top: 2px solid var(--snc-string-color);
+	}
+
+	.drag-below {
+		border-bottom: 2px solid var(--snc-string-color);
+	}
+}
+
+/* snc-py-exp drag-to-extract patterns */
+
+.py-exp-grab {
+	cursor: grab;
+}
+
+.py-exp-cell {
+	padding: 2px 7px;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	cursor: grab;
+}
+
+.py-exp-inner {
+	cursor: auto;
+}
+
+.obj-small {
+	font-family: var(--snc-code-font-family);
+	display: inline-block;
+	overflow: hidden;
+
+	.name {
+		color: var(--snc-string-color);
+	}
+
+	.field {
+		color: var(--snc-string-color);
+		opacity: 0.7;
+	}
+
+	.punct {
+		color: var(--snc-text-muted);
+	}
+
+	.error {
+		color: #f44747;
+		font-style: italic;
+	}
+
+	.py-exp-grab {
+		cursor: grab;
+		border-radius: 3px;
+		padding: 0 2px;
+		border: 1px solid transparent;
+		&:hover {
+			border-color: rgba(127, 127, 127, 0.4);
+			background: rgba(127, 127, 127, 0.1);
+		}
+	}
+}
+
+.match-object-preview {
+	padding: 1px 4px;
+	font-size: 11px;
+	opacity: 0.85;
+	line-height: 18px;
 }

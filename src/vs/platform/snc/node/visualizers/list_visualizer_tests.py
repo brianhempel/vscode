@@ -1384,6 +1384,7 @@ class TestCellDraggablePyExp(unittest.TestCase):
         html_output = visualize(lst, model, mock_get_visualizer, None)
         expected_expr = html.escape("people[0]['age']")
         self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
+        self.assertIn('class="py-exp-grab"', html_output)
         expected_expr_1 = html.escape("people[1]['age']")
         self.assertIn(f'snc-py-exp="{expected_expr_1}" draggable="true"', html_output)
 
@@ -1393,9 +1394,8 @@ class TestCellDraggablePyExp(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
         html_output = visualize(lst, model, mock_get_visualizer, None)
         expected_expr = html.escape("data[0]['age']")
-        # The draggable span should wrap the cell content
         self.assertRegex(html_output,
-            r'snc-py-exp="' + re.escape(expected_expr) + r'"[^>]*draggable="true"[^>]*>.*?<span>42</span>.*?</span>')
+            r'snc-py-exp="' + re.escape(expected_expr) + r'"[^>]*class="py-exp-grab"[^>]*>.*?<span>42</span>.*?</span>')
 
     def test_nongeneric_cell_border_drag(self):
         """Non-generic cells (string, model=dict) use border-only drag with draggable=false inner."""

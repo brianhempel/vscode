@@ -7,6 +7,7 @@
 	scrollbar-color: rgba(127, 127, 127, 0.1) transparent;
 	margin: 5px 10px;
 	margin-bottom: 3px;
+	white-space: pre;
 }
 
 .string-visualizer-overlay {
@@ -51,6 +52,7 @@
 
 	&.is-special {
 		color: #a5a5a5;
+		visibility: hidden;
 	}
 
 	&.literal.highlight {
@@ -63,6 +65,7 @@
 
 		&.is-special {
 			color: rgba(0,0,0,0.8);
+			visibility: visible;
 		}
 	}
 
@@ -77,6 +80,7 @@
 
 		&.is-special {
 			color: rgba(0,0,0,0.8);
+			visibility: visible;
 		}
 	}
 
@@ -91,6 +95,10 @@
 	&.end.start {
 		border-radius: 5px;
 	}
+}
+
+.string-visualizer:hover .char-span.is-special {
+	visibility: visible;
 }
 
 .string-visualizer > * {
@@ -163,6 +171,25 @@ span.overlay-content {
 	position: relative;
 	display: inline-block;
 	vertical-align: text-top;
+}
+
+.len-anchor {
+	position: relative;
+	display: inline-block;
+	width: 0;
+	height: 0;
+	vertical-align: top;
+}
+
+.len-indicator {
+	position: absolute;
+	left: 3px;
+	top: 1px;
+	font-size: 7px;
+	line-height: 7px;
+	cursor: grab;
+	user-select: none;
+	white-space: nowrap;
 }
 
 .snc-dropdown-category-divider {

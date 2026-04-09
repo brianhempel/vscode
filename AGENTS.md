@@ -18,18 +18,19 @@ The user should already be running `npm run watch` so any changes you make are a
 
 ### UI Testing
 
-If asked, try to test the UI yourself with the Chrome Devtools Protocol (CDP).
+If asked, try to test the UI yourself with the following tools. (They use Chrome Devtools Protocol (CDP)).
 
 Set up `snc_test.py` as desired, then start the app with:
 
 `./scripts/code.sh $(pwd) $(pwd)/snc_test.py --remote-debugging-port=9222`
 
-Tools available:
+Tools:
 
 `node ui_testing_tools/ready.js` - poll until CDP is reachable (up to 10s), then print targets JSON
 
-
 `node ui_testing_tools/screenshot.js [OUT_PATH.png]` - takes a screenshot (default: `cdp_screenshot.png`)
+
+`node ui_testing_tools/reload.js` - reload the app window, required if typescript or css changes (use this script because naive mechanisms like location.reload do not work)
 
 `node ui_testing_tools/eval.js 'document.title'` - run JS in the renderer, print result as JSON
 

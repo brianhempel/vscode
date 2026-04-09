@@ -50,9 +50,9 @@ from typing import List, Tuple, Any
 from visualizer_utils import (
     ChildEvent, EditorTextSelect, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
-    strip_leading_caret, eval_caret_expr,
+    strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     load_dotfile_list, save_dotfile_list, get_full_class_name,
-    BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
+    truncate_str,
 )
 
 # === Event types ===
@@ -208,6 +208,11 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
 
     Priority for fields: dotfile > DEFAULT_FIELDS_FOR_TYPE > non-trivial dir() names.
     """
+    source_expr = None
+    if var_and_exp:
+        var_name, expr = var_and_exp
+        source_expr = var_name if var_name else expr
+
     if value is None or isinstance(value, (int, float)):
         return {
             "fields": [],
@@ -219,6 +224,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
             "drag_over_index": None,
             "children": {},
             "handledKeys": list(_OWN_KEYS),
+            "_source_expr": source_expr,
         }
 
     fields = _resolve_fields(value)
@@ -244,6 +250,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "drag_over_index": None,
         "children": children,
         "handledKeys": handled_keys,
+        "_source_expr": source_expr,
     }
 
 
@@ -429,6 +436,103 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
     return (model, commands)
 
 
+_CHAR_PX = 7.7
+_LINE_PX = 18
+
+
+
+def _is_dunder(key):
+    """Check if a display key like '.foo' is a dunder attribute."""
+    name = key.lstrip('.')
+    return name.startswith('__') and name.endswith('__')
+
+
+def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None):
+    short_class_name = type(obj).__name__
+    fields = model.get('fields', [])
+    source_expr = model.get('_source_expr')
+    add_target = model.get('_add_target')
+
+    chars_per_line = int(max_width / _CHAR_PX) if max_width else 120
+    num_lines = max(1, int(max_height / _LINE_PX)) if max_height else 20
+    total_budget = chars_per_line * num_lines
+    single_line = (num_lines <= 1)
+
+    prefix = short_class_name + '('
+    suffix = ')'
+    remaining_budget = total_budget - len(prefix) - len(suffix)
+
+    pairs = []
+    for accessor_code in fields:
+        placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope)
+        if placeholder_args:
+            continue
+        key = strip_leading_caret(accessor_code)
+        if _is_dunder(key):
+            continue
+        pairs.append((key, val_str, is_error, accessor_code))
+
+    shown = []
+    budget_used = 0
+    for i, (key, val, is_error, acc) in enumerate(pairs):
+        remaining_pairs = len(pairs) - i
+        ellipsis_str = f', +{remaining_pairs}' if remaining_pairs > 1 else ''
+        sep = ', ' if shown else ''
+
+        val_max = min(30, max(remaining_budget - budget_used - len(sep) - len(key) - 1 - len(ellipsis_str), 8))
+        truncated_val = truncate_str(val, val_max)
+        pair_text = f'{sep}{key}={truncated_val}'
+
+        if budget_used + len(pair_text) + len(ellipsis_str) > remaining_budget and shown:
+            overflow = len(pairs) - len(shown)
+            shown.append(('_overflow', str(overflow), False, ''))
+            break
+        shown.append((key, truncated_val, is_error, acc))
+        budget_used += len(pair_text)
+
+    parts = [f'<span class="name">{html.escape(short_class_name)}</span>'
+             f'<span class="punct">(</span>']
+    for idx, (key, val, is_error, acc) in enumerate(shown):
+        if idx > 0:
+            parts.append('<span class="punct">, </span>')
+        if key == '_overflow':
+            parts.append(f'<span class="punct">+{html.escape(val)}</span>')
+        elif source_expr and not is_error:
+            field_expr = replace_caret_in_py_exp(acc, source_expr)
+            exp_attr = f' snc-py-exp="{html.escape(field_expr)}" draggable="true"'
+            add_attr = ''
+            if add_target:
+                add_attr = (f' snc-add-at-cursor="{html.escape(field_expr)}"'
+                            f' snc-add-target="{html.escape(add_target)}"')
+            parts.append(
+                f'<span{exp_attr}{add_attr} class="py-exp-grab">'
+                f'<span class="field">{html.escape(key)}</span>'
+                f'<span class="punct">=</span>'
+                f'{html.escape(val)}'
+                f'</span>')
+        else:
+            parts.append(f'<span class="field">{html.escape(key)}</span>')
+            parts.append('<span class="punct">=</span>')
+            if is_error:
+                parts.append(f'<span class="error">{html.escape(val)}</span>')
+            else:
+                parts.append(html.escape(val))
+    parts.append('<span class="punct">)</span>')
+
+    content = ''.join(parts)
+
+    dyn_style = ''
+    if max_width:
+        dyn_style += f'max-width:{max_width}px;'
+    if max_height:
+        dyn_style += f'max-height:{max_height}px;'
+    if single_line:
+        dyn_style += 'white-space:nowrap;text-overflow:ellipsis;'
+    style_attr = f' style="{dyn_style}"' if dyn_style else ''
+
+    return f'<span class="obj-small"{style_attr}>{content}</span>'
+
+
 def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
     """
     Render the object as HTML with configurable field inspection.
@@ -439,16 +543,18 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     if obj is None or isinstance(obj, int) or isinstance(obj, float):
         return repr(obj)
 
+    if small:
+        return _visualize_small(obj, model, eval_in_scope, max_width, max_height)
+
     full_class_name = get_full_class_name(obj)
+    source_expr = model.get('_source_expr')
 
     field_trs = []
 
     for i, accessor_code in enumerate(model.get('fields', [])):
         if model.get('editing_index') == i:
-            # This field is being edited: show input
             field_trs.append(_render_input_row(obj, model, is_editing=True, editing_index=i, eval_in_scope=eval_in_scope))
         else:
-            # Normal display: double-clickable field name with remove/drag handles
             placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope)
             click_event = repr(FieldClick(index=i))
             remove_event = repr(RemoveFieldClick(index=i))
@@ -456,7 +562,13 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
             drag_over_event = repr(DragOver(index=i))
             drag_end_event = repr(DragEnd(index=i))
 
-            # Render value cell: use subvisualizer for non-callable/non-error values
+            can_extract = source_expr and not is_error and not placeholder_args
+            if can_extract:
+                field_expr = replace_caret_in_py_exp(accessor_code, source_expr)
+                exp_attr = f' snc-py-exp="{html.escape(field_expr)}" draggable="true"'
+            else:
+                exp_attr = ''
+
             children = model.get('children', {})
             focused_child = model.get('focused_child')
             if not is_error and not placeholder_args and raw_value is not None and get_visualizer is not None:
@@ -465,79 +577,75 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 if child_model is None:
                     child_model = child_vis.init_model(raw_value, get_visualizer,
                                                        eval_in_scope=eval_in_scope)
+                is_generic = child_model is None
                 child_small = (accessor_code != focused_child)
                 child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small)
-                value_td = f'<td>{wrap_child_html(child_html, accessor_code)}</td>'
+                child_wrapped = wrap_child_html(child_html, accessor_code)
+                if exp_attr and not is_generic:
+                    value_td = (f'<td style="padding:0;"><div{exp_attr} class="py-exp-cell">'
+                                f'<div draggable="false" class="py-exp-inner">{child_wrapped}</div>'
+                                f'</div></td>')
+                elif exp_attr:
+                    value_td = f'<td><span{exp_attr} class="py-exp-grab">{child_wrapped}</span></td>'
+                else:
+                    value_td = f'<td>{child_wrapped}</td>'
             else:
-                value_td = f'<td>{html.escape(val_str)}</td>'
+                if exp_attr:
+                    value_td = f'<td><span{exp_attr} class="py-exp-grab">{html.escape(val_str)}</span></td>'
+                else:
+                    value_td = f'<td>{html.escape(val_str)}</td>'
 
-            # Visual feedback during drag
             drag_from = model.get('drag_from_index')
             drag_over = model.get('drag_over_index')
             is_drag_source = (drag_from == i)
             is_drag_target = (drag_from is not None
                               and drag_over == i
                               and drag_from != i)
-            row_style = 'opacity:0.3;' if is_drag_source else ''
+            drag_cls = ' drag-source' if is_drag_source else ''
             if is_drag_target:
-                # border-top when dragging up, border-bottom when dragging down
-                if drag_from > drag_over:
-                    target_style = f'border-top:2px solid {BLUE};'
-                else:
-                    target_style = f'border-bottom:2px solid {BLUE};'
-            else:
-                target_style = ''
+                drag_cls += ' drag-above' if drag_from > drag_over else ' drag-below'
 
             field_trs.append(
-                f'<tr class="snc-hover-hidden-parent" '
+                f'<tr class="snc-hover-hidden-parent{drag_cls}" '
                 f'snc-mouse-move="{html.escape(drag_over_event)}" '
-                f'snc-mouse-up="{html.escape(drag_end_event)}" '
-                f'style="{row_style}{target_style}">'
+                f'snc-mouse-up="{html.escape(drag_end_event)}">'
                 f'<td snc-mouse-down="{html.escape(drag_start_event)}" '
-                f'style="color:{GRAY};cursor:grab;opacity:0.5;user-select:none;'
-                f'padding-right:0;width:10px;font-size:8px;font-style:normal;" '
-                f'title="Drag to reorder" class="full-opacity-on-hover">'
-                f'<span class="snc-hover-hidden">U</span></td>'
+                f'class="handle full-opacity-on-hover" title="Drag to reorder">'
+                f'<span class="snc-hover-hidden">\u2630</span></td>'
                 f'<td snc-mouse-down="{html.escape(remove_event)}" '
-                f'style="color:{GRAY};cursor:pointer;opacity:0.5;user-select:none;'
-                f'padding-right:2px;width:12px;" '
-                f'title="Remove field" class="full-opacity-on-hover">'
-                f'<span class="snc-hover-hidden">U</span></td>'
-                f'<td snc-mouse-down="{html.escape(click_event)}" '
-                f'style="color:{BLUE};opacity:0.7;cursor:pointer;padding-right:8px;">'
-                f'{html.escape(strip_leading_caret(accessor_code))}<span style="opacity:0.4">{html.escape(placeholder_args)}</span></td>'
+                f'class="remove full-opacity-on-hover" title="Remove field">'
+                f'<span class="snc-hover-hidden">\u00d7</span></td>'
+                f'<td snc-mouse-down="{html.escape(click_event)}" class="field-name">'
+                f'{html.escape(strip_leading_caret(accessor_code))}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
                 f'{value_td}'
                 f'</tr>'
             )
 
-    # If adding a new field, show input row at the end
     if model.get('adding_field'):
         field_trs.append(_render_input_row(obj, model, is_editing=False, eval_in_scope=eval_in_scope))
 
     field_trs_str = '\n'.join(field_trs)
 
-    # (+) Add field button
     add_event = repr(AddFieldClick())
     add_button = (
         f'<tr snc-mouse-down="{html.escape(add_event)}" class="snc-hover-hidden-parent">'
-        f'<td style="min-width:0.8em"></td><td style="min-width:1em"></td>' # need min widths in case there are no property rows above
-        f'<td class="snc-hover-hide-border full-opacity-on-hover" colspan=2 style="color:{GRAY};cursor:pointer;text-align:center;opacity:0.5;user-select:none;height:5px;min-width:6em;border:1px solid {GRAY_HALF_ALPHA}">'
-            f'<span class="snc-hover-hidden" style="display:inline-block;position:absolute;margin-top:-9px;margin-left:-0.4em;font-size:8px;font-style:normal">+</span>'
+        f'<td style="min-width:0.8em"></td><td style="min-width:1em"></td>'
+        f'<td class="snc-hover-hide-border full-opacity-on-hover add" colspan=2>'
+            f'<span class="snc-hover-hidden add-icon">+</span>'
         f'</td>'
-        # f'<td></td>'
         f'</tr>'
     )
 
     key_handler = repr(KeyDown())
     return (
-        f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" '
-        f'style="font-family:monospace;overflow-x:auto;outline:none;">'
-        f'<h4 style="color:{BLUE};margin:0">{html.escape(full_class_name)} {html.escape(repr(obj))}</h4>'
-        f'<table style="border-collapse:collapse;">'
+        f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" class="visualizer-container">'
+        f'<div class="obj-visualizer">'
+        f'<h4>{html.escape(full_class_name)} {html.escape(repr(obj))}</h4>'
+        f'<table>'
         f'{field_trs_str}'
         f'{add_button}'
         f'</table>'
-        f'</div>'
+        f'</div></div>'
     )
 
 
@@ -565,44 +673,34 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eva
     suggestion_html = ''
     if suggestions:
         items = []
-        for i, suggestion in enumerate(suggestions[:10]):  # cap at 10 suggestions
+        for i, suggestion in enumerate(suggestions[:10]):
             select_event = repr(FieldSelect(accessor=suggestion))
             is_selected = (selected_idx == i)
-            bg = SELECTED_BG if is_selected else SUGGESTION_BG
+            sel_cls = ' selected' if is_selected else ''
             scroll_attr = ' snc-scroll-into-view' if is_selected else ''
             items.append(
                 f'<div snc-mouse-down="{html.escape(select_event)}" '
-                f'class="snc-dropdown-option"'
-                f'{scroll_attr} '
-                f'style="padding:2px 6px;cursor:pointer;color:{BLUE};white-space:nowrap;'
-                f'background:{bg};"'
+                f'class="snc-dropdown-option{sel_cls}"'
+                f'{scroll_attr}'
                 f'>{html.escape(suggestion)}</div>'
             )
         suggestion_html = (
-            f'<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
-            f'position:absolute;left:0;top:100%;'
-            f'border:1px solid {INPUT_BORDER};'
-            f'max-height:200px;overflow-y:auto;background:{SUGGESTION_BG};'
-            f'min-width:150px;font-size:12px;">'
+            f'<div class="snc-dropdown-panel left" snc-dropdown-align="left">'
             + '\n'.join(items)
             + '</div>'
         )
 
-    # Wrap input + dropdown in snc-dropdown-trigger so the TS hoisting mechanism
-    # can move the panel outside the overflow-clipped widget
     extra_attrs = ' autofocus'
     if is_editing:
         extra_attrs += ' snc-select-all'
     input_html = (
-        f'<span class="snc-dropdown-trigger" style="position:relative;display:inline-block;">'
+        f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="^.field_name" '
         f'spellcheck="false"'
         f'{extra_attrs} '
-        f'style="background:{INPUT_BG};color:{BLUE};border:1px solid {INPUT_BORDER};'
-        f'padding:1px 4px;font-family:inherit;font-size:inherit;'
-        f'outline:none;width:120px;" />'
+        f'class="obj-input" />'
         f'{suggestion_html}'
         f'</span>'
     )

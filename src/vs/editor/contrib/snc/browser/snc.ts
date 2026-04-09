@@ -381,7 +381,20 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		const rect = target.getBoundingClientRect();
 		const tooltip = document.createElement('div');
-		tooltip.className = 'snc-py-exp-tooltip';
+		tooltip.className = 'snc-tooltip snc-py-exp-tooltip';
+
+		const copyBtn = document.createElement('button');
+		copyBtn.className = 'snc-copy-btn';
+		copyBtn.textContent = '\u{29C9}';
+		copyBtn.title = 'Copy to clipboard';
+		copyBtn.addEventListener('mousedown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.clipboardService.writeText(expression);
+			copyBtn.textContent = '\u2713';
+			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
+		});
+		tooltip.appendChild(copyBtn);
 
 		const exprSpan = document.createElement('span');
 		exprSpan.textContent = expression;
@@ -408,39 +421,44 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		});
 		tooltip.appendChild(exprSpan);
 
-		const copyBtn = document.createElement('button');
-		copyBtn.className = 'snc-copy-btn';
-		copyBtn.textContent = '\u{29C9}';  // clipboard emoji
-		copyBtn.title = 'Copy to clipboard';
-		copyBtn.addEventListener('mousedown', (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			this.clipboardService.writeText(expression);
-			copyBtn.textContent = '\u2713';  // check mark
-			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
-		});
-		tooltip.appendChild(copyBtn);
-
-		// Keep tooltip alive while hovering it
+		// Keep tooltip alive while hovering it; also keep hover menu alive
 		tooltip.addEventListener('mouseenter', () => {
 			clearTimeout(this.pyExpTooltipHideTimer);
+			clearTimeout(this.hoverMenuHideTimer);
 		});
 		tooltip.addEventListener('mouseleave', () => {
 			this.schedulePyExpTooltipHide();
+			if (this.hoverMenu) {
+				this.scheduleHoverMenuHide();
+			}
 		});
 
-		// Position tooltip above the target element
-		tooltip.style.left = `${rect.left}px`;
-		tooltip.style.top = `${rect.top - 28}px`;
+		const align = target.getAttribute('snc-py-exp-align');
 
-		this.editor.getContainerDomNode().appendChild(tooltip);
-		this.pyExpTooltip = tooltip;
-
-		// Adjust if tooltip goes off screen top
-		const tooltipRect = tooltip.getBoundingClientRect();
-		if (tooltipRect.top < 0) {
-			tooltip.style.top = `${rect.bottom + 4}px`;
+		if (align === 'right') {
+			// Position to the right of the target, vertically centered
+			tooltip.style.visibility = 'hidden';
+			this.editor.getContainerDomNode().appendChild(tooltip);
+			const tooltipRect = tooltip.getBoundingClientRect();
+			let left = rect.right + 4;
+			if (left + tooltipRect.width > window.innerWidth) {
+				left = rect.left - tooltipRect.width - 4;
+			}
+			tooltip.style.left = `${left}px`;
+			tooltip.style.top = `${rect.top + (rect.height - tooltipRect.height) / 2}px`;
+			tooltip.style.visibility = '';
+		} else {
+			// Position above the target element
+			tooltip.style.left = `${rect.left}px`;
+			tooltip.style.top = `${rect.top - 28}px`;
+			this.editor.getContainerDomNode().appendChild(tooltip);
+			const tooltipRect = tooltip.getBoundingClientRect();
+			if (tooltipRect.top < 0) {
+				tooltip.style.top = `${rect.bottom + 4}px`;
+			}
 		}
+
+		this.pyExpTooltip = tooltip;
 	}
 
 	/**
@@ -478,19 +496,24 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hideActionTooltip();
 
 		const expression = target.getAttribute('data-action-expr');
-		const actionName = target.getAttribute('data-action-name') || '';
 		if (!expression) { return; }
 
 		const rect = target.getBoundingClientRect();
 		const tooltip = document.createElement('div');
-		tooltip.className = 'snc-action-tooltip';
+		tooltip.className = 'snc-tooltip snc-action-tooltip';
 
-		if (actionName) {
-			const nameSpan = document.createElement('span');
-			nameSpan.className = 'snc-action-tooltip-name';
-			nameSpan.textContent = actionName;
-			tooltip.appendChild(nameSpan);
-		}
+		const copyBtn = document.createElement('button');
+		copyBtn.className = 'snc-copy-btn';
+		copyBtn.textContent = '\u{29C9}';
+		copyBtn.title = 'Copy to clipboard';
+		copyBtn.addEventListener('mousedown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.clipboardService.writeText(expression);
+			copyBtn.textContent = '\u2713';
+			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
+		});
+		tooltip.appendChild(copyBtn);
 
 		const exprSpan = document.createElement('span');
 		exprSpan.className = 'snc-action-tooltip-expr';
@@ -510,19 +533,6 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 		});
 		tooltip.appendChild(exprSpan);
-
-		const copyBtn = document.createElement('button');
-		copyBtn.className = 'snc-copy-btn';
-		copyBtn.textContent = '\u{29C9}';
-		copyBtn.title = 'Copy to clipboard';
-		copyBtn.addEventListener('mousedown', (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			this.clipboardService.writeText(expression);
-			copyBtn.textContent = '\u2713';
-			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
-		});
-		tooltip.appendChild(copyBtn);
 
 		tooltip.addEventListener('mouseenter', () => {
 			clearTimeout(this.actionTooltipHideTimer);
@@ -607,6 +617,36 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.scheduleHoverMenuHide();
 		});
 
+		clone.addEventListener('mouseover', (ev: MouseEvent) => {
+			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp');
+			if (pyExpEl) {
+				clearTimeout(this.pyExpTooltipHideTimer);
+				if (pyExpEl !== this.pyExpCurrentTarget) {
+					this.pyExpCurrentTarget = pyExpEl;
+					clearTimeout(this.pyExpTooltipTimer);
+					this.pyExpTooltipTimer = setTimeout(() => {
+						this.showPyExpTooltip(pyExpEl);
+					}, 100);
+				}
+			} else if (this.pyExpCurrentTarget) {
+				this.pyExpCurrentTarget = null;
+				this.schedulePyExpTooltipHide();
+			}
+		});
+		clone.addEventListener('mouseout', (ev: MouseEvent) => {
+			const relatedTarget = ev.relatedTarget as Node | null;
+			if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
+				return;
+			}
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exp')) {
+				return;
+			}
+			if (this.pyExpCurrentTarget) {
+				this.pyExpCurrentTarget = null;
+			}
+			this.schedulePyExpTooltipHide();
+		});
+
 		this.editor.getContainerDomNode().appendChild(clone);
 		this.hoverMenu = clone;
 	}
@@ -629,6 +669,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.hoverMenu.remove();
 			this.hoverMenu = null;
 		}
+		this.hidePyExpTooltip();
 	}
 
 	/**
