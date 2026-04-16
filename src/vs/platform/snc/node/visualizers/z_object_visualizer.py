@@ -447,6 +447,22 @@ def _is_dunder(key):
     return name.startswith('__') and name.endswith('__')
 
 
+def render_small_field(display_key: str, val_repr: str, expr: str, add_target: str = None) -> str:
+    """Render a single interactive field chip: key=value, draggable with snc-py-exp."""
+    exp_attr = f' snc-py-exp="{html.escape(expr)}" draggable="true"'
+    add_attr = ''
+    if add_target:
+        add_attr = (f' snc-add-at-cursor="{html.escape(expr)}"'
+                    f' snc-add-target="{html.escape(add_target)}"')
+    return (
+        f'<span{exp_attr}{add_attr} class="py-exp-grab">'
+        f'<span class="field">{html.escape(display_key)}</span>'
+        f'<span class="punct">=</span>'
+        f'{html.escape(val_repr)}'
+        f'</span>'
+    )
+
+
 def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None):
     short_class_name = type(obj).__name__
     fields = model.get('fields', [])
@@ -467,8 +483,9 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
         placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope)
         if placeholder_args:
             continue
-        key = strip_leading_caret(accessor_code)
-        if _is_dunder(key):
+        key = accessor_code
+        stripped = strip_leading_caret(accessor_code)
+        if _is_dunder(stripped):
             continue
         pairs.append((key, val_str, is_error, accessor_code))
 
@@ -499,17 +516,7 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
             parts.append(f'<span class="punct">+{html.escape(val)}</span>')
         elif source_expr and not is_error:
             field_expr = replace_caret_in_py_exp(acc, source_expr)
-            exp_attr = f' snc-py-exp="{html.escape(field_expr)}" draggable="true"'
-            add_attr = ''
-            if add_target:
-                add_attr = (f' snc-add-at-cursor="{html.escape(field_expr)}"'
-                            f' snc-add-target="{html.escape(add_target)}"')
-            parts.append(
-                f'<span{exp_attr}{add_attr} class="py-exp-grab">'
-                f'<span class="field">{html.escape(key)}</span>'
-                f'<span class="punct">=</span>'
-                f'{html.escape(val)}'
-                f'</span>')
+            parts.append(render_small_field(key, val, field_expr, add_target))
         else:
             parts.append(f'<span class="field">{html.escape(key)}</span>')
             parts.append('<span class="punct">=</span>')

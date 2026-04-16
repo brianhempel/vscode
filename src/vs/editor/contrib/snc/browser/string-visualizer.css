@@ -5,7 +5,9 @@
 	overflow: auto;
 	scrollbar-width: thin;
 	scrollbar-color: rgba(127, 127, 127, 0.1) transparent;
-	margin: 5px 10px;
+	margin: 0px 5px 5px 0px;
+	/* need some padding so the on-hover segment repetition/pattern widgets are not clipped */
+	padding: 5px 5px 0 10px;
 	margin-bottom: 3px;
 	white-space: pre;
 }
@@ -46,9 +48,9 @@
 }
 
 .char-span {
-	&.hover {
-		/*background: rgba(0, 0, 0, 0.1);*/
-	}
+	/* &.hover {
+		background: rgba(0, 0, 0, 0.1);
+	} */
 
 	&.is-special {
 		color: #a5a5a5;
@@ -190,6 +192,64 @@ span.overlay-content {
 	cursor: grab;
 	user-select: none;
 	white-space: nowrap;
+}
+
+.segment-label-anchor {
+	position: relative;
+	display: inline-block;
+	width: 0;
+	height: 0;
+	vertical-align: text-top;
+}
+
+.segment-label {
+	position: absolute;
+	bottom: -2px;
+	font-size: 8px;
+	font-style: normal;
+	font-weight: bold;
+	line-height: 8px;
+	padding: 2px;
+	z-index: 10;
+	cursor: pointer;
+	white-space: nowrap;
+	opacity: 0.7;
+
+	border-radius: 2px;
+	/* border: 1px solid transparent; */
+
+	&:hover {
+		opacity: 1;
+		/* border-color: 1px solid var(--snc-border-color); */
+		background: var(--snc-hover-bg);
+	}
+
+	&.pattern {
+		left: -3px;
+
+		/* The long pattern [A-Za-z0-9] needs at least 6 chars to fit */
+		&.seg-length-1,
+		&.seg-length-2,
+		&.seg-length-3,
+		&.seg-length-4,
+		&.seg-length-5,
+		&.seg-length-6 {
+			right: -6px;
+			left: auto;
+		}
+	}
+
+	&.repetition {
+		left: -5px;
+
+		&.seg-length-1 {
+			left: -3px;
+		}
+	}
+}
+
+.segment-label-anchor .snc-dropdown-trigger {
+	position: static;
 }
 
 .snc-dropdown-category-divider {

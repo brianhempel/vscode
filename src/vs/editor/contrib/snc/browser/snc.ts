@@ -708,15 +708,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		while (el && el != this.domNode) {
 			if (el.hasAttribute(attr_name) || el.hasAttribute(`snc-mouse`)) {
 				let pythonEventStr: string;
-				if (el.hasAttribute(`snc-mouse`)) {
+				if (el.hasAttribute(attr_name)) {
+					pythonEventStr = el.getAttribute(attr_name) ?? '';
+				} else {
 					// snc-mouse="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
 					pythonEventStr = {
 						'snc-mouse-move': `MouseMove(${el.getAttribute(`snc-mouse`)})`,
 						'snc-mouse-down': `MouseDown(${el.getAttribute(`snc-mouse`)})`,
 						'snc-mouse-up': `MouseUp(${el.getAttribute(`snc-mouse`)})`,
 					}[attr_name] ?? '';
-				} else {
-					pythonEventStr = el.getAttribute(attr_name) ?? '';
 				}
 				pythonEventStr = this.wrapWithChildKeys(pythonEventStr, el.parentElement, this.domNode);
 				this.onPointerEvent(pythonEventStr, ev);

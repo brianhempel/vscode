@@ -396,219 +396,116 @@ def _overlay_html(content: str, side: str, seg_type: str, color: str) -> str:
     )
 
 
-def _fuzzy_dropdown_html(pat_str: str, segment_index: int, color: str, model: dict) -> str:
-    """Generate a dropdown for fuzzy pattern selection.
+def _format_repetition(min_count, max_count) -> str:
+    if min_count == max_count:
+        return f'{min_count}'
+    elif min_count == 0 and max_count == float('inf'):
+        return '*'
+    elif min_count == 1 and max_count == float('inf'):
+        return '+'
+    elif min_count == 0 and max_count == 1:
+        return '?'
+    elif min_count == 0:
+        return f'\u2264{max_count}'
+    elif max_count == float('inf'):
+        return f'\u2265{min_count}'
+    else:
+        return f'{min_count}-{max_count}'
 
-    Args:
-        pat_str: Current pattern string to display
-        segment_index: Index of this segment (for dropdown ID)
-        color: The color for the trigger text
-        model: The model state (needed for dropdown open state)
-    """
+def _segment_pattern_label(pat_str: str, segment_index: int, model: dict, seg_len: int = 1) -> str:
     dropdown_id = f'fuzzy-pattern-{segment_index}'
     open_dropdown = model.get('openDropdown') if model else None
     is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
 
-    trigger_style = (
-        'position: absolute;'
-        'left: -1px;'
-        'top: 3px;'
-        'font-size: 5px;'
-        'font-style: normal;'
-        'font-weight: bold;'
-        'padding: 0;'
-        f'color: {color};'
-        'z-index: 10;'
-        'line-height: 6px;'
+    trigger_event = repr(DropdownToggle(dropdown_id))
+    label_text = html.escape(pat_str) if pat_str else '.*'
+    trigger_html = (
+        f'<span class="segment-label pattern seg-length-{seg_len}" '
+        f'snc-mouse-down="{html.escape(trigger_event)}">{label_text}</span>'
     )
 
-    return render_dropdown(
-        dropdown_id=dropdown_id,
-        options=FUZZY_PATTERN_OPTIONS,
-        is_open=is_open,
-        trigger_content=html.escape(pat_str) if pat_str else '.*',
-        trigger_style=trigger_style,
+    dropdown_panel = ''
+    if is_open:
+        options_html = []
+        for value, label in FUZZY_PATTERN_OPTIONS:
+            select_event = repr(DropdownSelect(dropdown_id, value))
+            options_html.append(
+                f'<div class="snc-dropdown-option" snc-mouse-down="{html.escape(select_event)}">'
+                f'{html.escape(label)}</div>'
+            )
+        dropdown_panel = (
+            f'<div class="snc-dropdown-panel left" snc-dropdown-align="left">{"".join(options_html)}</div>'
+        )
+
+    return (
+        f'<span class="segment-label-anchor">'
+        f'<span class="snc-dropdown-trigger">{trigger_html}{dropdown_panel}</span>'
+        f'</span>'
     )
 
-def _char_span_dropdown_html(rep_str: str, segment_index: int, seg_type: str, color: str, model: dict) -> str:
+def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, model: dict, seg_len: int = 1) -> str:
     dropdown_id = f'dropdown-{segment_index}'
     open_dropdown = model.get('openDropdown') if model else None
     is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
 
-    if not is_open:
-        return (
-            '<span class="char-span-anchor-container"></span>'
-        )
-
-    options_html = []
-
-    for value, label in REPETITION_OPTIONS:
-        select_event = repr(DropdownSelect(dropdown_id, value))
-        option_html = (
-            f'<div snc-mouse-down="{html.escape(select_event)}" '
-            f'class="snc-dropdown-option">{html.escape(label)}</div>'
-        )
-        options_html.append(option_html)
-
-    exact_n = open_dropdown.get('exactN', '') if open_dropdown else ''
-    exact_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='exact', value=e.get('value', ''))"
-    options_html.append(
-        f'<div class="snc-dropdown-option">'
-        f'{{'
-        f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(exact_input_event)}" '
-        f'value="{html.escape(exact_n)}" '
-        f'placeholder="n" />'
-        f'}}'
-        f'</div>'
-    )
-
-    range_min = open_dropdown.get('rangeMin', '') if open_dropdown else ''
-    range_max = open_dropdown.get('rangeMax', '') if open_dropdown else ''
-    min_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='min', value=e.get('value', ''))"
-    max_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='max', value=e.get('value', ''))"
-    options_html.append(
-        f'<div class="snc-dropdown-option">'
-        f'{{'
-        f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(min_input_event)}" '
-        f'value="{html.escape(range_min)}" '
-        f'placeholder="n" />'
-        f','
-        f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(max_input_event)}" '
-        f'value="{html.escape(range_max)}" '
-        f'placeholder="n" />'
-        f'}}'
-        f'</div>'
-    )
-
-    # Fuzzy pattern
-    pattern_options_html = []
-    if seg_type == 'fuzzy':
-        pattern_options_html = []
-        for value, label in FUZZY_PATTERN_OPTIONS:
-            select_event = repr(DropdownSelect(dropdown_id, value))
-            option_html = (
-                f'<div class="snc-dropdown-option" snc-mouse-down="{html.escape(select_event)}">{html.escape(label)}</div>'
-            )
-            pattern_options_html.append(option_html)
-
-    repetition_html = (
-        f' <div class="snc-dropdown-category">'
-        f'  <div class="snc-dropdown-category-name">Repetition</div>'
-        f'  {"".join(options_html)}'
-        f' </div>'
-    )
-
-    pattern_html = (
-        f' <div class="snc-dropdown-category-divider"></div>'
-        f' <div class="snc-dropdown-category">'
-        f'  <div class="snc-dropdown-category-name">Pattern</div>'
-        f'  {"".join(pattern_options_html)}'
-        f' </div>'
-    ) if seg_type == 'fuzzy' else ''
-
-    dropdown_panel = (
-        f'<div class="snc-dropdown-panel categorized right" snc-dropdown-align="right">'
-        f' {repetition_html}'
-        f' {pattern_html}'
-        f'</div>'
-    )
-
-    return (
-        f'<span class="snc-dropdown-trigger">{dropdown_panel}</span>'
-    )
-
-
-def _repetition_dropdown_html(rep_str: str, segment_index: int, seg_type: str, color: str, model: dict) -> str:
-    """Generate a clickable dropdown for repetition selection.
-
-    Args:
-        rep_str: Current repetition display string (e.g., '1', '*', '+')
-        segment_index: Index of this segment (for dropdown ID)
-        seg_type: 'literal' or 'fuzzy' - affects vertical positioning
-        color: The color for the trigger text
-        model: The model state (needed for dropdown open state)
-    """
-    dropdown_id = f'repetition-{segment_index}'
-    open_dropdown = model.get('openDropdown') if model else None
-    is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
-
-    v_align = 'text-top' if seg_type == 'literal' else 'baseline'
-    top = -7 if seg_type == 'literal' else 3
-
-    trigger_style = (
-        'position: absolute;'
-        'right: 0px;'
-        f'top: {top}px;'
-        'font-size: 5px;'
-        'font-style: normal;'
-        'font-weight: bold;'
-        'padding: 0;'
-        f'color: {color};'
-        'z-index: 10;'
-        'line-height: 6px;'
-    )
-
-    if not is_open:
-        trigger_event = repr(DropdownToggle(dropdown_id))
-        return (
-            f'<span style="position: relative; display: inline-block; vertical-align: {v_align}">'
-            f'<span snc-mouse-down="{html.escape(trigger_event)}" '
-            f'style="cursor: pointer; {trigger_style}">{html.escape(rep_str)}</span>'
-            f'</span>'
-        )
-
     trigger_event = repr(DropdownToggle(dropdown_id))
     trigger_html = (
-        f'<span snc-mouse-down="{html.escape(trigger_event)}" '
-        f'style="cursor: pointer; {trigger_style}">{html.escape(rep_str)}</span>'
+        f'<span class="segment-label repetition seg-length-{seg_len}" '
+        f'snc-mouse-down="{html.escape(trigger_event)}">{html.escape(rep_str)}</span>'
     )
 
-    options_html = []
-    for value, label in REPETITION_OPTIONS:
-        select_event = repr(DropdownSelect(dropdown_id, value))
-        option_html = (
-            f'<div snc-mouse-down="{html.escape(select_event)}" '
-            f'class="snc-dropdown-option">{html.escape(label)}</div>'
+    dropdown_panel = ''
+    if is_open:
+        options_html = []
+        for value, label in REPETITION_OPTIONS:
+            select_event = repr(DropdownSelect(dropdown_id, value))
+            options_html.append(
+                f'<div class="snc-dropdown-option" snc-mouse-down="{html.escape(select_event)}">'
+                f'{html.escape(label)}</div>'
+            )
+
+        exact_n = open_dropdown.get('exactN', '') if open_dropdown else ''
+        exact_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='exact', value=e.get('value', ''))"
+        options_html.append(
+            f'<div class="snc-dropdown-option">'
+            f'{{'
+            f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(exact_input_event)}" '
+            f'value="{html.escape(exact_n)}" placeholder="n" />'
+            f'}}</div>'
         )
-        options_html.append(option_html)
 
-    exact_n = open_dropdown.get('exactN', '') if open_dropdown else ''
-    exact_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='exact', value=e.get('value', ''))"
-    options_html.append(
-        f'<div class="snc-dropdown-option">'
-        f'{{'
-        f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(exact_input_event)}" '
-        f'value="{html.escape(exact_n)}" '
-        f'placeholder="n" />'
-        f'}}'
-        f'</div>'
-    )
+        range_min = open_dropdown.get('rangeMin', '') if open_dropdown else ''
+        range_max = open_dropdown.get('rangeMax', '') if open_dropdown else ''
+        min_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='min', value=e.get('value', ''))"
+        max_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='max', value=e.get('value', ''))"
+        options_html.append(
+            f'<div class="snc-dropdown-option">'
+            f'{{'
+            f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(min_input_event)}" '
+            f'value="{html.escape(range_min)}" placeholder="n" />'
+            f','
+            f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(max_input_event)}" '
+            f'value="{html.escape(range_max)}" placeholder="n" />'
+            f'}}</div>'
+        )
 
-    range_min = open_dropdown.get('rangeMin', '') if open_dropdown else ''
-    range_max = open_dropdown.get('rangeMax', '') if open_dropdown else ''
-    min_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='min', value=e.get('value', ''))"
-    max_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='max', value=e.get('value', ''))"
-    options_html.append(
-        f'<div class="snc-dropdown-option">'
-        f'{{'
-        f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(min_input_event)}" '
-        f'value="{html.escape(range_min)}" '
-        f'placeholder="n" />'
-        f','
-        f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(max_input_event)}" '
-        f'value="{html.escape(range_max)}" '
-        f'placeholder="n" />'
-        f'}}'
-        f'</div>'
-    )
+        rep_category = (
+            f'<div class="snc-dropdown-category">'
+            f'<div class="snc-dropdown-category-name">Repetition</div>'
+            f'{"".join(options_html)}'
+            f'</div>'
+        )
 
-    dropdown_panel = (
-        f'<div class="snc-dropdown-panel right" snc-dropdown-align="right">{"".join(options_html)}</div>'
-    )
+        dropdown_panel = (
+            f'<div class="snc-dropdown-panel categorized right" snc-dropdown-align="right">'
+            f'{rep_category}'
+            f'</div>'
+        )
 
     return (
-        f'<span class="snc-dropdown-trigger" style="position: relative; display: inline-block; vertical-align: {v_align}">'
-        f'{trigger_html}{dropdown_panel}</span>'
+        f'<span class="segment-label-anchor">'
+        f'<span class="snc-dropdown-trigger">{trigger_html}{dropdown_panel}</span>'
+        f'</span>'
     )
 
 HTML_ESCAPE_CHARS = '<>&\'"'
@@ -648,18 +545,28 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
         # styles += f' border-{"top" if seg_type == "literal" else "bottom"}: 1px solid {color}; border-image: linear-gradient(to {"bottom" if seg_type == "literal" else "top"}, {color} 20%, transparent 20%) 1;'
         is_interactive = segment_index is not None
 
+        segment_active = False
         if is_interactive:
             classes.append('is-interactive')
-            dropdown_id = f'dropdown-{segment_index}'
+            if model is not None:
+                h = model.get('hoverIdx')
+                if model.get('dragging'):
+                    segment_active = True
+                elif h is not None and start <= h < end:
+                    segment_active = True
+                hd = model.get('handleDrag')
+                if hd is not None and hd.get('segmentIndex') == segment_index:
+                    segment_active = True
+                od = model.get('openDropdown')
+                if od is not None and od.get('id') in (f'dropdown-{segment_index}', f'fuzzy-pattern-{segment_index}'):
+                    segment_active = True
 
         if start == index:
             classes.append('start')
-            # styles += f' border-left: 1px solid {color}; margin-left: -1px;'
             if is_interactive:
-                # if seg_type == 'fuzzy':
-                #     pat_html = f'<span style="position: relative; display: inline-block; vertical-align: baseline">{_fuzzy_dropdown_html(pat_str, segment_index, color, model)}</span>'
-                # else:
-                #     pat_html = "" # _overlay_html(pat_str, 'left', seg_type, color)
+                seg_len = end - start
+                if segment_active and seg_type == 'fuzzy':
+                    pat_html = _segment_pattern_label(pat_str, segment_index, model, seg_len)
                 left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left'))
                 pat_html += (
                     '<span class="char-span-start-handle-container">'
@@ -667,23 +574,12 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 )
         if end - 1 == index:
             classes.append('end')
-            # styles += f' border-right: 1px solid {color}; padding-right: 0px;'
             if is_interactive:
-            #     if min_count == max_count:
-            #         rep_str = f'{min_count}'
-            #     elif min_count == 0 and max_count == float('inf'):
-            #         rep_str = '*'
-            #     elif min_count == 1 and max_count == float('inf'):
-            #         rep_str = '+'
-            #     elif min_count == 0 and max_count == 1:
-            #         rep_str = '?'
-            #     elif min_count == 0:
-            #         rep_str = f'≤{max_count}'
-            #     elif max_count == float('inf'):
-            #         rep_str = f'≥{min_count}'
-            #     else:
-            #         rep_str = f'{min_count}-{max_count}'
-                repetition_html = _char_span_dropdown_html('', segment_index, seg_type, color, model)
+                show_rep = segment_active and not (model.get('dragging') and seg_type == 'literal')
+                if show_rep:
+                    rep_str = _format_repetition(min_count, max_count)
+                    seg_len = end - start
+                    repetition_html = _segment_repetition_label(rep_str, segment_index, seg_type, model, seg_len)
                 if seg_type == 'literal':
                     right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right'))
                     repetition_html += (
@@ -693,7 +589,7 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
     elif model is not None and model.get('hoverIdx') == index and not model.get('dragging'):
         classes.append('hover')
 
-    mouse_listener = f'snc-mouse-down="{html.escape(repr(DropdownToggle(dropdown_id)))}"' if dropdown_id else f'snc-mouse="{str(index)}"'
+    mouse_listener = f'snc-mouse="{str(index)}"'
 
     # snc-mouse="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
     # (this abbreviation speeds up the string visualization quite a bit)
@@ -2745,16 +2641,16 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     parts = []
 
-    parts.append(_action_btn(f'<span class="text">Count:&nbsp;{match_count}</span>', 'count', has_search,
+    parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', has_search,
                              expr('count') if has_search else ''))
     # parts.append('<div class="action-button-divider"></div>')
 
     magnifying_glass_icon = '<span class="search-icon" style="width:10px;font-family:Pragmasevka;font-size:12px"></span>' # Pragmasevka's Nerf Font regions have the glyph
 
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace))
+    find_or_map_label = 'Map Matches' if replace_visible else 'Match Objs'
+    parts.append(btn(f'''{magnifying_glass_icon}<span class="text">{find_or_map_label}<span class="shortcut" style="font-family: 'Courier New', monospace; font-size: 15px; margin: -4px 0 -5px 3px; vertical-align: middle;">⏎</span></span>''', 'find_or_map', has_search))
 
-    find_or_map_label = 'Map&nbsp;Matches' if replace_visible else 'Match&nbsp;Objs'
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">{find_or_map_label}</span>', 'find_or_map', has_search))
+    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace))
 
     parts.append(btn(f'{magnifying_glass_icon}<span class="text">Idxs</span>', 'find_indices', has_search))
 
@@ -2799,13 +2695,13 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     )
     parts.append(predicate_btn)
 
-    parts.append(btn(f'{ICONS["bin"]}<span class="text">Delete</span>', 'delete', has_search))
+    parts.append(btn(f'{ICONS["bin"]}<span class="text">Delete<span class="shortcut">⌘⌫</span></span>', 'delete', has_search))
     # parts.append(btn('a┆b', 'split', has_search, 'Split string at matches'))
     # parts.append(btn('>┆<', 'split', has_search, 'Split string at matches'))
     parts.append(btn('<span style="font-family:Pragmasevka;margin-right:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span><span style="font-family:Pragmasevka;">┆</span><span style="font-family:Pragmasevka;margin-left:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;margin-right:3px">b</span><span class="text">Split</span>', 'split', has_search))
     # parts.append(btn('<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:1px 0 0 1px;border-width:1px 0 1px 1px;">a</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0;border-width:1px 0px 1px 0;">bc</span>┆<span style="margin:-1px;padding:0 1px;font-size:8px;border: 1px solid #4e4e4e;border-radius:0 1px 1px 0;border-width:1px 1px 1px 0;">b</span>', 'split', has_search, 'Split string at matches'))
 
-    parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace</span>', 'replace', has_search and has_replace))
+    parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace<span class="shortcut">⌘R</span></span>', 'replace', has_search and has_replace))
     parts.append(btn(f'{ICONS["filter"]}<span class="text">Filter</span>', 'filter', has_search and has_replace))
 
     if linked_action:
@@ -3216,7 +3112,6 @@ def _preview_chip(expr: str, val_repr: str, target: str = '.snc-replace-input') 
         f'</span>'
     )
 
-# START HERE some needs some margin fixups
 def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
     """Render the first regex match as a compact z_object small view between find/replace.
 
@@ -3225,16 +3120,22 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
     """
     selection_regex = model.get('search')
     if not selection_regex:
-        return ''
+        return '<div class="match-object-preview"><class="obj-small">No matches</span></div>'
     if is_index_or_slice_search(selection_regex, eval_in_scope):
-        return ''
+        matched = _eval_index_or_slice_match(selection_regex, value, eval_in_scope)
+        if matched is None:
+            return '<div class="match-object-preview"><span class="obj-small">No matches</span></div>'
+        val_repr = _trunc_repr(matched)
+        field_html = z_object_visualizer.render_small_field(
+            '^', val_repr, '^', add_target='.search-box-input-replace')
+        return f'<div class="match-object-preview"><span class="obj-small">{field_html}</span></div>'
 
     matches = _find_matches(selection_regex, value, eval_in_scope)
     if not matches:
-        return ''
+        return '<div class="match-object-preview"><class="obj-small">No matches</span></div>'
     m = matches[0]
     if not isinstance(m, re.Match):
-        return ''
+        return '<div class="match-object-preview"><class="obj-small">Match not a match object, ut oh</span></div>'
 
     fields = ['^[0]', '^.start()', '^.end()']
     grouped_match = None
@@ -3289,7 +3190,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
             return ''
 
         m_repr = html.escape(_trunc_repr(matched_str))
-        row1 = _preview_chip('^', m_repr)
+        # row1 = _preview_chip('^', m_repr)
 
         result_str = ''
         replace_text = model.get('replace_text')
@@ -3324,16 +3225,15 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
     mstart = html.escape(_trunc_repr(m.start()))
     mend = html.escape(_trunc_repr(m.end()))
 
-    row1 = (
-        _preview_chip('^[0]', m0)
-        + _preview_chip('^.start()', mstart)
-        + _preview_chip('^.end()', mend)
-    )
+    # row1 = (
+    #     _preview_chip('^[0]', m0)
+    #     + _preview_chip('^.start()', mstart)
+    #     + _preview_chip('^.end()', mend)
+    # )
 
-    # Show capture group previews when the inner pattern has groups.
-    # Also produce grouped_match for the transform evaluation so that
+    # produce grouped_match for the transform evaluation so that
     # expressions like ^[2] resolve against the real capture groups.
-    group_chips = ''
+    # group_chips = ''
     grouped_match = None
     if is_regex_search(selection_regex):
         inner = get_regex_inner_pattern(selection_regex)
@@ -3342,12 +3242,12 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
             flags = re.M | (re.I if ci else 0)
             try:
                 grouped_match = re.search(inner, value, flags=flags)
-                if grouped_match and grouped_match.lastindex:
-                    for i in range(1, grouped_match.lastindex + 1):
-                        g = grouped_match.group(i)
-                        if g is not None:
-                            g_repr = html.escape(_trunc_repr(g))
-                            group_chips += _preview_chip(f'^[{i}]', g_repr)
+                # if grouped_match and grouped_match.lastindex:
+                    # for i in range(1, grouped_match.lastindex + 1):
+                        # g = grouped_match.group(i)
+                        # if g is not None:
+                            # g_repr = html.escape(_trunc_repr(g))
+                            # group_chips += _preview_chip(f'^[{i}]', g_repr)
             except Exception:
                 grouped_match = None
 
@@ -3373,7 +3273,6 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
 
     return (
         f'<div class="transform-preview">'
-        # f'<div class="transform-preview-matches">First match: {row1}{group_chips}</div>'
         f'{row2}'
         f'</div>'
     )
@@ -3950,15 +3849,15 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
                     model['redoHistory'] = []
 
-                    if did.startswith('repetition-'):
+                    if did.startswith('fuzzy-pattern-'):
+                        # Fuzzy pattern dropdown: option is a character class
+                        model['search'] = replace_segment_pattern(
+                            current_regex, segment_index, option)
+                    else:
                         # Repetition dropdown: option is a quantifier ('1', '?', '*', '+')
                         new_quantifier = '' if option == '1' else option
                         model['search'] = replace_segment_repetition(
                             current_regex, segment_index, new_quantifier)
-                    else:
-                        # Fuzzy pattern dropdown: option is a character class
-                        model['search'] = replace_segment_pattern(
-                            current_regex, segment_index, option)
             # Close the dropdown
             model['openDropdown'] = None
 
