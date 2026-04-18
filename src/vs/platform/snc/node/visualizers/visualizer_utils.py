@@ -29,6 +29,36 @@ SELECTED_BG = "#094771"
 
 
 # =============================================================================
+# Shared SVG icons
+# =============================================================================
+#
+# Each icon is loaded once at module import. The <svg> root gets the
+# .search-icon CSS class so styling lives in CSS, and any inline style="..."
+# attributes (Amadine's export format) are expanded to discrete fill="..." /
+# stroke="..." attributes so CSS can override them.
+
+ICONS: Dict[str, str] = {}
+
+_STYLE_RE = re.compile(r'\bstyle="([^"]+)"', flags=re.M)
+_ICON_NAMES = [
+    "bin", "caps", "boolean-any", "boolean-all", "exists", "filter",
+    "match-first", "regex-group", "split", "loop", "replace", "search",
+    "search-str", "search-idx", "search-match",
+]
+for _icon in _ICON_NAMES:
+    with open(os.path.join(os.path.dirname(__file__), f'icons/{_icon}.svg'), 'r') as _f:
+        _svg_content = (_f.read()
+                        .replace('<?xml version="1.0" encoding="utf-8"?>\n', '')
+                        .replace('<svg ', '<svg class="search-icon"'))
+        ICONS[_icon] = _STYLE_RE.sub(
+            lambda m: ' '.join(f'{k}="{v}"'
+                               for attr in m[1].rstrip(';').split(';')
+                               for k, v in [attr.split(':', 2)]),
+            _svg_content,
+        )
+
+
+# =============================================================================
 # Shared HTML helpers
 # =============================================================================
 

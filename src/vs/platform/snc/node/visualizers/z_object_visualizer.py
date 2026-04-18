@@ -129,7 +129,10 @@ def get_fields(value):
 # === Dotfile operations ===
 
 def _ensure_caret_prefix(f):
-    return f if f.startswith('^') else f'^{f}'
+    # Field expressions only need a caret if they don't already reference the
+    # source value somewhere; a leading caret is only one of many valid forms
+    # (e.g. 'str3[^.start():]' references ^ inside an index expression).
+    return f if '^' in f else f'^{f}'
 
 
 def load_fields_from_dotfile(full_class_name: str):

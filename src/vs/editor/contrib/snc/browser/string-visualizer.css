@@ -6,8 +6,9 @@
 	scrollbar-width: thin;
 	scrollbar-color: rgba(127, 127, 127, 0.1) transparent;
 	margin: 0px 5px 5px 0px;
-	/* need some padding so the on-hover segment repetition/pattern widgets are not clipped */
-	padding: 5px 5px 0 10px;
+	/* need some padding so the on-hover segment repetition/pattern widgets are not clipped;
+	   right padding leaves room for the .tool-toolbar so characters don't slide under it */
+	padding: 5px 34px 0 10px;
 	margin-bottom: 3px;
 	white-space: pre;
 }
@@ -78,6 +79,61 @@
    		border-bottom: 1px dashed #0000005e;
      	background: #7d7d7d3d;
       cursor: pointer;
+		}
+
+		&.is-special {
+			color: rgba(0,0,0,0.8);
+			visibility: visible;
+		}
+	}
+
+	/* Slice/index highlights look like literal selections (cyan) but are
+	   non-interactive (no handles, no dropdowns). Static index labels are
+	   rendered at the segment ends via .segment-label.index-label. */
+	&.slice.highlight {
+		background: #0069ff24;
+
+		&.is-special {
+			color: rgba(0,0,0,0.8);
+			visibility: visible;
+		}
+	}
+
+	/* Segment-selection mode: each capture group / whole match is a
+	   clickable region. Looks like a literal highlight by default and
+	   brightens on hover; .segment-selected (added when the segment ID
+	   is in model.selectedSegments) shifts to a saturated green. */
+	&.segment-group.highlight {
+		background: #0069ff24;
+		cursor: pointer;
+
+		&:hover {
+			background: #0069ff52;
+		}
+
+		&.segment-selected {
+			background: #4caf5066;
+		}
+
+		&.is-special {
+			color: rgba(0,0,0,0.8);
+			visibility: visible;
+		}
+	}
+
+	/* Segment-selection mode: the prefix (string-start to match-start) and
+	   suffix (match-end to string-end) regions. Lighter/grayer than the
+	   match itself so the match remains the visual focus. */
+	&.segment-region.highlight {
+		background: #aaaaaa3d;
+		cursor: pointer;
+
+		&:hover {
+			background: #aaaaaa66;
+		}
+
+		&.segment-selected {
+			background: #4caf5066;
 		}
 
 		&.is-special {
@@ -246,10 +302,52 @@ span.overlay-content {
 			left: -3px;
 		}
 	}
+
+	/* Slice/index labels showing the slice expression's start/end (or the
+	   resolved positive string position for elided sides). Click-to-edit:
+	   each label is wired to a small one-input dropdown (DropdownToggle).
+	   Reuses .pattern/.repetition positioning (left/right). */
+	&.index-label {
+		cursor: pointer;
+		opacity: 0.85;
+		color: #3c53a7;
+
+		&:hover {
+			background: var(--snc-hover-bg);
+			opacity: 1;
+		}
+
+		/* Single-char index pick: one label centered under the char. Set on
+		   both .pattern (for left positioning override) and .center. */
+		&.center {
+			left: 50%;
+			right: auto;
+			transform: translateX(-50%);
+		}
+	}
 }
 
 .segment-label-anchor .snc-dropdown-trigger {
 	position: static;
+}
+
+/* Tiny one-input panel that pops up when a slice label is clicked.
+   Lets the user replace e.g. '5' with a variable name like 'n'.
+   Override the .snc-dropdown-panel default min-width:100px so the panel
+   sizes to its (single) input, and let the input fill the panel width. */
+.snc-dropdown-panel.slice-label-panel {
+	min-width: 0;
+	padding: 2px;
+
+	& .snc-dropdown-option {
+		padding: 0;
+	}
+
+	& .slice-label-input {
+		width: 80px;
+		font-family: var(--snc-code-font-family);
+		box-sizing: border-box;
+	}
 }
 
 .snc-dropdown-category-divider {
@@ -257,4 +355,429 @@ span.overlay-content {
   height: 1px;
   width: 100%;
   margin: 6px 0px;
+}
+
+.tool-toolbar {
+	position: absolute;
+	top: 5px;
+	right: 5px;
+	display: flex;
+	flex-direction: column;
+	padding: 2px;
+	gap: 2px;
+	z-index: 50;
+	user-select: none;
+	/* Opaque background so the toolbar doesn't visually merge with characters
+	   that scroll under it (relevant in both vertical and compact modes since
+	   the toolbar sits on top of the string content). */
+	background: var(--snc-bg);
+	border-radius: 4px;
+}
+
+.tool-button {
+	font-family: var(--snc-code-font-family);
+	font-size: 11px;
+	line-height: 1;
+	width: 22px;
+	height: 22px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 3px;
+	cursor: pointer;
+	color: var(--snc-text-color);
+}
+
+/* Match .action-button hover/active styling so the toolbar feels like part of
+   the action button area at the bottom of the visualizer. */
+.tool-button:hover {
+	background: var(--snc-hover-bg);
+	color: black;
+}
+
+.tool-button.active {
+	background: var(--snc-hover-bg);
+	color: #3c53a7;
+}
+
+/* Dimmed tool buttons (e.g. pick tool with no current search) - visibly
+   inactive and click-inert. */
+.tool-button.dimmed {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.tool-button.dimmed:hover {
+	background: transparent;
+	color: var(--snc-text-color);
+}
+
+/* Transient tool overrides driven by held modifier keys (set on body by snc.ts).
+   Resolver priority (mirrors _resolve_selection_type): shift > alt > ctrl > tool.
+   Shift -> literal, alt/option -> fuzzy, ctrl -> index. (Ctrl, not cmd/meta:
+   cmd is reserved for cmd-backspace / cmd-r / cmd-z editor actions.) */
+body.snc-shift-down .tool-button.active,
+body.snc-alt-down .tool-button.active,
+body.snc-ctrl-down .tool-button.active {
+	background: transparent;
+	color: var(--snc-text-color);
+}
+
+body.snc-ctrl-down .tool-button[data-tool="index"] {
+	background: var(--snc-hover-bg);
+	color: #3c53a7;
+}
+
+body.snc-alt-down .tool-button[data-tool="fuzzy"] {
+	background: var(--snc-hover-bg);
+	color: #3c53a7;
+}
+
+/* Alt beats ctrl */
+body.snc-alt-down .tool-button[data-tool="index"] {
+	background: transparent;
+	color: var(--snc-text-color);
+}
+
+body.snc-shift-down .tool-button[data-tool="literal"] {
+	background: var(--snc-hover-bg);
+	color: #3c53a7;
+}
+
+/* Shift beats alt and ctrl */
+body.snc-shift-down .tool-button[data-tool="fuzzy"],
+body.snc-shift-down .tool-button[data-tool="index"] {
+	background: transparent;
+	color: var(--snc-text-color);
+}
+
+/* =============================================================================
+   Compact (dropdown) tool toolbar
+   =============================================================================
+
+   Used when the string is < 4 lines tall, so the toolbar isn't dwarfed by a
+   tall stack of icon buttons. The active tool's ICON is shown as a single
+   button + a 🞃 chevron; hovering opens a panel with all 4 tool options
+   (each row shows icon + name).
+
+   The trigger renders all 4 tool icon spans inside it; CSS shows only the one
+   matching .tool-toolbar-compact[data-active-tool] (or, when modifier keys are
+   held, the override tool's icon) so the displayed icon tracks shift/alt/ctrl
+   without a Python roundtrip. Resolver priority mirrors _resolve_selection_type:
+   shift > alt > ctrl > tool. (Shift -> Literal, alt/option -> Fuzzy, ctrl -> Index.) */
+
+.tool-toolbar.tool-toolbar-compact {
+	flex-direction: row;
+	align-items: center;
+	padding: 0;
+}
+
+.tool-button.tool-dropdown-trigger-button {
+	width: auto;
+	height: 22px;
+	padding: 0 3px 0 5px;
+	gap: 2px;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.tool-icon {
+	display: none;
+	font-family: var(--snc-code-font-family);
+}
+
+.tool-toolbar-compact[data-active-tool="literal"] .tool-icon[data-tool="literal"],
+.tool-toolbar-compact[data-active-tool="fuzzy"] .tool-icon[data-tool="fuzzy"],
+.tool-toolbar-compact[data-active-tool="index"] .tool-icon[data-tool="index"],
+.tool-toolbar-compact[data-active-tool="pick"] .tool-icon[data-tool="pick"] {
+	display: inline;
+}
+
+/* Modifier-key transient overrides for the compact dropdown's displayed icon.
+   Resolver priority (mirrors the vertical .tool-button rules above and the
+   Python _resolve_selection_type): shift > alt > ctrl > tool.
+   Implementation:
+     - hide all .tool-icon spans whenever ANY modifier is held
+     - then show ONE specific .tool-icon based on which modifier wins
+   !important is needed because the [data-active-tool] active-tool selector
+   has comparable/higher raw specificity than body-class selectors. */
+body.snc-shift-down .tool-toolbar-compact .tool-icon,
+body.snc-alt-down .tool-toolbar-compact .tool-icon,
+body.snc-ctrl-down .tool-toolbar-compact .tool-icon {
+	display: none !important;
+}
+
+/* Lowest-priority modifier first, so higher-priority modifiers override below. */
+body.snc-ctrl-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
+	display: inline !important;
+}
+
+/* Alt beats ctrl. */
+body.snc-alt-down .tool-toolbar-compact .tool-icon[data-tool="fuzzy"] {
+	display: inline !important;
+}
+body.snc-alt-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
+	display: none !important;
+}
+
+/* Shift beats alt and ctrl. */
+body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="literal"] {
+	display: inline !important;
+}
+body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="fuzzy"],
+body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
+	display: none !important;
+}
+
+.tool-dropdown-chevron {
+	font-size: 8px;
+	line-height: 1;
+	margin-left: 1px;
+	opacity: 0.7;
+}
+
+/* Tool dropdown panel rows: icon column + name column. */
+.tool-dropdown-panel {
+	min-width: 0;
+}
+
+.tool-dropdown-option {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 6px 2px 4px;
+}
+
+.tool-dropdown-option.active .tool-dropdown-name,
+.tool-dropdown-option.active .tool-dropdown-icon {
+	color: #3c53a7;
+	font-weight: 600;
+}
+
+.tool-dropdown-icon {
+	width: 16px;
+	text-align: center;
+	font-family: var(--snc-code-font-family);
+	font-size: 11px;
+	color: var(--snc-text-color);
+}
+
+.tool-dropdown-name {
+	font-size: 11px;
+	color: var(--snc-text-color);
+}
+
+/* Make room for the dropdown trigger so characters in the string don't
+   slide under it. The vertical toolbar's right padding (34px) is calibrated for
+   22px-wide icon buttons; the compact trigger (icon + chevron) is slightly
+   wider so bump the right padding by a few extra pixels. */
+.visualizer-container.tool-toolbar-compact-container .string-visualizer {
+	padding-right: 50px;
+}
+
+/* In effective index mode, hide regex anchors (^, $) - both the string-boundary
+   anchors and the synthesized $/^ flanking each \n - so they don't get counted
+   when the user is reasoning about character positions. The two sides behave
+   differently:
+     - END ($) anchors collapse with display:none so the \n display sits flush
+       with the end of its line.
+     - START (^) anchors keep visibility:hidden (still take a glyph slot) so
+       the rest of the string doesn't shift left when ctrl is held / index
+       tool engaged.
+   Real characters like \n and \t stay VISIBLE: they're part of the string and
+   indices line up with their visible escape display.
+   Effective index mode means EITHER:
+     - ctrl is held (transient override), OR
+     - the visualizer's persistent tool is 'index' AND no other modifier overrides it.
+   The visibility rules on anchors and escape displays use !important to
+   override the default .is-special / hover-reveal rules. */
+body.snc-ctrl-down .visualizer-container .char-span-container.is-anchor-end,
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .char-span-container.is-anchor-end {
+	display: none !important;
+}
+
+body.snc-ctrl-down .visualizer-container .char-span.is-anchor-start,
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .char-span.is-anchor-start {
+	visibility: hidden !important;
+}
+
+body.snc-ctrl-down .visualizer-container .char-span.is-special:not(.is-regex-anchor),
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .char-span.is-special:not(.is-regex-anchor) {
+	visibility: visible !important;
+}
+
+/* =============================================================================
+   Pick Tool
+   =============================================================================
+
+   In pick-tool mode the visualizer shows the FIRST match plus the prefix
+   (string-start to match-start) and suffix (match-end to string-end) regions,
+   each as a clickable highlight. A floating chip above each region (and at the
+   match-start/end indices) carries the Python expression that extracts that
+   feature. Clicking a chip (or the highlighted region) toggles it into
+   model['selectedSegments'], which drives the Replace box content.
+*/
+
+/* Prefix/suffix regions: lighter background than the match itself so the
+   match still reads as the focus; brightens on hover and when selected. */
+.char-span.segment-region.highlight {
+	background: #aaaaaa30;
+	cursor: pointer;
+}
+
+.char-span.segment-region.highlight:hover {
+	background: #aaaaaa55;
+}
+
+/* The match itself (capture groups OR whole match in pick mode). */
+.char-span.segment-group.highlight {
+	background: #0069ff3d;
+	cursor: pointer;
+}
+
+.char-span.segment-group.highlight:hover {
+	background: #0069ff5c;
+}
+
+/* Selected segments use a brighter, saturated background so it's obvious which
+   chips are active. Wins over the base highlight background. */
+.char-span.highlight.segment-selected {
+	background: #34c75966;
+}
+
+.char-span.highlight.segment-selected:hover {
+	background: #34c75988;
+}
+
+/* Container for a clickable segment chip. .segment-label-anchor is reused
+   from the slice-label machinery so positioning math is consistent. */
+.segment-chip-anchor {
+	/* inherits .segment-label-anchor (zero-width float anchor) */
+}
+
+/* Mirror the visual treatment of .segment-label.index-label so the start/end
+   chips read as part of the existing above-char label vocabulary: no border,
+   transparent background, hover brightens. */
+.segment-chip {
+	position: absolute;
+	bottom: -2px;
+	font-size: 8px;
+	font-style: normal;
+	font-weight: bold;
+	line-height: 8px;
+	padding: 2px;
+	border-radius: 2px;
+	z-index: 10;
+	cursor: pointer;
+	white-space: nowrap;
+	user-select: none;
+	color: #3c53a7;
+	opacity: 0.85;
+}
+
+.segment-chip:hover {
+	background: var(--snc-hover-bg);
+	opacity: 1;
+}
+
+.segment-chip.selected {
+	color: #258a3f;
+	opacity: 1;
+}
+
+/* The start chip is inserted BEFORE the match's first char so its anchor
+   already sits at the match's left edge. The end chip is inserted AFTER the
+   match's last char so its anchor sits at the match's right edge. Both nudge
+   toward the anchor with small left offsets to read as part of the segment. */
+.segment-chip.pos-start {
+	left: -3px;
+}
+
+.segment-chip.pos-end {
+	left: -5px;
+}
+
+/* In pick-tool mode, suppress the literal/fuzzy hover affordances and the
+   resize handles - the only interaction in this mode is chip-click. */
+.visualizer-container.tool-pick .char-span.hover {
+	background: transparent;
+}
+
+.visualizer-container.tool-pick .char-span-resize-handle {
+	display: none;
+}
+
+/* Modifier keys (shift/alt/ctrl) temporarily hide the pick-mode visuals
+   so the user can peek at the underlying view (and use the modifier's normal
+   tool semantics for the next click/drag). The pick-mode click handlers
+   on the wrappers still fire, but visually the chrome disappears. */
+body.snc-shift-down .visualizer-container.tool-pick .segment-chip,
+body.snc-alt-down .visualizer-container.tool-pick .segment-chip,
+body.snc-ctrl-down .visualizer-container.tool-pick .segment-chip {
+	display: none;
+}
+
+body.snc-shift-down .visualizer-container.tool-pick .char-span.segment-region.highlight,
+body.snc-alt-down .visualizer-container.tool-pick .char-span.segment-region.highlight,
+body.snc-ctrl-down .visualizer-container.tool-pick .char-span.segment-region.highlight,
+body.snc-shift-down .visualizer-container.tool-pick .char-span.segment-group.highlight,
+body.snc-alt-down .visualizer-container.tool-pick .char-span.segment-group.highlight,
+body.snc-ctrl-down .visualizer-container.tool-pick .char-span.segment-group.highlight,
+body.snc-shift-down .visualizer-container.tool-pick .char-span.segment-selected,
+body.snc-alt-down .visualizer-container.tool-pick .char-span.segment-selected,
+body.snc-ctrl-down .visualizer-container.tool-pick .char-span.segment-selected {
+	background: transparent;
+}
+
+/* =========================================================================
+   Pick tool segment chips
+   ========================================================================= */
+
+/* Inline chips that float above each segment (capture group, prefix,
+   suffix, start/end indices). Reuse the .segment-label-anchor positioning
+   pattern (zero-width inline-block) so chips don't disturb the layout
+   of surrounding characters. */
+.segment-chip-anchor {
+	/* Anchor inherits .segment-label-anchor positioning. */
+}
+
+.segment-chip {
+	position: absolute;
+	font-family: var(--snc-code-font-family);
+	font-size: 8px;
+	line-height: 8px;
+	font-weight: bold;
+	padding: 1px 3px;
+	border-radius: 2px;
+	cursor: pointer;
+	white-space: nowrap;
+	user-select: none;
+	z-index: 11;
+	color: #3c53a7;
+	background: var(--snc-hover-bg);
+	opacity: 0.8;
+
+	&:hover {
+		opacity: 1;
+		background: #0069ff52;
+	}
+
+	&.selected {
+		background: #4caf5099;
+		color: white;
+		opacity: 1;
+	}
+
+	&.side-top {
+		bottom: 0;
+		left: -2px;
+	}
+}
+
+/* Pick-tool container: suppress the literal-mode hover affordances on
+   plain (non-segment) chars so the focus is on the segment chips. The
+   regular literal/fuzzy/index rules still drive char styling outside the
+   first match's region. */
+.visualizer-container.tool-pick .char-span.hover {
+	background: transparent;
 }

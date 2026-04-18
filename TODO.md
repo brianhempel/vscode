@@ -1,8 +1,13 @@
 - [x] clean up a bit
 - [ ] fix up tooltips
-- [ ] fix up dropdowns
+- [x] fix up dropdowns
 - [ ] restore clickable match obj helpers (just show match obj between find/replace?)
-- [ ] restore repetition modifiers
+- [x] fix string visualizer selection undo history
+- [ ] show string segment regex on hover and while drawing
+- [x] ability to resize segments leftward
+- [ ] segment repetition and kind dropdowns: current value should be preselected/prefilled in the items
 - [ ] literal and fuzzy selection as tool buttons
-- [ ] remove \A \Z
+- [x] remove \A \Z
 - [x] misaligned single-line generic visualizer
+- [ ] list join should work on a predicate or a slice
+- [ ]

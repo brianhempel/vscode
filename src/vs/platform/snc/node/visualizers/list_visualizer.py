@@ -55,6 +55,7 @@ from visualizer_utils import (
     load_dotfile_list, save_dotfile_list,
     get_full_class_name,
     BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
+    ICONS,
 )
 
 CELL_KEY_SEP = '\x00'
@@ -1007,129 +1008,123 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
     return f'<th style="padding:0 8px;">{input_html}</th>'
 
 
-SEARCH_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="none" stroke="#000000" stroke-width="1.5" d="M11.5 11.5L14 14M6.5 11a4.5 4.5 0 100-9 4.5 4.5 0 000 9z"/></svg>'
+def _resolve_first_and_index(model, eval_in_scope):
+    """Compute the effective `first` flag and `is_index_search` for the given model.
+
+    Plain slice and plain index searches force first=True (they target a single
+    region). Broadcast slices (lists in start/stop) keep the user's first_match
+    preference because there are multiple regions to iterate.
+    """
+    search = model.get('search')
+    has_search = search is not None and search != ''
+    first = bool(model.get('first_match', False))
+    is_index_search = False
+
+    if not has_search:
+        return first, is_index_search
+
+    parsed = parse_search_term(search)
+    if parsed and parsed[0] == 'slice':
+        start_s, stop_s = parsed[1]
+        _eval = eval_in_scope or (lambda c: ast.literal_eval(c))
+        try:
+            sv = _eval(start_s) if start_s else None
+        except Exception:
+            sv = None
+        try:
+            ev = _eval(stop_s) if stop_s else None
+        except Exception:
+            ev = None
+        if not (_is_list_of_ints(sv) or _is_list_of_ints(ev)):
+            first = True
+    elif parsed and parsed[0] == 'expr':
+        try:
+            val = eval(parsed[1]) if eval_in_scope is None else eval_in_scope(parsed[1])
+            if isinstance(val, int) and not isinstance(val, bool):
+                first = True
+                is_index_search = True
+        except Exception:
+            pass
+
+    return first, is_index_search
 
 
-def _render_search_box(model, max_width=None, eval_in_scope=None):
-    """Render the search box below the table."""
+def _preview_expr(model, action, eval_in_scope):
+    """Pre-compute the Python expression an action would generate.
+
+    Used to populate `data-action-expr` (action buttons) and `snc-py-exp`
+    (dropdown rows) so the existing snc-action-tooltip / py-exp-tooltip systems
+    can show + copy + drag the expression on hover.
+    """
+    source_expr = model.get('_source_expr')
+    if not source_expr:
+        return ''
+    ctx = _get_search_context(model, source_expr=source_expr, eval_in_scope=eval_in_scope)
+    if ctx is None:
+        ctx = _get_whole_list_context(model, source_expr=source_expr)
+    if not ctx:
+        return ''
+    if action.startswith('join:'):
+        ctx = dict(ctx)
+        ctx['join_separator'] = action[5:]
+        action = 'join'
+    try:
+        result = generate_action(action, ctx)
+    except Exception:
+        return ''
+    return result[1] if result else ''
+
+
+def _render_search_box_input(model, eval_in_scope=None):
+    """Render the .search-box-input + .search-toggles-container row contents.
+
+    Returned HTML is the inside of a single .search-box-row (the input
+    wrapper). The outer .search-box wrapper is added by `_render_search_box`.
+    """
     search_value = model.get('search') or ''
     search_input_event = "lambda e: SearchBoxInput(value=e.get('value', ''))"
-    search_svg = SEARCH_SVG.replace("stroke:#000000;", "stroke:#8C8C8C;").replace(
-        "<svg ", '<svg style="position: absolute; margin-left: 5px; margin-top: 4px; width: 12px; height: 12px;"', 1)
 
-    toggle_btn_style = (
-        'border-radius: 3px;'
-        'padding: 1px 3px;'
-        'font-family: inherit;'
-        'font-size: 10px;'
-        'cursor: pointer;'
-        'line-height: 16px;'
-        'user-select: none;'
-    )
-
-    first_match = bool(model.get('first_match', False))
-    search = model.get('search')
-
-    # Force 1st on for plain slice searches (not broadcast slices)
-    if search:
-        parsed = parse_search_term(search)
-        if parsed and parsed[0] == 'slice':
-            start_s, stop_s = parsed[1]
-            _sb_eval = eval_in_scope or (lambda c: ast.literal_eval(c))
-            try:
-                sv = _sb_eval(start_s) if start_s else None
-            except Exception:
-                sv = None
-            try:
-                ev = _sb_eval(stop_s) if stop_s else None
-            except Exception:
-                ev = None
-            if not (_is_list_of_ints(sv) or _is_list_of_ints(ev)):
-                first_match = True
+    first_match, _ = _resolve_first_and_index(model, eval_in_scope)
 
     fm_event = repr(FirstMatchToggle())
     first_match_toggle_html = (
-        f'<span snc-mouse-down="{html.escape(fm_event)}"'
-        f' class="snc-hoverable"'
-        f' style="'
-        f'background: {"#264f78" if first_match else "transparent"};'
-        f'margin-left: 2px;'
-        f'color: {"#ccc" if first_match else "#8C8C8C"};'
-        f'border: 1px solid {"#aaa" if first_match else "#3c3c3c"};'
-        f'{toggle_btn_style}'
-        f'"'
-        f'>1<span style="font-size: 8px; vertical-align: 3px; display: inline-block; margin-top: -1em;">st</span></span>'
+        f'<span class="search-button {"active" if first_match else "inactive"}"'
+        f' snc-mouse-down="{html.escape(fm_event)}">'
+        f'{ICONS["match-first"]}'
+        f'</span>'
     )
 
     toggles_html = (
-        f'<span style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%);">'
+        f'<span class="search-toggles-container">'
         f'{first_match_toggle_html}'
         f'</span>'
     )
 
     return (
-        f'<div style="margin-top: 4px; white-space: normal; display: flex; align-items: start; gap: 2px;'
-        f' max-width: {str(max_width) + "px" if max_width is not None else "none"};'
-        f'">'
-        f'<div style="flex: 1; min-width: 0;">'
-        f'<div style="position: relative;">'
-        f'{search_svg}'
+        f'<div class="search-box-input-wrapper">'
         f'<input type="text" tabindex="0"'
         f' snc-input="{html.escape(search_input_event)}"'
         f' value="{html.escape(search_value)}"'
         f' placeholder="Search"'
         f' spellcheck="false"'
-        f' style="'
-        f'background: #1e1e1e;'
-        f'color: #dcdcaa;'
-        f'border: 1px solid #3c3c3c;'
-        f'border-radius: 10px;'
-        f'padding: 2px 45px 2px 20px;'
-        f'font-family: inherit;'
-        f'font-size: 12px;'
-        f'outline: none;'
-        f'width: 100%;'
-        f'box-sizing: border-box;'
-        f'"'
-        f' />'
+        f' class="search-box-input" />'
         f'{toggles_html}'
-        f'</div>'
-        f'</div>'
         f'</div>'
     )
 
 
-def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
-    """Render the action button bar below the search box."""
+def _render_action_buttons(model, lst, eval_in_scope=None):
+    """Render the .action-buttons bar (no outer wrapper).
+
+    Uses .action-button + .snc-dropdown-trigger / .snc-dropdown-panel /
+    .snc-dropdown-option classes shared with the string visualizer. Each
+    .action-button carries data-action-expr so the snc-action-tooltip system
+    handles copy + drag-to-extract on hover; each .snc-dropdown-option
+    carries snc-py-exp for the same purpose.
+    """
     search = model.get('search')
     has_search = search is not None and search != ''
-    first = bool(model.get('first_match', False))
-
-    # Force 1st for plain index/slice (not broadcast)
-    is_index_search = False
-    if has_search:
-        parsed = parse_search_term(search)
-        if parsed and parsed[0] == 'slice':
-            start_s, stop_s = parsed[1]
-            _btn_eval = eval_in_scope or (lambda c: ast.literal_eval(c))
-            try:
-                sv = _btn_eval(start_s) if start_s else None
-            except Exception:
-                sv = None
-            try:
-                ev = _btn_eval(stop_s) if stop_s else None
-            except Exception:
-                ev = None
-            if not (_is_list_of_ints(sv) or _is_list_of_ints(ev)):
-                first = True
-        elif parsed and parsed[0] == 'expr':
-            try:
-                val = eval(parsed[1]) if eval_in_scope is None else eval_in_scope(parsed[1])
-                if isinstance(val, int) and not isinstance(val, bool):
-                    first = True
-                    is_index_search = True
-            except Exception:
-                pass
+    first, is_index_search = _resolve_first_and_index(model, eval_in_scope)
 
     match_count = 0
     if has_search and eval_in_scope is not None:
@@ -1140,230 +1135,196 @@ def _render_action_buttons(model, lst, eval_in_scope=None, max_width=None):
     elif not has_search:
         match_count = len(lst)
 
-    btn_base = (
-        'border: 1px solid #3c3c3c;'
-        'border-radius: 3px;'
-        'padding: 1px 5px;'
-        'font-family: inherit;'
-        'font-size: 10px;'
-        'cursor: pointer;'
-        'line-height: 16px;'
-        'user-select: none;'
-        'white-space: nowrap;'
-        'background: transparent;'
-        'color: #8C8C8C;'
-    )
-    copy_base = (
-        'border: 1px solid #3c3c3c;'
-        'border-left: none;'
-        'border-radius: 0 3px 3px 0;'
-        'padding: 1px 3px;'
-        'font-family: inherit;'
-        'font-size: 10px;'
-        'cursor: pointer;'
-        'line-height: 16px;'
-        'user-select: none;'
-        'white-space: nowrap;'
-        'background: transparent;'
-        'color: #8C8C8C;'
-    )
-    btn_with_copy = btn_base + 'border-radius: 3px 0 0 3px;'
-    disabled_style = 'opacity: 0.35; pointer-events: none;'
-
     linked_action = model.get('linked_action')
-    linked_highlight = 'background: #264f78; color: #ccc; border-color: #aaa;'
 
-    def action_btn(label, action, enabled=True, title='', extra_style=''):
-        active = linked_highlight if linked_action == action else ''
-        style = btn_with_copy + ('' if enabled else disabled_style) + active + extra_style
+    def action_btn(label, action, enabled=True, title='', extra_classes=''):
+        cls = 'action-button'
+        if not enabled:
+            cls += ' dimmed'
+        if linked_action == action:
+            cls += ' linked'
+        if extra_classes:
+            cls += ' ' + extra_classes
         event = repr(ActionButtonClick(action=action, copy=False))
+        expr_attr = ''
+        if enabled:
+            expr = _preview_expr(model, action, eval_in_scope)
+            if expr:
+                expr_attr = f' data-action-expr="{html.escape(expr)}"'
         title_attr = f' title="{html.escape(title)}"' if title else ''
-        return f'<span class="snc-hoverable" snc-mouse-down="{html.escape(event)}" style="margin-left: 3px;{style}"{title_attr}>{label}</span>'
-
-    def copy_btn(action, enabled=True):
-        style = copy_base + ('' if enabled else disabled_style)
-        event = repr(ActionButtonClick(action=action, copy=True))
-        return f'<span class="snc-hoverable" snc-mouse-down="{html.escape(event)}" style="{style}" title="Copy to clipboard">\u29C9</span>'
-
-    def btn_group(label, action, enabled=True, title='', extra_btn_style=''):
-        return f'<span>{action_btn(label, action, enabled, title, extra_btn_style)}{copy_btn(action, enabled)}</span>'
-
-    parts = []
-
-    # 1. Filter / Find One
-    filter_lbl = 'Find One \u23ce' if first else 'Filter \u23ce'
-    parts.append(btn_group(filter_lbl, 'filter', has_search, 'Filter matches (Enter)'))
-
-    # 2. Loop dropdown
-    open_dropdown = model.get('openDropdown')
-    loop_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-loop'
-    loop_enabled = not (has_search and first)
-
-    loop_toggle_event = repr(DropdownToggle('action-loop'))
-    loop_disabled = '' if loop_enabled else disabled_style
-    loop_btn_style = btn_base + ('background: #264f78; color: #ccc; border-color: #aaa;' if loop_dropdown_open else '') + loop_disabled
-    loop_btn = f'<span class="snc-hoverable" snc-mouse-down="{html.escape(loop_toggle_event)}" style="margin-left: 3px;{loop_btn_style}" title="For loop over matches">Loop \u25be</span>'
-
-    if loop_dropdown_open and loop_enabled:
-        loop_opts = []
-        loop_opt_style = 'padding: 3px 6px; display: flex; align-items: center; gap: 2px;'
-
-        def loop_row(label, action):
-            act_event = repr(ActionButtonClick(action=action, copy=False))
-            cp_event = repr(ActionButtonClick(action=action, copy=True))
-            return (
-                f'<div style="{loop_opt_style}" class="snc-dropdown-option">'
-                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
-                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(cp_event)}" style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
-                f'</div>'
-            )
-
-        loop_opts.append(loop_row('No indices', 'loop_no_idx'))
-        loop_opts.append(loop_row('Original indices', 'loop_orig_idx'))
-        loop_opts.append(loop_row('New indices', 'loop_new_idx'))
-
-        loop_panel = (
-            '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
-            'position: absolute;left: 0;top: 100%;'
-            'background: #252526;border: 1px solid #3c3c3c;border-radius: 3px;'
-            'z-index: 100;min-width: 120px;'
-            'box-shadow: 0 2px 8px rgba(0,0,0,0.4);font-size: 11px;line-height: 1.4;'
-            f'">{"".join(loop_opts)}</div>'
-        )
-        loop_btn = (
-            f'<span class="snc-dropdown-trigger" style="position: relative; display: inline-block;">'
-            f'{loop_btn}{loop_panel}</span>'
+        return (
+            f'<span class="{cls}" snc-mouse-down="{html.escape(event)}"'
+            f'{expr_attr}{title_attr}>{label}</span>'
         )
 
-    parts.append(loop_btn)
-
-    # 3. ? dropdown
-    predicate_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-predicate'
-
-    toggle_event = repr(DropdownToggle('action-predicate'))
-    q_disabled = ''
-    q_style = btn_base + ('background: #264f78; color: #ccc; border-color: #aaa;' if predicate_dropdown_open else '') + q_disabled
-    q_btn = f'<span class="snc-hoverable" snc-mouse-down="{html.escape(toggle_event)}" style="margin-left: 3px;{q_style}" title="Boolean queries">? \u25be</span>'
-
-    if predicate_dropdown_open:
-        dropdown_opts = []
-        opt_style = 'padding: 3px 6px; display: flex; align-items: center; gap: 2px;'
-
-        def dropdown_row(label, action, enabled):
-            row_style = opt_style + ('' if enabled else disabled_style)
-            act_event = repr(ActionButtonClick(action=action, copy=False))
-            cp_event = repr(ActionButtonClick(action=action, copy=True))
-            return (
-                f'<div style="{row_style}" class="snc-dropdown-option">'
-                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
-                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(cp_event)}" style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
-                f'</div>'
-            )
-
-        dropdown_opts.append(dropdown_row('Any', 'any', True))
-        dropdown_opts.append(dropdown_row('All', 'all', not (has_search and first)))
-        dropdown_opts.append(dropdown_row('If Any', 'if_any', True))
-        dropdown_opts.append(dropdown_row('If All', 'if_all', not (has_search and first)))
-
-        dropdown_panel = (
-            '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
-            'position: absolute;left: 0;top: 100%;'
-            'background: #252526;border: 1px solid #3c3c3c;border-radius: 3px;'
-            'z-index: 100;min-width: 100px;'
-            'box-shadow: 0 2px 8px rgba(0,0,0,0.4);font-size: 11px;line-height: 1.4;'
-            f'">{"".join(dropdown_opts)}</div>'
-        )
-        q_btn = (
-            f'<span class="snc-dropdown-trigger" style="position: relative; display: inline-block;">'
-            f'{q_btn}{dropdown_panel}</span>'
-        )
-
-    parts.append(q_btn)
-
-    # 4. Delete
-    delete_lbl = 'Delete First' if first else 'Delete All'
-    parts.append(btn_group(delete_lbl, 'delete', has_search, 'Delete matches'))
-
-    # 5. Join dropdown
-    join_dropdown_open = open_dropdown is not None and open_dropdown.get('id') == 'action-join'
-    join_enabled = not (has_search and first)
-
-    join_toggle_event = repr(DropdownToggle('action-join'))
-    join_disabled = '' if join_enabled else disabled_style
-    join_active = linked_highlight if linked_action == 'join' else ''
-    join_btn_style = btn_base + ('background: #264f78; color: #ccc; border-color: #aaa;' if join_dropdown_open else '') + join_disabled + join_active
-    join_btn = f'<span class="snc-hoverable" snc-mouse-down="{html.escape(join_toggle_event)}" style="margin-left: 3px;{join_btn_style}" title="Join list items into a string">Join \u25be</span>'
-
-    if join_dropdown_open and join_enabled:
-        join_opts = []
-        join_opt_style = 'padding: 3px 6px; display: flex; align-items: center; gap: 2px;'
-
-        join_presets = ["''", "' '", "'\\n'", "','", "'\\t'"]
-
-        for sep_expr in join_presets:
-            act_action = f'join:{sep_expr}'
-            act_event = repr(ActionButtonClick(action=act_action, copy=False))
-            cp_event = repr(ActionButtonClick(action=act_action, copy=True))
-            join_opts.append(
-                f'<div style="{join_opt_style}" class="snc-dropdown-option">'
-                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{html.escape(sep_expr)}</span>'
-                f'<span class="snc-hoverable" snc-mouse-down="{html.escape(cp_event)}" style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
-                f'</div>'
-            )
-
-        custom_sep = open_dropdown.get('customSep', "''") if open_dropdown else "''"
-        custom_input_event = "lambda e: JoinSeparatorInput(value=e.get('value', ''))"
-        custom_act_action = f'join:{custom_sep}'
-        custom_cp_event = repr(ActionButtonClick(action=custom_act_action, copy=True))
-        join_opts.append(
-            f'<div style="{join_opt_style}" class="snc-dropdown-option">'
-            f'<input type="text" snc-input="{html.escape(custom_input_event)}" '
-            f'value="{html.escape(custom_sep)}" '
-            f'placeholder="expr" '
-            f'spellcheck="false" '
-            f'style="width: 50px; background: #1e1e1e; color: #dcdcaa; border: 1px solid #3c3c3c; '
-            f'border-radius: 2px; padding: 1px 3px; font-size: 10px; font-family: inherit; outline: none;" />'
-            f'<span class="snc-hoverable" snc-mouse-down="{html.escape(custom_cp_event)}" '
-            f'style="font-size:10px;color:#8C8C8C;" title="Copy to clipboard">\u29C9</span>'
+    def dropdown_row(label, action, enabled):
+        cls = 'snc-dropdown-option'
+        if not enabled:
+            cls += ' dimmed'
+        act_event = repr(ActionButtonClick(action=action, copy=False))
+        py_exp_attr = ''
+        if enabled:
+            expr = _preview_expr(model, action, eval_in_scope)
+            if expr:
+                py_exp_attr = f' snc-py-exp="{html.escape(expr)}" snc-py-exp-align="right"'
+        return (
+            f'<div class="{cls}"{py_exp_attr}>'
+            f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
             f'</div>'
         )
 
-        join_panel = (
-            '<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
-            'position: absolute;left: 0;top: 100%;'
-            'background: #252526;border: 1px solid #3c3c3c;border-radius: 3px;'
-            'z-index: 100;min-width: 80px;'
-            'box-shadow: 0 2px 8px rgba(0,0,0,0.4);font-size: 11px;line-height: 1.4;'
-            f'">{"".join(join_opts)}</div>'
+    parts = []
+
+    # 1. Count (matches the string visualizer's action-button order)
+    count_enabled = not (has_search and first)
+    count_label = f'<span class="text">Count: {match_count}</span>'
+    parts.append(action_btn(count_label, 'count', count_enabled, 'Count of matches'))
+
+    # 2. Filter / Find One
+    filter_lbl = (
+        f'{ICONS["filter"]}<span class="text">Find One<span class="shortcut">\u23ce</span></span>'
+        if first
+        else f'{ICONS["filter"]}<span class="text">Filter<span class="shortcut">\u23ce</span></span>'
+    )
+    parts.append(action_btn(filter_lbl, 'filter', has_search, 'Filter matches (Enter)'))
+
+    # 3. Loop dropdown (hover-menu, panel always rendered with data-hover-menu)
+    loop_enabled = not (has_search and first)
+    loop_trigger_cls = 'snc-dropdown-trigger' + ('' if loop_enabled else ' dimmed')
+    loop_rows = ''.join([
+        dropdown_row('No indices', 'loop_no_idx', loop_enabled),
+        dropdown_row('Original indices', 'loop_orig_idx', loop_enabled),
+        dropdown_row('New indices', 'loop_new_idx', loop_enabled),
+    ])
+    parts.append(
+        f'<span class="{loop_trigger_cls}">'
+        f'<span class="action-button" title="For loop over matches">'
+        f'{ICONS["loop"]}<span class="text">Loop</span>'
+        f'</span>'
+        f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
+        f'{loop_rows}'
+        f'</div>'
+        f'</span>'
+    )
+
+    # 4. ? (Any/All) dropdown (hover-menu)
+    pred_trigger_cls = 'snc-dropdown-trigger'
+    pred_rows = ''.join([
+        dropdown_row('Any', 'any', has_search),
+        dropdown_row('If Any', 'if_any', has_search),
+        dropdown_row('All', 'all', has_search and not (has_search and first)),
+        dropdown_row('If All', 'if_all', has_search and not (has_search and first)),
+    ])
+    parts.append(
+        f'<span class="{pred_trigger_cls}">'
+        f'<span class="action-button" title="Boolean queries">'
+        f'{ICONS["exists"]}<span class="text">Any/All</span>'
+        f'</span>'
+        f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
+        f'{pred_rows}'
+        f'</div>'
+        f'</span>'
+    )
+
+    # 5. Delete
+    delete_lbl = (
+        f'{ICONS["bin"]}<span class="text">Delete First<span class="shortcut">\u2318\u232b</span></span>'
+        if first
+        else f'{ICONS["bin"]}<span class="text">Delete All<span class="shortcut">\u2318\u232b</span></span>'
+    )
+    parts.append(action_btn(delete_lbl, 'delete', has_search, 'Delete matches'))
+
+    # 6. Join dropdown (hover-menu like Loop and Any/All). The custom
+    # separator <input> lives inside the panel; hovering the panel keeps it
+    # open while the user types.
+    open_dropdown = model.get('openDropdown')
+    join_enabled = not (has_search and first)
+    join_trigger_cls = 'snc-dropdown-trigger' + ('' if join_enabled else ' dimmed')
+    join_btn_cls = 'action-button'
+    if linked_action == 'join':
+        join_btn_cls += ' linked'
+
+    join_presets = ["''", "' '", "'\\n'", "','", "'\\t'"]
+    rows = []
+    for sep_expr in join_presets:
+        act_action = f'join:{sep_expr}'
+        act_event = repr(ActionButtonClick(action=act_action, copy=False))
+        preview = _preview_expr(model, act_action, eval_in_scope) if join_enabled else ''
+        py_exp_attr = (f' snc-py-exp="{html.escape(preview)}" snc-py-exp-align="right"'
+                       if preview else '')
+        rows.append(
+            f'<div class="snc-dropdown-option"{py_exp_attr}>'
+            f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">'
+            f'{html.escape(sep_expr)}</span>'
+            f'</div>'
         )
-        join_btn = (
-            f'<span class="snc-dropdown-trigger" style="position: relative; display: inline-block;">'
-            f'{join_btn}{join_panel}</span>'
-        )
 
-    parts.append(join_btn)
+    custom_sep = (open_dropdown.get('customSep', "''")
+                  if open_dropdown and open_dropdown.get('id') == 'action-join'
+                  else "''")
+    custom_input_event = "lambda e: JoinSeparatorInput(value=e.get('value', ''))"
+    custom_act_action = f'join:{custom_sep}'
+    custom_preview = _preview_expr(model, custom_act_action, eval_in_scope) if join_enabled else ''
+    custom_py_exp_attr = (f' snc-py-exp="{html.escape(custom_preview)}" snc-py-exp-align="right"'
+                          if custom_preview else '')
+    rows.append(
+        f'<div class="snc-dropdown-option"{custom_py_exp_attr}>'
+        f'<input type="text" snc-input="{html.escape(custom_input_event)}" '
+        f'value="{html.escape(custom_sep)}" '
+        f'placeholder="expr" '
+        f'spellcheck="false" '
+        f'class="snc-dropdown-input" style="width:60px;font-family:var(--snc-code-font-family);" />'
+        f'</div>'
+    )
 
-    # 6. Find Indices (disabled for single-index searches — the index is already known)
-    indices_lbl = 'First Index' if first else 'Find Indices'
-    parts.append(btn_group(indices_lbl, 'find_indices', has_search and not is_index_search, 'Indices of matches'))
+    parts.append(
+        f'<span class="{join_trigger_cls}">'
+        f'<span class="{join_btn_cls}" title="Join list items into a string">'
+        f'<span class="text">Join</span>'
+        f'</span>'
+        f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
+        f'{"".join(rows)}'
+        f'</div>'
+        f'</span>'
+    )
 
-    # 7. Count
-    count_label = f'Count ({match_count})'
-    parts.append(btn_group(count_label, 'count', not (has_search and first), 'Count of matches'))
+    # 7. Find Indices (disabled for single-index searches — the index is already known)
+    indices_lbl = (
+        f'{ICONS["search-idx"]}<span class="text">First Index</span>'
+        if first
+        else f'{ICONS["search-idx"]}<span class="text">Find Indices</span>'
+    )
+    parts.append(action_btn(indices_lbl, 'find_indices',
+                            has_search and not is_index_search, 'Indices of matches'))
 
     if linked_action:
         unlink_event = repr(Unlink())
-        unlink_style = btn_base + 'color: #e0a060;'
         parts.append(
-            f'<span class="snc-hoverable" snc-mouse-down="{html.escape(unlink_event)}"'
-            f' style="margin-left: 6px;{unlink_style}" title="Unlink from selected code">'
-            f'\u26d3\ufe0e Unlink</span>'
+            f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
+            f' title="Unlink from selected code">'
+            f'<span class="search-icon" style="width:9px">\u26d3\ufe0e</span>'
+            f'<span class="text">Unlink</span>'
+            f'</span>'
         )
 
+    return f'<div class="action-buttons">{"".join(parts)}</div>'
+
+
+def _render_search_box(model, lst, eval_in_scope=None, small=False):
+    """Render the full .search-box (search input row + action buttons row)."""
+    input_html = _render_search_box_input(model, eval_in_scope)
+    if small:
+        action_buttons_html = ''
+    else:
+        action_buttons_html = _render_action_buttons(model, lst, eval_in_scope)
     return (
-        f'<div style="margin-top: 4px; white-space: normal;'
-        f'max-width: {str(max_width) + "px" if max_width is not None else "none"};">'
-        f'{"".join(parts)}'
+        f'<div class="search-box">'
+        f'<div class="search-box-row">'
+        f'<div class="search-replace-container">{input_html}</div>'
+        f'</div>'
+        f'<div class="search-box-row">'
+        f'{action_buttons_html}'
+        f'</div>'
         f'</div>'
     )
 
@@ -1399,10 +1360,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     key_handler = repr(ColumnKeyDown())
     strs = [
         f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" '
-        f'style="font-family:monospace;outline:none;">'
+        f'class="visualizer-container list-visualizer" style="outline:none;">'
     ]
-    strs.append(f'<div style="{table_div_style}">')
-    strs.append('<table style="border-collapse:collapse;font-family:monospace;"><tr>')
+    strs.append(f'<div style="{table_div_style}font-family:var(--snc-code-font-family);">')
+    strs.append('<table style="border-collapse:collapse;font-family:var(--snc-code-font-family);"><tr>')
     strs.append('<th style="padding:0 8px;"></th>')
 
     for ci, col in enumerate(columns):
@@ -1504,15 +1465,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     strs.append('</table>')
     strs.append('</div>')
 
-    if small:
-        search_box_html = ''
-        action_buttons_html = ''
-    else:
-        search_box_html = _render_search_box(model, max_width, eval_in_scope)
-        action_buttons_html = _render_action_buttons(model, lst, eval_in_scope, max_width)
+    if not small:
+        strs.append(_render_search_box(model, lst, eval_in_scope, small=False))
 
-    strs.append(search_box_html)
-    strs.append(action_buttons_html)
     strs.append('</div>')
     return ''.join(strs)
 

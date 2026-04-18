@@ -7,10 +7,52 @@ Run:
 
 import unittest
 import html
+import os
 import re
+import shutil
+import tempfile
 
 from visualizer_utils import ChildEvent
 import list_visualizer
+
+
+# Isolate the entire test module from the user's cwd so that stray
+# .snc_list_columns.json files (or other dotfiles created by other tests)
+# don't influence column auto-detection.
+#
+# Strategy: chdir to a tempdir for the whole module, AND neutralise the
+# save/load helpers so that one test's save can't pollute the next. Tests
+# that genuinely exercise the dotfile (TestColumnDotfile) stop these
+# patches in their own setUp.
+import unittest.mock as _mock
+
+_module_orig_cwd: str | None = None
+_module_tmp_dir: str | None = None
+_module_patches: list = []
+
+
+def setUpModule():
+    global _module_orig_cwd, _module_tmp_dir
+    _module_orig_cwd = os.getcwd()
+    _module_tmp_dir = tempfile.mkdtemp()
+    os.chdir(_module_tmp_dir)
+
+    p_load = _mock.patch('list_visualizer.load_columns_from_dotfile',
+                         return_value=None)
+    p_save = _mock.patch('list_visualizer.save_columns_to_dotfile')
+    p_load.start()
+    p_save.start()
+    _module_patches.extend([p_load, p_save])
+
+
+def tearDownModule():
+    for p in _module_patches:
+        p.stop()
+    _module_patches.clear()
+    if _module_orig_cwd is not None:
+        os.chdir(_module_orig_cwd)
+    if _module_tmp_dir is not None:
+        shutil.rmtree(_module_tmp_dir, ignore_errors=True)
 from list_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
@@ -648,9 +690,6 @@ class TestFocusTracking(unittest.TestCase):
 
 
 import json
-import os
-import tempfile
-import shutil
 from unittest.mock import patch
 
 
@@ -1159,8 +1198,15 @@ class TestColumnDotfile(unittest.TestCase):
         self.orig_cwd = os.getcwd()
         self.tmp_dir = tempfile.mkdtemp()
         os.chdir(self.tmp_dir)
+        # The module-level setUp neuters load/save so they don't pollute other
+        # tests; this class genuinely exercises them, so undo the patches for
+        # the duration of each test.
+        for p in _module_patches:
+            p.stop()
 
     def tearDown(self):
+        for p in _module_patches:
+            p.start()
         os.chdir(self.orig_cwd)
         shutil.rmtree(self.tmp_dir)
 
@@ -2578,7 +2624,7 @@ class TestSearchBoxRendering(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('#264f78', output)
+        self.assertIn('search-button active', output)
 
     def test_no_replace_box(self):
         lst = [10, 20, 30]
@@ -2645,7 +2691,7 @@ class TestActionButtonsRendering(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '^ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('action-loop', output)
+        self.assertIn('snc-dropdown-trigger', output)
         self.assertIn('Loop', output)
 
     def test_delete_button_label_changes_with_first_match(self):
@@ -2679,9 +2725,12 @@ class TestActionButtonsRendering(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, eval)
         find_idx_pos = output.find("action=&#x27;find_indices&#x27;, copy=False")
         self.assertGreater(find_idx_pos, -1)
-        span_end = output.find('</span>', find_idx_pos)
-        context = output[find_idx_pos:span_end]
-        self.assertIn('pointer-events: none', context)
+        # The .action-button span starts before the snc-mouse-down attribute;
+        # walk back to that <span class="..."> to inspect its class list.
+        span_start = output.rfind('<span class="', 0, find_idx_pos)
+        span_end = output.find('"', span_start + len('<span class="'))
+        cls = output[span_start + len('<span class="'):span_end]
+        self.assertIn('dimmed', cls)
 
     def test_count_button_present(self):
         lst = [10, 20, 30]
@@ -2698,24 +2747,31 @@ class TestActionButtonsRendering(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         count_pos = output.find("action=&#x27;count&#x27;, copy=False")
         self.assertGreater(count_pos, -1)
-        span_end = output.find('</span>', count_pos)
-        context = output[count_pos:span_end]
-        self.assertIn('pointer-events: none', context)
+        span_start = output.rfind('<span class="', 0, count_pos)
+        span_end = output.find('"', span_start + len('<span class="'))
+        cls = output[span_start + len('<span class="'):span_end]
+        self.assertIn('dimmed', cls)
 
     def test_question_dropdown_button(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '^ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('DropdownToggle', output)
-        self.assertIn('?', output)
+        # The Any/All trigger is a hover-menu (no DropdownToggle event); look
+        # for the panel options to confirm it's rendered.
+        self.assertIn("action=&#x27;any&#x27;", output)
+        self.assertIn("action=&#x27;if_any&#x27;", output)
+        self.assertIn('Any/All', output)
 
     def test_copy_buttons_present(self):
+        # Inline copy buttons were replaced by the snc-action-tooltip system;
+        # action buttons now expose the copy/drag expression via data-action-expr.
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
         model['search'] = '^ > 15'
-        output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('copy=True', output)
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn('data-action-expr=', output)
 
     def test_filter_disabled_without_search(self):
         lst = [10, 20, 30]
@@ -2724,9 +2780,10 @@ class TestActionButtonsRendering(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         filter_pos = output.find("action=&#x27;filter&#x27;, copy=False")
         self.assertGreater(filter_pos, -1)
-        span_end = output.find('</span>', filter_pos)
-        context = output[filter_pos:span_end]
-        self.assertIn('pointer-events: none', context)
+        span_start = output.rfind('<span class="', 0, filter_pos)
+        span_end = output.find('"', span_start + len('<span class="'))
+        cls = output[span_start + len('<span class="'):span_end]
+        self.assertIn('dimmed', cls)
 
     def test_loop_enabled_without_search(self):
         lst = [10, 20, 30]
@@ -2735,18 +2792,23 @@ class TestActionButtonsRendering(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         loop_pos = output.find('Loop')
         self.assertGreater(loop_pos, -1)
-        context = output[max(0, loop_pos - 200):loop_pos + 200]
-        self.assertNotIn('pointer-events: none', context)
+        # Walk back to the .snc-dropdown-trigger span and check it's not dimmed.
+        trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, loop_pos)
+        trigger_end = output.find('"', trigger_start + len('<span class="'))
+        cls = output[trigger_start + len('<span class="'):trigger_end]
+        self.assertNotIn('dimmed', cls)
 
     def test_question_enabled_without_search(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = None
         output = visualize(lst, model, mock_get_visualizer, None)
-        q_pos = output.find('? \u25be')
+        q_pos = output.find('Any/All')
         self.assertGreater(q_pos, -1)
-        context = output[max(0, q_pos - 200):q_pos + 200]
-        self.assertNotIn('pointer-events: none', context)
+        trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, q_pos)
+        trigger_end = output.find('"', trigger_start + len('<span class="'))
+        cls = output[trigger_start + len('<span class="'):trigger_end]
+        self.assertNotIn('dimmed', cls)
 
     def test_count_enabled_without_search(self):
         lst = [10, 20, 30]
@@ -2755,16 +2817,17 @@ class TestActionButtonsRendering(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         count_pos = output.find("action=&#x27;count&#x27;, copy=False")
         self.assertGreater(count_pos, -1)
-        span_end = output.find('</span>', count_pos)
-        context = output[count_pos:span_end]
-        self.assertNotIn('pointer-events: none', context)
+        span_start = output.rfind('<span class="', 0, count_pos)
+        span_end = output.find('"', span_start + len('<span class="'))
+        cls = output[span_start + len('<span class="'):span_end]
+        self.assertNotIn('dimmed', cls)
 
     def test_count_shows_list_length_without_search(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = None
         output = visualize(lst, model, mock_get_visualizer, eval)
-        self.assertIn('Count (3)', output)
+        self.assertIn('Count: 3', output)
 
 
 class TestRowHighlighting(unittest.TestCase):
@@ -2903,7 +2966,9 @@ class TestLoopDropdown(unittest.TestCase):
         model['search'] = '^ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Loop', output)
-        self.assertIn('action-loop', output)
+        # Loop is now a hover-menu (data-hover-menu); options live in the
+        # always-rendered panel.
+        self.assertIn('data-hover-menu', output)
 
     def test_loop_dropdown_options_when_open(self):
         lst = [10, 20, 30]
@@ -2923,8 +2988,10 @@ class TestLoopDropdown(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         loop_pos = output.find('Loop')
         self.assertGreater(loop_pos, -1)
-        context = output[max(0, loop_pos - 200):loop_pos + 200]
-        self.assertIn('pointer-events: none', context)
+        trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, loop_pos)
+        trigger_end = output.find('"', trigger_start + len('<span class="'))
+        cls = output[trigger_start + len('<span class="'):trigger_end]
+        self.assertIn('dimmed', cls)
 
     def test_loop_dropdown_options_without_search(self):
         lst = [10, 20, 30]
@@ -2941,12 +3008,14 @@ class TestJoinDropdown(unittest.TestCase):
     """Test Join dropdown button rendering and behavior."""
 
     def test_join_dropdown_present(self):
+        # Join is a hover-menu (no DropdownToggle event); check the panel
+        # markup + JoinSeparatorInput row is always rendered.
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '^ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Join', output)
-        self.assertIn('action-join', output)
+        self.assertIn('JoinSeparatorInput', output)
 
     def test_join_dropdown_disabled_in_first_match(self):
         lst = [10, 20, 30]
@@ -2956,8 +3025,10 @@ class TestJoinDropdown(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         join_pos = output.find('Join')
         self.assertGreater(join_pos, -1)
-        context = output[max(0, join_pos - 200):join_pos + 200]
-        self.assertIn('pointer-events: none', context)
+        trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, join_pos)
+        trigger_end = output.find('"', trigger_start + len('<span class="'))
+        cls = output[trigger_start + len('<span class="'):trigger_end]
+        self.assertIn('dimmed', cls)
 
     def test_join_dropdown_enabled_without_search(self):
         lst = [10, 20, 30]
@@ -2966,8 +3037,10 @@ class TestJoinDropdown(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         join_pos = output.find('Join')
         self.assertGreater(join_pos, -1)
-        context = output[max(0, join_pos - 200):join_pos + 200]
-        self.assertNotIn('pointer-events: none', context)
+        trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, join_pos)
+        trigger_end = output.find('"', trigger_start + len('<span class="'))
+        cls = output[trigger_start + len('<span class="'):trigger_end]
+        self.assertNotIn('dimmed', cls)
 
     def test_join_dropdown_highlighted_when_linked(self):
         lst = [10, 20, 30]
@@ -2977,8 +3050,11 @@ class TestJoinDropdown(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         join_pos = output.find('Join')
         self.assertGreater(join_pos, -1)
-        context = output[max(0, join_pos - 250):join_pos + 250]
-        self.assertIn('background: #264f78; color: #ccc; border-color: #aaa;', context)
+        # The Join button's <span class="action-button ... linked"> is just before "Join".
+        btn_start = output.rfind('<span class="action-button', 0, join_pos)
+        btn_end = output.find('"', btn_start + len('<span class="'))
+        cls = output[btn_start + len('<span class="'):btn_end]
+        self.assertIn('linked', cls)
 
     def test_join_dropdown_options_when_open(self):
         lst = [10, 20, 30]

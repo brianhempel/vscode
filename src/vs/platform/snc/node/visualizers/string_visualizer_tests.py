@@ -27,7 +27,11 @@ from string_visualizer import (
     CaseSensitiveToggle,
     CaptureGroupsToggle,
     ActionButtonClick,
+    ToolSelect,
+    SegmentToggle,
     CopyToClipboard,
+    _format_slice_expr, _format_index_expr,
+    SliceLabelInput,
     compute_internal_length,
     extract_by_internal_indices,
     get_last_segment_end_internal_idx,
@@ -61,6 +65,7 @@ from string_visualizer import (
     char_to_regex_literal,
     DC2, DC3,  # Sentinel characters
     _render_transform_preview,
+    _render_match_object_preview,
     _eval_index_or_slice_match,
     _find_matches,
     is_index_or_slice_search,
@@ -78,12 +83,13 @@ def _legacy_internal_index(index: int) -> int:
     return max(index - 1, 0)
 
 
-def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool = True) -> dict:
+def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool = True, shift_key: bool = False) -> dict:
     """Create a MouseDown event dict.
 
     Args:
         index: The character index clicked
         top_half: If True, click is in top half (literal). If False, bottom half (fuzzy).
+        shift_key: If True, simulates the shift key being held down.
     """
     if legacy_index:
         index = _legacy_internal_index(index)
@@ -91,6 +97,7 @@ def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool 
         'pythonEventStr': repr(MouseDown(index)),
         'eventJSON': {
             'altKey': not top_half,
+            'shiftKey': shift_key,
             'offsetY': 5 if top_half else 15,  # top half < 10, bottom half >= 10
             'elementHeight': 20,
             'buttons': 1,
@@ -269,7 +276,7 @@ class TestSingleLiteralSelection(unittest.TestCase):
         self.assertFalse(model['dragging'])
         self.assertIsNone(model['anchorIdx'])
         self.assertIsNone(model['cursorIdx'])
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
         self.assertEqual(model['undoHistory'], [None])
         self.assertEqual(commands, [])
 
@@ -280,7 +287,7 @@ class TestSingleLiteralSelection(unittest.TestCase):
         model, _ = update(make_mouse_up_event(2),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/h/')
+        self.assertEqual(model['search'], r"r'h'")
 
     def test_world_selection(self):
         """Select 'world' (indices 8-12) -> /(world)/."""
@@ -291,7 +298,7 @@ class TestSingleLiteralSelection(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
     def test_space_selection(self):
         """Select just the space at index 7 -> /(\\ )/."""
@@ -300,7 +307,7 @@ class TestSingleLiteralSelection(unittest.TestCase):
         model, _ = update(make_mouse_up_event(7),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/\\ /')
+        self.assertEqual(model['search'], r"r'\ '")
 
 
 # =============================================================================
@@ -350,7 +357,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
                          self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
-        self.assertEqual(model['search'], '/[a-z]{1}/')
+        self.assertEqual(model['search'], r"r'[a-z]{1}'")
         self.assertEqual(model['undoHistory'], [None])
 
     def test_fresh_fuzzy_on_space_uses_plus(self):
@@ -368,7 +375,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
                          self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
-        self.assertEqual(model['search'], r'/\s+/')
+        self.assertEqual(model['search'], r"r'\s+'")
         self.assertEqual(model['undoHistory'], [None])
 
     def test_fresh_fuzzy_drag_across_letters_with_clean_boundaries(self):
@@ -393,7 +400,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
         model, _ = update(make_mouse_up_event(8),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], r'/\d+/')
+        self.assertEqual(model['search'], r"r'\d+'")
 
 
 # =============================================================================
@@ -418,7 +425,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Get end index for extending
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -430,8 +437,8 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['search'], r"r'hello\s*'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
 
     def test_extend_hello_with_space_literal(self):
         """Extend 'hello' with space literal -> /(hello)(\\ )/."""
@@ -451,7 +458,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)(\\ )/')
+        self.assertEqual(model['search'], r"r'(hello)(\ )'")
 
     def test_chain_hello_fuzzy_world(self):
         """Chain: hello -> fuzzy -> world gives /(hello)(.*)(world)/."""
@@ -463,7 +470,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Extend with fuzzy at end of hello (index 7)
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -473,7 +480,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # The fuzzy (\s*) matches " world$\Z" (indices 7-15)
         # To add "world", click INSIDE the fuzzy region at index 8 (start of 'w')
@@ -486,7 +493,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*world/')
+        self.assertEqual(model['search'], r"r'hello\s*world'")
 
 
 class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
@@ -509,7 +516,7 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Extend with fuzzy (will stop at $ because .* doesn't match newline by default)
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -518,7 +525,7 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello.*/')
+        self.assertEqual(model['search'], r"r'hello.*'")
 
         # The (.*) after "hello" matches the $ anchor (index 7)
         # So fuzzy spans 7-8, end_idx is 8
@@ -531,7 +538,7 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello.*\\n/')
+        self.assertEqual(model['search'], r"r'hello.*\n'")
 
 
 # =============================================================================
@@ -566,7 +573,7 @@ class TestExtendLeft(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         # Get start index - this is 8 (the 'w')
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
@@ -580,8 +587,8 @@ class TestExtendLeft(unittest.TestCase):
                          self.var_and_exp, model, self.value)
 
         # Should prepend fuzzy: /(\s*)(world)/
-        self.assertEqual(model['search'], '/\\s*world/')
-        self.assertEqual(model['undoHistory'], [None, '/world/'])
+        self.assertEqual(model['search'], r"r'\s*world'")
+        self.assertEqual(model['undoHistory'], [None, r"r'world'"])
 
     def test_prepend_fuzzy_to_world(self):
         """Select 'world', then prepend fuzzy -> /(\s*)(world)/."""
@@ -593,7 +600,7 @@ class TestExtendLeft(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         # Get start index for prepending
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
@@ -605,8 +612,8 @@ class TestExtendLeft(unittest.TestCase):
         model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/\\s*world/')
-        self.assertEqual(model['undoHistory'], [None, '/world/'])
+        self.assertEqual(model['search'], r"r'\s*world'")
+        self.assertEqual(model['undoHistory'], [None, r"r'world'"])
 
     def test_prepend_literal_to_world(self):
         """Select 'world', prepend by dragging left selects 'o ' -> /(o\\ )(world)/."""
@@ -630,7 +637,7 @@ class TestExtendLeft(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(o\\ )(world)/')
+        self.assertEqual(model['search'], r"r'(o\ )(world)'")
 
 
 # =============================================================================
@@ -661,7 +668,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # Find where the fuzzy segment spans
         highlights = parse_regex_for_highlighting(model['search'], self.value)
@@ -713,7 +720,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # Find where the fuzzy segment spans
         highlights = parse_regex_for_highlighting(model['search'], self.value)
@@ -780,7 +787,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Step 2: Extend with fuzzy at end of hello
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -790,7 +797,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # Step 3: Click inside the fuzzy on "world" (indices 8-12) = (2)
         # This is a click-drag to select "world"
@@ -803,7 +810,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Expected: (1)(\s*)(2) = /hello\s*world/
         # Bug would produce: (\s*)(2)(1) = /(\s*)(world)(hello)/ - WRONG!
-        self.assertEqual(model['search'], '/hello\\s*world/')
+        self.assertEqual(model['search'], r"r'hello\s*world'")
 
         # Verify segment order explicitly
         highlights = parse_regex_for_highlighting(model['search'], self.value)
@@ -844,7 +851,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         # Step 2: Prepend with fuzzy (click at first_start - 1 = 7)
         first_start = get_first_segment_start_internal_idx(model['search'], value)
@@ -854,7 +861,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/\\s*world/')
+        self.assertEqual(model['search'], r"r'\s*world'")
 
         # Verify the fuzzy segment exists (in canonical format, \s* only covers whitespace)
         highlights = parse_regex_for_highlighting(model['search'], value)
@@ -878,7 +885,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # In canonical format, clicking before the fuzzy region starts a new selection
         # (index 3 is before the \s* fuzzy at the space character)
-        self.assertEqual(model['search'], '/ello/')
+        self.assertEqual(model['search'], r"r'ello'")
 
     def test_anchor_leading_fuzzy_abc_scenario(self):
         """
@@ -902,7 +909,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(4),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/C/')
+        self.assertEqual(model['search'], r"r'C'")
 
         # Click (2): fuzzy B (extend left from C)
         first_start = get_first_segment_start_internal_idx(model['search'], value)
@@ -911,7 +918,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/[A-Z]{1}C/')
+        self.assertEqual(model['search'], r"r'[A-Z]{1}C'")
 
         # Click (3): literal A (inside fuzzy at index 2)
         model, _ = update(make_mouse_down_event(2, top_half=True),
@@ -921,7 +928,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
 
         # Expected: A + fuzzy + C - A first, then fuzzy for B, then C
         # Bug was: (.*)(A)(C) - wrong order
-        self.assertEqual(model['search'], '/A[A-Z]{1}C/')
+        self.assertEqual(model['search'], r"r'A[A-Z]{1}C'")
 
 
 # =============================================================================
@@ -949,7 +956,7 @@ class TestKeyboardEvents(unittest.TestCase):
     def test_escape_clears_selection(self):
         """Escape key clears the selection and saves to undo."""
         model = self._create_hello_selection(self.model)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         model, commands = update(make_key_down_event('Escape'),
                                 self.var_and_exp, model, self.value)
@@ -958,7 +965,7 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertIsNone(model['anchorIdx'])
         self.assertIsNone(model['cursorIdx'])
         self.assertFalse(model['dragging'])
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
         self.assertEqual(commands, [])
 
     def test_enter_generates_new_code_command(self):
@@ -1034,16 +1041,16 @@ class TestKeyboardEvents(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['search'], r"r'hello\s*'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
 
         # Undo
         model, commands = update(make_key_down_event('z', meta_key=True),
                                 self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
         self.assertEqual(model['undoHistory'], [None])
-        self.assertEqual(model['redoHistory'], ['/hello\\s*/'])
+        self.assertEqual(model['redoHistory'], [r"r'hello\s*'"])
         self.assertEqual(commands, [])
 
     def test_cmd_shift_z_redoes_selection(self):
@@ -1060,14 +1067,14 @@ class TestKeyboardEvents(unittest.TestCase):
         # Undo
         model, _ = update(make_key_down_event('z', meta_key=True),
                          self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Redo
         model, commands = update(make_key_down_event('z', meta_key=True, shift_key=True),
                                 self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['search'], r"r'hello\s*'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
         self.assertEqual(model['redoHistory'], [])
         self.assertEqual(commands, [])
 
@@ -1110,7 +1117,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(2, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/^he/')
+        self.assertEqual(model['search'], r"r'^he'")
 
     def test_selection_starting_at_first_char(self):
         """Selection from first visible char excludes the ^ anchor."""
@@ -1126,7 +1133,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(3, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hel/')
+        self.assertEqual(model['search'], r"r'hel'")
 
     def test_selection_with_newlines_before_newline(self):
         """Selection of 'hello' in 'hello\\nworld' -> /(hello)/."""
@@ -1142,7 +1149,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(5, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
     def test_selection_across_newline(self):
         """Selection spanning newline in 'hi\\nbye' -> /(hi$\\n^b)/."""
@@ -1159,7 +1166,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hi$\\n^b/')
+        self.assertEqual(model['search'], r"r'hi$\n^b'")
 
     def test_mouse_released_outside_widget(self):
         """MouseMove with buttons=0 finalizes segment."""
@@ -1180,7 +1187,7 @@ class TestEdgeCases(unittest.TestCase):
                          var_and_exp, model, value)
 
         self.assertFalse(model['dragging'])
-        self.assertEqual(model['search'], '/hell/')
+        self.assertEqual(model['search'], r"r'hell'")
 
     def test_empty_string_anchor_selection(self):
         """Selection on empty string selects visible anchors -> /(^$)/."""
@@ -1196,7 +1203,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(1, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/^$/')
+        self.assertEqual(model['search'], r"r'^$'")
 
     def test_fresh_click_resets_selection(self):
         """Clicking away from extension points resets selection."""
@@ -1212,7 +1219,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(5, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Click somewhere NOT an extension point (index 9 = 'r' in world)
         model, _ = update(make_mouse_down_event(9, legacy_index=False, top_half=True),
@@ -1230,7 +1237,7 @@ class TestEdgeCases(unittest.TestCase):
         var_and_exp = ('x', 'x')
 
         # Create selection with case-insensitive flag
-        model['search'] = '/hello/i'
+        model['search'] = r"r'hello'i"
 
         # Click somewhere NOT an extension point to start fresh drag
         model, _ = update(make_mouse_down_event(9, legacy_index=False, top_half=True),
@@ -1246,7 +1253,7 @@ class TestEdgeCases(unittest.TestCase):
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        model['search'] = '/hello/i1'
+        model['search'] = r"r'hello'i1"
 
         model, _ = update(make_mouse_down_event(9, legacy_index=False, top_half=True),
                          var_and_exp, model, value)
@@ -1259,7 +1266,7 @@ class TestEdgeCases(unittest.TestCase):
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        model['search'] = '/hello/i'
+        model['search'] = r"r'hello'i"
 
         # Fresh drag on "world" (indices 7-11)
         model, _ = update(make_mouse_down_event(7, legacy_index=False, top_half=True),
@@ -1270,7 +1277,7 @@ class TestEdgeCases(unittest.TestCase):
                          var_and_exp, model, value)
 
         # New regex should have the i flag preserved
-        self.assertEqual(model['search'], '/world/i')
+        self.assertEqual(model['search'], r"r'world'i")
 
     def test_bare_flags_preserved_across_toggle_then_drag(self):
         """Toggle 1st with no search, then drag should carry flag to new regex."""
@@ -1291,7 +1298,7 @@ class TestEdgeCases(unittest.TestCase):
         model, _ = update(make_mouse_up_event(5, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hello/1')
+        self.assertEqual(model['search'], r"r'hello'1")
 
 
 # =============================================================================
@@ -1318,7 +1325,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal indices: ^=0, a=1, $=2, \n=3, ^=4, $=5, \n=6, ^=7, b=8, $=9
         # The two \n chars are at internal 3 and 6
 
-        highlights = parse_regex_for_highlighting(r'/(\n+)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(\n+)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
 
@@ -1335,7 +1342,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         A pattern with literal \\n\\n should match two consecutive newlines.
         """
         string_value = "a\n\nb"
-        highlights = parse_regex_for_highlighting(r'/(\n\n)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(\n\n)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'literal')
@@ -1345,7 +1352,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         A pattern with \\n{2,3} should match 2-3 consecutive newlines.
         """
         string_value = "a\n\n\nb"  # Three newlines
-        highlights = parse_regex_for_highlighting(r'/(\n{2,3})/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(\n{2,3})'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'literal')
@@ -1357,7 +1364,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "hello"
         # Internal indices: ^=0, h=1, e=2, l=3, l=4, o=5, $=6
-        highlights = parse_regex_for_highlighting(r'/(.+)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(.+)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         self.assertEqual(start, 1)  # 'h' at internal index 1
@@ -1369,7 +1376,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "xaay"
         # Internal indices: ^=0, x=1, a=2, a=3, y=4, $=5
-        highlights = parse_regex_for_highlighting(r'/((.)\2)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'((.)\2)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         # "aa" is at string positions 1-3, internal indices 2-4
@@ -1382,7 +1389,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "a\nxb"
         # Internal indices: ^=0, a=1, $=2, \n=3, ^=4, x=5, b=6, $=7
-        highlights = parse_regex_for_highlighting(r'/((?<=\n)x)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'((?<=\n)x)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         # 'x' is at string index 2, internal index 5
@@ -1395,7 +1402,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "ax\nb"
         # Internal indices: ^=0, a=1, x=2, $=3, \n=4, ^=5, b=6, $=7
-        highlights = parse_regex_for_highlighting(r'/(x(?=\n))/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(x(?=\n))'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         # 'x' is at string index 1, internal index 2
@@ -1408,7 +1415,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "hello world"
         # Internal indices: ^=0, h=1, e=2, l=3, l=4, o=5, ' '=6, w=7, o=8, r=9, l=10, d=11, $=12
-        highlights = parse_regex_for_highlighting(r'/(\bworld\b)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(\bworld\b)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         # "world" is at string positions 6-11, internal indices 7-12
@@ -1421,7 +1428,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "hello\nworld"
         # Internal: ^=0, h=1, e=2, l=3, l=4, o=5, $=6, \n=7, ^=8, w=9, o=10, r=11, l=12, d=13, $=14
-        highlights = parse_regex_for_highlighting(r'/(\nworld)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(\nworld)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         # \n is at string index 5 -> internal 7
@@ -1434,7 +1441,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         A pattern with (.*) should be identified as fuzzy.
         """
         string_value = "hello world"
-        highlights = parse_regex_for_highlighting(r'/(hello)(.*)(world)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(hello)(.*)(world)'", string_value)
         self.assertEqual(len(highlights), 3)
         self.assertEqual(highlights[0][2], 'literal')  # hello
         self.assertEqual(highlights[1][2], 'fuzzy')    # (.*)
@@ -1446,7 +1453,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         """
         string_value = "hello"
         # Use single backslash for the \A anchor in the regex pattern
-        highlights = parse_regex_for_highlighting(r'/(\Ahello)/', string_value)
+        highlights = parse_regex_for_highlighting(r"r'(\Ahello)'", string_value)
         self.assertEqual(len(highlights), 1)
         start, end, seg_type, _, _, _ = highlights[0]
         # Should start at internal index 0 (^ position)
@@ -1603,7 +1610,7 @@ class TestDropdownSelect(unittest.TestCase):
         """Selecting a character class from dropdown updates the regex, preserving quantifier."""
         model = init_model("hello world")
         # Set up a regex with a fuzzy segment (.* has * quantifier)
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
         model['openDropdown'] = {'id': 'fuzzy-pattern-1', 'segmentIndex': 1}
 
         # Select \s (character class only, no quantifier)
@@ -1611,13 +1618,13 @@ class TestDropdownSelect(unittest.TestCase):
         model, _ = update(event, None, model, "hello world")
 
         # Result should be \s* (preserves the * from .*)
-        self.assertEqual(model['search'], r'/hello\s*world/')
+        self.assertEqual(model['search'], r"r'hello\s*world'")
         self.assertIsNone(model.get('openDropdown'))
 
     def test_dropdown_select_closes_dropdown(self):
         """Selecting a pattern closes the dropdown."""
         model = init_model("test")
-        model['search'] = '/(.*)/'
+        model['search'] = r"r'(.*)'"
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('fuzzy-pattern-0', r'\d*')
@@ -1628,27 +1635,27 @@ class TestDropdownSelect(unittest.TestCase):
     def test_dropdown_select_adds_to_undo_history(self):
         """Selecting a pattern saves the previous regex to undo history."""
         model = init_model("test")
-        model['search'] = '/(.*)/'
+        model['search'] = r"r'(.*)'"
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         # Select \w (character class only), quantifier * is preserved
         event = make_dropdown_select_event('fuzzy-pattern-0', r'\w')
         model, _ = update(event, None, model, "test")
 
-        self.assertEqual(model['undoHistory'], ['/(.*)/']),
-        self.assertEqual(model['search'], r'/\w*/')
+        self.assertEqual(model['undoHistory'], [r"r'(.*)'"]),
+        self.assertEqual(model['search'], r"r'\w*'")
 
     def test_dropdown_select_ignores_wrong_dropdown_id(self):
         """Selection is ignored if dropdown ID doesn't match open dropdown."""
         model = init_model("test")
-        model['search'] = '/(.*)/'
+        model['search'] = r"r'(.*)'"
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('fuzzy-pattern-1', r'\d*')
         model, _ = update(event, None, model, "test")
 
         # Regex should remain unchanged
-        self.assertEqual(model['search'], '/(.*)/')
+        self.assertEqual(model['search'], r"r'(.*)'")
         # But dropdown should still close
         self.assertIsNone(model.get('openDropdown'))
 
@@ -1669,7 +1676,7 @@ class TestDropdownCloseBehavior(unittest.TestCase):
     def test_escape_closes_dropdown_first(self):
         """Escape closes dropdown without clearing selection."""
         model = init_model("hello")
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
 
         event = make_key_down_event('Escape')
@@ -1678,12 +1685,12 @@ class TestDropdownCloseBehavior(unittest.TestCase):
         # Dropdown should be closed
         self.assertIsNone(model.get('openDropdown'))
         # But selection should remain
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
     def test_escape_clears_selection_when_no_dropdown(self):
         """Escape clears selection when no dropdown is open."""
         model = init_model("hello")
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         model['openDropdown'] = None
 
         event = make_key_down_event('Escape')
@@ -1784,57 +1791,60 @@ class TestReplaceSegmentPattern(unittest.TestCase):
 
     def test_replace_preserves_star_quantifier(self):
         """Replacing .* with \s should give \s* (preserve *)."""
-        result = replace_segment_pattern('/(.*)(world)/', 0, r'\s')
-        self.assertEqual(result, r'/\s*world/')
+        result = replace_segment_pattern(r"r'(.*)(world)'", 0, r'\s')
+        self.assertEqual(result, r"r'\s*world'")
 
     def test_replace_preserves_plus_quantifier(self):
         """Replacing .+ with \d should give \d+ (preserve +)."""
-        result = replace_segment_pattern('/(.+)(world)/', 0, r'\d')
-        self.assertEqual(result, r'/\d+world/')
+        result = replace_segment_pattern(r"r'(.+)(world)'", 0, r'\d')
+        self.assertEqual(result, r"r'\d+world'")
 
     def test_replace_preserves_question_quantifier(self):
         """Replacing .? with \w should give \w? (preserve ?)."""
-        result = replace_segment_pattern('/(.?)(world)/', 0, r'\w')
-        self.assertEqual(result, r'/\w?world/')
+        result = replace_segment_pattern(r"r'(.?)(world)'", 0, r'\w')
+        self.assertEqual(result, r"r'\w?world'")
 
     def test_replace_preserves_braced_quantifier(self):
         """Replacing .{2,5} with [a-z] should give [a-z]{2,5}."""
-        result = replace_segment_pattern('/(hello)(.{2,5})/', 1, r'[a-z]')
-        self.assertEqual(result, r'/hello[a-z]{2,5}/')
+        result = replace_segment_pattern(r"r'(hello)(.{2,5})'", 1, r'[a-z]')
+        self.assertEqual(result, r"r'hello[a-z]{2,5}'")
 
     def test_replace_preserves_exact_count_quantifier(self):
         """Replacing .{3} with \d should give \d{3}."""
-        result = replace_segment_pattern('/(.{3})/', 0, r'\d')
-        self.assertEqual(result, r'/\d{3}/')
+        result = replace_segment_pattern(r"r'(.{3})'", 0, r'\d')
+        self.assertEqual(result, r"r'\d{3}'")
 
     def test_replace_no_quantifier_adds_none(self):
         """Replacing (.) with \s should give (\s) - no quantifier added."""
-        result = replace_segment_pattern('/(.)/', 0, r'\s')
-        self.assertEqual(result, r'/\s/')
+        result = replace_segment_pattern(r"r'(.)'", 0, r'\s')
+        self.assertEqual(result, r"r'\s'")
 
     def test_replace_character_class_preserves_quantifier(self):
         """Replacing [a-z]* with \d should give \d*."""
-        result = replace_segment_pattern('/([a-z]*)/', 0, r'\d')
-        self.assertEqual(result, r'/\d*/')
+        result = replace_segment_pattern(r"r'([a-z]*)'", 0, r'\d')
+        self.assertEqual(result, r"r'\d*'")
 
     def test_replace_middle_segment_preserves_quantifier(self):
         """Replace pattern of middle segment preserves its quantifier."""
-        result = replace_segment_pattern('/(hello)(.*)(world)/', 1, r'\s')
-        self.assertEqual(result, r'/hello\s*world/')
+        result = replace_segment_pattern(r"r'(hello)(.*)(world)'", 1, r'\s')
+        self.assertEqual(result, r"r'hello\s*world'")
 
     def test_replace_out_of_bounds_index(self):
         """Out of bounds index leaves regex unchanged."""
-        result = replace_segment_pattern('/(hello)/', 5, r'\d')
-        self.assertEqual(result, '/hello/')
+        result = replace_segment_pattern(r"r'(hello)'", 5, r'\d')
+        self.assertEqual(result, r"r'hello'")
 
 
 class TestDropdownInVisualize(unittest.TestCase):
     """Tests for dropdown rendering in visualize function."""
 
     def test_visualize_renders_dropdown_trigger_for_fuzzy(self):
-        """Fuzzy segments render with a clickable dropdown trigger."""
+        """Fuzzy segments render with a clickable dropdown trigger when hovered."""
         model = init_model("hello world")
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
+        # Segment labels (incl. the fuzzy-pattern dropdown trigger) are only
+        # rendered while the segment is "active" (e.g. hovered).
+        model['hoverIdx'] = 6  # the space char inside the (.*) segment
 
         html = visualize("hello world", model, None, None)
 
@@ -1845,7 +1855,7 @@ class TestDropdownInVisualize(unittest.TestCase):
     def test_visualize_renders_dropdown_options_when_open(self):
         """When dropdown is open, options are rendered."""
         model = init_model("hello world")
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
         model['openDropdown'] = {'id': 'fuzzy-pattern-1', 'segmentIndex': 1}
 
         html = visualize("hello world", model, None, None)
@@ -1862,70 +1872,70 @@ class TestPatternDisplay(unittest.TestCase):
 
     def test_word_char_displays_as_backslash_w(self):
         r"""The \w pattern should display as \w, not [...]."""
-        highlights = parse_regex_for_highlighting(r'/(\w*)(!)/', 'hello!')
+        highlights = parse_regex_for_highlighting(r"r'(\w*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\w')
 
     def test_whitespace_displays_as_backslash_s(self):
         r"""The \s pattern should display as \s, not [...]."""
-        highlights = parse_regex_for_highlighting(r'/(\s*)(world)/', '   world')
+        highlights = parse_regex_for_highlighting(r"r'(\s*)(world)'", '   world')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\s')
 
     def test_digit_displays_as_backslash_d(self):
         r"""The \d pattern should display as \d, not [...]."""
-        highlights = parse_regex_for_highlighting(r'/(\d*)(!)/', '123!')
+        highlights = parse_regex_for_highlighting(r"r'(\d*)(!)'", '123!')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\d')
 
     def test_non_whitespace_displays_as_backslash_S(self):
         r"""The \S pattern should display as \S, not [...]."""
-        highlights = parse_regex_for_highlighting(r'/(\S*)( )/', 'hello ')
+        highlights = parse_regex_for_highlighting(r"r'(\S*)( )'", 'hello ')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\S')
 
     def test_non_digit_displays_as_backslash_D(self):
         r"""The \D pattern should display as \D, not [...]."""
-        highlights = parse_regex_for_highlighting(r'/(\D*)(1)/', 'hello1')
+        highlights = parse_regex_for_highlighting(r"r'(\D*)(1)'", 'hello1')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\D')
 
     def test_non_word_displays_as_backslash_W(self):
         r"""The \W pattern should display as \W, not [...]."""
-        highlights = parse_regex_for_highlighting(r'/(\W*)(a)/', '...a')
+        highlights = parse_regex_for_highlighting(r"r'(\W*)(a)'", '...a')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\W')
 
     def test_character_range_displays_as_brackets(self):
         """Character class [a-z] should display as [a-z]."""
-        highlights = parse_regex_for_highlighting(r'/([a-z]*)(!)/', 'hello!')
+        highlights = parse_regex_for_highlighting(r"r'([a-z]*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, '[a-z]')
 
     def test_character_set_displays_as_brackets(self):
         """Character set [abc] should display as [abc]."""
-        highlights = parse_regex_for_highlighting(r'/([abc]*)(d)/', 'abcd')
+        highlights = parse_regex_for_highlighting(r"r'([abc]*)(d)'", 'abcd')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, '[abc]')
 
     def test_dot_displays_as_dot(self):
         """The . pattern should display as . not [...]."""
-        highlights = parse_regex_for_highlighting('/(.)(!)(!)/', 'a!!')
+        highlights = parse_regex_for_highlighting(r"r'(.)(!)(!)'", 'a!!')
         self.assertEqual(len(highlights), 3)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, '.')
 
     def test_literal_displays_correctly(self):
         """Literal patterns display as-is."""
-        highlights = parse_regex_for_highlighting('/(hello)(world)/', 'helloworld')
+        highlights = parse_regex_for_highlighting(r"r'(hello)(world)'", 'helloworld')
         self.assertEqual(len(highlights), 2)
         _, _, _, pattern_display, _, _ = highlights[0]
         self.assertEqual(pattern_display, 'hello')
@@ -1936,70 +1946,70 @@ class TestFuzzyPatternRecognition(unittest.TestCase):
 
     def test_dot_star_is_fuzzy(self):
         """The classic .* pattern is fuzzy."""
-        highlights = parse_regex_for_highlighting('/(.*)(world)/', 'hello world')
+        highlights = parse_regex_for_highlighting(r"r'(.*)(world)'", 'hello world')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_whitespace_star_is_fuzzy(self):
         r"""The \s* pattern is fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/(\s*)(world)/', '   world')
+        highlights = parse_regex_for_highlighting(r"r'(\s*)(world)'", '   world')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_digit_star_is_fuzzy(self):
         r"""The \d* pattern is fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/(\d*)(world)/', '123world')
+        highlights = parse_regex_for_highlighting(r"r'(\d*)(world)'", '123world')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_word_char_star_is_fuzzy(self):
         r"""The \w* pattern is fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/(\w*)(!)/', 'hello!')
+        highlights = parse_regex_for_highlighting(r"r'(\w*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_non_whitespace_star_is_fuzzy(self):
         r"""The \S* pattern is fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/(\S*)( )/', 'hello ')
+        highlights = parse_regex_for_highlighting(r"r'(\S*)( )'", 'hello ')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_character_class_star_is_fuzzy(self):
         """Character class with * like [a-z]* is fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/([a-z]*)(!)/', 'hello!')
+        highlights = parse_regex_for_highlighting(r"r'([a-z]*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_character_class_plus_is_fuzzy(self):
         """Character class with + like [A-Z]+ is fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/([A-Z]+)(!)/', 'HELLO!')
+        highlights = parse_regex_for_highlighting(r"r'([A-Z]+)(!)'", 'HELLO!')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_dot_plus_is_fuzzy(self):
         """The .+ pattern is fuzzy."""
-        highlights = parse_regex_for_highlighting('/(hello)(.+)/', 'hello world')
+        highlights = parse_regex_for_highlighting(r"r'(hello)(.+)'", 'hello world')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_single_dot_is_fuzzy(self):
         """A single . (any char) is fuzzy."""
-        highlights = parse_regex_for_highlighting('/(.)(ello)/', 'hello')
+        highlights = parse_regex_for_highlighting(r"r'(.)(ello)'", 'hello')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_literal_text_is_not_fuzzy(self):
         """Literal text patterns are not fuzzy."""
-        highlights = parse_regex_for_highlighting('/(hello)(world)/', 'helloworld')
+        highlights = parse_regex_for_highlighting(r"r'(hello)(world)'", 'helloworld')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type1, _, _, _ = highlights[0]
         _, _, seg_type2, _, _, _ = highlights[1]
@@ -2008,7 +2018,7 @@ class TestFuzzyPatternRecognition(unittest.TestCase):
 
     def test_escaped_special_chars_is_not_fuzzy(self):
         r"""Escaped special chars like \. are literal, not fuzzy."""
-        highlights = parse_regex_for_highlighting(r'/(hello)(\.)/', 'hello.')
+        highlights = parse_regex_for_highlighting(r"r'(hello)(\.)'", 'hello.')
         self.assertEqual(len(highlights), 2)
         _, _, seg_type, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'literal')
@@ -2181,21 +2191,21 @@ class TestSynthesizeFuzzyPattern(unittest.TestCase):
 
     def test_synthesized_plus_pattern_is_fuzzy_in_highlights(self):
         r"""\s+ pattern is recognized as fuzzy in highlighting."""
-        highlights = parse_regex_for_highlighting(r'/hello\s+world/', 'hello   world')
+        highlights = parse_regex_for_highlighting(r"r'hello\s+world'", 'hello   world')
         self.assertEqual(len(highlights), 3)
         _, _, seg_type, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_synthesized_exact_n_pattern_is_fuzzy_in_highlights(self):
         r"""\d{3} pattern is recognized as fuzzy in highlighting."""
-        highlights = parse_regex_for_highlighting(r'/prefix\d{3}suffix/', 'prefix123suffix')
+        highlights = parse_regex_for_highlighting(r"r'prefix\d{3}suffix'", 'prefix123suffix')
         self.assertEqual(len(highlights), 3)
         _, _, seg_type, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_synthesized_pattern_matches_exact_range(self):
         r"""Synthesized \s{3} matches exactly 3 spaces in context."""
-        highlights = parse_regex_for_highlighting(r'/hello\s{3}world/', 'hello   world')
+        highlights = parse_regex_for_highlighting(r"r'hello\s{3}world'", 'hello   world')
         self.assertEqual(len(highlights), 3)
         # The fuzzy segment should cover exactly 3 characters
         fuzzy_start, fuzzy_end, seg_type, _, _, _ = highlights[1]
@@ -2375,7 +2385,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(1),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/^/')
+        self.assertEqual(model['search'], r"r'^'")
 
         # Extend with .* fuzzy
         last_end = get_last_segment_end_internal_idx(model['search'], value)
@@ -2383,7 +2393,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(last_end, legacy_index=False),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/^[a-z]{1}/')
+        self.assertEqual(model['search'], r"r'^[a-z]{1}'")
 
         # Verify last_end (one past the last segment's last char)
         last_end = get_last_segment_end_internal_idx(model['search'], value)
@@ -2396,7 +2406,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
 
         # Click at index 8 is far from last_end=3, starts new selection for \n
-        self.assertEqual(model['search'], '/\\n/')
+        self.assertEqual(model['search'], r"r'\n'")
 
     def test_right_extend_over_dollar_to_newline_hello_first(self):
         """Extend /(hello)/ by clicking \\n (past $) should extend.
@@ -2416,7 +2426,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
         self.assertEqual(last_end, _legacy_internal_index(7))
@@ -2427,7 +2437,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(8),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/(hello)(\\n)/')
+        self.assertEqual(model['search'], r"r'(hello)(\n)'")
 
     def test_right_extend_to_visible_final_dollar(self):
         """After selecting "hello", clicking the final $ should extend.
@@ -2449,7 +2459,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
         self.assertEqual(last_end, _legacy_internal_index(7))  # at $
@@ -2460,7 +2470,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(7),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/(hello)($)/')
+        self.assertEqual(model['search'], r"r'(hello)($)'")
 
     def test_right_extend_fuzzy_over_dollar_to_newline(self):
         """Fuzzy extension over $ to \\n should work too.
@@ -2478,7 +2488,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         last_end = get_last_segment_end_internal_idx(model['search'], value)
 
@@ -2488,7 +2498,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(8),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
     def test_left_extend_over_caret_to_newline(self):
         """Select "world", clicking \\n (past ^ going left) should extend left.
@@ -2510,7 +2520,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(14),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         first_start = get_first_segment_start_internal_idx(model['search'], value)
         self.assertEqual(first_start, _legacy_internal_index(10))
@@ -2522,7 +2532,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
 
         # Should extend left (includes \n and ^ which is between)
-        self.assertEqual(model['search'], '/(\\n^)(world)/')
+        self.assertEqual(model['search'], r"r'(\n^)(world)'")
 
     def test_left_extend_over_caret_to_backslash_A(self):
         """Select "hello" from h, clicking \\A (past ^) should extend left.
@@ -2544,7 +2554,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         first_start = get_first_segment_start_internal_idx(model['search'], value)
         self.assertEqual(first_start, _legacy_internal_index(2))
@@ -2556,7 +2566,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
 
         # Should extend left with the visible ^ anchor
-        self.assertEqual(model['search'], '/(^)(hello)/')
+        self.assertEqual(model['search'], r"r'(^)(hello)'")
 
     def test_no_extend_over_real_characters(self):
         """Should NOT extend when real characters are between click and selection.
@@ -2577,7 +2587,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(14),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         # Click $ at 7 — there's \n (real char) between $ and the selection
         model, _ = update(make_mouse_down_event(7, top_half=True),
@@ -2602,7 +2612,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Click \n at 8 (skips $ at 7) and drag to ^ at 9
         model, _ = update(make_mouse_down_event(8, top_half=True),
@@ -2613,7 +2623,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
 
         # Should extend with \n^ (both selected by the drag)
-        self.assertEqual(model['search'], '/(hello)(\\n^)/')
+        self.assertEqual(model['search'], r"r'(hello)(\n^)'")
 
     def test_right_extend_skipped_adjacency_does_not_include_anchor(self):
         """When extending right by skipping an anchor, the skipped anchor
@@ -2641,7 +2651,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
 
         # Should be just \n, NOT $\n
-        self.assertEqual(model['search'], '/(hello)(\\n)/')
+        self.assertEqual(model['search'], r"r'(hello)(\n)'")
 
     def test_existing_right_extend_still_works(self):
         """The standard right extension (idx == last_end) should still work.
@@ -2659,7 +2669,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Extend with fuzzy at exact end
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
@@ -2668,7 +2678,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
     def test_existing_left_extend_still_works(self):
         """The standard left extension (idx == first_start - 1) should still work.
@@ -2686,7 +2696,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(12),
                          var_and_exp, model, value)
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         # Extend left at first_start - 1 (standard adjacency)
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
@@ -2695,7 +2705,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/\\s*world/')
+        self.assertEqual(model['search'], r"r'\s*world'")
 
 
 # =============================================================================
@@ -2727,22 +2737,22 @@ class TestSearchBoxBasics(unittest.TestCase):
 
     def test_typing_regex_sets_selection_regex(self):
         """Typing a regex in the search box sets search directly."""
-        model, commands = update(make_search_box_input_event('/hello/'),
+        model, commands = update(make_search_box_input_event(r"r'hello'"),
                                 self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
         self.assertEqual(commands, [])
 
     def test_typing_regex_with_groups_sets_selection_regex(self):
         """Typing a regex with capturing groups works."""
-        model, commands = update(make_search_box_input_event('/(hello)(.*)(world)/'),
+        model, commands = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
                                 self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)(.*)(world)/')
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'")
 
     def test_clearing_search_box_clears_regex(self):
         """Clearing the search box (empty value) sets search to None."""
-        self.model['search'] = '/(hello)/'
+        self.model['search'] = r"r'(hello)'"
         self.model['undoHistory'] = [None]
 
         model, _ = update(make_search_box_input_event(''),
@@ -2752,25 +2762,25 @@ class TestSearchBoxBasics(unittest.TestCase):
 
     def test_typing_saves_undo_history(self):
         """Each search box change saves the previous value to undo history."""
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['undoHistory'], [None])  # Previous was None
 
-        model, _ = update(make_search_box_input_event('/hello world/'),
+        model, _ = update(make_search_box_input_event(r"r'hello world'"),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
 
     def test_same_value_does_not_add_to_undo(self):
         """Typing the same value again doesn't add duplicate undo entries."""
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['undoHistory'], [None])
 
         # Same value again
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['undoHistory'], [None])  # No duplicate
@@ -2782,7 +2792,7 @@ class TestSearchBoxBasics(unittest.TestCase):
         self.model['dragging'] = True
         self.model['insertAfterSegment'] = 1
 
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
 
         self.assertIsNone(model['anchorIdx'])
@@ -2792,10 +2802,10 @@ class TestSearchBoxBasics(unittest.TestCase):
 
     def test_invalid_regex_still_stored(self):
         """An invalid regex is still stored so the user can keep editing."""
-        model, _ = update(make_search_box_input_event('/[unclosed/'),
+        model, _ = update(make_search_box_input_event(r"r'[unclosed'"),
                           self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/[unclosed/')
+        self.assertEqual(model['search'], r"r'[unclosed'")
 
     def test_search_box_value_without_delimiters(self):
         """Value without / delimiters is stored as-is (future search types)."""
@@ -2823,15 +2833,17 @@ class TestSearchBoxVisualize(unittest.TestCase):
         self.assertIn('value=""', html)
 
     def test_search_box_shows_current_regex(self):
-        """Search box shows the full search with / delimiters."""
+        """Search box shows the full search in r'..' form."""
+        import html as html_mod
         model = init_model("hello world")
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
 
-        html = visualize("hello world", model, None, None)
-        self.assertIn('/(hello)(.*)(world)/', html)
+        html_out = visualize("hello world", model, None, None)
+        self.assertIn(html_mod.escape(r"r'(hello)(.*)(world)'"), html_out)
 
     def test_search_box_shows_regex_after_mouse_selection(self):
         """After a mouse selection, the search box reflects the built regex."""
+        import html as html_mod
         value = "hello world"
         model = init_model(value)
         var_and_exp = ('x', 'x')
@@ -2844,8 +2856,8 @@ class TestSearchBoxVisualize(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                          var_and_exp, model, value)
 
-        html = visualize(value, model, None, None)
-        self.assertIn('/hello/', html)
+        html_out = visualize(value, model, None, None)
+        self.assertIn(html_mod.escape(r"r'hello'"), html_out)
 
     def test_search_box_has_placeholder(self):
         """Search box has a placeholder for when it's empty."""
@@ -2867,10 +2879,10 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         Type /(hello)/ -> extend right with fuzzy -> /(hello)(.*)/
         """
         # Type regex in search box
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
         # Now extend with fuzzy from the right end
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -2881,7 +2893,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
     def test_type_regex_then_click_inside_fuzzy(self):
         """Type a regex with fuzzy, then click inside the fuzzy to anchor it.
@@ -2889,10 +2901,10 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         Type /(hello)(.*)(world)/ -> click inside fuzzy to split with literal.
         """
         # Type regex with fuzzy segment in the search box
-        model, _ = update(make_search_box_input_event('/(hello)(.*)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(.*)'"),
                           self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)(.*)/')
+        self.assertEqual(model['search'], r"r'(hello)(.*)'")
 
         # Find the fuzzy segment and click inside it to add a literal anchor
         # In "hello world", (.*) matches " world" (indices 7-12)
@@ -2907,7 +2919,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hello.*world/')
+        self.assertEqual(model['search'], r"r'hello.*world'")
 
     def test_type_regex_then_new_mouse_selection_replaces(self):
         """Clicking far from the typed regex starts a fresh selection.
@@ -2915,10 +2927,10 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         Type /(hello)/ -> click in unrelated area -> replaces with new selection.
         """
         # Type regex
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
         # Click on 'w' at index 8 (not adjacent to "hello" selection end at 7)
         # This is far enough away that it should start fresh
@@ -2932,7 +2944,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
                           self.var_and_exp, model, self.value)
 
         # Should reset and create a fresh single-char selection
-        self.assertEqual(model['search'], '/r/')
+        self.assertEqual(model['search'], r"r'r'")
 
     def test_type_regex_then_extend_left_with_mouse(self):
         """Type a regex in the search box, then extend it from the left.
@@ -2940,10 +2952,10 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         Type /(world)/ -> extend left with fuzzy -> /(.*)(world)/
         """
         # Type regex in search box
-        model, _ = update(make_search_box_input_event('/(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(world)'"),
                           self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['search'], '/(world)/')
+        self.assertEqual(model['search'], r"r'(world)'")
 
         # Extend left with fuzzy
         start_idx = get_first_segment_start_internal_idx(model['search'], self.value)
@@ -2954,7 +2966,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/\\s*world/')
+        self.assertEqual(model['search'], r"r'\s*world'")
 
 
 class TestMouseToSearchBoxInteraction(unittest.TestCase):
@@ -2998,25 +3010,25 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
     def test_mouse_selection_then_edit_in_search_box(self):
         """Build a regex with mouse, then edit it via the search box."""
         model = self._select_hello(self.model)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Now tweak the regex via search box
-        model, _ = update(make_search_box_input_event('/(hell)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hell)'"),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hell)/')
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['search'], r"r'(hell)'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
 
     def test_mouse_selection_then_clear_via_search_box(self):
         """Build regex with mouse, then clear it by emptying the search box."""
         model = self._select_hello(self.model)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         model, _ = update(make_search_box_input_event(''),
                           self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['search'])
-        self.assertEqual(model['undoHistory'], [None, '/hello/'])
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
 
     def test_mouse_selection_then_search_box_then_mouse_again(self):
         """Full round trip: mouse -> search box edit -> mouse extend.
@@ -3024,13 +3036,13 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         Build /(hello)/ with mouse -> edit to /(hel)/ in search box -> extend right.
         """
         model = self._select_hello(self.model)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Edit in search box to shorten the pattern
-        model, _ = update(make_search_box_input_event('/(hel)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hel)'"),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hel)/')
+        self.assertEqual(model['search'], r"r'(hel)'")
 
         # Extend right with fuzzy from end of "hel" match
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -3041,18 +3053,18 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/hel[a-z]{1}/')
+        self.assertEqual(model['search'], r"r'hel[a-z]{1}'")
 
     def test_complex_mouse_then_edit_pattern_in_search_box(self):
         """Build /(hello)(.*)(world)/ with mouse, then change .* to \\s+ via search box."""
         model = self._select_hello_fuzzy_world(self.model)
-        self.assertEqual(model['search'], '/hello\\s*world/')
+        self.assertEqual(model['search'], r"r'hello\s*world'")
 
         # Edit the pattern in the search box to change \s* to \s+
-        model, _ = update(make_search_box_input_event(r'/(hello)(\s+)(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(\s+)(world)'"),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], r'/(hello)(\s+)(world)/')
+        self.assertEqual(model['search'], r"r'(hello)(\s+)(world)'")
 
     def test_mouse_then_search_box_then_extend_left(self):
         """Mouse selection -> edit in search box -> extend left with mouse.
@@ -3071,17 +3083,17 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                           self.var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/world/')
+        self.assertEqual(model['search'], r"r'world'")
 
         # Edit in search box
-        model, _ = update(make_search_box_input_event('/(world!)/'),
+        model, _ = update(make_search_box_input_event(r"r'(world!)'"),
                           self.var_and_exp, model, value)
-        self.assertEqual(model['search'], '/(world!)/')
+        self.assertEqual(model['search'], r"r'(world!)'")
 
         # Fix back
-        model, _ = update(make_search_box_input_event('/(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(world)'"),
                           self.var_and_exp, model, value)
-        self.assertEqual(model['search'], '/(world)/')
+        self.assertEqual(model['search'], r"r'(world)'")
 
         # Extend left with fuzzy
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
@@ -3090,7 +3102,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
                           self.var_and_exp, model, value)
 
-        self.assertEqual(model['search'], '/\\s*world/')
+        self.assertEqual(model['search'], r"r'\s*world'")
 
 
 class TestSearchBoxUndoRedo(unittest.TestCase):
@@ -3104,9 +3116,9 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
     def test_undo_search_box_edit(self):
         """Cmd-Z after a search box edit restores the previous regex."""
         # Type a regex
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
         # Undo
         model, _ = update(make_key_down_event('z', meta_key=True),
@@ -3114,11 +3126,11 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
 
         self.assertIsNone(model['search'])
         self.assertEqual(model['undoHistory'], [])
-        self.assertEqual(model['redoHistory'], ['/(hello)/'])
+        self.assertEqual(model['redoHistory'], [r"r'(hello)'"])
 
     def test_redo_search_box_edit(self):
         """Cmd-Shift-Z after undoing a search box edit restores the regex."""
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
 
         # Undo
@@ -3130,7 +3142,7 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
         model, _ = update(make_key_down_event('z', meta_key=True, shift_key=True),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
     def test_undo_across_mouse_and_search_box(self):
         """Undo traverses both mouse selections and search box edits.
@@ -3146,7 +3158,7 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Mouse: extend with fuzzy
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
@@ -3154,23 +3166,23 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # Search box: refine to /(hello)(.*)(world)/
-        model, _ = update(make_search_box_input_event('/(hello)(.*)(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/(hello)(.*)(world)/')
-        self.assertEqual(model['undoHistory'], [None, '/hello/', '/hello\\s*/'])
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'", r"r'hello\s*'"])
 
         # Undo 1: back to /hello\s*/
         model, _ = update(make_key_down_event('z', meta_key=True),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # Undo 2: back to /hello/
         model, _ = update(make_key_down_event('z', meta_key=True),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Undo 3: back to None
         model, _ = update(make_key_down_event('z', meta_key=True),
@@ -3180,18 +3192,18 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
     def test_search_box_edit_clears_redo_history(self):
         """A search box edit after an undo clears the redo history."""
         # Create a regex
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
 
         # Undo it
         model, _ = update(make_key_down_event('z', meta_key=True),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['redoHistory'], ['/(hello)/'])
+        self.assertEqual(model['redoHistory'], [r"r'(hello)'"])
 
         # Type something new in search box - should clear redo
-        model, _ = update(make_search_box_input_event('/(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(world)'"),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/(world)/')
+        self.assertEqual(model['search'], r"r'(world)'")
         self.assertEqual(model['redoHistory'], [])
 
 
@@ -3205,7 +3217,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
 
     def test_enter_after_search_box_regex(self):
         """Enter generates (suggest_name, expr) using the regex typed in the search box."""
-        model, _ = update(make_search_box_input_event('/(hello)(.*)(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
                           self.var_and_exp, self.model, self.value)
 
         model, commands = update(make_key_down_event('Enter'),
@@ -3218,7 +3230,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
 
     def test_enter_after_search_box_simple_regex(self):
         """Enter generates (suggest_name, expr) for a simple regex without groups."""
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
 
         model, commands = update(make_key_down_event('Enter'),
@@ -3231,7 +3243,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
 
     def test_enter_after_search_box_suggests_name_regardless_of_collision(self):
         """Search-box Enter path suggests name without collision resolution."""
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
 
         model, commands = update(make_key_down_event('Enter'),
@@ -3261,7 +3273,7 @@ class TestSingleQuoteEscaping(unittest.TestCase):
         model, _ = update(make_mouse_up_event(5),
                          var_and_exp, model, value)
 
-        self.assertEqual(model['search'], "/it\\'s/")
+        self.assertEqual(model['search'], r'''r"it\'s"''')
 
     def test_enter_with_single_quote_generates_valid_raw_string(self):
         value = "it's here"
@@ -3306,7 +3318,7 @@ class TestBareExpressionSuggestions(unittest.TestCase):
     def test_bare_expression_suggests_result_matches(self):
         """For a bare expression (not an assignment), suggested name is result_matches."""
         model = init_model("hello world")
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model, commands = update(make_key_down_event('Enter'),
                                 (None, "print('hello world')"), model, "hello world")
         self.assertEqual(len(commands), 1)
@@ -3317,7 +3329,7 @@ class TestBareExpressionSuggestions(unittest.TestCase):
     def test_bare_expression_suggests_result_for_delete(self):
         """For a bare expression, Backspace suggests 'result' as var name."""
         model = init_model("hello world")
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 (None, "print('hello world')"), model, "hello world")
         self.assertEqual(len(commands), 1)
@@ -3336,7 +3348,7 @@ class TestSearchBoxEscape(unittest.TestCase):
 
     def test_escape_clears_search_box_typed_regex(self):
         """Escape clears a regex that was typed in the search box."""
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
 
         model, _ = update(make_key_down_event('Escape'),
@@ -3344,7 +3356,7 @@ class TestSearchBoxEscape(unittest.TestCase):
 
         self.assertIsNone(model['search'])
         # The typed regex should be in undo history (recoverable)
-        self.assertIn('/(hello)/', model['undoHistory'])
+        self.assertIn(r"r'(hello)'", model['undoHistory'])
 
 
 class TestSearchBoxHighlighting(unittest.TestCase):
@@ -3354,7 +3366,7 @@ class TestSearchBoxHighlighting(unittest.TestCase):
         """A typed regex with groups produces segment highlights."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
 
         highlights = parse_regex_for_highlighting(model['search'], value)
         self.assertEqual(len(highlights), 3)
@@ -3372,7 +3384,7 @@ class TestSearchBoxHighlighting(unittest.TestCase):
         """A typed regex without groups still produces segment highlights."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
 
         highlights = parse_regex_for_highlighting(model['search'], value)
         # Canonical parsing identifies segments even without explicit groups
@@ -3382,7 +3394,7 @@ class TestSearchBoxHighlighting(unittest.TestCase):
         """An invalid regex produces no highlights (graceful handling)."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/[unclosed/'
+        model['search'] = r"r'[unclosed'"
 
         highlights = parse_regex_for_highlighting(model['search'], value)
         self.assertEqual(len(highlights), 0)
@@ -3391,7 +3403,7 @@ class TestSearchBoxHighlighting(unittest.TestCase):
         """A valid regex that doesn't match produces no highlights."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/(xyz)/'
+        model['search'] = r"r'(xyz)'"
 
         highlights = parse_regex_for_highlighting(model['search'], value)
         self.assertEqual(len(highlights), 0)
@@ -3420,12 +3432,12 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(6),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
         # Search box: add fuzzy
-        model, _ = update(make_search_box_input_event('/(hello)(.*)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(.*)'"),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/(hello)(.*)/')
+        self.assertEqual(model['search'], r"r'(hello)(.*)'")
 
         # Mouse: click inside fuzzy to add "world"
         model, _ = update(make_mouse_down_event(8, top_half=True),
@@ -3434,25 +3446,25 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello.*world/')
+        self.assertEqual(model['search'], r"r'hello.*world'")
 
         # Search box: tweak fuzzy to \s+
-        model, _ = update(make_search_box_input_event(r'/(hello)(\s+)(world)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(\s+)(world)'"),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], r'/(hello)(\s+)(world)/')
+        self.assertEqual(model['search'], r"r'(hello)(\s+)(world)'")
 
         # Verify the full undo history
         self.assertEqual(model['undoHistory'], [
             None,
-            '/hello/',
-            '/(hello)(.*)/',
-            '/hello.*world/',
+            r"r'hello'",
+            r"r'(hello)(.*)'",
+            r"r'hello.*world'",
         ])
 
     def test_searchbox_to_mouse_preserves_undo_chain(self):
         """Switching input methods doesn't break the undo chain."""
         # Search box
-        model, _ = update(make_search_box_input_event('/(hello)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)'"),
                           self.var_and_exp, self.model, self.value)
 
         # Mouse extend
@@ -3461,21 +3473,21 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         # Search box again
-        model, _ = update(make_search_box_input_event('/(hello)(\\d+)/'),
+        model, _ = update(make_search_box_input_event(r"r'(hello)(\d+)'"),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/(hello)(\\d+)/')
+        self.assertEqual(model['search'], r"r'(hello)(\d+)'")
 
         # Undo all the way back
         model, _ = update(make_key_down_event('z', meta_key=True),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello\\s*/')
+        self.assertEqual(model['search'], r"r'hello\s*'")
 
         model, _ = update(make_key_down_event('z', meta_key=True),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
         model, _ = update(make_key_down_event('z', meta_key=True),
                           self.var_and_exp, model, self.value)
@@ -3489,7 +3501,7 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
         model = self.model
 
         # Type "/" -> "/h" -> "/he" -> "/hel" -> "/hell" -> "/hello" -> "/hello/"
-        steps = ['/', '/h', '/he', '/hel', '/hell', '/hello', '/hello/']
+        steps = ['/', '/h', '/he', '/hel', '/hell', '/hello', r"r'hello'"]
         for step_value in steps:
             model, _ = update(make_search_box_input_event(step_value),
                               self.var_and_exp, model, self.value)
@@ -3536,80 +3548,80 @@ class TestResizeLiteralSegment(unittest.TestCase):
 
     def test_expand_right(self):
         """Expand 'hello' right to include space -> 'hello '."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
-        self.assertEqual(result, '/(hello\\ )/')
+        result = resize_literal_segment(r"r'(hello)'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
+        self.assertEqual(result, r"r'(hello\ )'")
 
     def test_collapse_right(self):
         """Collapse 'hello' from right to 'hell'."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(6))
-        self.assertEqual(result, '/(hell)/')
+        result = resize_literal_segment(r"r'(hello)'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(6))
+        self.assertEqual(result, r"r'(hell)'")
 
     def test_expand_left(self):
         """Expand 'ello' left to include 'h' -> 'hello'."""
-        result = resize_literal_segment('/(ello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(7))
-        self.assertEqual(result, '/(hello)/')
+        result = resize_literal_segment(r"r'(ello)'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(7))
+        self.assertEqual(result, r"r'(hello)'")
 
     def test_collapse_left(self):
         """Collapse 'hello' from left to 'ello'."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(3), _legacy_internal_index(7))
-        self.assertEqual(result, '/(ello)/')
+        result = resize_literal_segment(r"r'(hello)'", 0, self.value, _legacy_internal_index(3), _legacy_internal_index(7))
+        self.assertEqual(result, r"r'(ello)'")
 
     def test_single_char(self):
         """Resize to single char 'h'."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(3))
-        self.assertEqual(result, '/(h)/')
+        result = resize_literal_segment(r"r'(hello)'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(3))
+        self.assertEqual(result, r"r'(h)'")
 
     def test_no_change_if_empty_range(self):
         """Empty range (new_end <= new_start) returns original regex unchanged."""
-        result = resize_literal_segment('/(hello)/', 0, self.value, _legacy_internal_index(5), _legacy_internal_index(5))
-        self.assertEqual(result, '/(hello)/')
+        result = resize_literal_segment(r"r'(hello)'", 0, self.value, _legacy_internal_index(5), _legacy_internal_index(5))
+        self.assertEqual(result, r"r'(hello)'")
 
     def test_multi_segment_resize_first(self):
         """Resize first segment in multi-segment regex."""
-        result = resize_literal_segment('/(hello)(.*)(world)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
-        self.assertEqual(result, '/(hello\\ )(.*)(world)/')
+        result = resize_literal_segment(r"r'(hello)(.*)(world)'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
+        self.assertEqual(result, r"r'(hello\ )(.*)(world)'")
 
     def test_multi_segment_resize_last(self):
         """Resize last segment in multi-segment regex."""
-        result = resize_literal_segment('/(hello)(.*)(world)/', 2, self.value, _legacy_internal_index(7), _legacy_internal_index(13))
-        self.assertEqual(result, '/(hello)(.*)(\\ world)/')
+        result = resize_literal_segment(r"r'(hello)(.*)(world)'", 2, self.value, _legacy_internal_index(7), _legacy_internal_index(13))
+        self.assertEqual(result, r"r'(hello)(.*)(\ world)'")
 
     def test_preserves_other_segments(self):
         """Other segments are unchanged when one is resized."""
-        result = resize_literal_segment('/(hello)(.*)(world)/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(3))
-        self.assertEqual(result, '/(h)(.*)(world)/')
+        result = resize_literal_segment(r"r'(hello)(.*)(world)'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(3))
+        self.assertEqual(result, r"r'(h)(.*)(world)'")
 
     # --- Canonical ungrouped form (the form actually stored in model) ---
 
     def test_ungrouped_single_expand_right(self):
         """Ungrouped /hello/ expanded right to include space."""
-        result = resize_literal_segment('/hello/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
-        self.assertEqual(result, '/hello\\ /')
+        result = resize_literal_segment(r"r'hello'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
+        self.assertEqual(result, r"r'hello\ '")
 
     def test_ungrouped_single_collapse_right(self):
         """Ungrouped /hello/ collapsed from right to 'hell'."""
-        result = resize_literal_segment('/hello/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(6))
-        self.assertEqual(result, '/hell/')
+        result = resize_literal_segment(r"r'hello'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(6))
+        self.assertEqual(result, r"r'hell'")
 
     def test_ungrouped_single_collapse_left(self):
         """Ungrouped /hello/ collapsed from left to 'ello'."""
-        result = resize_literal_segment('/hello/', 0, self.value, _legacy_internal_index(3), _legacy_internal_index(7))
-        self.assertEqual(result, '/ello/')
+        result = resize_literal_segment(r"r'hello'", 0, self.value, _legacy_internal_index(3), _legacy_internal_index(7))
+        self.assertEqual(result, r"r'ello'")
 
     def test_ungrouped_single_char_expand(self):
         """Ungrouped single char /h/ expanded right."""
-        result = resize_literal_segment('/h/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(4))
-        self.assertEqual(result, '/he/')
+        result = resize_literal_segment(r"r'h'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(4))
+        self.assertEqual(result, r"r'he'")
 
     def test_ungrouped_multi_segment_resize_first(self):
         """Ungrouped /hello.*world/ resize first literal segment."""
-        result = resize_literal_segment('/hello.*world/', 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
-        self.assertEqual(result, '/hello\\ .*world/')
+        result = resize_literal_segment(r"r'hello.*world'", 0, self.value, _legacy_internal_index(2), _legacy_internal_index(8))
+        self.assertEqual(result, r"r'hello\ .*world'")
 
     def test_ungrouped_multi_segment_resize_last(self):
         """Ungrouped /hello.*world/ resize last literal segment."""
-        result = resize_literal_segment('/hello.*world/', 2, self.value, _legacy_internal_index(7), _legacy_internal_index(13))
-        self.assertEqual(result, '/hello.*\\ world/')
+        result = resize_literal_segment(r"r'hello.*world'", 2, self.value, _legacy_internal_index(7), _legacy_internal_index(13))
+        self.assertEqual(result, r"r'hello.*\ world'")
 
 
 # =============================================================================
@@ -3633,7 +3645,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_handle_mouse_down_right_starts_drag(self):
         """HandleMouseDown on right side starts handle drag mode."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, commands = update(make_handle_mouse_down_event(0, 'right'),
                                  self.var_and_exp, model, self.value)
@@ -3646,7 +3658,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_handle_mouse_down_left_starts_drag(self):
         """HandleMouseDown on left side starts handle drag mode."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, commands = update(make_handle_mouse_down_event(0, 'left'),
                                  self.var_and_exp, model, self.value)
@@ -3660,7 +3672,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_mouse_move_during_handle_drag_updates_cursor(self):
         """MouseMove during handle drag updates the drag cursor position."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3672,7 +3684,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_mouse_move_during_handle_drag_does_not_start_new_selection(self):
         """MouseMove during handle drag should NOT set anchorIdx/cursorIdx on model root."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3688,7 +3700,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_mouse_up_finalizes_handle_drag(self):
         """MouseUp finalizes the handle drag and clears handleDrag state."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3704,7 +3716,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_drag_right_handle_right_expands(self):
         """Drag right handle rightward: hello -> hello (space)."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3713,12 +3725,12 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(7),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello\\ )/')
+        self.assertEqual(model['search'], r"r'(hello\ )'")
 
     def test_drag_right_handle_left_collapses(self):
         """Drag right handle leftward: hello -> hell."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         # hello is internal [2,7). Drag right handle to index 5 (second l).
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
@@ -3728,14 +3740,14 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(5),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hell)/')
+        self.assertEqual(model['search'], r"r'(hell)'")
 
     # --- Full drag left handle sequences ---
 
     def test_drag_left_handle_left_expands(self):
         """Drag left handle leftward: ello -> hello."""
         model = init_model(self.value)
-        model['search'] = '/(ello)/'
+        model['search'] = r"r'(ello)'"
 
         # ello matches internal [3,7). Drag left handle to index 2 (h).
         model, _ = update(make_handle_mouse_down_event(0, 'left'),
@@ -3745,12 +3757,12 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(2),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
     def test_drag_left_handle_right_collapses(self):
         """Drag left handle rightward: hello -> ello."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         # hello is internal [2,7). Drag left handle to index 3 (e).
         model, _ = update(make_handle_mouse_down_event(0, 'left'),
@@ -3760,14 +3772,14 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(3),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(ello)/')
+        self.assertEqual(model['search'], r"r'(ello)'")
 
     # --- Minimum size: cannot collapse to empty ---
 
     def test_right_handle_cannot_collapse_past_start(self):
         """Dragging right handle past start keeps at least 1 char."""
         model = init_model(self.value)
-        model['search'] = '/(h)/'
+        model['search'] = r"r'(h)'"
 
         # h is internal [2,3). Drag right handle to index 1 (past start).
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
@@ -3778,12 +3790,12 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
                           self.var_and_exp, model, self.value)
 
         # Should stay as /(h)/ - at least 1 char
-        self.assertEqual(model['search'], '/(h)/')
+        self.assertEqual(model['search'], r"r'(h)'")
 
     def test_left_handle_cannot_collapse_past_end(self):
         """Dragging left handle past end keeps at least 1 char."""
         model = init_model(self.value)
-        model['search'] = '/(h)/'
+        model['search'] = r"r'(h)'"
 
         # h is internal [2,3). Drag left handle to index 3 (past end).
         model, _ = update(make_handle_mouse_down_event(0, 'left'),
@@ -3794,14 +3806,14 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
                           self.var_and_exp, model, self.value)
 
         # Should stay as /(h)/ - at least 1 char
-        self.assertEqual(model['search'], '/(h)/')
+        self.assertEqual(model['search'], r"r'(h)'")
 
     # --- Multi-segment resize ---
 
     def test_resize_first_segment_in_multi(self):
         """Resize first segment in /(hello)(.*)(world)/."""
         model = init_model(self.value)
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
 
         # Drag right handle of hello to include space.
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
@@ -3811,12 +3823,12 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(7),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello\\ )(.*)(world)/')
+        self.assertEqual(model['search'], r"r'(hello\ )(.*)(world)'")
 
     def test_resize_last_segment_in_multi(self):
         """Resize last segment in /(hello)(.*)(world)/."""
         model = init_model(self.value)
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
 
         # world is internal [8,13). Drag left handle to index 7 (space).
         model, _ = update(make_handle_mouse_down_event(2, 'left'),
@@ -3826,14 +3838,14 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(7),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)(.*)(\\ world)/')
+        self.assertEqual(model['search'], r"r'(hello)(.*)(\ world)'")
 
     # --- Undo history ---
 
     def test_handle_drag_saves_to_undo_history(self):
         """Handle drag finalization saves old regex to undo history."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3842,12 +3854,12 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(7),
                           self.var_and_exp, model, self.value)
 
-        self.assertIn('/(hello)/', model['undoHistory'])
+        self.assertIn(r"r'(hello)'", model['undoHistory'])
 
     def test_handle_drag_no_change_does_not_add_to_undo(self):
         """If handle is dragged back to original position, no undo entry."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         undo_before = list(model.get('undoHistory', []))
 
         # Drag right handle to 8 then back to 6 (original last char index).
@@ -3860,7 +3872,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         model, _ = update(make_mouse_up_event(6),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], '/(hello)/')
+        self.assertEqual(model['search'], r"r'(hello)'")
         self.assertEqual(model.get('undoHistory', []), undo_before)
 
     # --- Preview during drag ---
@@ -3868,7 +3880,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
     def test_preview_shows_resized_segment_during_drag(self):
         """During handle drag, the visualize output reflects the resized segment."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3880,17 +3892,16 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
         # The visualize function should use the preview regex which includes the space.
         html_output = visualize(self.value, model, None, None)
-        # The space character (index 7) should have highlight styling
-        # (border-top indicates literal highlight).
-        # We check that the space char is highlighted by looking for border-top near the space.
-        self.assertIn('border-top', html_output)
+        # The literal highlight is now applied via the 'highlight literal' CSS classes
+        # on individual char-spans (CSS supplies the border styling).
+        self.assertIn('highlight literal', html_output)
 
     # --- Mouse released outside (buttons=0) during handle drag ---
 
     def test_mouse_move_buttons_0_finalizes_handle_drag(self):
         """MouseMove with buttons=0 during handle drag finalizes it."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
 
         model, _ = update(make_handle_mouse_down_event(0, 'right'),
                           self.var_and_exp, model, self.value)
@@ -3902,7 +3913,7 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
                           self.var_and_exp, model, self.value)
 
         self.assertIsNone(model.get('handleDrag'))
-        self.assertEqual(model['search'], '/(hello\\ )/')
+        self.assertEqual(model['search'], r"r'(hello\ )'")
 
 
 # =============================================================================
@@ -3915,52 +3926,54 @@ class TestLiteralDragHandleRendering(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
 
-    def test_literal_segment_has_ew_resize_cursor(self):
-        """Literal selection bracket renders elements with ew-resize cursor."""
+    def test_literal_segment_has_resize_handle(self):
+        """Literal selection bracket renders char-span-resize-handle elements (CSS gives them ew-resize cursor)."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         html_output = visualize(self.value, model, None, None)
-        self.assertIn('ew-resize', html_output)
+        self.assertIn('char-span-resize-handle', html_output)
 
     def test_literal_segment_has_left_handle(self):
         """First char of literal segment renders a left drag handle."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         html_output = visualize(self.value, model, None, None)
         self.assertIn("side=&#x27;left&#x27;", html_output)
 
     def test_literal_segment_has_right_handle(self):
         """Last char of literal segment renders a right drag handle."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         html_output = visualize(self.value, model, None, None)
         self.assertIn("side=&#x27;right&#x27;", html_output)
 
     def test_literal_handle_has_HandleMouseDown_event(self):
         """Drag handle elements have HandleMouseDown event attribute."""
         model = init_model(self.value)
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         html_output = visualize(self.value, model, None, None)
         self.assertIn('HandleMouseDown', html_output)
 
-    def test_fuzzy_segment_has_no_drag_handles(self):
-        """Fuzzy selection does NOT render drag handles."""
+    def test_fuzzy_segment_has_only_left_drag_handle(self):
+        """Fuzzy selection renders only a left-resize handle (literals get both)."""
         model = init_model(self.value)
-        model['search'] = '/(.*)/'
+        model['search'] = r"r'(.*)'"
         html_output = visualize(self.value, model, None, None)
-        self.assertNotIn('ew-resize', html_output)
-        self.assertNotIn('HandleMouseDown', html_output)
+        # Exactly one HandleMouseDown for fuzzy, on the left side.
+        self.assertEqual(html_output.count('HandleMouseDown'), 1)
+        self.assertIn("side=&#x27;left&#x27;", html_output)
+        self.assertNotIn("side=&#x27;right&#x27;", html_output)
 
     def test_mixed_segments_only_literal_has_handles(self):
-        """In /(hello)(.*)(world)/, only literal segments have handles."""
+        """In /(hello)(.*)(world)/, both literals get left+right handles, and the
+        in-between fuzzy segment gets a single left-resize handle."""
         model = init_model(self.value)
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
         html_output = visualize(self.value, model, None, None)
-        # Should have handles for hello and world (both literal)
         self.assertIn('HandleMouseDown', html_output)
-        # Count occurrences: 2 segments * 2 handles each = 4 HandleMouseDown
+        # 2 literals * 2 handles + 1 fuzzy left-resize handle = 5
         handle_count = html_output.count('HandleMouseDown')
-        self.assertEqual(handle_count, 4)
+        self.assertEqual(handle_count, 5)
 
 
 # =============================================================================
@@ -4001,79 +4014,79 @@ class TestReplaceSegmentRepetition(unittest.TestCase):
 
     def test_replace_star_with_plus_on_fuzzy(self):
         """Replacing .* quantifier with + gives .+ (canonical: no group for single segment)."""
-        result = replace_segment_repetition('/(.*)/', 0, '+')
-        self.assertEqual(result, '/.+/')
+        result = replace_segment_repetition(r"r'(.*)'", 0, '+')
+        self.assertEqual(result, r"r'.+'")
 
     def test_replace_star_with_question_on_fuzzy(self):
         """Replacing .* quantifier with ? gives .? (canonical)."""
-        result = replace_segment_repetition('/(.*)/', 0, '?')
-        self.assertEqual(result, '/.?/')
+        result = replace_segment_repetition(r"r'(.*)'", 0, '?')
+        self.assertEqual(result, r"r'.?'")
 
     def test_replace_star_with_exact_on_fuzzy(self):
         """Replacing .* quantifier with {3} gives .{3} (canonical)."""
-        result = replace_segment_repetition('/(.*)/', 0, '{3}')
-        self.assertEqual(result, '/.{3}/')
+        result = replace_segment_repetition(r"r'(.*)'", 0, '{3}')
+        self.assertEqual(result, r"r'.{3}'")
 
     def test_replace_star_with_range_on_fuzzy(self):
         """Replacing .* quantifier with {2,5} gives .{2,5} (canonical)."""
-        result = replace_segment_repetition('/(.*)/', 0, '{2,5}')
-        self.assertEqual(result, '/.{2,5}/')
+        result = replace_segment_repetition(r"r'(.*)'", 0, '{2,5}')
+        self.assertEqual(result, r"r'.{2,5}'")
 
     def test_replace_star_with_no_quantifier_on_fuzzy(self):
         """Replacing .* with '' (exactly 1) gives . (canonical)."""
-        result = replace_segment_repetition('/(.*)/', 0, '')
-        self.assertEqual(result, '/./')
+        result = replace_segment_repetition(r"r'(.*)'", 0, '')
+        self.assertEqual(result, r"r'.'")
 
     def test_replace_plus_with_star_on_fuzzy(self):
         """Replacing .+ quantifier with * gives .* (canonical)."""
-        result = replace_segment_repetition('/(.+)/', 0, '*')
-        self.assertEqual(result, '/.*/')
+        result = replace_segment_repetition(r"r'(.+)'", 0, '*')
+        self.assertEqual(result, r"r'.*'")
 
     def test_replace_on_char_class_fuzzy(self):
         r"""Replacing \s* quantifier with + gives \s+ (canonical)."""
-        result = replace_segment_repetition(r'/(\s*)/', 0, '+')
-        self.assertEqual(result, r'/\s+/')
+        result = replace_segment_repetition(r"r'(\s*)'", 0, '+')
+        self.assertEqual(result, r"r'\s+'")
 
     def test_replace_on_bracket_class_fuzzy(self):
         """Replacing [a-z]* quantifier with {2,5} gives [a-z]{2,5} (canonical)."""
-        result = replace_segment_repetition('/([a-z]*)/', 0, '{2,5}')
-        self.assertEqual(result, '/[a-z]{2,5}/')
+        result = replace_segment_repetition(r"r'([a-z]*)'", 0, '{2,5}')
+        self.assertEqual(result, r"r'[a-z]{2,5}'")
 
     # --- Literal segment (single char) repetition changes ---
 
     def test_replace_repetition_on_literal_single_char(self):
         """Adding + to single char literal 'h' gives h+ (canonical: no group)."""
-        result = replace_segment_repetition('/(h)/', 0, '+')
-        self.assertEqual(result, '/h+/')
+        result = replace_segment_repetition(r"r'(h)'", 0, '+')
+        self.assertEqual(result, r"r'h+'")
 
     def test_replace_single_char_with_exact(self):
         """Adding {3} to single char literal 'h' gives h{3} (canonical: no group)."""
-        result = replace_segment_repetition('/(h)/', 0, '{3}')
-        self.assertEqual(result, '/h{3}/')
+        result = replace_segment_repetition(r"r'(h)'", 0, '{3}')
+        self.assertEqual(result, r"r'h{3}'")
 
     # --- Literal segment (multi char) repetition changes ---
 
     def test_replace_repetition_on_literal_multi_char(self):
         """Adding + to multi-char literal 'hello' wraps in (?:hello)+ and keeps group."""
-        result = replace_segment_repetition('/(hello)/', 0, '+')
+        result = replace_segment_repetition(r"r'(hello)'", 0, '+')
         # Group kept because text contains (?:
-        self.assertEqual(result, '/((?:hello)+)/')
+        self.assertEqual(result, r"r'((?:hello)+)'")
 
     def test_replace_repetition_on_literal_multi_char_exact(self):
         """Adding {3} to multi-char literal 'hello' wraps in (?:hello){3}."""
-        result = replace_segment_repetition('/(hello)/', 0, '{3}')
-        self.assertEqual(result, '/((?:hello){3})/')
+        result = replace_segment_repetition(r"r'(hello)'", 0, '{3}')
+        self.assertEqual(result, r"r'((?:hello){3})'")
 
     def test_remove_repetition_from_literal_multi_char(self):
         """Removing quantifier from (?:hello)+ gives back hello (canonical: no group)."""
-        result = replace_segment_repetition('/((?:hello)+)/', 0, '')
+        result = replace_segment_repetition(r"r'((?:hello)+)'", 0, '')
         # Unwraps (?:...) and removes group since no (?:) in result
-        self.assertEqual(result, '/hello/')
+        self.assertEqual(result, r"r'hello'")
 
     def test_change_repetition_on_literal_multi_char(self):
         """Changing (?:hello)+ to (?:hello){2,5} keeps group."""
-        result = replace_segment_repetition('/((?:hello)+)/', 0, '{2,5}')
-        self.assertEqual(result, '/((?:hello){2,5})/')
+        result = replace_segment_repetition(r"r'((?:hello)+)'", 0, '{2,5}')
+        self.assertEqual(result, r"r'((?:hello){2,5})'")
 
     # --- Multi-segment regex (canonical form strips groups for non-adjacent-literal segments) ---
 
@@ -4082,36 +4095,36 @@ class TestReplaceSegmentRepetition(unittest.TestCase):
 
         Canonical form: no adjacent literals -> no groups needed.
         """
-        result = replace_segment_repetition('/(hello)(.*)(world)/', 1, '+')
-        self.assertEqual(result, '/hello.+world/')
+        result = replace_segment_repetition(r"r'(hello)(.*)(world)'", 1, '+')
+        self.assertEqual(result, r"r'hello.+world'")
 
     def test_replace_preserves_other_segments(self):
         """When adding (?:...) to one segment, it keeps its group."""
-        result = replace_segment_repetition('/(hello)(.*)(world)/', 0, '{3}')
+        result = replace_segment_repetition(r"r'(hello)(.*)(world)'", 0, '{3}')
         # (?:hello){3} segment keeps group, others get canonicalized
-        self.assertEqual(result, '/((?:hello){3}).*world/')
+        self.assertEqual(result, r"r'((?:hello){3}).*world'")
 
     def test_replace_last_segment_repetition(self):
         """Replace repetition of last segment wraps in (?:...) and keeps group."""
-        result = replace_segment_repetition('/(hello)(.*)(world)/', 2, '+')
-        self.assertEqual(result, '/hello.*((?:world)+)/')
+        result = replace_segment_repetition(r"r'(hello)(.*)(world)'", 2, '+')
+        self.assertEqual(result, r"r'hello.*((?:world)+)'")
 
     # --- Edge cases ---
 
     def test_out_of_bounds_index_unchanged(self):
         """Out of bounds segment index leaves regex unchanged (canonical form)."""
-        result = replace_segment_repetition('/(hello)/', 5, '+')
-        self.assertEqual(result, '/hello/')
+        result = replace_segment_repetition(r"r'(hello)'", 5, '+')
+        self.assertEqual(result, r"r'hello'")
 
     def test_replace_with_min_only_range(self):
         """Replace with {2,} (2 or more) quantifier (canonical)."""
-        result = replace_segment_repetition('/(.*)/', 0, '{2,}')
-        self.assertEqual(result, '/.{2,}/')
+        result = replace_segment_repetition(r"r'(.*)'", 0, '{2,}')
+        self.assertEqual(result, r"r'.{2,}'")
 
     def test_escaped_chars_in_literal(self):
         r"""Escaped chars like \n are single atoms, no wrapping needed (canonical)."""
-        result = replace_segment_repetition(r'/(\n)/', 0, '+')
-        self.assertEqual(result, r'/\n+/')
+        result = replace_segment_repetition(r"r'(\n)'", 0, '+')
+        self.assertEqual(result, r"r'\n+'")
 
 
 # =============================================================================
@@ -4124,7 +4137,7 @@ class TestRepetitionDropdownToggle(unittest.TestCase):
     def test_repetition_dropdown_toggle_opens(self):
         """DropdownToggle with repetition-* ID opens the repetition dropdown."""
         model = init_model("hello world")
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         self.assertIsNone(model.get('openDropdown'))
 
         event = make_dropdown_toggle_event('repetition-0')
@@ -4137,7 +4150,7 @@ class TestRepetitionDropdownToggle(unittest.TestCase):
     def test_repetition_dropdown_toggle_closes(self):
         """DropdownToggle closes an already-open repetition dropdown."""
         model = init_model("hello world")
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_toggle_event('repetition-0')
@@ -4148,7 +4161,7 @@ class TestRepetitionDropdownToggle(unittest.TestCase):
     def test_repetition_dropdown_toggle_switches(self):
         """Opening a different repetition dropdown closes the old one."""
         model = init_model("hello world")
-        model['search'] = '/(hello)(.*)(world)/'
+        model['search'] = r"r'(hello)(.*)(world)'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_toggle_event('repetition-2')
@@ -4172,86 +4185,86 @@ class TestRepetitionDropdownSelect(unittest.TestCase):
     def test_select_star_on_fuzzy(self):
         """Select * on a fuzzy segment changes .+ to .* (canonical: no groups)."""
         model = init_model("hello world")
-        model['search'] = '/hello.+world/'
+        model['search'] = r"r'hello.+world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '*')
         model, _ = update(event, None, model, "hello world")
 
-        self.assertEqual(model['search'], '/hello.*world/')
+        self.assertEqual(model['search'], r"r'hello.*world'")
         self.assertIsNone(model.get('openDropdown'))
 
     def test_select_plus_on_fuzzy(self):
         """Select + on a fuzzy segment changes .* to .+ (canonical: no groups)."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '+')
         model, _ = update(event, None, model, "hello world")
 
-        self.assertEqual(model['search'], '/hello.+world/')
+        self.assertEqual(model['search'], r"r'hello.+world'")
         self.assertIsNone(model.get('openDropdown'))
 
     def test_select_question_on_fuzzy(self):
         """Select ? on a fuzzy segment changes .* to .? (canonical: no groups)."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '?')
         model, _ = update(event, None, model, "hello world")
 
-        self.assertEqual(model['search'], '/hello.?world/')
+        self.assertEqual(model['search'], r"r'hello.?world'")
         self.assertIsNone(model.get('openDropdown'))
 
     def test_select_1_removes_quantifier(self):
         """Select 1 on a fuzzy segment removes the quantifier (e.g., .* -> .)."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '1')
         model, _ = update(event, None, model, "hello world")
 
-        self.assertEqual(model['search'], '/hello.world/')
+        self.assertEqual(model['search'], r"r'hello.world'")
         self.assertIsNone(model.get('openDropdown'))
 
     def test_select_plus_on_literal(self):
         """Select + on a literal segment adds + quantifier, wrapping multi-char in (?:...)."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('repetition-0', '+')
         model, _ = update(event, None, model, "hello world")
 
         # (?:hello)+ gets a group because it contains (?:)
-        self.assertEqual(model['search'], '/((?:hello)+).*world/')
+        self.assertEqual(model['search'], r"r'((?:hello)+).*world'")
         self.assertIsNone(model.get('openDropdown'))
 
     def test_repetition_select_saves_undo(self):
         """Changing repetition saves previous regex to undo history."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
 
         event = make_dropdown_select_event('repetition-1', '+')
         model, _ = update(event, None, model, "hello world")
 
-        self.assertIn('/hello.*world/', model['undoHistory'])
+        self.assertIn(r"r'hello.*world'", model['undoHistory'])
 
     def test_repetition_select_wrong_id_ignored(self):
         """Selection ignored if dropdown ID doesn't match."""
         model = init_model("hello world")
-        model['search'] = '/hello.*/'
+        model['search'] = r"r'hello.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
 
         event = make_dropdown_select_event('repetition-1', '+')
         model, _ = update(event, None, model, "hello world")
 
         # Regex unchanged
-        self.assertEqual(model['search'], '/hello.*/')
+        self.assertEqual(model['search'], r"r'hello.*'")
         # Dropdown still closes
         self.assertIsNone(model.get('openDropdown'))
 
@@ -4266,119 +4279,185 @@ class TestRepetitionInput(unittest.TestCase):
     Note: Results are canonicalized. Single-segment fuzzy patterns lose their groups.
     """
 
-    def test_exact_field_sets_exact_quantifier(self):
-        """Typing '3' in the {n} field sets quantifier to {3} (canonical: no group)."""
+    # NOTE: Repetition + slice-label dropdowns BUFFER user-typed values into
+    # openDropdown state without touching model['search']. The new quantifier /
+    # slice expression is committed only when the dropdown closes (via
+    # DropdownToggle, MouseDown elsewhere, Enter, etc.). This prevents
+    # transient invalid expressions from making the segment - and the dropdown
+    # itself - disappear mid-edit. Escape closes WITHOUT committing.
+
+    def test_exact_field_buffers_value_without_changing_regex(self):
+        """Typing into {n} only buffers the value; the regex stays put."""
         model = init_model("hello world")
-        model['search'] = '/.*/'
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         event = make_repetition_input_event('repetition-0', 'exact', '3')
         model, _ = update(event, None, model, "hello world")
 
-        self.assertEqual(model['search'], '/.{3}/')
-        # Dropdown should remain open for further edits
-        self.assertIsNotNone(model.get('openDropdown'))
+        self.assertEqual(model['search'], r"r'.*'")  # unchanged
         self.assertEqual(model['openDropdown']['exactN'], '3')
 
-    def test_exact_field_empty_does_not_change_regex(self):
-        """Empty {n} field does not change the regex."""
+    def test_exact_field_commits_on_close(self):
+        """Closing the dropdown commits the buffered exact quantifier."""
         model = init_model("hello world")
-        model['search'] = '/.*/'
+        model['search'] = r"r'.*'"
+        model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
+                                  'exactN': '', 'rangeMin': '', 'rangeMax': ''}
+
+        # Buffer
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', '3'),
+                          None, model, "hello world")
+        # Close via DropdownToggle on the same id
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
+
+        self.assertEqual(model['search'], r"r'.{3}'")
+        self.assertIsNone(model.get('openDropdown'))
+
+    def test_exact_field_empty_does_not_change_regex(self):
+        """Empty {n} field never produces a quantifier even on close."""
+        model = init_model("hello world")
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '3', 'rangeMin': '', 'rangeMax': ''}
 
-        event = make_repetition_input_event('repetition-0', 'exact', '')
-        model, _ = update(event, None, model, "hello world")
+        # User clears the field, then closes.
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', ''),
+                          None, model, "hello world")
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
 
-        # Should not crash; dropdown state updated but regex may not change
-        self.assertIsNotNone(model.get('openDropdown'))
-        self.assertEqual(model['openDropdown']['exactN'], '')
+        self.assertEqual(model['search'], r"r'.*'")  # still unchanged
 
-    def test_range_min_and_max_set_range_quantifier(self):
-        """Typing in both min and max fields sets {min,max} quantifier."""
+    def test_range_min_and_max_buffer_then_commit(self):
+        """Typing min then max buffers both, commits {min,max} on close."""
         model = init_model("hello world")
-        model['search'] = '/.*/'
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
-        # Set min to 2
-        event = make_repetition_input_event('repetition-0', 'min', '2')
-        model, _ = update(event, None, model, "hello world")
-
-        # With only min, should produce {2,}
+        model, _ = update(make_repetition_input_event('repetition-0', 'min', '2'),
+                          None, model, "hello world")
         self.assertEqual(model['openDropdown']['rangeMin'], '2')
+        self.assertEqual(model['search'], r"r'.*'")  # not yet
 
-        # Set max to 5
-        event = make_repetition_input_event('repetition-0', 'max', '5')
-        model, _ = update(event, None, model, "hello world")
-
-        self.assertEqual(model['search'], '/.{2,5}/')
+        model, _ = update(make_repetition_input_event('repetition-0', 'max', '5'),
+                          None, model, "hello world")
         self.assertEqual(model['openDropdown']['rangeMax'], '5')
+        self.assertEqual(model['search'], r"r'.*'")  # still not yet
 
-    def test_range_min_only_sets_min_quantifier(self):
-        """Setting only min field gives {n,} quantifier (canonical: no group)."""
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
+        self.assertEqual(model['search'], r"r'.{2,5}'")
+
+    def test_range_min_only_commits_open_ended(self):
+        """Buffering only min yields {n,} on close."""
         model = init_model("hello world")
-        model['search'] = '/.*/'
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
-        event = make_repetition_input_event('repetition-0', 'min', '2')
-        model, _ = update(event, None, model, "hello world")
+        model, _ = update(make_repetition_input_event('repetition-0', 'min', '2'),
+                          None, model, "hello world")
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
 
-        self.assertEqual(model['search'], '/.{2,}/')
+        self.assertEqual(model['search'], r"r'.{2,}'")
 
     def test_range_max_only_does_not_change_regex(self):
-        """Setting only max field (no min) does not produce a valid quantifier."""
+        """Setting only max (no min) doesn't produce a valid quantifier even
+        on close - rangeMax alone has no canonical regex form."""
         model = init_model("hello world")
-        original_regex = '/.*/'
-        model['search'] = original_regex
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
-        event = make_repetition_input_event('repetition-0', 'max', '5')
-        model, _ = update(event, None, model, "hello world")
-
-        # rangeMax only is not a valid quantifier on its own; regex unchanged
+        model, _ = update(make_repetition_input_event('repetition-0', 'max', '5'),
+                          None, model, "hello world")
         self.assertEqual(model['openDropdown']['rangeMax'], '5')
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
+        self.assertEqual(model['search'], r"r'.*'")
 
-    def test_repetition_input_saves_undo(self):
-        """RepetitionInput that changes the regex saves to undo history."""
+    def test_repetition_undo_saved_on_commit_only(self):
+        """Undo history is appended only when the dropdown closes (commit), not on each keystroke."""
         model = init_model("hello world")
-        model['search'] = '/.*/'
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
-        event = make_repetition_input_event('repetition-0', 'exact', '3')
-        model, _ = update(event, None, model, "hello world")
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', '3'),
+                          None, model, "hello world")
+        # No undo entry yet - regex hasn't changed.
+        self.assertNotIn(r"r'.*'", model.get('undoHistory', []))
 
-        self.assertIn('/.*/', model['undoHistory'])
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
+        # Now the original regex is in undo.
+        self.assertIn(r"r'.*'", model['undoHistory'])
 
     def test_repetition_input_non_numeric_ignored(self):
-        """Non-numeric values in text fields are ignored."""
+        """Non-numeric values are buffered but never produce a quantifier on close."""
         model = init_model("hello world")
-        model['search'] = '/.*/'
-        original_regex = '/.*/'
+        model['search'] = r"r'.*'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
-        event = make_repetition_input_event('repetition-0', 'exact', 'abc')
-        model, _ = update(event, None, model, "hello world")
-
-        # Non-numeric value should not change regex
-        self.assertEqual(model['search'], original_regex)
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', 'abc'),
+                          None, model, "hello world")
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
+        self.assertEqual(model['search'], r"r'.*'")
 
     def test_repetition_input_on_literal_multi_char(self):
-        """RepetitionInput on a multi-char literal wraps in (?:...) and keeps group."""
+        """Closing after typing on a multi-char literal wraps in (?:...) and keeps group."""
         model = init_model("hello world")
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
-        event = make_repetition_input_event('repetition-0', 'exact', '3')
-        model, _ = update(event, None, model, "hello world")
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', '3'),
+                          None, model, "hello world")
+        model, _ = update(make_dropdown_toggle_event('repetition-0'),
+                          None, model, "hello world")
 
-        self.assertEqual(model['search'], '/((?:hello){3})/')
+        self.assertEqual(model['search'], r"r'((?:hello){3})'")
+
+    def test_mousedown_elsewhere_commits_repetition_buffer(self):
+        """Clicking on the string (which clears openDropdown) commits buffered values."""
+        model = init_model("hello world")
+        model['search'] = r"r'.*'"
+        model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
+                                  'exactN': '', 'rangeMin': '', 'rangeMax': ''}
+
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', '3'),
+                          None, model, "hello world")
+        # Simulate a mousedown on a char to close the dropdown.
+        ev = {
+            'pythonEventStr': repr(MouseDown(2)),
+            'eventJSON': {'altKey': False, 'shiftKey': False, 'ctrlKey': False,
+                          'offsetY': 5, 'elementHeight': 20, 'buttons': 1},
+        }
+        model, _ = update(ev, ('x', 'x'), model, "hello world")
+        self.assertEqual(model['search'], r"r'.{3}'")
+        self.assertIsNone(model.get('openDropdown'))
+
+    def test_escape_discards_repetition_buffer(self):
+        """Escape closes the dropdown WITHOUT committing the buffered value."""
+        model = init_model("hello world")
+        model['search'] = r"r'.*'"
+        model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0,
+                                  'exactN': '', 'rangeMin': '', 'rangeMax': ''}
+
+        model, _ = update(make_repetition_input_event('repetition-0', 'exact', '3'),
+                          None, model, "hello world")
+        # Escape via KeyDown
+        ev = make_key_down_event('Escape')
+        model, _ = update(ev, ('x', 'x'), model, "hello world")
+        self.assertEqual(model['search'], r"r'.*'")  # unchanged
+        self.assertIsNone(model.get('openDropdown'))
 
 
 # =============================================================================
@@ -4394,32 +4473,32 @@ class TestRepetitionDropdownRendering(unittest.TestCase):
     """
 
     def test_literal_segment_has_clickable_repetition(self):
-        """Literal segment renders repetition count as a clickable dropdown trigger."""
+        """Literal segment renders repetition count as a clickable dropdown trigger
+        when the segment is hovered (segments are only "active" while hovered)."""
         model = init_model("helloworld")
-        # Adjacent literals need groups to be preserved in canonical form
-        model['search'] = '/(hello)(world)/'
+        model['search'] = r"r'(hello)(world)'"
+        model['hoverIdx'] = 2  # somewhere inside 'hello' (segment 0)
 
         html_output = visualize("helloworld", model, None, None)
 
-        # Should contain a repetition dropdown toggle event
         self.assertIn('repetition-0', html_output)
 
     def test_fuzzy_segment_has_clickable_repetition(self):
-        """Fuzzy segment renders repetition count as a clickable dropdown trigger."""
+        """Fuzzy segment renders repetition count as a clickable dropdown trigger
+        when the segment is hovered."""
         model = init_model("hello world")
-        # Use canonical form that will produce highlights
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
+        # The middle fuzzy segment (.*) covers just the space at internal index 6.
+        model['hoverIdx'] = 6
 
         html_output = visualize("hello world", model, None, None)
 
-        # Should contain repetition dropdown toggle events
-        # Segment 1 is fuzzy (.*)
         self.assertIn('repetition-1', html_output)
 
     def test_repetition_dropdown_open_shows_options(self):
         """When repetition dropdown is open, options are rendered."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
@@ -4431,7 +4510,7 @@ class TestRepetitionDropdownRendering(unittest.TestCase):
     def test_repetition_dropdown_has_text_input_fields(self):
         """When repetition dropdown is open, text input fields for {n} and {n,m} are present."""
         model = init_model("hello world")
-        model['search'] = '/hello.*world/'
+        model['search'] = r"r'hello.*world'"
         model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
@@ -4439,6 +4518,144 @@ class TestRepetitionDropdownRendering(unittest.TestCase):
 
         # Should contain RepetitionInput events for text fields
         self.assertIn('RepetitionInput', html_output)
+
+
+class TestRepetitionDropdownPrefillAndSelected(unittest.TestCase):
+    """The repetition dropdown should reflect the segment's CURRENT quantifier:
+    - The matching simple option ('1' / '?' / '*' / '+') is highlighted with .selected.
+    - For {n} (n>=2), the exact-n input row is .selected and value-prefilled.
+    - For {n,m}, {n,}, {0,m} (range forms), the range input row is .selected
+      and the min/max inputs are value-prefilled.
+    Prefilling happens when the dropdown OPENS via DropdownToggle - subsequent
+    user typing into the inputs replaces the seeded values.
+    """
+
+    # --- Renderer: .selected on the matching simple option --------------------
+
+    def _open_dropdown_for(self, value, search, segment_index=0):
+        """Helper: open the repetition dropdown for the given segment via the
+        same code path the UI takes (DropdownToggle), so prefill happens."""
+        model = init_model(value)
+        model['search'] = search
+        ev = make_dropdown_toggle_event(f'repetition-{segment_index}')
+        model, _ = update(ev, None, model, value)
+        return model
+
+    def _selected_simple_options(self, html_output):
+        """Return the labels of options that have the .selected class."""
+        return re.findall(r'class="snc-dropdown-option selected[^"]*"[^>]*>([^<]+)<', html_output)
+
+    def test_quantifier_one_marks_one_option_selected(self):
+        value = "helloworld"
+        # /(hello)(world)/ -> two literal segments, both with quantifier '1' (no quantifier)
+        model = self._open_dropdown_for(value, r"r'(hello)(world)'", segment_index=0)
+        html_output = visualize(value, model, None, None)
+        self.assertEqual(self._selected_simple_options(html_output), ['1'])
+
+    def test_quantifier_star_marks_star_option_selected(self):
+        value = "hello world"
+        model = self._open_dropdown_for(value, r"r'hello.*world'", segment_index=1)
+        html_output = visualize(value, model, None, None)
+        self.assertEqual(self._selected_simple_options(html_output), ['*'])
+
+    def test_quantifier_plus_marks_plus_option_selected(self):
+        value = "hello world"
+        model = self._open_dropdown_for(value, r"r'hello.+world'", segment_index=1)
+        html_output = visualize(value, model, None, None)
+        self.assertEqual(self._selected_simple_options(html_output), ['+'])
+
+    def test_quantifier_question_marks_question_option_selected(self):
+        value = "hello world"
+        model = self._open_dropdown_for(value, r"r'hello.?world'", segment_index=1)
+        html_output = visualize(value, model, None, None)
+        self.assertEqual(self._selected_simple_options(html_output), ['?'])
+
+    # --- Prefill: openDropdown init from current quantifier -------------------
+
+    def test_open_dropdown_prefills_exact_n_for_brace_quantifier(self):
+        """For /.{3}/, opening the repetition dropdown seeds exactN='3'."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{3}'", segment_index=0)
+        od = model.get('openDropdown')
+        self.assertIsNotNone(od)
+        self.assertEqual(od.get('exactN'), '3')
+        self.assertEqual(od.get('rangeMin'), '')
+        self.assertEqual(od.get('rangeMax'), '')
+
+    def test_open_dropdown_prefills_range_for_brace_range_quantifier(self):
+        """For /.{2,5}/, opening seeds rangeMin='2', rangeMax='5'."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{2,5}'", segment_index=0)
+        od = model.get('openDropdown')
+        self.assertEqual(od.get('exactN'), '')
+        self.assertEqual(od.get('rangeMin'), '2')
+        self.assertEqual(od.get('rangeMax'), '5')
+
+    def test_open_dropdown_prefills_open_ended_range_quantifier(self):
+        """For /.{3,}/, opening seeds rangeMin='3', rangeMax=''."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{3,}'", segment_index=0)
+        od = model.get('openDropdown')
+        self.assertEqual(od.get('exactN'), '')
+        self.assertEqual(od.get('rangeMin'), '3')
+        self.assertEqual(od.get('rangeMax'), '')
+
+    def test_open_dropdown_no_prefill_for_simple_quantifier(self):
+        """For /.+/, all input fields stay empty (the '+' simple option is selected instead)."""
+        value = "abc"
+        model = self._open_dropdown_for(value, r"r'.+'", segment_index=0)
+        od = model.get('openDropdown')
+        self.assertEqual(od.get('exactN'), '')
+        self.assertEqual(od.get('rangeMin'), '')
+        self.assertEqual(od.get('rangeMax'), '')
+
+    # --- Render: input rows show prefilled values + .selected -----------------
+
+    def test_render_exact_n_row_prefilled_and_selected(self):
+        """Exact-n row's input has the seeded value and is marked .selected."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{3}'", segment_index=0)
+        html_output = visualize(value, model, None, None)
+        # Look for a value="3" attribute on the exact-n input
+        self.assertRegex(html_output, r'snc-input="[^"]*field=&#x27;exact&#x27;[^"]*"[^/]*value="3"')
+        # And the row is .selected (regex spans the <input> tag inside it)
+        self.assertRegex(
+            html_output,
+            r'class="snc-dropdown-option selected"[^>]*>\{.*?field=&#x27;exact&#x27;',
+        )
+
+    def test_render_range_row_prefilled_and_selected(self):
+        """Range row inputs have seeded values and the row is marked .selected."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{2,5}'", segment_index=0)
+        html_output = visualize(value, model, None, None)
+        # Both min and max prefilled
+        self.assertRegex(html_output, r'snc-input="[^"]*field=&#x27;min&#x27;[^"]*"[^/]*value="2"')
+        self.assertRegex(html_output, r'snc-input="[^"]*field=&#x27;max&#x27;[^"]*"[^/]*value="5"')
+        # The range row is .selected (regex spans the <input> tag inside it)
+        self.assertRegex(
+            html_output,
+            r'class="snc-dropdown-option selected"[^>]*>\{.*?field=&#x27;min&#x27;',
+        )
+
+    def test_render_open_ended_range_only_min_prefilled(self):
+        """For {3,}, min is '3' and max is empty."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{3,}'", segment_index=0)
+        html_output = visualize(value, model, None, None)
+        self.assertRegex(html_output, r'snc-input="[^"]*field=&#x27;min&#x27;[^"]*"[^/]*value="3"')
+        self.assertRegex(html_output, r'snc-input="[^"]*field=&#x27;max&#x27;[^"]*"[^/]*value=""')
+
+    def test_user_typed_value_overrides_prefill(self):
+        """If the user has already typed into a field, the rendered value
+        is the user's typed value, not the original prefill."""
+        value = "abcdef"
+        model = self._open_dropdown_for(value, r"r'.{3}'", segment_index=0)
+        # Simulate user clearing the exact-n field after the prefill.
+        model['openDropdown']['exactN'] = ''
+        html_output = visualize(value, model, None, None)
+        # The input should now be empty (not '3' from the prefill).
+        self.assertRegex(html_output, r'snc-input="[^"]*field=&#x27;exact&#x27;[^"]*"[^/]*value=""')
 
 
 # =============================================================================
@@ -4455,20 +4672,23 @@ class TestHoverPreview(unittest.TestCase):
 
     # --- Model state tests ---
 
-    def test_mousemove_no_buttons_top_half_sets_literal_hover(self):
-        """MouseMove with buttons=0 and top half sets hoverIdx and hoverType='literal'."""
+    def test_mousemove_no_buttons_with_literal_tool_sets_literal_hover(self):
+        """MouseMove with buttons=0 and the 'literal' tool active sets hoverType='literal'."""
+        # Top/bottom half no longer determines hoverType; the active tool does.
+        # The default tool is 'literal'.
         event = make_mouse_move_event(5, buttons=0, top_half=True)
         model, _ = update(event, self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['hoverIdx'], 5)
+        self.assertEqual(model['hoverIdx'], _legacy_internal_index(5))
         self.assertEqual(model['hoverType'], 'literal')
 
-    def test_mousemove_no_buttons_bottom_half_sets_fuzzy_hover(self):
-        """MouseMove with buttons=0 and bottom half sets hoverType='fuzzy'."""
+    def test_mousemove_no_buttons_with_fuzzy_tool_sets_fuzzy_hover(self):
+        """MouseMove with buttons=0 and the 'fuzzy' tool active sets hoverType='fuzzy'."""
+        self.model['tool'] = 'fuzzy'
         event = make_mouse_move_event(5, buttons=0, top_half=False)
         model, _ = update(event, self.var_and_exp, self.model, self.value)
 
-        self.assertEqual(model['hoverIdx'], 5)
+        self.assertEqual(model['hoverIdx'], _legacy_internal_index(5))
         self.assertEqual(model['hoverType'], 'fuzzy')
 
     def test_mousedown_clears_hover_state(self):
@@ -4476,7 +4696,7 @@ class TestHoverPreview(unittest.TestCase):
         # First set hover state
         event = make_mouse_move_event(5, buttons=0, top_half=True)
         model, _ = update(event, self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['hoverIdx'], 5)
+        self.assertEqual(model['hoverIdx'], _legacy_internal_index(5))
 
         # MouseDown should clear it
         event = make_mouse_down_event(5, top_half=True)
@@ -4500,72 +4720,204 @@ class TestHoverPreview(unittest.TestCase):
 
     # --- Rendering tests ---
 
-    def test_visualize_shows_hover_border_top_for_literal(self):
-        """visualize() renders border-top on hovered char when hoverType='literal'."""
+    def test_visualize_shows_hover_class_for_literal(self):
+        """visualize() adds the 'hover' CSS class to the hovered char-span (CSS supplies the border)."""
         model = init_model(self.value)
-        model['hoverIdx'] = 5  # 'l' in "hello" (internal index)
+        model['hoverIdx'] = 4  # 'l' in "hello" (new internal index)
         model['hoverType'] = 'literal'
 
         html_output = visualize(self.value, model, None, None)
 
-        # The hovered char should have a blue top border (literal style)
-        # Extract the span for index 5
-        self.assertIn('border-top', html_output)
-        # Check the blue literal color is present on border
-        self.assertIn('#00aeff', html_output)
+        # The hovered char-span gets the 'hover' class.
+        self.assertIn('class="char-span hover"', html_output)
+        # Border styling is now done in CSS, not inline.
+        self.assertNotIn('border-top', html_output)
 
-    def test_visualize_shows_hover_border_bottom_for_fuzzy(self):
-        """visualize() renders border-bottom on hovered char when hoverType='fuzzy'."""
+    def test_visualize_shows_hover_class_for_fuzzy(self):
+        """Hover for fuzzy uses the same 'hover' class (CSS distinguishes via hoverType state)."""
         model = init_model(self.value)
-        model['hoverIdx'] = 5
-        model['hoverType'] = 'fuzzy'
-
-        html_output = visualize(self.value, model, None, None)
-
-        # The hovered char should have a gray bottom border (fuzzy style)
-        self.assertIn('border-bottom', html_output)
-        self.assertIn('#868686', html_output)
-
-    def test_hover_does_not_affect_highlighted_char(self):
-        """If char is already in a selected segment, hover border style does not duplicate."""
-        model = init_model(self.value)
-        model['search'] = '/(hello)/'
-        # Hover on index 4 which is inside the 'hello' literal segment
         model['hoverIdx'] = 4
         model['hoverType'] = 'fuzzy'
 
         html_output = visualize(self.value, model, None, None)
 
-        # The highlighted char should still have literal border-top (from the selection),
-        # not the fuzzy border-bottom from the hover. Count occurrences of border-bottom
-        # with the fuzzy color - there should be none since 'hello' is literal.
-        # The hover should not add its own border to an already-highlighted char.
-        # (All chars in 'hello' have border-top from the literal segment)
-        # We verify by checking that no span has BOTH border-top and border-bottom
-        # Actually, simpler: count border-bottom with #868686 - should be 0
-        # because the only hover char is inside the literal segment.
-        import re as _re
-        # Find spans with MouseMove(4) and check they don't have fuzzy border
-        spans = _re.findall(r'<span[^>]*snc-mouse-move="MouseMove\(4\)"[^>]*style="([^"]*)"', html_output)
-        for style in spans:
-            self.assertNotIn('#868686', style)
+        self.assertIn('class="char-span hover"', html_output)
+        self.assertNotIn('border-bottom', html_output)
 
-    def test_hover_border_has_left_and_right_borders(self):
-        """Hover preview on a single char shows left and right borders too."""
+    def test_hover_does_not_affect_highlighted_char(self):
+        """If a char is already in a selected segment, the .hover class is not applied to it."""
         model = init_model(self.value)
-        model['hoverIdx'] = 5
+        model['search'] = r"r'(hello)'"
+        # Hover on index 3 which is inside the 'hello' literal segment (new index space).
+        model['hoverIdx'] = 3
+        model['hoverType'] = 'fuzzy'
+
+        html_output = visualize(self.value, model, None, None)
+
+        import re as _re
+        m = _re.search(r'<span class="char-span-container" snc-mouse="3"[^>]*><span class="([^"]+)"', html_output)
+        self.assertIsNotNone(m)
+        # Already highlighted; should not also get the standalone hover class.
+        self.assertNotIn('hover', m.group(1).split())
+        self.assertIn('highlight', m.group(1).split())
+
+    def test_hover_char_span_has_hover_class(self):
+        """Hover preview wraps the hovered char-span with the 'hover' class.
+
+        The visual border (left/right/top/bottom) is supplied by CSS rules
+        targeting the .hover class instead of inline style attributes.
+        """
+        model = init_model(self.value)
+        model['hoverIdx'] = 4
         model['hoverType'] = 'literal'
 
         html_output = visualize(self.value, model, None, None)
 
-        # Extract the inner span's style (borders live on the nested span inside snc-mouse="5")
         import re as _re
-        inner_spans = _re.findall(r'<span snc-mouse="5"[^>]*><span style="([^"]*)"', html_output)
-        self.assertTrue(len(inner_spans) > 0, "Should find inner span inside snc-mouse=5")
-        style = inner_spans[0]
-        self.assertIn('border-left', style)
-        self.assertIn('border-right', style)
-        self.assertIn('border-top', style)
+        m = _re.search(r'<span class="char-span-container" snc-mouse="4"[^>]*><span class="([^"]+)"', html_output)
+        self.assertIsNotNone(m, "Should find inner char-span inside snc-mouse=4")
+        self.assertIn('hover', m.group(1).split())
+
+
+class TestRegexAnchorClass(unittest.TestCase):
+    """In effective index mode the visualizer should hide regex anchors (^/$)
+    but keep escape-sequence displays (\\n, \\t) visible, since those represent
+    real characters in the string. The Python side tags only the anchor
+    chars with `is-regex-anchor`; the CSS targets only that class for the
+    index-mode hide rule, so escape displays remain visible.
+    """
+
+    def _classes_at(self, html_output: str, mouse_index: int):
+        import re as _re
+        m = _re.search(
+            rf'<span class="char-span-container[^"]*" snc-mouse="{mouse_index}"[^>]*>'
+            rf'<span class="([^"]+)"',
+            html_output,
+        )
+        self.assertIsNotNone(m, f"Should find char-span at index {mouse_index}")
+        return m.group(1).split()
+
+    def _container_classes_at(self, html_output: str, mouse_index: int):
+        """Return the wrapper container's class list at the given internal index."""
+        import re as _re
+        m = _re.search(
+            rf'<span class="([^"]+)" snc-mouse="{mouse_index}"',
+            html_output,
+        )
+        self.assertIsNotNone(m, f"Should find char-span-container at index {mouse_index}")
+        return m.group(1).split()
+
+    def test_string_start_caret_has_is_regex_anchor(self):
+        """The leading ^ at internal index 0 gets `is-regex-anchor`."""
+        value = "hi"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        classes = self._classes_at(html_output, 0)
+        self.assertIn('is-special', classes)
+        self.assertIn('is-regex-anchor', classes)
+
+    def test_string_end_dollar_has_is_regex_anchor(self):
+        """The trailing $ gets `is-regex-anchor`."""
+        value = "hi"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        end_index = compute_internal_length(value) - 1
+        classes = self._classes_at(html_output, end_index)
+        self.assertIn('is-special', classes)
+        self.assertIn('is-regex-anchor', classes)
+
+    def test_synth_dollar_before_newline_has_is_regex_anchor(self):
+        """The synthesized $ rendered before a \\n display gets `is-regex-anchor`."""
+        value = "a\nb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        classes = self._classes_at(html_output, 2)
+        self.assertIn('is-special', classes)
+        self.assertIn('is-regex-anchor', classes)
+
+    def test_synth_caret_after_newline_has_is_regex_anchor(self):
+        """The synthesized ^ rendered after a \\n display gets `is-regex-anchor`."""
+        value = "a\nb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        classes = self._classes_at(html_output, 4)
+        self.assertIn('is-special', classes)
+        self.assertIn('is-regex-anchor', classes)
+
+    def test_newline_display_is_special_but_not_anchor(self):
+        """The \\n escape display is `is-special` but NOT `is-regex-anchor`."""
+        value = "a\nb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        classes = self._classes_at(html_output, 3)
+        self.assertIn('is-special', classes)
+        self.assertNotIn('is-regex-anchor', classes)
+
+    def test_tab_display_is_special_but_not_anchor(self):
+        """The \\t escape display is `is-special` but NOT `is-regex-anchor`."""
+        value = "a\tb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        classes = self._classes_at(html_output, 2)
+        self.assertIn('is-special', classes)
+        self.assertNotIn('is-regex-anchor', classes)
+
+    def test_container_for_anchor_carries_is_regex_anchor(self):
+        """The wrapper for ^/$ also carries is-regex-anchor so CSS can collapse
+        it (display:none) in index mode and the \\n display sits flush at the
+        end of its line."""
+        value = "a\nb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        # Synth $ before \n (index 2) and synth ^ after \n (index 4)
+        for idx in (0, 2, 4, 6):  # ^, synth $, synth ^, $
+            container_classes = self._container_classes_at(html_output, idx)
+            self.assertIn(
+                'is-regex-anchor', container_classes,
+                f"container at {idx} should carry is-regex-anchor",
+            )
+
+    def test_container_for_escape_display_lacks_is_regex_anchor(self):
+        """Containers for \\n / \\t escape displays must NOT carry is-regex-anchor
+        (otherwise they'd be collapsed in index mode)."""
+        for value, escape_idx in [("a\nb", 3), ("a\tb", 2)]:
+            model = init_model(value)
+            html_output = visualize(value, model, None, None)
+            container_classes = self._container_classes_at(html_output, escape_idx)
+            self.assertNotIn(
+                'is-regex-anchor', container_classes,
+                f"container at {escape_idx} for value {value!r} should NOT carry is-regex-anchor",
+            )
+
+    def test_caret_anchors_carry_is_anchor_start(self):
+        """Both string-start ^ and synthesized ^ after \\n carry is-anchor-start
+        (not is-anchor-end). The CSS keeps these visibility:hidden in index
+        mode so the string doesn't shift left."""
+        value = "a\nb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        for idx in (0, 4):  # ^ at string start, synth ^ after \n
+            container_classes = self._container_classes_at(html_output, idx)
+            inner_classes = self._classes_at(html_output, idx)
+            self.assertIn('is-anchor-start', container_classes)
+            self.assertNotIn('is-anchor-end', container_classes)
+            self.assertIn('is-anchor-start', inner_classes)
+            self.assertNotIn('is-anchor-end', inner_classes)
+
+    def test_dollar_anchors_carry_is_anchor_end(self):
+        """Both synthesized $ before \\n and string-end $ carry is-anchor-end
+        (not is-anchor-start). The CSS collapses these (display:none) in index
+        mode so \\n displays sit flush with the end of their line."""
+        value = "a\nb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        for idx in (2, 6):  # synth $ before \n, $ at string end
+            container_classes = self._container_classes_at(html_output, idx)
+            inner_classes = self._classes_at(html_output, idx)
+            self.assertIn('is-anchor-end', container_classes)
+            self.assertNotIn('is-anchor-start', container_classes)
+            self.assertIn('is-anchor-end', inner_classes)
+            self.assertNotIn('is-anchor-start', inner_classes)
 
 
 # =============================================================================
@@ -4619,9 +4971,9 @@ class TestTextGrouping(unittest.TestCase):
         in a single snc-text-start span, not 5 individual snc-mouse spans."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
-        self.assertIn('snc-text-start="2"', output)
+        self.assertIn('snc-text-start="1"', output)
         import re as _re
-        individual_plain = _re.findall(r'snc-mouse="[2-6]"', output)
+        individual_plain = _re.findall(r'snc-mouse="[1-5]"', output)
         self.assertEqual(len(individual_plain), 0,
                          "Plain chars should not have individual snc-mouse spans")
 
@@ -4629,20 +4981,20 @@ class TestTextGrouping(unittest.TestCase):
         """The grouped span's text content should contain the full plain text."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
-        self.assertIn('snc-text-start="2"', output)
+        self.assertIn('snc-text-start="1"', output)
         import re as _re
-        match = _re.search(r'<span snc-text-start="2"[^>]*>([^<]+)</span>', output)
-        self.assertIsNotNone(match, "Should find grouped span starting at index 2")
+        match = _re.search(r'<span [^>]*snc-text-start="1"[^>]*>([^<]+)</span>', output)
+        self.assertIsNotNone(match, "Should find grouped span starting at index 1")
         self.assertEqual(match.group(1), "hello")
 
     def test_special_chars_always_individual_spans(self):
         """Prefix/suffix markers and \\n/\\t always get individual snc-mouse spans."""
         model = init_model("a\nb")
         output = visualize("a\nb", model, None, None)
-        import re as _re
+        # Prefix anchor (^) at internal index 0.
         self.assertIn('snc-mouse="0"', output)
-        self.assertIn('snc-mouse="1"', output)
-        for special_idx in [3, 4, 5]:
+        # Newline expands to multiple individual char spans.
+        for special_idx in [2, 3, 4]:
             self.assertIn(f'snc-mouse="{special_idx}"', output,
                           f"Newline expansion index {special_idx} should be individual span")
 
@@ -4650,16 +5002,16 @@ class TestTextGrouping(unittest.TestCase):
         """'ab\\ncd' should produce groups for 'ab' and 'cd', with \\n chars individual."""
         model = init_model("ab\ncd")
         output = visualize("ab\ncd", model, None, None)
-        self.assertIn('snc-text-start="2"', output)
-        self.assertIn('snc-text-start="7"', output)
+        self.assertIn('snc-text-start="1"', output)
+        self.assertIn('snc-text-start="6"', output)
 
     def test_group_flushes_at_tab(self):
         """'ab\\tcd' should produce groups for 'ab' and 'cd', with \\t individual."""
         model = init_model("ab\tcd")
         output = visualize("ab\tcd", model, None, None)
-        self.assertIn('snc-text-start="2"', output)
-        self.assertIn('snc-text-start="5"', output)
-        self.assertIn('snc-mouse="4"', output)
+        self.assertIn('snc-text-start="1"', output)
+        self.assertIn('snc-text-start="4"', output)
+        self.assertIn('snc-mouse="3"', output)
 
     def test_hover_breaks_group(self):
         """When hoverIdx points to a plain char, that char gets its own span
@@ -4669,16 +5021,16 @@ class TestTextGrouping(unittest.TestCase):
         model['hoverType'] = 'literal'
         output = visualize("hello", model, None, None)
         self.assertIn('snc-mouse="4"', output)
-        self.assertIn('snc-text-start="2"', output)
+        self.assertIn('snc-text-start="1"', output)
         self.assertIn('snc-text-start="5"', output)
 
     def test_highlight_breaks_group(self):
         """Highlighted chars get individual spans; surrounding plain chars are grouped."""
         model = init_model("hello world")
-        model['search'] = '/(hello)/'
+        model['search'] = r"r'(hello)'"
         output = visualize("hello world", model, None, None)
         import re as _re
-        for idx in range(2, 7):
+        for idx in range(1, 6):
             self.assertIn(f'snc-mouse="{idx}"', output,
                           f"Highlighted char at index {idx} should be individual span")
         self.assertIn('snc-text-start=', output)
@@ -4689,15 +5041,15 @@ class TestTextGrouping(unittest.TestCase):
         output = visualize("ab\tcd", model, None, None)
         import re as _re
         starts = _re.findall(r'snc-text-start="(\d+)"', output)
-        self.assertIn('2', starts, "First group should start at index 2")
-        self.assertIn('5', starts, "Second group should start at index 5")
+        self.assertIn('1', starts, "First group should start at index 1")
+        self.assertIn('4', starts, "Second group should start at index 4")
 
     def test_html_escape_in_grouped_span(self):
         """Characters like < and & are HTML-escaped inside grouped spans."""
         model = init_model("a<b")
         output = visualize("a<b", model, None, None)
         import re as _re
-        match = _re.search(r'<span snc-text-start="2"[^>]*>(.*?)</span>', output)
+        match = _re.search(r'<span [^>]*snc-text-start="1"[^>]*>(.*?)</span>', output)
         self.assertIsNotNone(match)
         self.assertIn('&lt;', match.group(1))
 
@@ -4705,7 +5057,7 @@ class TestTextGrouping(unittest.TestCase):
         """Even a single plain char between specials should use grouped span."""
         model = init_model("\na\n")
         output = visualize("\na\n", model, None, None)
-        self.assertIn('snc-text-start="5"', output)
+        self.assertIn('snc-text-start="4"', output)
 
     def test_empty_string_no_grouped_spans(self):
         """An empty string should have no snc-text-start spans."""
@@ -4713,14 +5065,14 @@ class TestTextGrouping(unittest.TestCase):
         output = visualize("", model, None, None)
         self.assertNotIn('snc-text-start', output)
 
-    def test_grouped_span_has_letter_spacing(self):
-        """Grouped spans should have letter-spacing:1px for consistent spacing."""
+    def test_grouped_span_uses_text_group_class(self):
+        """Grouped spans use the string-visualizer-text-group class for shared styling."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
         import re as _re
-        match = _re.search(r'<span snc-text-start="2"[^>]*style="([^"]*)"', output)
+        match = _re.search(r'<span ([^>]*)snc-text-start="1"', output)
         self.assertIsNotNone(match)
-        self.assertIn('letter-spacing:1px', match.group(1))
+        self.assertIn('string-visualizer-text-group', match.group(1))
 
 
 # =============================================================================
@@ -4734,35 +5086,35 @@ class TestIsFirstMatchMode(unittest.TestCase):
         self.assertFalse(is_first_match_mode(None))
 
     def test_many_match_default(self):
-        self.assertFalse(is_first_match_mode('/hello/'))
+        self.assertFalse(is_first_match_mode(r"r'hello'"))
 
     def test_first_match_with_1_postfix(self):
-        self.assertTrue(is_first_match_mode('/hello/1'))
+        self.assertTrue(is_first_match_mode(r"r'hello'1"))
 
     def test_complex_pattern_many_match(self):
-        self.assertFalse(is_first_match_mode('/hello.*world/'))
+        self.assertFalse(is_first_match_mode(r"r'hello.*world'"))
 
     def test_complex_pattern_first_match(self):
-        self.assertTrue(is_first_match_mode('/hello.*world/1'))
+        self.assertTrue(is_first_match_mode(r"r'hello.*world'1"))
 
     def test_empty_pattern_not_first_match(self):
-        self.assertFalse(is_first_match_mode('//'))
+        self.assertFalse(is_first_match_mode(r"r''"))
 
     def test_empty_pattern_first_match(self):
-        self.assertTrue(is_first_match_mode('//1'))
+        self.assertTrue(is_first_match_mode(r"r''1"))
 
 
 class TestGetRegexInnerPatternWithPostfix(unittest.TestCase):
     """Test get_regex_inner_pattern strips /1 postfix correctly."""
 
     def test_many_match_pattern(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'"), 'hello')
 
     def test_first_match_pattern_strips_1(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/1'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'1"), 'hello')
 
     def test_complex_first_match(self):
-        self.assertEqual(get_regex_inner_pattern('/hello.*world/1'), 'hello.*world')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello.*world'1"), 'hello.*world')
 
     def test_none_returns_none(self):
         self.assertIsNone(get_regex_inner_pattern(None))
@@ -4778,17 +5130,17 @@ class TestFirstMatchToggle(unittest.TestCase):
 
     def test_toggle_from_many_to_first(self):
         """Toggling from many-match adds /1 postfix."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_first_match_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/1')
+        self.assertEqual(model['search'], r"r'hello'1")
 
     def test_toggle_from_first_to_many(self):
         """Toggling from first-match removes /1 postfix."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         model, _ = update(make_first_match_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
     def test_toggle_with_no_search_creates_bare_flags(self):
         """Toggling with no search creates bare backtick form with flag."""
@@ -4805,20 +5157,20 @@ class TestFirstMatchToggle(unittest.TestCase):
 
     def test_toggle_saves_undo(self):
         """Toggling saves to undo history."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_first_match_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertIn('/hello/', model['undoHistory'])
+        self.assertIn(r"r'hello'", model['undoHistory'])
 
     def test_double_toggle_roundtrip(self):
         """Toggling twice returns to original state."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_first_match_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/1')
+        self.assertEqual(model['search'], r"r'hello'1")
         model, _ = update(make_first_match_toggle_event(),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
 
 class TestManyMatchHighlighting(unittest.TestCase):
@@ -4827,7 +5179,7 @@ class TestManyMatchHighlighting(unittest.TestCase):
     def test_many_match_highlights_all_occurrences(self):
         """Many-match mode should return highlights for all matches."""
         value = "abc abc abc"
-        highlights = parse_regex_for_highlighting('/abc/', value)
+        highlights = parse_regex_for_highlighting(r"r'abc'", value)
         match_starts = [h[0] for h in highlights]
         self.assertGreater(len(match_starts), 1,
                            "Many-match should highlight more than one occurrence")
@@ -4835,7 +5187,7 @@ class TestManyMatchHighlighting(unittest.TestCase):
     def test_first_match_highlights_only_first(self):
         """First-match mode should return highlights for only the first match."""
         value = "abc abc abc"
-        highlights = parse_regex_for_highlighting('/abc/1', value)
+        highlights = parse_regex_for_highlighting(r"r'abc'1", value)
         match_count = len(set(h[0] for h in highlights))
         self.assertEqual(match_count, 1,
                          "First-match should highlight only one occurrence")
@@ -4845,14 +5197,14 @@ class TestManyMatchHighlighting(unittest.TestCase):
         value = "ab ab"
         # "ab" appears at string positions 0-2 and 3-5
         # Internal indices: +2 offset, so first "ab" at 2-4, second at 5-7
-        highlights = parse_regex_for_highlighting('/ab/', value)
+        highlights = parse_regex_for_highlighting(r"r'ab'", value)
         starts = sorted(set(h[0] for h in highlights))
         self.assertEqual(len(starts), 2, "Should find two 'ab' matches")
 
     def test_many_match_with_fuzzy_pattern(self):
         """Many-match with fuzzy pattern highlights multiple matches."""
         value = "12 34 56"
-        highlights = parse_regex_for_highlighting(r'/\d+/', value)
+        highlights = parse_regex_for_highlighting(r"r'\d+'", value)
         starts = sorted(set(h[0] for h in highlights))
         self.assertGreaterEqual(len(starts), 3,
                                 "Should find three digit groups")
@@ -4860,7 +5212,7 @@ class TestManyMatchHighlighting(unittest.TestCase):
     def test_many_match_no_matches(self):
         """Many-match with no matches returns empty."""
         value = "hello world"
-        highlights = parse_regex_for_highlighting('/xyz/', value)
+        highlights = parse_regex_for_highlighting(r"r'xyz'", value)
         self.assertEqual(len(highlights), 0)
 
 
@@ -4874,7 +5226,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
 
     def test_many_match_enter_generates_finditer(self):
         """Default many-match Enter generates list(re.finditer(...))."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -4884,7 +5236,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
 
     def test_first_match_enter_generates_search(self):
         """First-match Enter generates re.search(...)."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -4895,7 +5247,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
 
     def test_first_match_enter_with_complex_pattern(self):
         """First-match Enter with grouped pattern uses re.search."""
-        self.model['search'] = '/(hello)(.*)(world)/1'
+        self.model['search'] = r"r'(hello)(.*)(world)'1"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -4913,7 +5265,7 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
 
     def test_many_match_backspace_generates_sub(self):
         """Default many-match Backspace generates re.sub without count."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -4924,7 +5276,7 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
 
     def test_first_match_backspace_generates_sub_with_count(self):
         """First-match Backspace generates re.sub with count=1."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -4935,52 +5287,63 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
 
 
 class TestFirstMatchToggleRendering(unittest.TestCase):
-    """Test that the '1st' toggle button renders in the search box."""
+    """Test that the first-match toggle button renders in the search box.
 
-    first_button_html = '1<span style="font-size: 8px; vertical-align: 3px; display: inline-block; margin-top: -1em;">st</span>'
+    The button is now icon-only (no '1st' text label), so we identify it by
+    its FirstMatchToggle event handler.
+    """
 
     def test_toggle_button_present(self):
-        """The '1st' toggle button should be present in the search box HTML."""
-        model = init_model("hello world")
-        output = visualize("hello world", model, None, None)
-        self.assertIn(self.first_button_html, output)
-
-    def test_toggle_button_inactive_by_default(self):
-        """The toggle should appear inactive (not highlighted) by default."""
+        """The first-match toggle button should be present in the search box HTML."""
         model = init_model("hello world")
         output = visualize("hello world", model, None, None)
         self.assertIn('FirstMatchToggle', output)
 
-    def test_toggle_button_active_when_first_match(self):
-        """The toggle should appear active when in first-match mode."""
+    def test_toggle_button_inactive_by_default(self):
+        """The toggle should be marked inactive by default (no /1 flag)."""
         model = init_model("hello world")
-        model['search'] = '/hello/1'
         output = visualize("hello world", model, None, None)
-        self.assertIn(self.first_button_html, output)
+        self.assertIn('FirstMatchToggle', output)
+        # In the search-button block surrounding FirstMatchToggle, the inactive class is applied by default.
+        import re as _re
+        m = _re.search(r'<span class="search-button (\w+)" snc-mouse-down="FirstMatchToggle', output)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), 'inactive')
+
+    def test_toggle_button_active_when_first_match(self):
+        """The toggle should be marked active when search has /1 flag."""
+        model = init_model("hello world")
+        model['search'] = r"r'hello'1"
+        output = visualize("hello world", model, None, None)
+        import re as _re
+        m = _re.search(r'<span class="search-button (\w+)" snc-mouse-down="FirstMatchToggle', output)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), 'active')
 
     def test_toggle_hidden_when_small(self):
         """The toggle should be hidden when small=True (no search box)."""
         model = init_model("hello world")
         output = visualize("hello world", model, None, None, small=True)
-        self.assertNotIn(self.first_button_html, output)
+        self.assertNotIn('FirstMatchToggle', output)
 
 
 class TestSearchBoxValueWithPostfix(unittest.TestCase):
     """Test that the search box displays the full value including /1 postfix."""
 
     def test_search_box_shows_postfix(self):
-        """The search box value should include the /1 postfix when in first-match mode."""
+        """The search box value should include the 1 postfix when in first-match mode."""
+        import html as html_mod
         model = init_model("hello world")
-        model['search'] = '/hello/1'
+        model['search'] = r"r'hello'1"
         output = visualize("hello world", model, None, None)
-        self.assertIn('/hello/1', output)
+        self.assertIn(html_mod.escape(r"r'hello'1"), output)
 
     def test_search_box_input_preserves_postfix(self):
-        """Typing /hello/1 in the search box sets first-match mode."""
+        """Typing r'hello'1 in the search box sets first-match mode."""
         model = init_model("hello world")
-        model, _ = update(make_search_box_input_event('/hello/1'),
+        model, _ = update(make_search_box_input_event(r"r'hello'1"),
                           ('x', 'x'), model, "hello world")
-        self.assertEqual(model['search'], '/hello/1')
+        self.assertEqual(model['search'], r"r'hello'1")
         self.assertTrue(is_first_match_mode(model['search']))
 
 
@@ -5008,26 +5371,26 @@ class TestGetSearchFlags(unittest.TestCase):
     """Test get_search_flags helper that extracts postfix flags."""
 
     def test_no_flags(self):
-        self.assertEqual(get_search_flags('/hello/'), '')
+        self.assertEqual(get_search_flags(r"r'hello'"), '')
 
     def test_first_match_flag(self):
-        self.assertEqual(get_search_flags('/hello/1'), '1')
+        self.assertEqual(get_search_flags(r"r'hello'1"), '1')
 
     def test_case_insensitive_flag(self):
-        self.assertEqual(get_search_flags('/hello/i'), 'i')
+        self.assertEqual(get_search_flags(r"r'hello'i"), 'i')
 
     def test_combined_flags_1i(self):
-        self.assertEqual(get_search_flags('/hello/1i'), '1i')
+        self.assertEqual(get_search_flags(r"r'hello'1i"), '1i')
 
     def test_combined_flags_i1(self):
-        self.assertEqual(get_search_flags('/hello/i1'), 'i1')
+        self.assertEqual(get_search_flags(r"r'hello'i1"), 'i1')
 
     def test_none_returns_empty(self):
         self.assertEqual(get_search_flags(None), '')
 
     def test_pattern_with_slash(self):
-        """Slash inside pattern doesn't confuse flag extraction."""
-        self.assertEqual(get_search_flags('/a\\/b/i'), 'i')
+        """Slash inside the regex pattern doesn't confuse flag extraction."""
+        self.assertEqual(get_search_flags(r"r'a\/b'i"), 'i')
 
 
 class TestIsCaseInsensitive(unittest.TestCase):
@@ -5037,57 +5400,58 @@ class TestIsCaseInsensitive(unittest.TestCase):
         self.assertFalse(is_case_insensitive(None))
 
     def test_no_flag_is_case_sensitive(self):
-        self.assertFalse(is_case_insensitive('/hello/'))
+        self.assertFalse(is_case_insensitive(r"r'hello'"))
 
     def test_i_flag_is_case_insensitive(self):
-        self.assertTrue(is_case_insensitive('/hello/i'))
+        self.assertTrue(is_case_insensitive(r"r'hello'i"))
 
     def test_1i_flag_is_case_insensitive(self):
-        self.assertTrue(is_case_insensitive('/hello/1i'))
+        self.assertTrue(is_case_insensitive(r"r'hello'1i"))
 
     def test_1_flag_only_is_case_sensitive(self):
-        self.assertFalse(is_case_insensitive('/hello/1'))
+        self.assertFalse(is_case_insensitive(r"r'hello'1"))
 
 
 class TestGetRegexInnerPatternWithFlags(unittest.TestCase):
     """Test get_regex_inner_pattern strips all postfix flags."""
 
     def test_no_flags(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'"), 'hello')
 
     def test_1_flag(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/1'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'1"), 'hello')
 
     def test_i_flag(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/i'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'i"), 'hello')
 
     def test_1i_flags(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/1i'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'1i"), 'hello')
 
     def test_i1_flags(self):
-        self.assertEqual(get_regex_inner_pattern('/hello/i1'), 'hello')
+        self.assertEqual(get_regex_inner_pattern(r"r'hello'i1"), 'hello')
 
     def test_pattern_with_slash(self):
-        self.assertEqual(get_regex_inner_pattern('/a\\/b/i'), 'a\\/b')
+        """Slash inside the regex pattern is preserved verbatim."""
+        self.assertEqual(get_regex_inner_pattern(r"r'a\/b'i"), r'a\/b')
 
 
 class TestIsFirstMatchModeWithCombinedFlags(unittest.TestCase):
     """Test is_first_match_mode works with combined flag postfixes."""
 
     def test_1_flag(self):
-        self.assertTrue(is_first_match_mode('/hello/1'))
+        self.assertTrue(is_first_match_mode(r"r'hello'1"))
 
     def test_1i_flag(self):
-        self.assertTrue(is_first_match_mode('/hello/1i'))
+        self.assertTrue(is_first_match_mode(r"r'hello'1i"))
 
     def test_i1_flag(self):
-        self.assertTrue(is_first_match_mode('/hello/i1'))
+        self.assertTrue(is_first_match_mode(r"r'hello'i1"))
 
     def test_i_flag_only(self):
-        self.assertFalse(is_first_match_mode('/hello/i'))
+        self.assertFalse(is_first_match_mode(r"r'hello'i"))
 
     def test_no_flags(self):
-        self.assertFalse(is_first_match_mode('/hello/'))
+        self.assertFalse(is_first_match_mode(r"r'hello'"))
 
 
 class TestCaseSensitiveToggle(unittest.TestCase):
@@ -5100,31 +5464,31 @@ class TestCaseSensitiveToggle(unittest.TestCase):
 
     def test_toggle_to_case_insensitive(self):
         """Toggling from case-sensitive adds i flag."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/i')
+        self.assertEqual(model['search'], r"r'hello'i")
 
     def test_toggle_to_case_sensitive(self):
         """Toggling from case-insensitive removes i flag."""
-        self.model['search'] = '/hello/i'
+        self.model['search'] = r"r'hello'i"
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
     def test_toggle_preserves_first_match_flag(self):
         """Toggling case preserves the 1 flag."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/1i')
+        self.assertEqual(model['search'], r"r'hello'1i")
 
     def test_toggle_off_preserves_first_match_flag(self):
         """Toggling case off with 1 flag preserves 1."""
-        self.model['search'] = '/hello/1i'
+        self.model['search'] = r"r'hello'1i"
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/1')
+        self.assertEqual(model['search'], r"r'hello'1")
 
     def test_toggle_with_no_search_creates_bare_flags(self):
         """Toggling with no search creates bare backtick form with i flag."""
@@ -5140,19 +5504,19 @@ class TestCaseSensitiveToggle(unittest.TestCase):
         self.assertIsNone(model['search'])
 
     def test_toggle_saves_undo(self):
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertIn('/hello/', model['undoHistory'])
+        self.assertIn(r"r'hello'", model['undoHistory'])
 
     def test_double_toggle_roundtrip(self):
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/i')
+        self.assertEqual(model['search'], r"r'hello'i")
         model, _ = update(make_case_sensitive_toggle_event(),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello/')
+        self.assertEqual(model['search'], r"r'hello'")
 
 
 class TestCaseInsensitiveHighlighting(unittest.TestCase):
@@ -5161,21 +5525,21 @@ class TestCaseInsensitiveHighlighting(unittest.TestCase):
     def test_case_insensitive_matches_different_cases(self):
         """Case-insensitive search highlights all case variants."""
         value = "Hello hello HELLO"
-        highlights = parse_regex_for_highlighting('/hello/i', value)
+        highlights = parse_regex_for_highlighting(r"r'hello'i", value)
         starts = sorted(set(h[0] for h in highlights))
         self.assertEqual(len(starts), 3, "Should match all three 'hello' variants")
 
     def test_case_sensitive_matches_exact_case_only(self):
         """Case-sensitive search only matches exact case."""
         value = "Hello hello HELLO"
-        highlights = parse_regex_for_highlighting('/hello/', value)
+        highlights = parse_regex_for_highlighting(r"r'hello'", value)
         starts = sorted(set(h[0] for h in highlights))
         self.assertEqual(len(starts), 1, "Should match only exact 'hello'")
 
     def test_case_insensitive_first_match(self):
         """Case-insensitive + first-match highlights only first case variant."""
         value = "Hello hello HELLO"
-        highlights = parse_regex_for_highlighting('/hello/1i', value)
+        highlights = parse_regex_for_highlighting(r"r'hello'1i", value)
         match_count = len(set(h[0] for h in highlights))
         self.assertEqual(match_count, 1, "First-match should highlight only one")
 
@@ -5190,7 +5554,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
 
     def test_case_sensitive_enter_no_re_I(self):
         """Case-sensitive Enter should NOT include re.I in flags."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5199,7 +5563,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
 
     def test_case_insensitive_enter_has_re_I(self):
         """Case-insensitive Enter should include re.I in flags."""
-        self.model['search'] = '/hello/i'
+        self.model['search'] = r"r'hello'i"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5209,7 +5573,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
 
     def test_case_insensitive_first_match_enter(self):
         """Case-insensitive + first-match Enter uses re.search with re.I."""
-        self.model['search'] = '/hello/1i'
+        self.model['search'] = r"r'hello'1i"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5228,7 +5592,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
         self.var_and_exp = ('x', 'x')
 
     def test_case_sensitive_backspace_no_re_I(self):
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5236,7 +5600,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
         self.assertNotIn('re.I', expr)
 
     def test_case_insensitive_backspace_has_re_I(self):
-        self.model['search'] = '/hello/i'
+        self.model['search'] = r"r'hello'i"
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5246,7 +5610,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
 
     def test_case_insensitive_first_match_backspace(self):
         """Case-insensitive + first-match Backspace uses count=1 and re.I."""
-        self.model['search'] = '/hello/1i'
+        self.model['search'] = r"r'hello'1i"
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5256,23 +5620,29 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
 
 
 class TestCaseSensitiveToggleRendering(unittest.TestCase):
-    """Test that the 'Aa' toggle button renders in the search box."""
+    """Test that the case-sensitive toggle button renders in the search box.
+
+    The button is now icon-only (the literal 'Aa' label was replaced with an
+    SVG glyph), so we identify it by its CaseSensitiveToggle event handler.
+    """
 
     def test_aa_button_present(self):
         model = init_model("hello")
         output = visualize("hello", model, None, None)
-        self.assertIn('Aa', output)
+        self.assertIn('CaseSensitiveToggle', output)
 
     def test_aa_button_active_by_default(self):
-        """Aa should be highlighted (active) by default = case-sensitive."""
+        """Toggle should be marked as the case-sensitive active state by default."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
         self.assertIn('CaseSensitiveToggle', output)
+        # The active class is applied to the button when case-sensitive (the default).
+        self.assertIn('search-button active', output)
 
     def test_aa_button_hidden_when_small(self):
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True)
-        self.assertNotIn('Aa', output)
+        self.assertNotIn('CaseSensitiveToggle', output)
 
 
 # =============================================================================
@@ -5291,19 +5661,19 @@ class TestIsCaptureGroupsMode(unittest.TestCase):
     """Test the is_capture_groups_mode flag checker."""
 
     def test_c_flag_present(self):
-        self.assertTrue(is_capture_groups_mode('/hello/c'))
+        self.assertTrue(is_capture_groups_mode(r"r'hello'c"))
 
     def test_c_flag_absent(self):
-        self.assertFalse(is_capture_groups_mode('/hello/'))
+        self.assertFalse(is_capture_groups_mode(r"r'hello'"))
 
     def test_c_with_other_flags(self):
-        self.assertTrue(is_capture_groups_mode('/hello/1ic'))
+        self.assertTrue(is_capture_groups_mode(r"r'hello'1ic"))
 
     def test_none_returns_false(self):
         self.assertFalse(is_capture_groups_mode(None))
 
     def test_no_flags(self):
-        self.assertFalse(is_capture_groups_mode('/hello/'))
+        self.assertFalse(is_capture_groups_mode(r"r'hello'"))
 
 
 class TestEnsureAllGroups(unittest.TestCase):
@@ -5311,23 +5681,23 @@ class TestEnsureAllGroups(unittest.TestCase):
 
     def test_ungrouped_becomes_grouped(self):
         """Canonical /hello.*world/ becomes /(hello)(.*)(world)/."""
-        self.assertEqual(ensure_all_groups('/hello.*world/'), '/(hello)(.*)(world)/')
+        self.assertEqual(ensure_all_groups(r"r'hello.*world'"), r"r'(hello)(.*)(world)'")
 
     def test_already_grouped_unchanged(self):
         """Already fully-grouped regex is unchanged."""
-        self.assertEqual(ensure_all_groups('/(hello)(.*)(world)/'), '/(hello)(.*)(world)/')
+        self.assertEqual(ensure_all_groups(r"r'(hello)(.*)(world)'"), r"r'(hello)(.*)(world)'")
 
     def test_single_literal(self):
         """Single literal gets grouped."""
-        self.assertEqual(ensure_all_groups('/hello/'), '/(hello)/')
+        self.assertEqual(ensure_all_groups(r"r'hello'"), r"r'(hello)'")
 
     def test_preserves_flags(self):
         """Flags are preserved after re-grouping."""
-        self.assertEqual(ensure_all_groups('/hello.*world/1i'), '/(hello)(.*)(world)/1i')
+        self.assertEqual(ensure_all_groups(r"r'hello.*world'1i"), r"r'(hello)(.*)(world)'1i")
 
     def test_preserves_c_flag(self):
         """The c flag is preserved."""
-        self.assertEqual(ensure_all_groups('/hello.*world/c'), '/(hello)(.*)(world)/c')
+        self.assertEqual(ensure_all_groups(r"r'hello.*world'c"), r"r'(hello)(.*)(world)'c")
 
     def test_none_returns_none(self):
         self.assertIsNone(ensure_all_groups(None))
@@ -5338,8 +5708,8 @@ class TestEnsureAllGroups(unittest.TestCase):
 
     def test_adjacent_literals_grouped(self):
         """Adjacent literals that canonicalize normally get fully grouped."""
-        result = ensure_all_groups('/(hello)(world)/')
-        self.assertEqual(result, '/(hello)(world)/')
+        result = ensure_all_groups(r"r'(hello)(world)'")
+        self.assertEqual(result, r"r'(hello)(world)'")
 
 
 class TestCaptureGroupsToggle(unittest.TestCase):
@@ -5352,33 +5722,33 @@ class TestCaptureGroupsToggle(unittest.TestCase):
 
     def test_toggle_on_adds_c_flag_and_groups(self):
         """Toggling on adds 'c' flag and fully groups the pattern."""
-        self.model['search'] = '/hello.*world/'
+        self.model['search'] = r"r'hello.*world'"
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, self.model, self.value)
         self.assertIn('c', get_search_flags(model['search']))
-        self.assertEqual(model['search'], '/(hello)(.*)(world)/c')
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'c")
 
     def test_toggle_off_removes_c_flag_and_canonicalizes(self):
         """Toggling off removes 'c' flag and re-canonicalizes."""
-        self.model['search'] = '/(hello)(.*)(world)/c'
+        self.model['search'] = r"r'(hello)(.*)(world)'c"
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, self.model, self.value)
         self.assertNotIn('c', get_search_flags(model['search']))
-        self.assertEqual(model['search'], '/hello.*world/')
+        self.assertEqual(model['search'], r"r'hello.*world'")
 
     def test_toggle_preserves_other_flags(self):
         """Toggling c preserves existing i and 1 flags."""
-        self.model['search'] = '/hello/1i'
+        self.model['search'] = r"r'hello'1i"
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/(hello)/1ic')
+        self.assertEqual(model['search'], r"r'(hello)'1ic")
 
     def test_toggle_off_preserves_other_flags(self):
         """Toggling c off preserves i and 1 flags."""
-        self.model['search'] = '/(hello)/1ic'
+        self.model['search'] = r"r'(hello)'1ic"
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/hello/1i')
+        self.assertEqual(model['search'], r"r'hello'1i")
 
     def test_toggle_with_no_search_does_nothing(self):
         model, _ = update(make_capture_groups_toggle_event(),
@@ -5386,19 +5756,19 @@ class TestCaptureGroupsToggle(unittest.TestCase):
         self.assertIsNone(model['search'])
 
     def test_toggle_saves_undo(self):
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertIn('/hello/', model['undoHistory'])
+        self.assertIn(r"r'hello'", model['undoHistory'])
 
     def test_double_toggle_roundtrip(self):
-        self.model['search'] = '/hello.*world/'
+        self.model['search'] = r"r'hello.*world'"
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, self.model, self.value)
-        self.assertEqual(model['search'], '/(hello)(.*)(world)/c')
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'c")
         model, _ = update(make_capture_groups_toggle_event(),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], '/hello.*world/')
+        self.assertEqual(model['search'], r"r'hello.*world'")
 
 
 class TestCaptureGroupsToggleRendering(unittest.TestCase):
@@ -5420,7 +5790,7 @@ class TestCaptureGroupsFlagAwareSegmentFunctions(unittest.TestCase):
 
     def test_append_segment_preserves_flags(self):
         """append_segment_to_regex with flags doesn't corrupt the pattern."""
-        result = append_segment_to_regex('/hello/1i', 'literal', 'world')
+        result = append_segment_to_regex(r"r'hello'1i", 'literal', 'world')
         self.assertIn('hello', result)
         self.assertIn('world', result)
         self.assertIn('1i', get_search_flags(result))
@@ -5429,21 +5799,21 @@ class TestCaptureGroupsFlagAwareSegmentFunctions(unittest.TestCase):
 
     def test_append_segment_with_c_flag_groups_all(self):
         """append_segment_to_regex with 'c' flag produces fully-grouped result."""
-        result = append_segment_to_regex('/hello/c', 'fuzzy', '.*')
+        result = append_segment_to_regex(r"r'hello'c", 'fuzzy', '.*')
         self.assertIn('c', get_search_flags(result))
         inner = get_regex_inner_pattern(result)
         self.assertTrue(inner.startswith('('), f"Expected grouped inner, got: {inner}")
 
     def test_replace_segment_pattern_preserves_flags(self):
         """replace_segment_pattern with flags doesn't corrupt the pattern."""
-        result = replace_segment_pattern('/(hello)(\\s*)/1i', 0, r'\d')
+        result = replace_segment_pattern(r"r'(hello)(\s*)'1i", 0, r'\d')
         self.assertIn('1i', get_search_flags(result))
         inner = get_regex_inner_pattern(result)
         self.assertNotIn('/', inner)
 
     def test_replace_segment_repetition_preserves_flags(self):
         """replace_segment_repetition with flags doesn't corrupt the pattern."""
-        result = replace_segment_repetition('/(hello)(\\s*)/1i', 1, '+')
+        result = replace_segment_repetition(r"r'(hello)(\s*)'1i", 1, '+')
         self.assertIn('1i', get_search_flags(result))
         inner = get_regex_inner_pattern(result)
         self.assertNotIn('/', inner)
@@ -5451,14 +5821,14 @@ class TestCaptureGroupsFlagAwareSegmentFunctions(unittest.TestCase):
     def test_resize_literal_preserves_flags(self):
         """resize_literal_segment with flags doesn't corrupt the pattern."""
         value = "hello world"
-        result = resize_literal_segment('/(hello)/1i', 0, value, _legacy_internal_index(2), _legacy_internal_index(7))
+        result = resize_literal_segment(r"r'(hello)'1i", 0, value, _legacy_internal_index(2), _legacy_internal_index(7))
         self.assertIn('1i', get_search_flags(result))
         inner = get_regex_inner_pattern(result)
         self.assertNotIn('/', inner)
 
     def test_canonicalize_preserves_adjacent_literal_groups_with_c_flag(self):
         """When c flag is on, all groups are kept after canonicalize."""
-        result = append_segment_to_regex('/(hello)(.*)/c', 'literal', 'world')
+        result = append_segment_to_regex(r"r'(hello)(.*)'c", 'literal', 'world')
         self.assertIn('c', get_search_flags(result))
         inner = get_regex_inner_pattern(result)
         self.assertEqual(inner.count('('), inner.count(')'))
@@ -5475,7 +5845,7 @@ class TestCaptureGroupsCodeGeneration(unittest.TestCase):
 
     def test_enter_with_c_flag_preserves_groups_in_code(self):
         """Enter with 'c' flag generates code with capture groups."""
-        self.model['search'] = '/(hello)(.*)(world)/c'
+        self.model['search'] = r"r'(hello)(.*)(world)'c"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5485,7 +5855,7 @@ class TestCaptureGroupsCodeGeneration(unittest.TestCase):
 
     def test_enter_without_c_flag_strips_groups(self):
         """Enter without 'c' flag strips capture groups from code."""
-        self.model['search'] = '/(hello)(.*)(world)/'
+        self.model['search'] = r"r'(hello)(.*)(world)'"
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -5503,7 +5873,7 @@ class TestCaptureGroupsBuildPreviewRegex(unittest.TestCase):
         model = init_model(value)
         var_and_exp = ('x', 'x')
 
-        model['search'] = '/(hello)/c'
+        model['search'] = r"r'(hello)'c"
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
 
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
@@ -5524,10 +5894,11 @@ class TestFindClosingDelimiter(unittest.TestCase):
     """Test _find_closing_delimiter for regex and string searches."""
 
     def test_regex(self):
-        self.assertEqual(_find_closing_delimiter('/hello/'), 7)
+        # r'hello' is 8 chars; closing ' is at index 7, function returns one past.
+        self.assertEqual(_find_closing_delimiter(r"r'hello'"), 8)
 
     def test_regex_with_flags(self):
-        self.assertEqual(_find_closing_delimiter('/hello/1i'), 7)
+        self.assertEqual(_find_closing_delimiter(r"r'hello'1i"), 8)
 
     def test_single_quote(self):
         self.assertEqual(_find_closing_delimiter("'hello'"), 7)
@@ -5575,7 +5946,8 @@ class TestFindClosingDelimiter(unittest.TestCase):
         self.assertEqual(_find_closing_delimiter("''"), 2)
 
     def test_empty_regex(self):
-        self.assertEqual(_find_closing_delimiter('//'), 2)
+        # r'' is 3 chars: r ' '
+        self.assertEqual(_find_closing_delimiter(r"r''"), 3)
 
     def test_triple_quote_with_single_inside(self):
         self.assertEqual(_find_closing_delimiter("'''it's'''"), 10)
@@ -5590,7 +5962,7 @@ class TestFindClosingDelimiter(unittest.TestCase):
 
 class TestIsRegexSearch(unittest.TestCase):
     def test_regex(self):
-        self.assertTrue(is_regex_search('/hello/'))
+        self.assertTrue(is_regex_search(r"r'hello'"))
 
     def test_string(self):
         self.assertFalse(is_regex_search("'hello'"))
@@ -5617,11 +5989,12 @@ class TestEvalStringSearch(unittest.TestCase):
     def test_triple_quote(self):
         self.assertEqual(eval_string_search("'''hello'''"), "hello")
 
-    def test_raw_string(self):
-        self.assertEqual(eval_string_search(r"r'\n'"), r"\n")
+    def test_raw_string_treated_as_regex(self):
+        # r'..' now parses as a regex search, not a string literal.
+        self.assertIsNone(eval_string_search(r"r'\n'"))
 
     def test_regex_returns_none(self):
-        self.assertIsNone(eval_string_search("/hello/"))
+        self.assertIsNone(eval_string_search(r"r'hello'"))
 
     def test_none_returns_none(self):
         self.assertIsNone(eval_string_search(None))
@@ -5637,10 +6010,10 @@ class TestGetSearchFlagsWithStrings(unittest.TestCase):
     """Test get_search_flags works for both regex and string searches."""
 
     def test_regex_no_flags(self):
-        self.assertEqual(get_search_flags('/hello/'), '')
+        self.assertEqual(get_search_flags(r"r'hello'"), '')
 
     def test_regex_flags(self):
-        self.assertEqual(get_search_flags('/hello/1i'), '1i')
+        self.assertEqual(get_search_flags(r"r'hello'1i"), '1i')
 
     def test_string_no_flags(self):
         self.assertEqual(get_search_flags("'hello'"), '')
@@ -5916,13 +6289,13 @@ class TestParseSearchTerm(unittest.TestCase):
 
     # --- regex ---
     def test_regex_no_flags(self):
-        self.assertEqual(parse_search_term('/hello/'), ('regex', 'hello', ''))
+        self.assertEqual(parse_search_term(r"r'hello'"), ('regex', 'hello', ''))
 
     def test_regex_with_flags(self):
-        self.assertEqual(parse_search_term('/hello/1i'), ('regex', 'hello', '1i'))
+        self.assertEqual(parse_search_term(r"r'hello'1i"), ('regex', 'hello', '1i'))
 
     def test_regex_complex_pattern(self):
-        self.assertEqual(parse_search_term(r'/(\d+)\s+/i'), ('regex', r'(\d+)\s+', 'i'))
+        self.assertEqual(parse_search_term(r"r'(\d+)\s+'i"), ('regex', r'(\d+)\s+', 'i'))
 
     # --- string ---
     def test_string_no_flags(self):
@@ -6245,7 +6618,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_regex_replace_many_match(self):
         """Regex search + replacement produces list comprehension."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6256,7 +6629,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_regex_replace_first_match(self):
         """Regex search + first-match generates next(...)."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6268,7 +6641,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_regex_replace_case_insensitive(self):
         """Regex search + case-insensitive includes re.M|re.I."""
-        self.model['search'] = '/hello/i'
+        self.model['search'] = r"r'hello'i"
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6322,7 +6695,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_caret_translates_to_match_var(self):
         """^ in replace expression translates to mtch in list comprehension."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6332,7 +6705,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_backtick_wrapped_expression(self):
         """Backtick-wrapped replace expression is unwrapped and ^ translated."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_text'] = "`^[0].upper()`"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6342,7 +6715,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_caret_method_call(self):
         """^ with method call: ^.group(1) -> mtch.group(1) in comprehension."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_text'] = "^.group(1)"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6352,7 +6725,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_arbitrary_code_accepted(self):
         """Any non-empty replace text is accepted as Python code."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_text'] = 'some_func(^[0])'
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6362,7 +6735,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_empty_replace_text_does_nothing(self):
         """Enter with empty replace text in replace mode falls back to Get."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_text'] = None
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
@@ -6373,7 +6746,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
 
     def test_replace_visible_false_does_extract(self):
         """Enter with replace_visible=False generates extract code."""
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_visible'] = False
         self.model['replace_text'] = "'world'"
         _, commands = update(make_key_down_event('Enter'),
@@ -6439,11 +6812,12 @@ class TestReplaceBoxVisualize(unittest.TestCase):
         self.assertIn('ReplaceBoxInput', html)
 
     def test_replace_input_has_target_class(self):
-        """Replace input has snc-replace-input class for snc-add-target."""
+        """Replace input has the search-box-input-replace class used by snc-add-target."""
         model = init_model(self.value)
         model['replace_visible'] = True
         html = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('class="snc-replace-input"', html)
+        # The class is part of the search-box-input space-separated class list.
+        self.assertIn('search-box-input-replace', html)
 
     def test_replace_box_preserves_value(self):
         """Replace input preserves the current replace_text value."""
@@ -6504,7 +6878,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_get_button_non_replace(self):
@@ -6518,7 +6892,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
 
     def test_get_button_non_replace_first_match(self):
         """With 1st mode, Get produces re.search."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -6539,7 +6913,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
 
     def test_transform_button_first_match(self):
         """With 1st mode + replace, produces next(..., None)."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('find_or_map'),
@@ -6606,7 +6980,7 @@ class TestActionButtonReplace(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.model['replace_visible'] = True
         self.model['replace_text'] = "'world'"
         self.var_and_exp = ('x', 'x')
@@ -6622,7 +6996,7 @@ class TestActionButtonReplace(unittest.TestCase):
 
     def test_replace_button_first_match(self):
         """Replace with first-match includes count=1."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         _, commands = update(make_action_button_event('replace'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -6674,7 +7048,7 @@ class TestActionButtonDelete(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_delete_button(self):
@@ -6719,6 +7093,54 @@ class TestActionButtonDelete(unittest.TestCase):
         _, expr = commands[0]
         self.assertEqual(expr, "x.replace('hello', '')")
 
+    # --- Disabled in Pick mode / when replace box is open -------------------
+    # The Delete action mutates the source string. In Pick mode the user is
+    # composing an extraction expression (via segment chips) and in
+    # Replace-box-open mode they're composing a replacement; in both cases
+    # firing Delete would discard the in-progress work, so the button is
+    # dimmed and Cmd-Backspace is a no-op.
+
+    def test_delete_button_dimmed_in_pick_mode(self):
+        """Delete button is dimmed when Pick tool is active."""
+        self.model['tool'] = 'pick'
+        html_str = visualize(self.value, self.model, None, None)
+        self.assertRegex(
+            html_str,
+            r"snc-mouse-down=\"ActionButtonClick\(action=&#x27;delete&#x27;,[^\"]*\)\" class=\"action-button dimmed\"",
+        )
+
+    def test_delete_button_dimmed_when_replace_visible(self):
+        """Delete button is dimmed when the Replace box is open."""
+        self.model['replace_visible'] = True
+        html_str = visualize(self.value, self.model, None, None)
+        self.assertRegex(
+            html_str,
+            r"snc-mouse-down=\"ActionButtonClick\(action=&#x27;delete&#x27;,[^\"]*\)\" class=\"action-button dimmed\"",
+        )
+
+    def test_delete_button_enabled_in_default_mode(self):
+        """Delete button is NOT dimmed in literal mode with replace box closed."""
+        # Defaults: tool=literal, replace_visible=False, search set in setUp.
+        html_str = visualize(self.value, self.model, None, None)
+        self.assertRegex(
+            html_str,
+            r"snc-mouse-down=\"ActionButtonClick\(action=&#x27;delete&#x27;,[^\"]*\)\" class=\"action-button\"",
+        )
+
+    def test_cmd_backspace_no_op_in_pick_mode(self):
+        """Cmd-Backspace does NOT produce delete commands when Pick tool is active."""
+        self.model['tool'] = 'pick'
+        _, commands = update(make_key_down_event('Backspace', meta_key=True),
+                            self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+
+    def test_cmd_backspace_no_op_when_replace_visible(self):
+        """Cmd-Backspace does NOT produce delete commands when Replace box is open."""
+        self.model['replace_visible'] = True
+        _, commands = update(make_key_down_event('Backspace', meta_key=True),
+                            self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+
 
 # =============================================================================
 # Action Button: Loop Tests
@@ -6730,7 +7152,7 @@ class TestActionButtonLoop(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_loop_non_replace(self):
@@ -6782,7 +7204,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_match_strings_all(self):
@@ -6795,7 +7217,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
 
     def test_match_strings_first(self):
         """Match Strings in first-match mode produces next(iter(re.findall(...)), None)."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         _, commands = update(make_action_button_event('match_strings'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -6853,7 +7275,7 @@ class TestActionButtonLoopMatchStrings(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_loop_match_strings(self):
@@ -6893,7 +7315,7 @@ class TestActionButtonAny(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_any_non_replace(self):
@@ -6944,7 +7366,7 @@ class TestActionButtonAll(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_all_replace_mode(self):
@@ -6984,7 +7406,7 @@ class TestActionButtonIfAny(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_if_any_non_replace(self):
@@ -7031,7 +7453,7 @@ class TestActionButtonIfAll(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_if_all_replace_mode(self):
@@ -7075,7 +7497,7 @@ class TestActionButtonCount(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_count_non_replace(self):
@@ -7125,7 +7547,7 @@ class TestActionButtonFilter(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/\\w+/'
+        self.model['search'] = r"r'\w+'"
         self.model['replace_visible'] = True
         self.model['replace_text'] = "len(^[0]) > 4"
         self.var_and_exp = ('x', 'x')
@@ -7176,7 +7598,7 @@ class TestActionButtonFilter(unittest.TestCase):
 
     def test_filter_first_match(self):
         """Filter with first-match uses next(..., None)."""
-        self.model['search'] = '/\\w+/1'
+        self.model['search'] = r"r'\w+'1"
         _, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7195,7 +7617,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/\\w+/'
+        self.model['search'] = r"r'\w+'"
         self.var_and_exp = ('x', 'x')
 
     def test_find_indices_no_replace_generates_start_list(self):
@@ -7220,7 +7642,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
 
     def test_find_indices_first_match_no_replace(self):
         """Find Indices with first-match uses next(..., None)."""
-        self.model['search'] = '/\\w+/1'
+        self.model['search'] = r"r'\w+'1"
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7230,7 +7652,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
 
     def test_find_indices_first_match_with_replace(self):
         """Find Indices with first-match and replace uses next(..., None) with if."""
-        self.model['search'] = '/\\w+/1'
+        self.model['search'] = r"r'\w+'1"
         self.model['replace_visible'] = True
         self.model['replace_text'] = "len(^[0]) > 4"
         _, commands = update(make_action_button_event('find_indices'),
@@ -7279,7 +7701,7 @@ class TestActionButtonSplit(unittest.TestCase):
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
         self.var_and_exp = ('x', 'x')
 
     def test_split_regex(self):
@@ -7293,7 +7715,7 @@ class TestActionButtonSplit(unittest.TestCase):
 
     def test_split_first_match(self):
         """Split with first-match uses maxsplit=1."""
-        self.model['search'] = '/hello/1'
+        self.model['search'] = r"r'hello'1"
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7329,7 +7751,7 @@ class TestActionButtonSplit(unittest.TestCase):
 
     def test_split_case_insensitive(self):
         """Split with regex + case-insensitive."""
-        self.model['search'] = '/hello/i'
+        self.model['search'] = r"r'hello'i"
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7362,14 +7784,14 @@ class TestCountViaGrammar(unittest.TestCase):
 
     def test_regex_with_predicate(self):
         """Predicate filters: only count matches where predicate is truthy."""
-        model = {'search': '/\\w+/', 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
+        model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
         # "hi" (len 2, False), "world" (len 5, True), "hello" (len 5, True)
-        self.assertEqual(_eval_count_via_grammar('/\\w+/', "hi world hello", model, self.eis), 2)
+        self.assertEqual(_eval_count_via_grammar(r"r'\w+'", "hi world hello", model, self.eis), 2)
 
     def test_regex_without_predicate(self):
         """Without replace, count all matches."""
-        model = {'search': '/\\w+/'}
-        self.assertEqual(_eval_count_via_grammar('/\\w+/', "hi world hello", model, self.eis), 3)
+        model = {'search': r"r'\w+'"}
+        self.assertEqual(_eval_count_via_grammar(r"r'\w+'", "hi world hello", model, self.eis), 3)
 
     def test_string_search_with_predicate(self):
         """String search with predicate filters by truthy results."""
@@ -7379,15 +7801,15 @@ class TestCountViaGrammar(unittest.TestCase):
 
     def test_case_insensitive_with_predicate(self):
         """Case-insensitive search + predicate."""
-        model = {'search': '/hello/i', 'replace_visible': True, 'replace_text': '^.start() == 0'}
+        model = {'search': r"r'hello'i", 'replace_visible': True, 'replace_text': '^.start() == 0'}
         # "Hello hello HELLO" → matches at 0, 6, 12; start==0 is only first
-        self.assertEqual(_eval_count_via_grammar('/hello/i', "Hello hello HELLO", model, self.eis), 1)
+        self.assertEqual(_eval_count_via_grammar(r"r'hello'i", "Hello hello HELLO", model, self.eis), 1)
 
     def test_generates_same_code_as_button(self):
         """The count expression should be identical to what generate_action('count') produces."""
         from string_visualizer_grammar import generate_action
         from string_visualizer import replace_caret_in_py_exp
-        model = {'search': '/\\w+/', 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
+        model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
         ctx = {
             'source_expr': '_snc_v',
             'is_first': False, 'is_ci': False, 'is_expr': False,
@@ -7401,14 +7823,14 @@ class TestCountViaGrammar(unittest.TestCase):
         _, grammar_code = result
         _snc_v = "hi world hello"
         expected = eval(grammar_code)
-        actual = _eval_count_via_grammar('/\\w+/', _snc_v, model, self.eis)
+        actual = _eval_count_via_grammar(r"r'\w+'", _snc_v, model, self.eis)
         self.assertEqual(actual, expected)
 
     def test_no_search_returns_zero(self):
         self.assertEqual(_eval_count_via_grammar(None, "hello", {}, self.eis), 0)
 
     def test_no_value_returns_zero(self):
-        self.assertEqual(_eval_count_via_grammar('/x/', "", {'search': '/x/'}, self.eis), 0)
+        self.assertEqual(_eval_count_via_grammar(r"r'x'", "", {'search': r"r'x'"}, self.eis), 0)
 
 
 # =============================================================================
@@ -7416,16 +7838,53 @@ class TestCountViaGrammar(unittest.TestCase):
 # =============================================================================
 
 class TestActionButtonRendering(unittest.TestCase):
-    """Test that action buttons render correctly in visualize output."""
+    """Test that action buttons render correctly in visualize output.
+
+    The action-button row was rewritten in commit 11c2fbf1185:
+      - All buttons live in a `<span class="action-button">` (with the
+        ``dimmed`` class added when disabled — no more inline opacity).
+      - Find/Map/Substrs/Idxs/Replace/Delete/Filter/Split labels are now
+        the same regardless of first-match mode (the action handler treats
+        first-mode differently at click time).
+      - Loop and Any/All are hover dropdowns with always-rendered panels
+        (no openDropdown state needed to read the labels).
+      - Count shows ``Count: N`` instead of ``Count (N)``.
+    """
 
     def setUp(self):
         self.value = "hello world"
         self.var_and_exp = ('x', 'x')
 
+    # ---- Helpers --------------------------------------------------------------
+
+    def _action_btn_class(self, html_output, action):
+        """Return the class attribute of the top-level action button for `action`,
+        or None if the button is not present."""
+        import re as _re
+        m = _re.search(
+            rf'<span snc-mouse-down="ActionButtonClick\(action=&#x27;{action}&#x27;,'
+            rf' copy=False\)" class="([^"]+)"',
+            html_output,
+        )
+        return m.group(1) if m else None
+
+    def _dropdown_option_class(self, html_output, action):
+        """Return the class attribute of the predicate/loop dropdown row for
+        `action`, or None if the row is not present."""
+        import re as _re
+        m = _re.search(
+            rf'<div class="([^"]+)"><span snc-mouse-down="ActionButtonClick\(action=&#x27;{action}&#x27;,'
+            rf' copy=False\)"',
+            html_output,
+        )
+        return m.group(1) if m else None
+
+    # ---- Presence tests ------------------------------------------------------
+
     def test_buttons_present_non_small(self):
         """Action buttons render in non-small mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('ActionButtonClick', html_output)
         self.assertIn('find_or_map', html_output)
@@ -7434,389 +7893,298 @@ class TestActionButtonRendering(unittest.TestCase):
     def test_buttons_absent_small(self):
         """No action buttons in small mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400, small=True)
         self.assertNotIn('ActionButtonClick', html_output)
 
+    # ---- Labels --------------------------------------------------------------
+
     def test_get_label_changes_to_map_in_replace_mode(self):
-        """find_or_map label is 'Match Objs' until replace row is open, then 'Map Matches'."""
+        """find_or_map label is 'Match Objs' until the replace row is open, then 'Map Matches'."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_get = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Match&nbsp;Objs', html_get)
-        self.assertNotIn('Map&nbsp;Matches', html_get)
+        self.assertIn('Match Objs', html_get)
+        self.assertNotIn('Map Matches', html_get)
 
         model['replace_visible'] = True
         model['replace_text'] = "'world'"
         html_transform = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Map&nbsp;Matches', html_transform)
-        self.assertNotIn('Match&nbsp;Objs', html_transform)
+        self.assertIn('Map Matches', html_transform)
+        self.assertNotIn('Match Objs', html_transform)
 
-    def test_first_match_mode_labels(self):
-        """In first-match mode, buttons show singular labels."""
-        model = init_model(self.value)
-        model['search'] = '/hello/1'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('First Match', html_output)
-        self.assertNotIn('Find First Match', html_output)
-        self.assertIn('Replace First', html_output)
-        self.assertIn('Delete First', html_output)
-        self.assertIn('First Index', html_output)
-        self.assertNotIn('Find Indices', html_output)
+    def test_button_labels(self):
+        """Standard set of labels is present regardless of first-match mode."""
+        for search in (r"r'hello'", r"r'hello'1"):
+            model = init_model(self.value)
+            model['search'] = search
+            html_output = visualize(self.value, model, None, None, max_width=400)
+            for label in ('Match Objs', 'Substrs', 'Idxs', 'Loop',
+                          'Any/All', 'Delete', 'Split', 'Replace', 'Filter'):
+                self.assertIn(label, html_output, f"label {label!r} missing for search={search!r}")
 
-    def test_all_mode_labels(self):
-        """Without first-match flag, buttons show plural labels."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Find Matches', html_output)
-        self.assertIn('Match Strings', html_output)
-        self.assertIn('Replace All', html_output)
-        self.assertIn('Delete All', html_output)
-        self.assertIn('Find Indices', html_output)
+    # ---- Dimmed / enabled state for top-level buttons -------------------------
 
-    def test_match_strings_label_in_first_mode(self):
-        """In first-match mode, Match Strings becomes First Substring."""
-        model = init_model(self.value)
-        model['search'] = '/hello/1'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('First Substring', html_output)
-        self.assertNotIn('Match Strings', html_output)
+    def _assert_dimmed(self, html_output, action, msg=None):
+        cls = self._action_btn_class(html_output, action)
+        self.assertIsNotNone(cls, f"{action!r} button should be present")
+        self.assertIn('dimmed', cls.split(), msg or f"{action!r} should be dimmed")
 
-    def test_match_strings_before_find_matches(self):
-        """Match Strings button appears before Find Matches in the HTML."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        ms_pos = html_output.index('Match Strings')
-        fm_pos = html_output.index('Find Matches')
-        self.assertLess(ms_pos, fm_pos)
+    def _assert_not_dimmed(self, html_output, action, msg=None):
+        cls = self._action_btn_class(html_output, action)
+        self.assertIsNotNone(cls, f"{action!r} button should be present")
+        self.assertNotIn('dimmed', cls.split(), msg or f"{action!r} should be enabled")
 
     def test_match_strings_disabled_in_replace_mode(self):
-        """Match Strings button is disabled (grayed out) in replace mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model['replace_visible'] = True
         model['replace_text'] = "'world'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        ms_match = re_mod.search(r"action=&#x27;match_strings&#x27;.*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(ms_match)
-        self.assertIn('opacity: 0.35', ms_match.group(1))
+        self._assert_dimmed(html_output, 'match_strings')
 
     def test_match_strings_enabled_without_replace(self):
-        """Match Strings button is enabled when not in replace mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        ms_match = re_mod.search(r"action=&#x27;match_strings&#x27;.*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(ms_match)
-        self.assertNotIn('opacity: 0.35', ms_match.group(1))
-
-    def test_loop_dropdown_renders(self):
-        """Loop is a dropdown with 'Match Strings' and 'Matches' options when open."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        model['openDropdown'] = {'id': 'action-loop'}
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn("action=&#x27;loop_match_strings&#x27;", html_output)
-        self.assertIn("action=&#x27;loop&#x27;", html_output)
-
-    def test_loop_dropdown_closed_by_default(self):
-        """Loop dropdown is closed by default (no panel)."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Loop', html_output)
-        self.assertNotIn("action=&#x27;loop_match_strings&#x27;", html_output)
-
-    def test_loop_disabled_in_first_match_mode(self):
-        """Loop button is disabled in first-match mode."""
-        model = init_model(self.value)
-        model['search'] = '/hello/1'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Loop', html_output)
-        # Loop dropdown toggle should be disabled (opacity: 0.35)
-        import re as re_mod
-        loop_match = re_mod.search(r"DropdownToggle\(dropdown_id=&#x27;action-loop&#x27;\).*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(loop_match)
-        self.assertIn('opacity: 0.35', loop_match.group(1))
-
-    def test_loop_enabled_in_all_mode(self):
-        """Loop button is enabled in find-all mode."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        loop_match = re_mod.search(r"DropdownToggle\(dropdown_id=&#x27;action-loop&#x27;\).*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(loop_match)
-        self.assertNotIn('opacity: 0.35', loop_match.group(1))
-
-    def test_replace_button_grayed_when_no_replace(self):
-        """Replace button has low opacity when not in replace mode."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        # The replace button section should have opacity styling for disabled state
-        # Just check that the replace action reference exists but is styled as disabled
-        self.assertIn("action=&#x27;replace&#x27;", html_output)
+        self._assert_not_dimmed(html_output, 'match_strings')
 
     def test_filter_button_present(self):
-        """Filter button renders in the action bar."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Filter', html_output)
         self.assertIn("action=&#x27;filter&#x27;", html_output)
 
     def test_filter_button_grayed_when_no_replace(self):
-        """Filter button is grayed out when not in replace mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        filter_match = re_mod.search(r"action=&#x27;filter&#x27;[^>]*style=\"([^\"]*?)\"", html_output)
-        if not filter_match:
-            filter_match = re_mod.search(r"style=\"([^\"]*?)\"[^>]*>Filter", html_output)
-        self.assertIsNotNone(filter_match, "Filter button should be present")
-        style = filter_match.group(1)
-        self.assertIn('opacity: 0.35', style)
+        self._assert_dimmed(html_output, 'filter')
 
     def test_filter_button_enabled_with_replace(self):
-        """Filter button is enabled when replace mode is active."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model['replace_visible'] = True
         model['replace_text'] = "len(^[0]) > 3"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        filter_match = re_mod.search(r"style=\"([^\"]*?)\"[^>]*>Filter", html_output)
-        self.assertIsNotNone(filter_match, "Filter button should be present")
-        style = filter_match.group(1)
-        self.assertNotIn('opacity: 0.35', style)
+        self._assert_not_dimmed(html_output, 'filter')
 
     def test_find_indices_button_present(self):
-        """Find Indices button renders in the action bar."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Find Indices', html_output)
         self.assertIn("action=&#x27;find_indices&#x27;", html_output)
+        # Label is 'Idxs' in the new layout.
+        self.assertIn('Idxs', html_output)
 
     def test_find_indices_button_enabled_without_replace(self):
-        """Find Indices button is enabled even without replace mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        match = re_mod.search(r"style=\"([^\"]*?)\"[^>]*>Find Indices", html_output)
-        self.assertIsNotNone(match, "Find Indices button should be present")
-        style = match.group(1)
-        self.assertNotIn('opacity: 0.35', style)
+        self._assert_not_dimmed(html_output, 'find_indices')
+
+    def test_replace_button_grayed_when_no_replace(self):
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn("action=&#x27;replace&#x27;", html_output)
+        self._assert_dimmed(html_output, 'replace')
+
+    def test_split_enabled_when_replace_visible(self):
+        """Split now stays enabled regardless of the replace box state."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self._assert_not_dimmed(html_output, 'split')
+
+    def test_split_enabled_when_replace_hidden(self):
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = False
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self._assert_not_dimmed(html_output, 'split')
+
+    # ---- Count ---------------------------------------------------------------
 
     def test_count_shows_match_count(self):
-        """Count button text shows the number of matches."""
         model = init_model(self.value)
-        model['search'] = '/l/'
+        model['search'] = r"r'l'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         # 'hello world' has 3 'l' characters
-        self.assertIn('Count (3)', html_output)
+        self.assertIn('Count: 3', html_output)
 
     def test_count_uses_transform_result_when_predicate(self):
         """Count shows truthy transform results when transform/replace is present."""
         model = init_model("hello world hello")
-        model['search'] = '/\\w+/'
+        model['search'] = r"r'\w+'"
         model['replace_visible'] = True
         model['replace_text'] = "len(^[0]) > 4"
         html_output = visualize("hello world hello", model, None, eval, max_width=400)
-        # 'hello' (len 5 > 4 = True), 'world' (len 5 > 4 = True), 'hello' (len 5 > 4 = True)
-        self.assertIn('Count (3)', html_output)
+        self.assertIn('Count: 3', html_output)
 
     def test_count_uses_transform_result_filters_falsy(self):
         """Count with predicate transform only counts truthy results."""
         model = init_model("hi world hello")
-        model['search'] = '/\\w+/'
+        model['search'] = r"r'\w+'"
         model['replace_visible'] = True
         model['replace_text'] = "len(^[0]) > 3"
         html_output = visualize("hi world hello", model, None, eval, max_width=400)
-        # 'hi' (len 2 > 3 = False), 'world' (len 5 > 3 = True), 'hello' (len 5 > 3 = True)
-        self.assertIn('Count (2)', html_output)
+        self.assertIn('Count: 2', html_output)
 
     def test_count_without_transform_uses_match_count(self):
         """Count without transform still shows total match count."""
         model = init_model("hi world hello")
-        model['search'] = '/\\w+/'
+        model['search'] = r"r'\w+'"
         html_output = visualize("hi world hello", model, None, eval, max_width=400)
-        # 3 word matches
-        self.assertIn('Count (3)', html_output)
+        self.assertIn('Count: 3', html_output)
 
-    def test_question_mark_dropdown_grayed_when_no_search(self):
-        """? dropdown button is grayed out when there is no search pattern."""
+    def test_count_enabled_in_first_match_mode(self):
+        """Count is enabled even in first-match mode (was previously disabled)."""
+        model = init_model(self.value)
+        model['search'] = r"r'l'1"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self._assert_not_dimmed(html_output, 'count')
+
+    def test_count_enabled_in_all_mode(self):
+        model = init_model(self.value)
+        model['search'] = r"r'l'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self._assert_not_dimmed(html_output, 'count')
+
+    # ---- Loop dropdown -------------------------------------------------------
+
+    def test_loop_dropdown_renders_options(self):
+        """The Loop hover-dropdown panel always renders both options."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn("action=&#x27;loop_match_strings&#x27;", html_output)
+        self.assertIn("action=&#x27;loop&#x27;", html_output)
+        self.assertIn('Over matched strings', html_output)
+        self.assertIn('Over match objects', html_output)
+
+    def test_loop_disabled_in_first_match_mode(self):
+        """Loop trigger is dimmed in first-match mode."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'1"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as _re
+        # The Loop trigger is the snc-dropdown-trigger wrapper containing the Loop label.
+        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span class="action-button">[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>[^<]*<span class="text">Loop', html_output)
+        self.assertIsNotNone(m, "Loop trigger should be present")
+        self.assertIn('dimmed', m.group(1).split())
+
+    def test_loop_enabled_in_all_mode(self):
+        """Loop trigger is enabled in all-match mode."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as _re
+        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span class="action-button">[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>[^<]*<span class="text">Loop', html_output)
+        self.assertIsNotNone(m, "Loop trigger should be present")
+        self.assertNotIn('dimmed', m.group(1).split())
+
+    # ---- Any/All predicate dropdown -----------------------------------------
+
+    def test_predicate_dropdown_grayed_when_no_search(self):
+        """Any/All trigger is dimmed when there is no search pattern."""
         model = init_model(self.value)
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        q_span_match = re_mod.search(r'<span[^>]*style="([^"]*)"[^>]*title="Boolean queries"', html_output)
-        self.assertIsNotNone(q_span_match, "? button should be present")
-        style = q_span_match.group(1)
-        self.assertIn('opacity: 0.35', style)
-        self.assertIn('pointer-events: none', style)
+        import re as _re
+        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span class="action-button">[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>\s*<span class="text">Any/All', html_output)
+        self.assertIsNotNone(m, "Any/All trigger should be present")
+        self.assertIn('dimmed', m.group(1).split())
 
-    def test_question_mark_dropdown_not_grayed_with_search(self):
-        """? dropdown button is NOT grayed out when search is present."""
+    def test_predicate_dropdown_not_grayed_with_search(self):
+        """Any/All trigger is enabled when search is present."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        q_span_match = re_mod.search(r'<span[^>]*style="([^"]*)"[^>]*title="Boolean queries"', html_output)
-        self.assertIsNotNone(q_span_match, "? button should be present")
-        style = q_span_match.group(1)
-        self.assertNotIn('opacity: 0.35', style)
-
-    def test_question_mark_dropdown_renders(self):
-        """Predicate dropdown button is present in the action bar."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('action-predicate', html_output)
+        import re as _re
+        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span class="action-button">[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>\s*<span class="text">Any/All', html_output)
+        self.assertIsNotNone(m, "Any/All trigger should be present")
+        self.assertNotIn('dimmed', m.group(1).split())
 
     def test_any_shows_true_when_match_exists(self):
         """Any label shows (True) when search pattern matches."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
-        model['openDropdown'] = {'id': 'action-predicate'}
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Any (True)', html_output)
 
     def test_any_shows_false_when_no_match(self):
-        """Any label shows (False) when search pattern doesn't match."""
         model = init_model(self.value)
-        model['search'] = '/xyz/'
-        model['openDropdown'] = {'id': 'action-predicate'}
+        model['search'] = r"r'xyz'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Any (False)', html_output)
 
     def test_if_any_shows_true_when_match_exists(self):
-        """If Any label shows (True) when search pattern matches."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
-        model['openDropdown'] = {'id': 'action-predicate'}
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('If Any (True)', html_output)
 
     def test_if_any_shows_false_when_no_match(self):
-        """If Any label shows (False) when search pattern doesn't match."""
         model = init_model(self.value)
-        model['search'] = '/xyz/'
-        model['openDropdown'] = {'id': 'action-predicate'}
+        model['search'] = r"r'xyz'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('If Any (False)', html_output)
 
     def test_all_shows_preview_in_replace_mode(self):
         """All label shows (True)/(False) in replace mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
-        model['openDropdown'] = {'id': 'action-predicate'}
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('All (True)', html_output)
 
     def test_if_all_shows_preview_in_replace_mode(self):
-        """If All label shows (True)/(False) in replace mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
-        model['openDropdown'] = {'id': 'action-predicate'}
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('If All (True)', html_output)
 
     def test_all_no_preview_when_disabled(self):
-        """All label has no preview when not in replace mode (it's disabled)."""
+        """All has no (True/False) suffix when not in replace mode (it's disabled)."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
-        model['openDropdown'] = {'id': 'action-predicate'}
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertNotIn('All (True)', html_output)
         self.assertNotIn('All (False)', html_output)
 
-    def test_count_disabled_in_first_match_mode(self):
-        """Count button is disabled in first-match mode."""
-        model = init_model(self.value)
-        model['search'] = '/l/1'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        count_match = re_mod.search(r"action=&#x27;count&#x27;.*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(count_match, "Count button should be present")
-        self.assertIn('opacity: 0.35', count_match.group(1))
-
-    def test_count_enabled_in_all_mode(self):
-        """Count button is enabled in find-all mode."""
-        model = init_model(self.value)
-        model['search'] = '/l/'
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        count_match = re_mod.search(r"action=&#x27;count&#x27;.*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(count_match, "Count button should be present")
-        self.assertNotIn('opacity: 0.35', count_match.group(1))
-
     def test_all_disabled_in_first_match_mode(self):
-        """All option is disabled in first-match mode even with replace."""
+        """All option in the predicate panel is dimmed in first-match mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/1'
+        model['search'] = r"r'hello'1"
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
-        model['openDropdown'] = {'id': 'action-predicate'}
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        for m in re_mod.finditer(r'<div style="([^"]*)"[^>]*class="snc-dropdown-option"[^>]*>(.*?)</div>', html_output):
-            if "action=&#x27;all&#x27;" in m.group(2) and "if_all" not in m.group(2):
-                self.assertIn('opacity: 0.35', m.group(1))
-                return
-        self.fail("All dropdown row not found")
+        cls = self._dropdown_option_class(html_output, 'all')
+        self.assertIsNotNone(cls, "All dropdown row should be present")
+        self.assertIn('dimmed', cls.split())
 
     def test_if_all_disabled_in_first_match_mode(self):
-        """If All option is disabled in first-match mode even with replace."""
+        """If All option in the predicate panel is dimmed in first-match mode."""
         model = init_model(self.value)
-        model['search'] = '/hello/1'
+        model['search'] = r"r'hello'1"
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
-        model['openDropdown'] = {'id': 'action-predicate'}
         html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        for m in re_mod.finditer(r'<div style="([^"]*)"[^>]*class="snc-dropdown-option"[^>]*>(.*?)</div>', html_output):
-            if "action=&#x27;if_all&#x27;" in m.group(2):
-                self.assertIn('opacity: 0.35', m.group(1))
-                return
-        self.fail("If All dropdown row not found")
+        cls = self._dropdown_option_class(html_output, 'if_all')
+        self.assertIsNotNone(cls, "If All dropdown row should be present")
+        self.assertIn('dimmed', cls.split())
 
-    def test_split_disabled_when_replace_visible(self):
-        """Split button is disabled when the replace box is open."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        model['replace_visible'] = True
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        split_match = re_mod.search(r"action=&#x27;split&#x27;.*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(split_match, "Split button should be present")
-        self.assertIn('opacity: 0.35', split_match.group(1))
-
-    def test_split_enabled_when_replace_hidden(self):
-        """Split button is enabled when the replace box is closed."""
-        model = init_model(self.value)
-        model['search'] = '/hello/'
-        model['replace_visible'] = False
-        html_output = visualize(self.value, model, None, None, max_width=400)
-        import re as re_mod
-        split_match = re_mod.search(r"action=&#x27;split&#x27;.*?style=\"(.*?)\"", html_output)
-        self.assertIsNotNone(split_match, "Split button should be present")
-        self.assertNotIn('opacity: 0.35', split_match.group(1))
+    # ---- Update behaviour ----------------------------------------------------
 
     def test_dropdown_closes_on_action_button_click(self):
         """Predicate dropdown closes when an action button is clicked."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
         model['openDropdown'] = {'id': 'action-predicate'}
@@ -7836,12 +8204,12 @@ class TestTransformPreview(unittest.TestCase):
         self.value = "hello world hello"
         self.model = init_model(self.value)
         self.model['replace_visible'] = True
-        self.model['search'] = '/hello/'
+        self.model['search'] = r"r'hello'"
 
     def test_no_preview_when_replace_hidden(self):
         """No preview labels when replace_visible is False."""
         model = init_model(self.value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertNotIn('^[0]', html_output)
         self.assertNotIn('^.start()', html_output)
@@ -7854,7 +8222,7 @@ class TestTransformPreview(unittest.TestCase):
 
     def test_no_preview_when_no_matches(self):
         """No preview when search matches nothing."""
-        self.model['search'] = '/zzzzz/'
+        self.model['search'] = r"r'zzzzz'"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
         self.assertNotIn('^[0]', html_output)
 
@@ -7873,38 +8241,40 @@ class TestTransformPreview(unittest.TestCase):
         self.assertIn(html_mod.escape(repr('hello')), html_output)
 
     def test_no_row2_without_replace_text(self):
-        """No transform result row when replace_text is empty."""
+        """No transform-result content when replace_text is empty."""
         html_output = visualize(self.value, self.model, None, None, max_width=400)
         self.assertIn('^[0]', html_output)
-        self.assertNotIn('Transform:', html_output)
+        self.assertNotIn('transform-preview-content', html_output)
 
     def test_row2_shows_transform_result(self):
-        """Row 2 shows STR => RESULT for a valid transform expression."""
+        """The transform-preview shows the evaluated result for a valid transform expression."""
         self.model['replace_text'] = "^[0].upper()"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertIn('Transform:', html_output)
+        self.assertIn('transform-preview-content', html_output)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('HELLO')), html_output)
 
     def test_row2_shows_runtime_error(self):
-        """Row 2 shows the error message when the transform expression raises."""
+        """The transform-preview shows the error message when the expression raises."""
         self.model['replace_text'] = "1/0"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertIn('Transform:', html_output)
+        self.assertIn('transform-preview-content', html_output)
         self.assertIn('division by zero', html_output)
 
     def test_row2_shows_syntax_error(self):
-        """Row 2 shows error for an unparseable transform expression."""
+        """The transform-preview shows an error for an unparseable expression."""
         self.model['replace_text'] = "^[0] +"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertIn('Transform:', html_output)
+        self.assertIn('transform-preview-content', html_output)
 
     def test_truncates_long_repr(self):
         """repr values longer than 30 chars are truncated with ellipsis."""
         long_value = "abcdefghijklmnopqrstuvwxyz_extra"
         model = init_model(long_value)
         model['replace_visible'] = True
-        model['search'] = '/abcdefghijklmnopqrstuvwxyz_extra/'
+        # Use \w+ so the search box itself doesn't echo the long value back
+        # into the HTML and trip the substring assertion below.
+        model['search'] = r"r'\w+'"
         html_output = visualize(long_value, model, None, None, max_width=400)
         import html as html_mod
         full_repr = html_mod.escape(repr(long_value))
@@ -7935,15 +8305,15 @@ class TestTransformPreview(unittest.TestCase):
         """_render_transform_preview returns '' when search has no matches."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/zzzzz/'
+        model['search'] = r"r'zzzzz'"
         eis = lambda _c: eval(_c)
         result = _render_transform_preview(model, self.value, eis)
         self.assertEqual(result, '')
 
     def test_helper_returns_html_with_matches(self):
-        """_render_transform_preview returns non-empty HTML when there are matches."""
+        """_render_match_object_preview returns the chip row when there are matches."""
         eis = lambda _c: eval(_c)
-        result = _render_transform_preview(self.model, self.value, eis)
+        result = _render_match_object_preview(self.model, self.value, eis)
         self.assertIn('^[0]', result)
         self.assertIn('^.start()', result)
         self.assertIn('^.end()', result)
@@ -7959,38 +8329,38 @@ class TestTransformPreview(unittest.TestCase):
 
 
 class TestTransformPreviewCaptureGroups(unittest.TestCase):
-    """Test that capture groups show ^[1], ^[2] etc. in the transform preview."""
+    """Test that capture groups show ^[1], ^[2] etc. in the match-object preview."""
 
     def setUp(self):
         self.value = "hello world"
         self.eis = lambda _c: eval(_c)
 
     def test_groups_shown_when_regex_has_groups(self):
-        """Preview shows ^[1], ^[2] etc. when the regex has capture groups."""
+        """Match-object preview shows ^[1], ^[2] etc. when the regex has capture groups."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/(hello)(.*)(world)/'
-        result = _render_transform_preview(model, self.value, self.eis)
+        model['search'] = r"r'(hello)(.*)(world)'"
+        result = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('^[1]', result)
         self.assertIn('^[2]', result)
         self.assertIn('^[3]', result)
 
     def test_groups_shown_with_c_flag(self):
-        """Preview shows ^[1] etc. when 'c' flag makes groups explicit."""
+        """Match-object preview shows ^[1] etc. when 'c' flag makes groups explicit."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/(hello)(.*)(world)/c'
-        result = _render_transform_preview(model, self.value, self.eis)
+        model['search'] = r"r'(hello)(.*)(world)'c"
+        result = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('^[1]', result)
         self.assertIn('^[2]', result)
         self.assertIn('^[3]', result)
 
     def test_no_groups_for_ungrouped_regex(self):
-        """Preview does not show ^[1] when regex has no capture groups."""
+        """Match-object preview does not show ^[1] when regex has no capture groups."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/hello/'
-        result = _render_transform_preview(model, self.value, self.eis)
+        model['search'] = r"r'hello'"
+        result = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('^[0]', result)
         self.assertNotIn('^[1]', result)
 
@@ -7998,8 +8368,8 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         """The group preview values should match actual captured text."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/(hello)( )(world)/'
-        result = _render_transform_preview(model, self.value, self.eis)
+        model['search'] = r"r'(hello)( )(world)'"
+        result = _render_match_object_preview(model, self.value, self.eis)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('hello')), result)
         self.assertIn(html_mod.escape(repr(' ')), result)
@@ -8009,20 +8379,20 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         """All preview expression spans should have snc-add-at-cursor and snc-add-target."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/(hello)(.*)(world)/'
-        result = _render_transform_preview(model, self.value, self.eis)
+        model['search'] = r"r'(hello)(.*)(world)'"
+        result = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('snc-add-at-cursor="^[0]"', result)
         self.assertIn('snc-add-at-cursor="^[1]"', result)
         self.assertIn('snc-add-at-cursor="^.start()"', result)
         self.assertIn('snc-add-at-cursor="^.end()"', result)
-        self.assertIn('snc-add-target=".snc-replace-input"', result)
+        self.assertIn('snc-add-target=".search-box-input-replace"', result)
 
     def test_no_groups_still_has_add_at_cursor(self):
         """Preview spans have snc-add-at-cursor even without capture groups."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/hello/'
-        result = _render_transform_preview(model, self.value, self.eis)
+        model['search'] = r"r'hello'"
+        result = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('snc-add-at-cursor="^[0]"', result)
         self.assertIn('snc-add-at-cursor="^.start()"', result)
 
@@ -8031,14 +8401,14 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = '0'
-        result = _render_transform_preview(model, self.value, self.eis)
+        result = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('snc-add-at-cursor="^"', result)
 
     def test_transform_preview_uses_capture_groups(self):
         """Transform ^[2] should resolve correctly when groups exist."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/(hello)( )(world)/'
+        model['search'] = r"r'(hello)( )(world)'"
         model['replace_text'] = '^[2]'
         result = _render_transform_preview(model, self.value, self.eis)
         import html as html_mod
@@ -8049,7 +8419,7 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         """Transform using ^[1].upper() should not error when groups exist."""
         model = init_model(self.value)
         model['replace_visible'] = True
-        model['search'] = '/(hello)( )(world)/'
+        model['search'] = r"r'(hello)( )(world)'"
         model['replace_text'] = '^[1].upper()'
         result = _render_transform_preview(model, self.value, self.eis)
         import html as html_mod
@@ -8092,7 +8462,7 @@ class TestIsSliceSearch(unittest.TestCase):
         self.assertFalse(is_slice_search("'a:b'"))
 
     def test_regex_with_colon(self):
-        self.assertFalse(is_slice_search('/a:b/'))
+        self.assertFalse(is_slice_search(r"r'a:b'"))
 
     def test_dict_literal_not_slice(self):
         self.assertFalse(is_slice_search("{'a':1}"))
@@ -8202,8 +8572,9 @@ class TestIndexSearchHighlighting(unittest.TestCase):
         value = "hello"
         highlights = parse_regex_for_highlighting('idx', value, eval_in_scope=eis)
         self.assertEqual(len(highlights), 1)
-        self.assertEqual(highlights[0][0], 4)
-        self.assertEqual(highlights[0][1], 5)
+        # idx=2 selects 'l' (third char), at internal index 3 in the new layout.
+        self.assertEqual(highlights[0][0], _legacy_internal_index(4))
+        self.assertEqual(highlights[0][1], _legacy_internal_index(5))
 
     def test_segment_index_is_none(self):
         """Index search highlights should be display-only (segment_index=None)."""
@@ -8246,20 +8617,22 @@ class TestSliceSearchHighlighting(unittest.TestCase):
         highlights = parse_regex_for_highlighting('3:3', value, eval_in_scope=lambda c: eval(c))
         self.assertEqual(len(highlights), 0)
 
-    def test_segment_index_is_none(self):
-        """Slice search highlights should be display-only."""
+    def test_segment_index_is_zero(self):
+        """Slice highlights now have segment_index=0 (interactive) so the
+        visualizer can render left/right resize handles like literal segments."""
         value = "hello world"
         highlights = parse_regex_for_highlighting('0:5', value, eval_in_scope=lambda c: eval(c))
         if highlights:
-            self.assertIsNone(highlights[0][5])
+            self.assertEqual(highlights[0][5], 0)
 
     def test_stop_only_internal_positions(self):
-        """':3' on 'hello' highlights internal indices 2,3,4 (the first 3 chars)."""
+        """':3' on 'hello' highlights internal indices for the first 3 chars."""
         value = "hello"
         highlights = parse_regex_for_highlighting(':3', value, eval_in_scope=lambda c: eval(c))
         self.assertEqual(len(highlights), 1)
-        self.assertEqual(highlights[0][0], 2)
-        self.assertEqual(highlights[0][1], 5)
+        # In the new layout, visible chars start at internal index 1 (no \A anchor).
+        self.assertEqual(highlights[0][0], _legacy_internal_index(2))
+        self.assertEqual(highlights[0][1], _legacy_internal_index(5))
 
     def test_negative_start(self):
         """'-3:' on 'hello' highlights last 3 chars."""
@@ -8286,11 +8659,11 @@ class TestIndexSliceTransformPreview(unittest.TestCase):
         self.assertNotIn('^[0]', html_output)
 
     def test_index_preview_shows_caret(self):
-        """Index search preview should show ^ => the matched character."""
+        """Index search match-object preview should show ^ => the matched character."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = '0'
-        html_output = _render_transform_preview(model, self.value, self.eis)
+        html_output = _render_match_object_preview(model, self.value, self.eis)
         self.assertIn('^', html_output)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('h')), html_output)
@@ -8327,25 +8700,29 @@ class TestIndexSliceTransformPreview(unittest.TestCase):
 
 
 class TestIndexSliceToggles(unittest.TestCase):
-    """Test that index/slice searches force 1st toggle and dim Aa."""
+    """Test that index/slice searches force the first-match toggle into the active state."""
+
+    def _first_match_toggle_state(self, html_output):
+        """Return 'active' / 'inactive' for the FirstMatchToggle button in HTML."""
+        import re as _re
+        m = _re.search(r'<span class="search-button (\w+)" snc-mouse-down="FirstMatchToggle', html_output)
+        return m.group(1) if m else None
 
     def test_index_search_shows_first_match_highlighted(self):
-        """Even without '1' flag, index search renders 1st as highlighted."""
+        """Even without the /1 flag, index search renders the first-match toggle as active."""
         value = "hello world"
         model = init_model(value)
         model['search'] = '0'
         html_output = visualize(value, model, None, lambda c: eval(c), max_width=400)
-        # The 1st toggle should be highlighted (background: #264f78)
-        # Find the 1st toggle span - it should have the highlighted background
-        self.assertIn('#264f78', html_output.split('1<span')[0].split('snc-mouse-down')[-1] if '1<span' in html_output else '')
+        self.assertEqual(self._first_match_toggle_state(html_output), 'active')
 
     def test_slice_search_shows_first_match_highlighted(self):
-        """Slice search renders 1st as highlighted."""
+        """Slice search renders the first-match toggle as active."""
         value = "hello world"
         model = init_model(value)
         model['search'] = ':5'
         html_output = visualize(value, model, None, lambda c: eval(c), max_width=400)
-        self.assertIn('#264f78', html_output.split('1<span')[0].split('snc-mouse-down')[-1] if '1<span' in html_output else '')
+        self.assertEqual(self._first_match_toggle_state(html_output), 'active')
 
 
 class TestIndexSliceCodeGen(unittest.TestCase):
@@ -10139,7 +10516,7 @@ class TestScrollToMatch(unittest.TestCase):
         """SearchBoxInput sets _scroll_to_match, first match span gets attribute."""
         value = "hello world"
         model = init_model(value)
-        model, _ = update(make_search_box_input_event('/world/'),
+        model, _ = update(make_search_box_input_event(r"r'world'"),
                           ('x', 'x'), model, value)
         self.assertTrue(model.get('_scroll_to_match'))
         html = visualize(value, model, None, None)
@@ -10149,7 +10526,7 @@ class TestScrollToMatch(unittest.TestCase):
         """Attribute appears only once even with multiple matches."""
         value = "abcabc"
         model = init_model(value)
-        model['search'] = '/abc/'
+        model['search'] = r"r'abc'"
         model['_scroll_to_match'] = True
         html = visualize(value, model, None, None)
         self.assertEqual(html.count('snc-scroll-to-match'), 1)
@@ -10158,7 +10535,7 @@ class TestScrollToMatch(unittest.TestCase):
         """Without _scroll_to_match flag, no attribute even with matches."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/hello/'
+        model['search'] = r"r'hello'"
         html = visualize(value, model, None, None)
         self.assertNotIn('snc-scroll-to-match', html)
 
@@ -10174,7 +10551,7 @@ class TestScrollToMatch(unittest.TestCase):
         """No attribute when search has no matches."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/xyz/'
+        model['search'] = r"r'xyz'"
         model['_scroll_to_match'] = True
         html = visualize(value, model, None, None)
         self.assertNotIn('snc-scroll-to-match', html)
@@ -10192,8 +10569,8 @@ class TestScrollToMatch(unittest.TestCase):
         """Typing the same search value does not set _scroll_to_match."""
         value = "hello world"
         model = init_model(value)
-        model['search'] = '/hello/'
-        model, _ = update(make_search_box_input_event('/hello/'),
+        model['search'] = r"r'hello'"
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
                           ('x', 'x'), model, value)
         self.assertFalse(model.get('_scroll_to_match'))
 
@@ -10250,6 +10627,1884 @@ class TestDropdownRow(unittest.TestCase):
     def test_dimmed_when_disabled(self):
         result = _dropdown_row('Any', 'any', False, expr='any(x)')
         self.assertIn('dimmed', result)
+
+
+class TestToolToolbar(unittest.TestCase):
+    """Tests for the tool toolbar (literal / fuzzy / index) and modifier overrides."""
+
+    def _tool_select_event(self, tool: str) -> dict:
+        return {
+            'pythonEventStr': repr(ToolSelect(tool=tool)),
+            'eventJSON': {},
+        }
+
+    def _mouse_down(self, index: int, *, alt: bool = False, shift: bool = False) -> dict:
+        return {
+            'pythonEventStr': repr(MouseDown(_legacy_internal_index(index))),
+            'eventJSON': {
+                'altKey': alt,
+                'shiftKey': shift,
+                'offsetY': 5,
+                'elementHeight': 20,
+                'buttons': 1,
+            },
+        }
+
+    def test_init_model_default_tool_is_literal(self):
+        model = init_model("hello")
+        self.assertEqual(model.get('tool'), 'literal')
+
+    def test_tool_select_updates_model(self):
+        value = "hello"
+        model = init_model(value)
+        for t in ('fuzzy', 'index', 'literal'):
+            model, commands = update(self._tool_select_event(t), ('x', 'x'), model, value)
+            self.assertEqual(model['tool'], t)
+            self.assertEqual(commands, [])
+
+    def test_tool_select_invalid_value_ignored(self):
+        value = "hello"
+        model = init_model(value)
+        model, _ = update(self._tool_select_event('bogus'), ('x', 'x'), model, value)
+        self.assertEqual(model['tool'], 'literal')
+
+    def test_mouse_down_no_modifiers_uses_literal_tool(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'literal'
+        model, _ = update(self._mouse_down(5), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'literal')
+        self.assertTrue(model['dragging'])
+
+    def test_mouse_down_no_modifiers_uses_fuzzy_tool(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'fuzzy'
+        model, _ = update(self._mouse_down(5), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'fuzzy')
+        self.assertTrue(model['dragging'])
+
+    def test_shift_overrides_fuzzy_tool_to_literal(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'fuzzy'
+        model, _ = update(self._mouse_down(5, shift=True), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'literal')
+
+    def test_alt_overrides_literal_tool_to_fuzzy(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'literal'
+        model, _ = update(self._mouse_down(5, alt=True), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'fuzzy')
+
+    def test_shift_overrides_index_tool_to_literal(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'index'
+        model, _ = update(self._mouse_down(5, shift=True), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'literal')
+        self.assertTrue(model['dragging'])
+
+    def test_alt_overrides_index_tool_to_fuzzy(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'index'
+        model, _ = update(self._mouse_down(5, alt=True), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'fuzzy')
+        self.assertTrue(model['dragging'])
+
+    def test_index_tool_no_modifiers_starts_index_drag(self):
+        """With tool=index and no modifiers, MouseDown starts an index-mode drag."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'index'
+        model, _ = update(self._mouse_down(5), ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'index')
+        self.assertTrue(model['dragging'])
+        self.assertIsNotNone(model['anchorIdx'])
+
+    def test_ctrl_overrides_literal_tool_to_index(self):
+        """Holding ctrl while tool=literal switches to index for this drag."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'literal'
+        ev = self._mouse_down(5)
+        ev['eventJSON']['ctrlKey'] = True
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'index')
+        self.assertTrue(model['dragging'])
+
+    def test_shift_beats_ctrl(self):
+        """Shift takes priority over ctrl in the resolver."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'literal'
+        ev = self._mouse_down(5, shift=True)
+        ev['eventJSON']['ctrlKey'] = True
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'literal')
+
+    def test_alt_beats_ctrl(self):
+        """Alt takes priority over ctrl in the resolver."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'literal'
+        ev = self._mouse_down(5, alt=True)
+        ev['eventJSON']['ctrlKey'] = True
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['anchorType'], 'fuzzy')
+
+    def test_visualize_renders_tool_toolbar(self):
+        # 5 lines so the non-compact (vertical) layout is used and all
+        # ab/.*/01 icon labels appear as standalone tool buttons.
+        value = "a\nb\nc\nd\ne"
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertIn('tool-toolbar', html_str)
+        self.assertIn('tool-button', html_str)
+        self.assertIn('>ab<', html_str)
+        self.assertIn('>.*<', html_str)
+        self.assertIn('>01<', html_str)
+
+    def test_fresh_mouse_down_preserves_active_tool(self):
+        """A fresh MouseDown (which reinitializes the model) must keep the active tool."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'fuzzy'
+        model, _ = update(self._mouse_down(5), ('x', 'x'), model, value)
+        self.assertEqual(model['tool'], 'fuzzy')
+        self.assertEqual(model['anchorType'], 'fuzzy')
+
+    def test_visualize_marks_active_tool(self):
+        # Use a >=4 line value to force the vertical (non-compact) layout
+        # so the active class is applied directly to the icon-label button.
+        value = "a\nb\nc\nd\ne"
+        model = init_model(value)
+        model['tool'] = 'fuzzy'
+        html_str = visualize(value, model, None, None)
+        # The active tool's button should have the 'active' class adjacent to its label.
+        self.assertRegex(html_str, r'class="tool-button active"[^>]*>\.\*<')
+        self.assertNotRegex(html_str, r'class="tool-button active"[^>]*>ab<')
+
+    def test_tool_buttons_have_name_tooltips(self):
+        """Each tool button must carry a data-tooltip with the tool's display name
+        (snc-tooltip system - shows on hover faster than the native title attribute)."""
+        value = "a\nb\nc\nd\ne"  # vertical layout
+        model = init_model(value)
+        model['search'] = r"r'a'"  # so pick button is enabled (still gets a tooltip either way)
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(html_str, r'data-tool="literal"[^>]*data-tooltip="Literal"|data-tooltip="Literal"[^>]*data-tool="literal"')
+        self.assertRegex(html_str, r'data-tool="fuzzy"[^>]*data-tooltip="Fuzzy"|data-tooltip="Fuzzy"[^>]*data-tool="fuzzy"')
+        self.assertRegex(html_str, r'data-tool="index"[^>]*data-tooltip="Index"|data-tooltip="Index"[^>]*data-tool="index"')
+        self.assertRegex(html_str, r'data-tool="pick"[^>]*data-tooltip="Pick"|data-tooltip="Pick"[^>]*data-tool="pick"')
+
+    def test_tool_button_tooltips_right_aligned(self):
+        """Tool toolbar lives in the upper-right corner, so tooltips show to the
+        right of the button (where there's empty editor space) instead of above."""
+        value = "a\nb\nc\nd\ne"  # vertical layout
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        # Each tool button carries data-tooltip-align="right"
+        for tool in ('literal', 'fuzzy', 'index', 'pick'):
+            self.assertRegex(
+                html_str,
+                rf'data-tool="{tool}"[^>]*data-tooltip-align="right"'
+                rf'|data-tooltip-align="right"[^>]*data-tool="{tool}"',
+            )
+
+    def test_dimmed_pick_tool_button_still_has_tooltip(self):
+        """Even when the pick tool is dimmed (no search), it should still carry its tooltip."""
+        value = "a\nb\nc\nd\ne"  # vertical layout
+        model = init_model(value)
+        # No search => pick button is dimmed and click-disabled.
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(
+            html_str,
+            r'<span class="tool-button dimmed"[^>]*data-tool="pick"[^>]*data-tooltip="Pick"'
+            r'|<span class="tool-button dimmed"[^>]*data-tooltip="Pick"[^>]*data-tool="pick"',
+        )
+
+    # --- compact (dropdown) toolbar for short strings -----------------------
+
+    def _long_value(self) -> str:
+        """A 5-line string forces the non-compact (vertical) toolbar layout."""
+        return "a\nb\nc\nd\ne"
+
+    def test_long_string_uses_vertical_toolbar(self):
+        """4 or more lines -> traditional vertical toolbar with all 4 buttons."""
+        value = self._long_value()
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertNotIn('tool-toolbar-compact', html_str)
+        # All 4 tool icon labels should still render as separate buttons
+        self.assertIn('>ab<', html_str)
+        self.assertIn('>.*<', html_str)
+        self.assertIn('>01<', html_str)
+
+    def test_short_string_uses_compact_dropdown_toolbar(self):
+        """Less than 4 lines -> compact dropdown that collapses the 4 tools."""
+        value = "hello"  # 1 line
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertIn('tool-toolbar-compact', html_str)
+        # The compact toolbar uses the snc-dropdown-trigger pattern (hover panel)
+        self.assertIn('snc-dropdown-trigger', html_str)
+        self.assertIn('data-hover-menu', html_str)
+
+    def test_compact_dropdown_trigger_shows_chevron(self):
+        """Compact dropdown trigger displays a 🞃 chevron next to the active tool icon."""
+        value = "hello"
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertIn('\U0001F783', html_str)  # 🞃 (U+1F783, DOWN POINTING SMALL TRIANGLE)
+
+    def test_compact_dropdown_includes_all_tool_icons(self):
+        """All 4 tool icons live inside the trigger so CSS can swap which
+        one is visible based on body.snc-shift-down / snc-alt-down / snc-ctrl-down
+        without a Python roundtrip."""
+        value = "hello"
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        # Each tool's icon (literal=ab, fuzzy=.*, index=01) appears as a .tool-icon
+        # span inside the trigger. The 'pick' icon is HTML so we just check for
+        # its data-tool attribute.
+        self.assertRegex(html_str, r'class="tool-icon"[^>]*data-tool="literal"[^>]*>ab<')
+        self.assertRegex(html_str, r'class="tool-icon"[^>]*data-tool="fuzzy"[^>]*>\.\*<')
+        self.assertRegex(html_str, r'class="tool-icon"[^>]*data-tool="index"[^>]*>01<')
+        self.assertRegex(html_str, r'class="tool-icon"[^>]*data-tool="pick"')
+
+    def test_compact_dropdown_does_not_show_tool_name_in_trigger(self):
+        """The compact dropdown trigger shows the icon, not the name."""
+        value = "hello"
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        # The full word "Literal" must not appear inside the trigger button itself
+        # (it does appear inside the dropdown panel option rows).
+        # Find the trigger button content and assert "Literal" isn't in it.
+        import re as _re
+        m = _re.search(r'<span class="tool-button active tool-dropdown-trigger-button[^"]*">(.*?)</span>(?=<div class="snc-dropdown-panel)', html_str)
+        self.assertIsNotNone(m, f"Could not find compact dropdown trigger button in HTML")
+        trigger_content = m.group(1)
+        for name in ('Literal', 'Fuzzy', 'Index', 'Pick'):
+            self.assertNotIn(name, trigger_content,
+                             f"Tool name {name!r} should not appear in compact dropdown trigger (icon-only)")
+
+    def test_compact_dropdown_marks_active_tool(self):
+        """The trigger marks the model's active tool so default CSS shows it."""
+        value = "hello"
+        model = init_model(value)
+        model['tool'] = 'fuzzy'
+        html_str = visualize(value, model, None, None)
+        # The dropdown trigger element carries the active tool as data-active-tool
+        self.assertRegex(
+            html_str,
+            r'class="[^"]*tool-toolbar-compact[^"]*"[^>]*data-active-tool="fuzzy"'
+            r'|data-active-tool="fuzzy"[^>]*class="[^"]*tool-toolbar-compact',
+        )
+
+    def test_compact_dropdown_panel_has_all_four_tool_options(self):
+        """The hover-menu panel inside the compact dropdown lists all 4 tools."""
+        value = "hello"
+        model = init_model(value)
+        model['search'] = r"r'hello'"  # so pick is enabled
+        html_str = visualize(value, model, None, None)
+        # Each of the 4 tools has a clickable option in the panel
+        for tool in ('literal', 'fuzzy', 'index', 'pick'):
+            self.assertRegex(
+                html_str,
+                rf'snc-mouse-down="ToolSelect\(tool=&#x27;{tool}&#x27;\)"',
+            )
+
+    def test_compact_dropdown_panel_includes_tool_names(self):
+        """The hover-menu rows show each tool's display name (Literal / Fuzzy / Index / Pick)."""
+        value = "hello"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        html_str = visualize(value, model, None, None)
+        for name in ('Literal', 'Fuzzy', 'Index', 'Pick'):
+            self.assertRegex(html_str, rf'class="tool-dropdown-name">{name}<')
+
+    def test_compact_dropdown_pick_option_dimmed_when_no_search(self):
+        """In the compact panel, the pick row is dimmed (no click) when there's no search."""
+        value = "hello"
+        model = init_model(value)
+        # No search -> pick dimmed
+        html_str = visualize(value, model, None, None)
+        # The Pick row inside the panel must be marked dimmed and must NOT
+        # carry a snc-mouse-down handler (clicks are no-ops).
+        self.assertRegex(
+            html_str,
+            r'class="[^"]*tool-dropdown-option[^"]*dimmed[^"]*"[^>]*data-tool="pick"',
+        )
+        self.assertNotRegex(
+            html_str,
+            r'data-tool="pick"[^>]*snc-mouse-down=',
+        )
+
+    def test_compact_dropdown_trigger_has_active_class(self):
+        """The trigger button uses the same .tool-button.active styling as a vertical button."""
+        value = "hello"
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(html_str, r'class="tool-button active[^"]*"')
+
+    def test_three_line_string_is_compact(self):
+        """3 lines (<4) -> compact dropdown."""
+        value = "a\nb\nc"  # 3 lines
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertIn('tool-toolbar-compact', html_str)
+
+    def test_four_line_string_is_not_compact(self):
+        """4 lines (not <4) -> normal vertical toolbar."""
+        value = "a\nb\nc\nd"  # 4 lines
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertNotIn('tool-toolbar-compact', html_str)
+
+
+class TestIndexSelection(unittest.TestCase):
+    """Tests for index-mode mouse selection (ctrl hotkey or persistent 'index' tool).
+
+    An index-mode drag produces a Python slice expression `start:stop` in
+    model['search'], using STRING (not internal/augmented) coordinates.
+    """
+
+    def _mouse_down(self, internal_index: int, *, ctrl: bool = False,
+                    shift: bool = False, alt: bool = False) -> dict:
+        return {
+            'pythonEventStr': repr(MouseDown(internal_index)),
+            'eventJSON': {
+                'ctrlKey': ctrl, 'shiftKey': shift, 'altKey': alt,
+                'offsetY': 5, 'elementHeight': 20, 'buttons': 1,
+            },
+        }
+
+    def _mouse_move(self, internal_index: int, *, ctrl: bool = False,
+                    buttons: int = 1) -> dict:
+        return {
+            'pythonEventStr': repr(MouseMove(internal_index)),
+            'eventJSON': {'buttons': buttons, 'ctrlKey': ctrl},
+        }
+
+    def _mouse_up(self, internal_index: int) -> dict:
+        return {
+            'pythonEventStr': repr(MouseUp(internal_index)),
+            'eventJSON': {'buttons': 0},
+        }
+
+    def test_ctrl_drag_two_chars_produces_slice(self):
+        """ctrl-drag from 'h' to 'e' in 'hello' (n=5) produces canonical slice ':2'.
+
+        With start=0 elision: '0:2' becomes ':2'. (k=3, but n=5 < 7 so no neg form.)
+        """
+        value = "hello"
+        model = init_model(value)
+        model, _ = update(self._mouse_down(1, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_move(2, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(2), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], ':2')
+        self.assertTrue(is_slice_search(model['search']))
+
+    def test_ctrl_single_click_produces_bare_index(self):
+        """ctrl-click on a single char (far from end) produces a bare positive index."""
+        value = "0123456789"  # n=10
+        model = init_model(value)
+        # Click on '4' (internal index 5 = string index 4). k=6, no neg shorthand.
+        model, _ = update(self._mouse_down(5, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(5), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '4')
+
+    def test_ctrl_single_click_last_char_uses_neg_one(self):
+        """ctrl-click on the last char emits '-1' (negative-index shorthand)."""
+        value = "0123456789"  # n=10
+        model = init_model(value)
+        # Last char '9' is at internal index 10
+        model, _ = update(self._mouse_down(10, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(10), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '-1')
+
+    def test_ctrl_single_click_second_to_last_uses_neg_two(self):
+        """ctrl-click on second-to-last char emits '-2'."""
+        value = "0123456789"  # n=10
+        model = init_model(value)
+        # Second-to-last '8' is at internal index 9 (string index 8). k=2, n>4.
+        model, _ = update(self._mouse_down(9, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(9), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '-2')
+
+    def test_ctrl_drag_across_newline_uses_neg_end(self):
+        """Drag from 'b' to 'c' across \\n in 'ab\\ncd' (n=5) produces '1:-1'.
+
+        Resolved slice = 1:4. start=1 (no zero-elision), stop=4, k=1, n>2 -> neg.
+        """
+        value = "ab\ncd"
+        model = init_model(value)
+        # Drag from 'b' (internal 2) to 'c' (internal 6)
+        model, _ = update(self._mouse_down(2, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_move(6, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(6), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '1:-1')
+
+    def test_index_tool_drag_to_end_elides_len(self):
+        """Persistent index tool drag to last char emits 'start:' (end elision)."""
+        value = "hello world"  # n=11
+        model = init_model(value)
+        model['tool'] = 'index'
+        # Drag from 'w' (internal 7 = string 6) to 'd' (internal 11 = string 10).
+        # Because cursor is on the LAST char, end=11=n, so emit '6:'.
+        model, _ = update(self._mouse_down(7), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_move(11), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(11), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '6:')
+
+    def test_index_drag_does_not_extend_existing_regex(self):
+        """Index drag is always a fresh selection; never appends to an existing regex."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        # ctrl-click on a single char should REPLACE the regex with a bare index.
+        model, _ = update(self._mouse_down(7, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(7), ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '6')
+
+    def test_index_drag_preserves_active_tool(self):
+        """An index-mode drag must not lose the persistent 'tool' state."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'fuzzy'  # persistent fuzzy, but transient ctrl override
+        model, _ = update(self._mouse_down(2, ctrl=True), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(2), ('x', 'x'), model, value)
+        self.assertEqual(model['tool'], 'fuzzy')
+
+    def test_visualize_adds_tool_class_to_container(self):
+        """Visualizer container gets a tool-{literal|fuzzy|index} class so CSS can react."""
+        value = "hello"
+        for t in ('literal', 'fuzzy', 'index'):
+            model = init_model(value)
+            model['tool'] = t
+            html_str = visualize(value, model, None, None)
+            self.assertIn(f'tool-{t}', html_str,
+                          f'Expected class tool-{t} in container HTML for tool={t!r}')
+
+
+class TestSliceExprFormatting(unittest.TestCase):
+    """Unit tests for _format_slice_expr (canonical Python slice expression).
+
+    Rules:
+      - start == 0 AND stop == n   -> ':'              (whole string)
+      - start == 0                 -> ':<stop>' or ':-<k>' shorthand
+      - stop == n                  -> '<start>:'       (end elision)
+      - general                    -> '<start>:<stop>' or '<start>:-<k>'
+    Negative-end shorthand applies for k = n - stop in {1, 2, 3} only when
+    n > 2*k (i.e., the forward stop is at least k+1, matching the user-spec
+    "forward would be at least :2 :3 :4 respectively").
+    """
+
+    def test_whole_string(self):
+        self.assertEqual(_format_slice_expr(0, 10, 10), ':')
+
+    def test_start_zero_elision(self):
+        self.assertEqual(_format_slice_expr(0, 5, 11), ':5')
+
+    def test_stop_eq_len_elision(self):
+        self.assertEqual(_format_slice_expr(5, 11, 11), '5:')
+
+    def test_general(self):
+        self.assertEqual(_format_slice_expr(2, 5, 11), '2:5')
+
+    def test_neg_one_when_start_zero(self):
+        self.assertEqual(_format_slice_expr(0, 9, 10), ':-1')
+
+    def test_neg_two_when_start_zero(self):
+        self.assertEqual(_format_slice_expr(0, 8, 10), ':-2')
+
+    def test_neg_three_when_start_zero(self):
+        self.assertEqual(_format_slice_expr(0, 7, 10), ':-3')
+
+    def test_neg_one_with_nonzero_start(self):
+        self.assertEqual(_format_slice_expr(3, 9, 10), '3:-1')
+
+    def test_neg_three_with_nonzero_start(self):
+        self.assertEqual(_format_slice_expr(2, 7, 10), '2:-3')
+
+    def test_no_neg_when_too_short_for_neg1(self):
+        self.assertEqual(_format_slice_expr(0, 1, 2), ':1')
+
+    def test_no_neg_when_too_short_for_neg2(self):
+        self.assertEqual(_format_slice_expr(0, 2, 4), ':2')
+
+    def test_no_neg_when_too_short_for_neg3(self):
+        self.assertEqual(_format_slice_expr(0, 3, 6), ':3')
+
+    def test_neg1_at_threshold(self):
+        self.assertEqual(_format_slice_expr(0, 2, 3), ':-1')
+
+    def test_neg2_at_threshold(self):
+        self.assertEqual(_format_slice_expr(0, 3, 5), ':-2')
+
+    def test_neg3_at_threshold(self):
+        self.assertEqual(_format_slice_expr(0, 4, 7), ':-3')
+
+    def test_no_neg_when_distance_too_far(self):
+        self.assertEqual(_format_slice_expr(0, 6, 10), ':6')
+
+    def test_no_neg_when_k_is_four(self):
+        self.assertEqual(_format_slice_expr(0, 96, 100), ':96')
+
+    def test_neg3_with_long_string(self):
+        self.assertEqual(_format_slice_expr(0, 97, 100), ':-3')
+
+
+class TestIndexExprFormatting(unittest.TestCase):
+    """Unit tests for _format_index_expr (canonical bare-index expression)."""
+
+    def test_first_char(self):
+        self.assertEqual(_format_index_expr(0, 10), '0')
+
+    def test_middle_char(self):
+        self.assertEqual(_format_index_expr(5, 11), '5')
+
+    def test_last_char_uses_neg_one(self):
+        self.assertEqual(_format_index_expr(9, 10), '-1')
+
+    def test_second_to_last_uses_neg_two(self):
+        self.assertEqual(_format_index_expr(8, 10), '-2')
+
+    def test_third_to_last_uses_neg_three(self):
+        self.assertEqual(_format_index_expr(7, 10), '-3')
+
+    def test_no_neg_for_short_string(self):
+        # n=2, last char idx=1, k=1. n > 2 is FALSE. Use '1'.
+        self.assertEqual(_format_index_expr(1, 2), '1')
+
+    def test_no_neg_when_distance_too_far(self):
+        self.assertEqual(_format_index_expr(6, 10), '6')
+
+
+class TestSliceLabelRendering(unittest.TestCase):
+    """Tests that slice highlights carry labels matching the SELECTION EXPRESSION
+    (with '·' (U+00B7 middle dot) substituted for omitted start/end, visually
+    distinct from a negative-int label like '-1'). Labels mirror what the user
+    typed/dragged into:
+        '2:5'   -> labels '2' and '5'
+        ':5'    -> labels '·' and '5'
+        '5:'    -> labels '5' and '·'
+        ':'     -> labels '·' and '·'
+        ':-1'   -> labels '·' and '-1'
+        '5:-3'  -> labels '5' and '-3'
+        '5'     -> single centered label '5'
+        '-1'    -> single centered label '-1'
+    """
+
+    def _slice_labels(self, search: str, value: str) -> list:
+        highlights = parse_regex_for_highlighting(search, value, eval_in_scope=lambda c: eval(c))
+        self.assertEqual(len(highlights), 1, f'Expected 1 highlight for {search!r}')
+        return highlights[0][3].split('|')
+
+    def _index_label(self, search: str, value: str) -> str:
+        highlights = parse_regex_for_highlighting(search, value, eval_in_scope=lambda c: eval(c))
+        self.assertEqual(len(highlights), 1, f'Expected 1 highlight for {search!r}')
+        pat_str = highlights[0][3]
+        self.assertNotIn('|', pat_str, f'Expected single (non-pipe) label for {search!r}')
+        return pat_str
+
+    def test_slice_highlight_uses_slice_seg_type(self):
+        value = "hello world"
+        highlights = parse_regex_for_highlighting('2:5', value, eval_in_scope=lambda c: eval(c))
+        self.assertEqual(highlights[0][2], 'slice')
+
+    def test_slice_labels_match_explicit_bounds(self):
+        self.assertEqual(self._slice_labels('2:5', 'hello world'), ['2', '5'])
+
+    def test_slice_labels_dot_for_omitted_start(self):
+        self.assertEqual(self._slice_labels(':5', 'hello world'), ['·', '5'])
+
+    def test_slice_labels_dot_for_omitted_end(self):
+        self.assertEqual(self._slice_labels('5:', 'hello world'), ['5', '·'])
+
+    def test_slice_labels_dot_for_both_omitted(self):
+        self.assertEqual(self._slice_labels(':', 'hello world'), ['·', '·'])
+
+    def test_slice_labels_negative_end(self):
+        # ':-1' must render as '·' and '-1' (not the resolved positive)
+        self.assertEqual(self._slice_labels(':-1', '0123456789'), ['·', '-1'])
+
+    def test_slice_labels_negative_end_with_start(self):
+        self.assertEqual(self._slice_labels('5:-3', '0123456789'), ['5', '-3'])
+
+    def test_slice_labels_preserve_variable_expression(self):
+        """Variable names in slice expressions are preserved as labels."""
+        eis = lambda c, _l={'x': 2}: eval(c, {**_l, '__builtins__': __builtins__})
+        highlights = parse_regex_for_highlighting('x:5', 'hello world', eval_in_scope=eis)
+        self.assertEqual(highlights[0][3].split('|'), ['x', '5'])
+
+    def test_index_highlight_single_label_matches_expression(self):
+        self.assertEqual(self._index_label('2', 'hello'), '2')
+
+    def test_index_highlight_negative_label_matches_expression(self):
+        self.assertEqual(self._index_label('-1', 'hello'), '-1')
+
+    # The index labels are now wrapped in a click-to-edit dropdown trigger
+    # (snc-mouse-down attribute between the class and the closing `>`), so the
+    # regexes use [^>]* to permit those extra attributes.
+
+    def test_visualize_renders_slice_labels(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '2:5'
+        html_str = visualize(value, model, None, None)
+        self.assertIn('index-label', html_str)
+        self.assertRegex(html_str, r'class="segment-label index-label[^"]*"[^>]*>2<')
+        self.assertRegex(html_str, r'class="segment-label index-label[^"]*"[^>]*>5<')
+
+    def test_visualize_renders_dot_for_omitted_start(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = ':5'
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(html_str, r'class="segment-label index-label[^"]*"[^>]*>\xb7<')
+        self.assertRegex(html_str, r'class="segment-label index-label[^"]*"[^>]*>5<')
+
+    def test_visualize_renders_dot_for_omitted_end(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '5:'
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(html_str, r'class="segment-label index-label[^"]*"[^>]*>5<')
+        self.assertRegex(html_str, r'class="segment-label index-label[^"]*"[^>]*>\xb7<')
+
+    def test_visualize_renders_negative_end_label(self):
+        value = "0123456789"
+        model = init_model(value)
+        model['search'] = ':-1'
+        html_str = visualize(value, model, None, None)
+        labels = re.findall(r'class="segment-label index-label[^"]*"[^>]*>([^<]+)<', html_str)
+        self.assertEqual(labels, ['·', '-1'])
+
+    def test_visualize_renders_single_label_for_index(self):
+        value = "hello"
+        model = init_model(value)
+        model['search'] = '2'
+        html_str = visualize(value, model, None, None)
+        labels = re.findall(r'class="segment-label index-label[^"]*"[^>]*>([^<]+)<', html_str)
+        self.assertEqual(labels, ['2'])
+
+    def test_visualize_renders_single_label_for_negative_index(self):
+        value = "hello"
+        model = init_model(value)
+        model['search'] = '-1'
+        html_str = visualize(value, model, None, None)
+        labels = re.findall(r'class="segment-label index-label[^"]*"[^>]*>([^<]+)<', html_str)
+        self.assertEqual(labels, ['-1'])
+
+
+class TestSliceResizeHandles(unittest.TestCase):
+    """Tests for resize handles on slice (index-mode) selections.
+
+    Slice highlights get segment_index=0 (one segment per slice) so they're
+    interactive, and the visualizer renders left+right handles like for
+    literal regex segments. Dragging a handle reissues the slice expression
+    canonically (with elision/negative-end shorthand re-applied).
+    """
+
+    def _start_handle_drag(self, value, search, side, cursor_internal_idx) -> dict:
+        """Helper: set up a model mid-drag on the given slice's left/right handle."""
+        model = init_model(value)
+        model['search'] = search
+        # Find the slice highlight to pick its segment_index (always 0).
+        highlights = parse_regex_for_highlighting(search, value, eval_in_scope=lambda c: eval(c))
+        self.assertGreater(len(highlights), 0, f'no highlight for {search!r}')
+        model['handleDrag'] = {
+            'segmentIndex': highlights[0][5] if highlights[0][5] is not None else 0,
+            'side': side,
+            'cursorIdx': cursor_internal_idx,
+        }
+        return model
+
+    def test_slice_highlight_is_interactive(self):
+        """Slice highlights need a non-None segment_index so handles can target them."""
+        value = "hello world"
+        highlights = parse_regex_for_highlighting('2:5', value, eval_in_scope=lambda c: eval(c))
+        self.assertEqual(highlights[0][5], 0)
+
+    def test_visualize_renders_handles_for_slice(self):
+        """Slice selections render both a left and a right resize handle."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '2:5'
+        html_str = visualize(value, model, None, None)
+        self.assertIn('char-span-resize-handle left', html_str)
+        self.assertIn('char-span-resize-handle right', html_str)
+        # Handles are wired to HandleMouseDown for segment 0.
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;)", html_str)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;)", html_str)
+
+    def test_visualize_no_handles_for_single_index(self):
+        """A bare-index pick (single centered label) does NOT render handles."""
+        value = "hello"
+        model = init_model(value)
+        model['search'] = '2'
+        html_str = visualize(value, model, None, None)
+        self.assertNotIn('char-span-resize-handle', html_str)
+
+    def test_handle_drag_right_extends_slice(self):
+        """Dragging the right handle past the current end extends the slice.
+
+        Uses a long enough string that the negative-end shorthand does NOT
+        kick in for the new end (so we can assert the bare '2:9' form).
+        """
+        value = "0123456789abcde"  # n=15
+        # Drag right handle to internal 9 (cursor_idx -> string idx 9 included).
+        model = self._start_handle_drag(value, '2:5', 'right', 9)
+        ev = {'pythonEventStr': repr(MouseUp(9)), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '2:9')
+        self.assertIsNone(model['handleDrag'])
+
+    def test_handle_drag_left_shrinks_slice_start(self):
+        """Dragging the left handle moves the slice's start position."""
+        value = "hello world"
+        model = self._start_handle_drag(value, '2:5', 'left', 5)
+        # cursor internal 5 = 'o' (string idx 4). New start = 4.
+        ev = {'pythonEventStr': repr(MouseUp(5)), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '4:5')
+
+    def test_handle_drag_right_to_end_uses_end_elision(self):
+        """Dragging right handle to the last char emits 'start:' (end elision)."""
+        value = "hello world"  # n=11
+        # Internal index 11 = 'd' (string idx 10, last char).
+        model = self._start_handle_drag(value, '2:5', 'right', 11)
+        ev = {'pythonEventStr': repr(MouseUp(11)), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['search'], '2:')
+
+    def test_handle_drag_left_to_first_char_uses_start_elision(self):
+        """Dragging left handle to the first char emits ':stop' (start elision)."""
+        value = "hello world"
+        # Internal index 1 = 'h' (string idx 0).
+        model = self._start_handle_drag(value, '2:5', 'left', 1)
+        ev = {'pythonEventStr': repr(MouseUp(1)), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['search'], ':5')
+
+    def test_handle_drag_right_uses_neg_end_when_applicable(self):
+        """Right-handle drag re-applies negative-end shorthand when threshold holds."""
+        value = "0123456789"  # n=10
+        # Start with ':3' (string 0..3). Drag right handle to internal 9 (string 8 = '8').
+        # New end = string 9. k=1, n>2 -> ':-1'.
+        model = self._start_handle_drag(value, ':3', 'right', 9)
+        ev = {'pythonEventStr': repr(MouseUp(9)), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, ('x', 'x'), model, value)
+        self.assertEqual(model['search'], ':-1')
+
+
+class TestSliceLabelEditing(unittest.TestCase):
+    """Slice/index labels are click-to-edit. Click a label opens a small
+    one-input dropdown (re-using the openDropdown machinery) prefilled with
+    that side's current value. Typing into the input fires SliceLabelInput
+    which rewrites the slice expression - so '5' can be replaced with a
+    variable name like 'n', or the elided '·' side filled in.
+
+    Dropdown ID format: 'slice-label-{start|end|center}'.
+    """
+
+    # --- The trigger renders snc-mouse-down=DropdownToggle('slice-label-...') -
+
+    def _label_trigger_events(self, html_str: str) -> list[str]:
+        """Return the dropdown IDs targeted by snc-mouse-down on .index-label
+        spans (i.e. the trigger events for the slice labels)."""
+        return re.findall(
+            r'<span class="segment-label index-label[^"]*"[^>]*'
+            r'snc-mouse-down="DropdownToggle\(dropdown_id=&#x27;([^&]+)&#x27;\)"',
+            html_str,
+        )
+
+    def test_slice_start_and_end_labels_are_clickable(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '2:5'
+        html_str = visualize(value, model, None, None)
+        self.assertEqual(self._label_trigger_events(html_str),
+                         ['slice-label-start', 'slice-label-end'])
+
+    def test_center_label_is_clickable(self):
+        value = "hello"
+        model = init_model(value)
+        model['search'] = '2'
+        html_str = visualize(value, model, None, None)
+        self.assertEqual(self._label_trigger_events(html_str), ['slice-label-center'])
+
+    # --- DropdownToggle seeds the input value from the current slice -------
+
+    def _open_label(self, value, search, side):
+        """Open the slice-label-{side} dropdown for the given search."""
+        model = init_model(value)
+        model['search'] = search
+        ev = {'pythonEventStr': repr(DropdownToggle(f'slice-label-{side}')),
+              'eventJSON': {}}
+        model, _ = update(ev, None, model, value)
+        return model
+
+    def test_open_start_label_seeds_left_value(self):
+        """Opening slice-label-start for '2:5' seeds dropdown value with '2'."""
+        m = self._open_label("hello world", '2:5', 'start')
+        od = m.get('openDropdown')
+        self.assertIsNotNone(od)
+        self.assertEqual(od.get('id'), 'slice-label-start')
+        self.assertEqual(od.get('value'), '2')
+
+    def test_open_end_label_seeds_right_value(self):
+        m = self._open_label("hello world", '2:5', 'end')
+        self.assertEqual(m['openDropdown'].get('value'), '5')
+
+    def test_open_start_label_for_elided_seeds_empty(self):
+        """For ':5', the start label's seeded value is '' (no left bound)."""
+        m = self._open_label("hello world", ':5', 'start')
+        self.assertEqual(m['openDropdown'].get('value'), '')
+
+    def test_open_center_label_seeds_full_value(self):
+        m = self._open_label("hello", '5', 'center')
+        self.assertEqual(m['openDropdown'].get('value'), '5')
+
+    # --- SliceLabelInput buffers; the slice is committed on close ----------
+
+    def _type_label(self, model, value, side, typed):
+        ev = {'pythonEventStr': repr(SliceLabelInput(side=side, value=typed)),
+              'eventJSON': {}}
+        return update(ev, None, model, value)[0]
+
+    def _close_label(self, model, value, side):
+        ev = {'pythonEventStr': repr(DropdownToggle(f'slice-label-{side}')),
+              'eventJSON': {}}
+        return update(ev, None, model, value)[0]
+
+    def test_typing_into_start_label_does_not_change_search_yet(self):
+        """Typing only buffers - the slice highlight (search) stays put.
+
+        This is the whole point: we don't want a transient invalid expression
+        to make the slice (and the popup) disappear mid-edit.
+        """
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        self.assertEqual(m['search'], '2:5')  # unchanged
+        self.assertEqual(m['openDropdown']['value'], 'n')
+        self.assertIsNotNone(m.get('openDropdown'))
+
+    def test_close_commits_buffered_start_value(self):
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        m = self._close_label(m, value, 'start')
+        self.assertEqual(m['search'], 'n:5')
+        self.assertIsNone(m.get('openDropdown'))
+
+    def test_close_commits_buffered_end_value(self):
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'end')
+        m = self._type_label(m, value, 'end', 'n')
+        m = self._close_label(m, value, 'end')
+        self.assertEqual(m['search'], '2:n')
+
+    def test_close_commits_buffered_center_value(self):
+        value = "hello"
+        m = self._open_label(value, '5', 'center')
+        m = self._type_label(m, value, 'center', 'n')
+        m = self._close_label(m, value, 'center')
+        self.assertEqual(m['search'], 'n')
+
+    def test_close_commits_empty_start_as_elided(self):
+        """Clearing then closing collapses to ':5' (start elided)."""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', '')
+        m = self._close_label(m, value, 'start')
+        self.assertEqual(m['search'], ':5')
+
+    def test_close_commits_empty_end_as_elided(self):
+        """Clearing then closing collapses to '2:' (end elided)."""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'end')
+        m = self._type_label(m, value, 'end', '')
+        m = self._close_label(m, value, 'end')
+        self.assertEqual(m['search'], '2:')
+
+    def test_close_commits_fill_in_for_elided_start(self):
+        """Filling in the start of ':5' then closing produces 'n:5'."""
+        value = "hello world"
+        m = self._open_label(value, ':5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        m = self._close_label(m, value, 'start')
+        self.assertEqual(m['search'], 'n:5')
+
+    def test_undo_saved_on_commit_only(self):
+        """Undo entry is appended only when the dropdown closes (commit), not on each keystroke."""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        self.assertNotIn('2:5', m.get('undoHistory', []))
+        m = self._close_label(m, value, 'start')
+        self.assertIn('2:5', m['undoHistory'])
+
+    def test_typing_keeps_dropdown_open_for_further_edits(self):
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        self.assertIsNotNone(m.get('openDropdown'))
+        self.assertEqual(m['openDropdown'].get('value'), 'n')
+
+    def test_mousedown_elsewhere_commits_buffered_value(self):
+        """A click on a char closes the popup AND commits the buffered value."""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        ev = {
+            'pythonEventStr': repr(MouseDown(3)),
+            'eventJSON': {'altKey': False, 'shiftKey': False, 'ctrlKey': False,
+                          'offsetY': 5, 'elementHeight': 20, 'buttons': 1},
+        }
+        m, _ = update(ev, ('x', 'x'), m, value)
+        self.assertEqual(m['search'], 'n:5')
+        self.assertIsNone(m.get('openDropdown'))
+
+    def test_escape_discards_buffered_value(self):
+        """Escape closes the popup WITHOUT committing - search stays put."""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        m = self._type_label(m, value, 'start', 'n')
+        ev = make_key_down_event('Escape')
+        m, _ = update(ev, ('x', 'x'), m, value)
+        self.assertEqual(m['search'], '2:5')  # unchanged
+        self.assertIsNone(m.get('openDropdown'))
+
+    # --- The dropdown panel renders an input prefilled with the value -------
+
+    def test_visualize_renders_prefilled_input_when_label_dropdown_open(self):
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        html_str = visualize(value, m, None, None)
+        # The panel contains an input with snc-input wired to SliceLabelInput
+        # for side='start' and value='2' prefilled.
+        self.assertRegex(html_str, r'snc-input="[^"]*SliceLabelInput[^"]*side=&#x27;start&#x27;')
+        self.assertRegex(html_str, r'<input[^/]*snc-input="[^"]*SliceLabelInput[^"]*"[^/]*value="2"')
+
+    def test_visualize_renders_empty_input_for_elided_side(self):
+        value = "hello world"
+        m = self._open_label(value, ':5', 'start')
+        html_str = visualize(value, m, None, None)
+        self.assertRegex(html_str, r'<input[^/]*snc-input="[^"]*SliceLabelInput[^"]*"[^/]*value=""')
+
+    def test_visualize_input_has_autofocus_and_select_all(self):
+        """The slice-label edit input must have autofocus + snc-select-all so
+        the framework focuses it and selects its text on open - editing the
+        label is the only thing the user can do here, so they should be able
+        to immediately type a replacement."""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        html_str = visualize(value, m, None, None)
+        self.assertRegex(
+            html_str,
+            r'<input[^/]*class="[^"]*slice-label-input[^"]*"[^/]*autofocus[^/]*snc-select-all',
+        )
+
+    # --- MouseDown elsewhere closes the slice-label dropdown ---------------
+
+    def test_mousedown_elsewhere_closes_slice_label_dropdown(self):
+        """The existing 'click closes openDropdown' behavior also dismisses
+        a slice-label edit popup. (Commit behavior covered separately above.)"""
+        value = "hello world"
+        m = self._open_label(value, '2:5', 'start')
+        ev = {
+            'pythonEventStr': repr(MouseDown(3)),
+            'eventJSON': {'altKey': False, 'shiftKey': False, 'ctrlKey': False,
+                          'offsetY': 5, 'elementHeight': 20, 'buttons': 1},
+        }
+        m, _ = update(ev, ('x', 'x'), m, value)
+        self.assertIsNone(m.get('openDropdown'))
+
+
+# =============================================================================
+# Segment Selection Tool Tests
+# =============================================================================
+
+class TestSegmentSelection(unittest.TestCase):
+    """Tests for the segment selection tool (4th tool in the toolbar).
+
+    With the segment tool active, only the first match is highlighted, and
+    each visible feature of that match (start/end indices, prefix/suffix
+    substrings, and capture groups) becomes a clickable chip with an
+    snc-py-exp. Clicking chips toggles them into model['selectedSegments']
+    and overwrites the Replace box with a simplified concat/tuple expression.
+    """
+
+    def _tool_select_event(self, tool: str) -> dict:
+        return {
+            'pythonEventStr': repr(ToolSelect(tool=tool)),
+            'eventJSON': {},
+        }
+
+    def _segment_toggle_event(self, segment_id: str) -> dict:
+        return {
+            'pythonEventStr': repr(SegmentToggle(segment_id=segment_id)),
+            'eventJSON': {},
+        }
+
+    # --- model + tool wiring ------------------------------------------------
+
+    def test_init_model_includes_selected_segments_empty(self):
+        model = init_model("hello")
+        self.assertEqual(model.get('selectedSegments'), [])
+
+    def test_tool_select_segment_sets_tool(self):
+        value = "hello"
+        model = init_model(value)
+        model, _ = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertEqual(model['tool'], 'pick')
+
+    def test_tool_select_segment_auto_opens_replace_box(self):
+        value = "hello"
+        model = init_model(value)
+        self.assertFalse(model.get('replace_visible', False))
+        model, _ = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertTrue(model.get('replace_visible'))
+
+    def test_tool_select_segment_auto_enables_capgroups_for_multi_segment(self):
+        """Multi-segment regex /(hello)(world)/ -> 'c' flag flips on entering segment."""
+        value = "helloworld"
+        model = init_model(value)
+        model['search'] = r"r'hello.*world'"  # 3 segments after grouping
+        model, _ = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertTrue(is_capture_groups_mode(model['search']))
+
+    def test_tool_select_segment_does_not_enable_capgroups_for_single_segment(self):
+        """Single-segment regex /hello/ -> 'c' flag stays off."""
+        value = "hello"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        model, _ = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertFalse(is_capture_groups_mode(model['search']))
+
+    def test_tool_select_segment_clears_stale_selections(self):
+        value = "hello"
+        model = init_model(value)
+        model['selectedSegments'] = ['group_0']
+        model, _ = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertEqual(model['selectedSegments'], [])
+
+    def test_tool_select_away_from_segment_clears_selections(self):
+        """Switching to another tool clears selections so they don't drive Replace."""
+        value = "hello"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['selectedSegments'] = ['group_0']
+        model, _ = update(self._tool_select_event('literal'), ('x', 'x'), model, value)
+        self.assertEqual(model['selectedSegments'], [])
+
+    # --- SegmentToggle event ------------------------------------------------
+
+    def test_segment_toggle_adds_then_removes(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'hello'1"  # first-match mode
+        model, _ = update(self._segment_toggle_event('group_0'), ('x', 'x'), model, value)
+        self.assertIn('group_0', model['selectedSegments'])
+        model, _ = update(self._segment_toggle_event('group_0'), ('x', 'x'), model, value)
+        self.assertNotIn('group_0', model['selectedSegments'])
+
+    def test_segment_toggle_orders_canonically(self):
+        """Toggling group_2 then group_1 produces the canonical [group_1, group_2]."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello) (world)'1c"
+        model, _ = update(self._segment_toggle_event('group_2'), ('x', 'x'), model, value)
+        model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
+        self.assertEqual(model['selectedSegments'], ['group_1', 'group_2'])
+
+    def test_segment_toggle_updates_replace_text_first_match(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello) (world)'1c"
+        model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
+        self.assertEqual(model['replace_text'], '^[1]')
+
+    def test_segment_toggle_updates_replace_text_uses_first_match_flavor(self):
+        """Replace text always uses the first-match flavor, even without '1' flag.
+
+        Action buttons (Loop / Map / Find Indices / etc.) handle the multi-match
+        wrapping; building list comprehensions here would double-wrap them.
+        """
+        value = "ab ab ab"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        # Cap groups on so segment chips operate on capture groups.
+        model['search'] = r"r'(a)(b)'c"
+        model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '^[1]')
+
+    def test_segment_toggle_clears_replace_text_when_empty(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello) (world)'1c"
+        model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
+        self.assertEqual(model['replace_text'], '^[1]')
+        model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
+        self.assertIsNone(model['replace_text'])
+
+    def test_segment_toggle_auto_opens_replace_box(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'hello'1"
+        self.assertFalse(model.get('replace_visible', False))
+        model, _ = update(self._segment_toggle_event('group_0'), ('x', 'x'), model, value)
+        self.assertTrue(model['replace_visible'])
+
+    # --- simplifications ----------------------------------------------------
+
+    def test_simplify_all_groups_to_group_zero(self):
+        """Selecting all capture groups collapses to ^[0]."""
+        value = "helloworld"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello)(world)'1c"
+        model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
+        model, _ = update(self._segment_toggle_event('group_2'), ('x', 'x'), model, value)
+        self.assertEqual(model['replace_text'], '^[0]')
+
+    def test_simplify_group0_plus_suffix_to_tail_slice(self):
+        """{group_0, suffix} -> '<src>[^.start():]'."""
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'hello'1"  # single segment, cap groups off
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[^.start():]')
+
+    def test_simplify_prefix_plus_group0_to_head_slice(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[:^.end()]')
+
+    def test_simplify_full_coverage_to_var_name(self):
+        """{prefix, group_0, suffix} -> '<src>'."""
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'hello'1"
+        for sid in ('prefix', 'group_0', 'suffix'):
+            model, _ = update(self._segment_toggle_event(sid), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1')
+
+    def test_simplify_all_groups_then_suffix_to_tail_slice(self):
+        """{all groups, suffix} should also collapse via group_0."""
+        value = "helloworld!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello)(world)'1c"
+        for sid in ('group_1', 'group_2', 'suffix'):
+            model, _ = update(self._segment_toggle_event(sid), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[^.start():]')
+
+    def test_adjacent_strings_join_with_plus(self):
+        """Selecting prefix + group_1 (adjacent strings) joins with ' + '."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(world)'1c"
+        model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[:^.start()] + ^[1]')
+
+    def test_non_adjacent_strings_emit_tuple(self):
+        """Non-adjacent strings (with a gap) -> tuple."""
+        value = "abcdef"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(b)(c)(d)'1c"
+        # Skip group_2 -> [group_1, group_3] is non-adjacent
+        model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('group_3'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '(^[1], ^[3])')
+
+    def test_index_with_segment_emits_tuple(self):
+        """Mixing an index (start/end) with a string segment yields a tuple."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello)'1c"
+        model, _ = update(self._segment_toggle_event('start'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '(^.start(), ^[1])')
+
+    def test_single_index_selection(self):
+        """Selecting only the start index produces the bare expression."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        model, _ = update(self._segment_toggle_event('start'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '^.start()')
+
+    def test_single_prefix_selection(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[:^.start()]')
+
+    def test_single_suffix_selection(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'hello'1"
+        model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[^.end():]')
+
+    # --- toolbar rendering --------------------------------------------------
+
+    def test_render_tool_toolbar_includes_pick_button(self):
+        # 5 lines so the vertical (non-compact) toolbar is rendered
+        value = "a\nb\nc\nd\ne"
+        model = init_model(value)
+        html_str = visualize(value, model, None, None)
+        self.assertIn('data-tool="pick"', html_str)
+        # Pragmasevka cursor-default glyph U+F01C0 is rendered inside the chip.
+        self.assertIn('\U000F01C0', html_str)
+
+    def test_pick_tool_button_dimmed_when_no_search(self):
+        """The pick tool button is meaningless without a search, so dim it."""
+        value = "a\nb\nc\nd\ne"  # vertical layout
+        model = init_model(value)
+        # No search yet
+        html_str = visualize(value, model, None, None)
+        # The pick button has both the dimmed class AND no snc-mouse-down.
+        self.assertRegex(
+            html_str,
+            r'<span class="tool-button dimmed"[^>]*data-tool="pick"[^>]*>',
+        )
+        self.assertNotRegex(
+            html_str,
+            r'data-tool="pick"[^>]*snc-mouse-down=',
+        )
+
+    def test_pick_tool_button_enabled_when_search(self):
+        """With a search, the pick button is fully enabled."""
+        value = "a\nb\nc\nd\ne"  # vertical layout
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        html_str = visualize(value, model, None, None)
+        # Button is NOT dimmed and DOES have a click handler.
+        self.assertNotRegex(
+            html_str,
+            r'<span class="tool-button dimmed"[^>]*data-tool="pick"',
+        )
+        self.assertRegex(
+            html_str,
+            r'data-tool="pick"[^>]*snc-mouse-down="ToolSelect',
+        )
+
+    def test_visualize_marks_pick_tool_active(self):
+        value = "a\nb\nc\nd\ne"  # vertical layout
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'hello'"  # required so the tool button isn't dimmed
+        html_str = visualize(value, model, None, None)
+        # The pick tool's button should be the active one.
+        self.assertRegex(
+            html_str,
+            r'class="tool-button active"[^>]*data-tool="pick"',
+        )
+
+    def test_visualize_adds_tool_pick_class_to_container(self):
+        value = "hello"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        html_str = visualize(value, model, None, None)
+        self.assertIn('tool-pick', html_str)
+
+    # --- segment-mode rendering ---------------------------------------------
+
+    def test_visualize_segment_mode_only_highlights_first_match(self):
+        """Even with multiple matches, only the first match's chars get highlighted."""
+        value = "ab ab ab"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'ab'"  # matches 3x
+        html_str = visualize(value, model, None, None)
+        # There should be exactly one 'a' span with .highlight class for 'ab' literal,
+        # but counting is awkward since spans wrap. As a proxy: count `highlight literal`
+        # appearances. With 3 matches non-segment-mode you'd get many; with 1 match
+        # you should get fewer than 6 (3 matches * 2 chars * 2 transitions).
+        # Specifically the 2nd 'a' (string idx 3) should NOT be in any highlight.
+        non_first_count = html_str.count('highlight literal')
+        # In segment mode only the first match is highlighted, so highlight count
+        # should be low (just the first match's chars and start/end markers).
+        self.assertLess(non_first_count, 6,
+                        f"Expected only first match highlighted, got {non_first_count} 'highlight literal' classes")
+
+    def test_visualize_segment_mode_renders_start_chip_with_snc_py_exp(self):
+        """Match start has a chip with snc-py-exp = '^.start()' (1st mode)."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        html_str = visualize(value, model, None, None)
+        self.assertIn('snc-py-exp="^.start()"', html_str)
+
+    def test_visualize_segment_mode_renders_end_chip_with_snc_py_exp(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        html_str = visualize(value, model, None, None)
+        self.assertIn('snc-py-exp="^.end()"', html_str)
+
+    def test_visualize_segment_mode_chips_have_segment_toggle_handlers(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        html_str = visualize(value, model, None, None)
+        self.assertIn("SegmentToggle(segment_id=&#x27;start&#x27;)", html_str)
+        self.assertIn("SegmentToggle(segment_id=&#x27;end&#x27;)", html_str)
+        self.assertIn("SegmentToggle(segment_id=&#x27;group_0&#x27;)", html_str)
+
+    def test_visualize_segment_mode_renders_prefix_suffix_regions(self):
+        """Prefix and suffix substrings are highlighted as selectable regions."""
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        html_str = visualize(value, model, None, None)
+        # Prefix and suffix get their own seg_type 'segment-region' highlight class.
+        self.assertIn('segment-region', html_str)
+        self.assertIn("SegmentToggle(segment_id=&#x27;prefix&#x27;)", html_str)
+        self.assertIn("SegmentToggle(segment_id=&#x27;suffix&#x27;)", html_str)
+
+    def test_visualize_segment_mode_no_search_renders_no_chips(self):
+        """Without a search, segment mode shouldn't render any segment chips."""
+        value = "hello"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        html_str = visualize(value, model, None, None)
+        self.assertNotIn('SegmentToggle', html_str)
+
+    def test_visualize_segment_mode_capgroups_on_renders_group_chips(self):
+        """With cap groups on and multiple groups, each group has its own chip."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello) (world)'1c"
+        html_str = visualize(value, model, None, None)
+        self.assertIn("SegmentToggle(segment_id=&#x27;group_1&#x27;)", html_str)
+        self.assertIn("SegmentToggle(segment_id=&#x27;group_2&#x27;)", html_str)
+
+    # --- index / slice search support ---------------------------------------
+
+    def test_segment_works_with_slice_search_replace_text(self):
+        """Slice search /2:7/ - clicking group_0 puts str1[2:7] in Replace box."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[2:7]')
+
+    def test_segment_works_with_slice_search_prefix(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[:2]')
+
+    def test_segment_works_with_slice_search_suffix(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[7:]')
+
+    def test_segment_works_with_slice_search_start_index(self):
+        """Start label for a slice puts the start expression directly."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('start'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '2')
+
+    def test_segment_works_with_slice_search_end_index(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('end'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '7')
+
+    def test_segment_slice_simplify_full_coverage(self):
+        """Selecting prefix+group_0+suffix in a slice search collapses to <src>."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        for sid in ('prefix', 'group_0', 'suffix'):
+            model, _ = update(self._segment_toggle_event(sid), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1')
+
+    def test_segment_slice_simplify_tail(self):
+        """{group_0, suffix} in a slice search collapses to <src>[<start>:]."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[2:]')
+
+    def test_segment_slice_simplify_head(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[:7]')
+
+    def test_segment_works_with_index_search(self):
+        """Single-index search '5' - group_0 = str[5]."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '5'
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[5]')
+
+    def test_segment_works_with_index_search_prefix(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '5'
+        model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[:5]')
+
+    def test_segment_works_with_index_search_suffix(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '5'
+        model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[5+1:]')
+
+    def test_segment_visualize_renders_for_slice_search(self):
+        """Visualizer in segment mode for a slice search emits chips & py-exps."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        html_str = visualize(value, model, None, None)
+        # group_0 char wrapper carries the slice expression.
+        self.assertRegex(
+            html_str,
+            r'<span class="char-span-container"[^>]*snc-py-exp="str\[2:7\]"',
+        )
+        # start chip carries the literal start index.
+        self.assertIn('snc-py-exp="2"', html_str)
+        self.assertIn('snc-py-exp="7"', html_str)
+
+    def test_segment_visualize_renders_for_index_search(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '5'
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(
+            html_str,
+            r'<span class="char-span-container"[^>]*snc-py-exp="str\[5\]"',
+        )
+
+    # --- snc-py-exp vs Replace box differ for multi-match regex -------------
+
+    def test_chip_snc_py_exp_uses_list_comp_for_multi_match_regex(self):
+        """For regex without '1' flag, snc-py-exp on chips should use the
+        list-comp form so a dragged-out expression is fully self-contained.
+
+        (The Replace box content from CLICKING the chip stays first-match flavor,
+        because the action buttons handle the multi-match wrapping.)
+        """
+        value = "ab ab ab"
+        model = init_model(value)
+        model['_source_expr'] = 'str1'
+        model['tool'] = 'pick'
+        model['search'] = r"r'(a)(b)'c"   # no '1' flag => multi-match
+        html_str = visualize(value, model, ('str1', 'str1'), None)
+        # Each capture group's wrapper carries a list-comprehension snc-py-exp.
+        self.assertRegex(
+            html_str,
+            r'snc-py-exp="\[m\[1\] for m in re\.finditer\(r&#x27;\(a\)\(b\)&#x27;, str1, flags=re\.M\)\]"',
+        )
+        # And the start/end chips also carry list-comp form.
+        self.assertRegex(
+            html_str,
+            r'snc-py-exp="\[m\.start\(\) for m in re\.finditer\(r&#x27;\(a\)\(b\)&#x27;, str1, flags=re\.M\)\]"',
+        )
+
+    def test_chip_snc_py_exp_uses_first_match_form_with_1_flag(self):
+        """With '1' flag, snc-py-exp matches the Replace-box first-match form."""
+        value = "ab ab ab"
+        model = init_model(value)
+        model['_source_expr'] = 'str1'
+        model['tool'] = 'pick'
+        model['search'] = r"r'(a)(b)'1c"
+        html_str = visualize(value, model, ('str1', 'str1'), None)
+        self.assertIn('snc-py-exp="^[1]"', html_str)
+        self.assertIn('snc-py-exp="^.start()"', html_str)
+
+    def test_replace_text_uses_first_match_even_for_multi_match_search(self):
+        """Even when the search has no '1' flag, the Replace box uses first-match
+        flavor (action buttons handle the multi-match wrapping)."""
+        value = "ab ab ab"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(a)(b)'c"   # no '1' flag
+        model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '^[1]')
+
+    # --- start/end labels show numeric index --------------------------------
+
+    def test_start_chip_label_is_numeric_position_for_regex(self):
+        """Match start label is the numeric position in the source string."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"    # match at positions 6..11
+        html_str = visualize(value, model, None, None)
+        # The start chip's display text is "6", end chip's is "11".
+        self.assertRegex(html_str, r'<span class="segment-chip[^"]*"[^>]*>6</span>')
+        self.assertRegex(html_str, r'<span class="segment-chip[^"]*"[^>]*>11</span>')
+
+    def test_start_chip_label_is_numeric_position_for_slice(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '2:7'
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(html_str, r'<span class="segment-chip[^"]*"[^>]*>2</span>')
+        self.assertRegex(html_str, r'<span class="segment-chip[^"]*"[^>]*>7</span>')
+
+    def test_chip_labels_no_longer_show_word_start_or_end(self):
+        """Per spec: start/end chips show numeric index, not the literal words."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        html_str = visualize(value, model, None, None)
+        # Within a segment-chip element, must not contain 'start' or 'end' as text.
+        for m in re.finditer(r'<span class="segment-chip[^"]*"[^>]*>(.*?)</span>', html_str):
+            self.assertNotEqual(m.group(1), 'start')
+            self.assertNotEqual(m.group(1), 'end')
+
+    def test_visualize_segment_mode_marks_selected_segments(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'(hello)'1c"
+        model['selectedSegments'] = ['group_1']
+        html_str = visualize(value, model, None, None)
+        self.assertIn('segment-selected', html_str)
+
+    def test_visualize_segment_mode_snc_py_exp_on_char_wrappers_not_chips(self):
+        """Per spec: snc-py-exp for prefix/group/suffix segments goes on the
+        highlighted char-span-container itself, not as a floating chip above.
+
+        Only the start/end indices remain as floating labels.
+        """
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = r"r'world'1"
+        html_str = visualize(value, model, None, None)
+        # Wrapper for first match's chars carries snc-py-exp pointing at ^[0].
+        self.assertRegex(
+            html_str,
+            r'<span class="char-span-container"[^>]*snc-py-exp="\^\[0\]"',
+        )
+        # Wrapper for prefix chars carries snc-py-exp for the slice expression.
+        self.assertRegex(
+            html_str,
+            r'<span class="char-span-container"[^>]*snc-py-exp="str\[:\^\.start\(\)\]"',
+        )
+        # Wrapper for suffix chars carries snc-py-exp for the tail slice.
+        self.assertRegex(
+            html_str,
+            r'<span class="char-span-container"[^>]*snc-py-exp="str\[\^\.end\(\):\]"',
+        )
+        # No floating chip with the segment's label expression text - only the
+        # bare 'start' / 'end' index chips are allowed as floating labels.
+        # Confirm no segment-chip element carries the prefix/suffix expressions.
+        self.assertNotRegex(
+            html_str,
+            r'<span class="segment-chip[^"]*"[^>]*snc-py-exp="str\[:\^\.start\(\)\]"',
+        )
+
+
+# =============================================================================
+# Pythonic r'pattern' Regex Syntax
+# =============================================================================
+#
+# The search box uses Python's raw-string regex syntax to mirror what users
+# write in real Python code (re.findall(r'pat', s)):
+#   r'pattern'flags         single-quoted (preferred)
+#   r"pattern"flags         double-quoted (when pattern contains ')
+#   r'''pattern'''flags     triple single-quoted (when pattern contains ' and ")
+#   r"""pattern"""flags     triple double-quoted (last resort)
+#   R'pattern'              uppercase R also accepted
+#
+# Other prefixes (b'..', f'..', rb'..', fr'..', etc.) remain string literal
+# searches; only a bare "r" / "R" prefix marks the value as a regex.
+
+from string_visualizer import make_regex_search
+
+
+class TestMakeRegexSearch(unittest.TestCase):
+    """make_regex_search picks the smallest quoting that holds the pattern verbatim."""
+
+    def test_simple_pattern_uses_single_quotes(self):
+        self.assertEqual(make_regex_search('hello'), "r'hello'")
+
+    def test_simple_pattern_with_flags(self):
+        self.assertEqual(make_regex_search('hello', 'i'), "r'hello'i")
+
+    def test_pattern_with_multiple_flags(self):
+        self.assertEqual(make_regex_search('hello', '1i'), "r'hello'1i")
+
+    def test_empty_pattern(self):
+        self.assertEqual(make_regex_search(''), "r''")
+
+    def test_pattern_with_single_quote_uses_double_quotes(self):
+        self.assertEqual(make_regex_search("don't"), 'r"don\'t"')
+
+    def test_pattern_with_double_quote_uses_single_quotes(self):
+        self.assertEqual(make_regex_search('say "hi"'), 'r\'say "hi"\'')
+
+    def test_pattern_with_both_quotes_uses_triple_single(self):
+        self.assertEqual(make_regex_search('mix \' and "'), "r'''mix ' and \"'''")
+
+    def test_regex_metacharacters_passed_through(self):
+        self.assertEqual(make_regex_search(r'\d+\s+'), "r'\\d+\\s+'")
+
+    def test_grouped_pattern(self):
+        self.assertEqual(make_regex_search('(hello)(world)'), "r'(hello)(world)'")
+
+
+class TestParseSearchTermRawString(unittest.TestCase):
+    """parse_search_term recognizes r'pattern' / r\"pattern\" forms as regex."""
+
+    def test_r_single_quote(self):
+        self.assertEqual(parse_search_term("r'hello'"), ('regex', 'hello', ''))
+
+    def test_r_double_quote(self):
+        self.assertEqual(parse_search_term('r"hello"'), ('regex', 'hello', ''))
+
+    def test_uppercase_r(self):
+        self.assertEqual(parse_search_term("R'hello'"), ('regex', 'hello', ''))
+
+    def test_r_with_flag(self):
+        self.assertEqual(parse_search_term("r'hello'i"), ('regex', 'hello', 'i'))
+
+    def test_r_with_multi_flag(self):
+        self.assertEqual(parse_search_term("r'hello'1i"), ('regex', 'hello', '1i'))
+
+    def test_r_triple_single(self):
+        self.assertEqual(parse_search_term("r'''hello'''"), ('regex', 'hello', ''))
+
+    def test_r_triple_double(self):
+        self.assertEqual(parse_search_term('r"""hello"""1i'), ('regex', 'hello', '1i'))
+
+    def test_r_with_regex_metacharacters(self):
+        self.assertEqual(parse_search_term(r"r'(\d+)\s+'i"), ('regex', r'(\d+)\s+', 'i'))
+
+    def test_empty_r_string(self):
+        self.assertEqual(parse_search_term("r''"), ('regex', '', ''))
+
+    def test_double_letter_prefix_still_string(self):
+        """rb'..', br'..', fr'..', rf'..' are bytes/format raw strings, not regex."""
+        self.assertEqual(parse_search_term("rb'hello'"), ('string', "rb'hello'", ''))
+        self.assertEqual(parse_search_term("br'hello'"), ('string', "br'hello'", ''))
+        self.assertEqual(parse_search_term("fr'hello'"), ('string', "fr'hello'", ''))
+        self.assertEqual(parse_search_term("rf'hello'"), ('string', "rf'hello'", ''))
+
+    def test_other_prefixes_still_string(self):
+        self.assertEqual(parse_search_term("f'hello'"), ('string', "f'hello'", ''))
+        self.assertEqual(parse_search_term("b'hello'"), ('string', "b'hello'", ''))
+
+
+class TestIsRegexSearchRawString(unittest.TestCase):
+    def test_r_single_quote_is_regex(self):
+        self.assertTrue(is_regex_search("r'hello'"))
+
+    def test_r_double_quote_is_regex(self):
+        self.assertTrue(is_regex_search('r"hello"'))
+
+    def test_uppercase_r_is_regex(self):
+        self.assertTrue(is_regex_search("R'hello'"))
+
+    def test_r_triple_quote_is_regex(self):
+        self.assertTrue(is_regex_search("r'''hello'''"))
+
+    def test_string_with_other_prefix_not_regex(self):
+        self.assertFalse(is_regex_search("rb'hello'"))
+        self.assertFalse(is_regex_search("f'hello'"))
+
+
+class TestGetRegexInnerPatternRawString(unittest.TestCase):
+    def test_r_single_quote(self):
+        self.assertEqual(get_regex_inner_pattern("r'hello'"), 'hello')
+
+    def test_r_double_quote(self):
+        self.assertEqual(get_regex_inner_pattern('r"hello"'), 'hello')
+
+    def test_r_triple_single(self):
+        self.assertEqual(get_regex_inner_pattern("r'''hello'''"), 'hello')
+
+    def test_r_with_flags(self):
+        self.assertEqual(get_regex_inner_pattern("r'hello'1i"), 'hello')
+
+    def test_string_returns_none(self):
+        self.assertIsNone(get_regex_inner_pattern("'hello'"))
+
+
+class TestGetSearchFlagsRawString(unittest.TestCase):
+    def test_no_flags(self):
+        self.assertEqual(get_search_flags("r'hello'"), '')
+
+    def test_one_flag(self):
+        self.assertEqual(get_search_flags("r'hello'i"), 'i')
+
+    def test_multi_flag(self):
+        self.assertEqual(get_search_flags("r'hello'1i"), '1i')
+
+    def test_double_quoted_with_flags(self):
+        self.assertEqual(get_search_flags('r"hello"1ic'), '1ic')
+
+
+class TestEvalStringSearchIgnoresRawString(unittest.TestCase):
+    """eval_string_search returns None for r'...' since those are regex now."""
+
+    def test_r_single_quote(self):
+        self.assertIsNone(eval_string_search("r'hello'"))
+
+    def test_r_double_quote(self):
+        self.assertIsNone(eval_string_search('r"hello"'))
+
+    def test_other_prefixes_still_evaluate(self):
+        self.assertEqual(eval_string_search("'hello'"), 'hello')
+
+
+class TestCanonicalizeRegexEmitsRawString(unittest.TestCase):
+    """canonicalize_regex outputs the new r'...' form."""
+
+    def test_simple_pattern(self):
+        self.assertEqual(canonicalize_regex("r'hello'"), "r'hello'")
+
+    def test_strips_unneeded_groups(self):
+        # Single-segment, no adjacent literals -> drop outer group
+        self.assertEqual(canonicalize_regex("r'(hello)'"), "r'hello'")
+
+    def test_keeps_groups_for_adjacent_literals(self):
+        self.assertEqual(canonicalize_regex("r'(hello)(world)'"), "r'(hello)(world)'")
+
+    def test_drops_groups_around_fuzzy(self):
+        self.assertEqual(canonicalize_regex("r'(hello)(.*)(world)'"), "r'hello.*world'")
+
+
+class TestEnsureAllGroupsEmitsRawString(unittest.TestCase):
+    def test_wraps_each_segment(self):
+        self.assertEqual(ensure_all_groups("r'hello.*world'"), "r'(hello)(.*)(world)'")
+
+    def test_preserves_flags(self):
+        self.assertEqual(ensure_all_groups("r'hello.*'i"), "r'(hello)(.*)'i")
+
+
+class TestSelectionEmitsRawStringForm(unittest.TestCase):
+    """Mouse selections should produce r'pattern' instead of /pattern/."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.var_and_exp = ('x', 'x')
+
+    def test_literal_selection_uses_raw_string_form(self):
+        # Select 'hello' (indices 2-6 in legacy index space)
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                          self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_move_event(6),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(6),
+                          self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], "r'hello'")
+
+    def test_fuzzy_selection_uses_raw_string_form(self):
+        # Bottom-half drag selects ' ' (index 7) as a fuzzy whitespace segment
+        model, _ = update(make_mouse_down_event(7, top_half=False),
+                          self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_up_event(7),
+                          self.var_and_exp, model, self.value)
+        # Should be an r'\s+' style fuzzy
+        self.assertTrue(model['search'].startswith("r'"))
+        self.assertTrue(is_regex_search(model['search']))
+
+
+class TestSearchBoxInputAcceptsRawString(unittest.TestCase):
+    """Typing r'pattern' into the search box stores it and recognizes it as regex."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+
+    def _input_event(self, val):
+        return {
+            'pythonEventStr': repr(SearchBoxInput(value=val)),
+            'eventJSON': {},
+        }
+
+    def test_single_quoted_raw_string_input(self):
+        model, _ = update(self._input_event("r'hello'"),
+                          self.var_and_exp, init_model(self.value), self.value)
+        self.assertEqual(model['search'], "r'hello'")
+        self.assertTrue(is_regex_search(model['search']))
+
+    def test_double_quoted_raw_string_input(self):
+        model, _ = update(self._input_event('r"hello"'),
+                          self.var_and_exp, init_model(self.value), self.value)
+        self.assertEqual(model['search'], 'r"hello"')
+        self.assertTrue(is_regex_search(model['search']))
+
+    def test_raw_string_with_flags_input(self):
+        model, _ = update(self._input_event("r'hello'1i"),
+                          self.var_and_exp, init_model(self.value), self.value)
+        self.assertEqual(model['search'], "r'hello'1i")
+        self.assertTrue(is_first_match_mode(model['search']))
+        self.assertTrue(is_case_insensitive(model['search']))
+
+    def test_raw_string_highlighting(self):
+        highlights = parse_regex_for_highlighting("r'hello'", self.value)
+        self.assertEqual(len(highlights), 1)
 
 
 if __name__ == '__main__':

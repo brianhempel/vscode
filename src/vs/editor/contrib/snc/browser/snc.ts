@@ -53,6 +53,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private actionTooltipTimer: any = null;
 	private actionTooltipHideTimer: any = null;
 	private actionTooltipTarget: Element | null = null;
+	private simpleTooltip: HTMLElement | null = null;
+	private simpleTooltipTimer: any = null;
+	private simpleTooltipHideTimer: any = null;
+	private simpleTooltipTarget: Element | null = null;
 	private hoverMenu: HTMLElement | null = null;
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
@@ -288,6 +292,35 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				this.actionTooltipTarget = null;
 			}
 			this.scheduleActionTooltipHide();
+		}));
+
+		// Simple tooltip on hover for elements with data-tooltip="<text>"
+		// (lighter weight than the action/py-exp tooltips: just text, no copy
+		// button, no draggable expression).
+		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
+			const target = this.findAncestorWithAttr(ev.target as Node, 'data-tooltip');
+			if (target && target.getAttribute('data-tooltip')) {
+				clearTimeout(this.simpleTooltipHideTimer);
+				if (target !== this.simpleTooltipTarget) {
+					this.hideSimpleTooltip();
+					this.simpleTooltipTarget = target;
+					this.simpleTooltipTimer = setTimeout(() => {
+						this.showSimpleTooltip(target);
+					}, 200);
+				}
+			} else if (this.simpleTooltipTarget) {
+				this.scheduleSimpleTooltipHide();
+			}
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
+			const relatedTarget = ev.relatedTarget as Node | null;
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'data-tooltip')) {
+				return;
+			}
+			if (this.simpleTooltipTarget) {
+				this.simpleTooltipTarget = null;
+			}
+			this.scheduleSimpleTooltipHide();
 		}));
 
 		// Hover-to-open dropdown menus (data-hover-menu panels inside .snc-dropdown-trigger)
@@ -568,6 +601,71 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		if (this.actionTooltip) {
 			this.actionTooltip.remove();
 			this.actionTooltip = null;
+		}
+	}
+
+	private showSimpleTooltip(target: Element): void {
+		this.hideSimpleTooltip();
+
+		const text = target.getAttribute('data-tooltip');
+		if (!text) { return; }
+
+		const rect = target.getBoundingClientRect();
+		const tooltip = document.createElement('div');
+		tooltip.className = 'snc-tooltip snc-simple-tooltip';
+		tooltip.textContent = text;
+
+		// Same placement convention as snc-py-exp tooltips:
+		//   data-tooltip-align="right" -> render to the right of the target,
+		//                                 vertically centered (with a fallback
+		//                                 to the left if it would overflow)
+		//   default                    -> render above the target (with a
+		//                                 fallback to below if it overflows).
+		const align = target.getAttribute('data-tooltip-align');
+		const viewportWidth = dom.getWindow(this.editor.getContainerDomNode()).innerWidth;
+
+		if (align === 'right') {
+			tooltip.style.visibility = 'hidden';
+			this.editor.getContainerDomNode().appendChild(tooltip);
+			const tooltipRect = tooltip.getBoundingClientRect();
+			let left = rect.right + 4;
+			if (left + tooltipRect.width > viewportWidth) {
+				left = rect.left - tooltipRect.width - 4;
+			}
+			tooltip.style.left = `${left}px`;
+			tooltip.style.top = `${rect.top + (rect.height - tooltipRect.height) / 2}px`;
+			tooltip.style.visibility = '';
+		} else {
+			tooltip.style.left = `${rect.left}px`;
+			tooltip.style.top = `${rect.top - 28}px`;
+			this.editor.getContainerDomNode().appendChild(tooltip);
+			const tooltipRect = tooltip.getBoundingClientRect();
+			if (tooltipRect.top < 0) {
+				tooltip.style.top = `${rect.bottom + 4}px`;
+			}
+			if (tooltipRect.right > viewportWidth) {
+				tooltip.style.left = `${Math.max(0, rect.right - tooltipRect.width)}px`;
+			}
+		}
+
+		this.simpleTooltip = tooltip;
+	}
+
+	private scheduleSimpleTooltipHide(): void {
+		clearTimeout(this.simpleTooltipTimer);
+		clearTimeout(this.simpleTooltipHideTimer);
+		this.simpleTooltipHideTimer = setTimeout(() => {
+			this.hideSimpleTooltip();
+		}, 100);
+	}
+
+	private hideSimpleTooltip(): void {
+		clearTimeout(this.simpleTooltipTimer);
+		clearTimeout(this.simpleTooltipHideTimer);
+		this.simpleTooltipTarget = null;
+		if (this.simpleTooltip) {
+			this.simpleTooltip.remove();
+			this.simpleTooltip = null;
 		}
 	}
 
@@ -913,6 +1011,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Dismiss any active tooltips/menus since the DOM is being replaced
 		this.hidePyExpTooltip();
+		this.hideActionTooltip();
+		this.hideSimpleTooltip();
 		this.hideHoverMenu();
 
 		// Any pending focus restoration from an older render should be ignored.
@@ -940,6 +1040,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			? Array.from(this.hoistedDropdown.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR))
 			: [];
 		const allOldFocusable = [...widgetFocusable, ...oldHoistedFocusable];
+
+		// Track whether an [autofocus] element existed in the OLD render. If
+		// one is in the NEW render but wasn't in the old one, it's "newly
+		// appearing" - we want to focus it even when an input was previously
+		// focused (e.g. user clicked a label trigger to open an edit popup
+		// while the search box still held focus).
+		const hadAutoFocusEl = !!(this.domNode.querySelector('[autofocus]')
+			|| (this.hoistedDropdown && this.hoistedDropdown.querySelector('[autofocus]')));
 
 		if (activeElement && (this.domNode.contains(activeElement) || (this.hoistedDropdown && this.hoistedDropdown.contains(activeElement)))) {
 			for (let i = 0; i < allOldFocusable.length; i++) {
@@ -977,7 +1085,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const shouldRestoreScroll = savedWidgetScrollTop !== 0
 			|| savedWidgetScrollLeft !== 0
 			|| savedScrollOffsets.some((offset) => offset.top !== 0 || offset.left !== 0);
-		const autoFocusEl = this.domNode.querySelector('[autofocus]') as HTMLElement | null;
+		// [autofocus] elements may live inside the hoisted dropdown panel
+		// (which is taken out of this.domNode so it can be position:fixed).
+		// Look in both places.
+		const autoFocusEl = (this.domNode.querySelector('[autofocus]')
+			|| (this.hoistedDropdown ? this.hoistedDropdown.querySelector('[autofocus]') : null)
+		) as HTMLElement | null;
 		const hasScrollToMatch = this.domNode.querySelector('[snc-scroll-to-match]') !== null;
 		if (shouldRestoreScroll || focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
 			// Defer to next frame so layout/DOM updates settle, and ensure only the
@@ -1008,10 +1121,16 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}
 
 				// Autofocus: focus the [autofocus] element when it's newly appearing.
-				// If the previously focused element was already an input (savedSelectionStart != null),
-				// use normal focus restoration to preserve cursor position.
-				// Otherwise (e.g. focus was on the outer div), autofocus the new input.
-				if (autoFocusEl && savedSelectionStart === null) {
+				// Two cases honor autofocus:
+				//   1. No input was previously focused (savedSelectionStart === null) -
+				//      e.g. focus was on the outer div, so autofocus the new input.
+				//   2. An autofocus element appeared in this render but did NOT exist
+				//      in the previous one - the user just opened a popup expecting it
+				//      to take focus, so override the saved input cursor restoration.
+				// Otherwise (autofocus el is the SAME one persisting across renders, e.g.
+				// the user is typing into it), preserve the cursor via focusedIndex below.
+				const autoFocusIsNew = !!autoFocusEl && !hadAutoFocusEl;
+				if (autoFocusEl && (savedSelectionStart === null || autoFocusIsNew)) {
 					autoFocusEl.focus({ preventScroll: true });
 					// Select all text if requested (e.g. editing an existing field)
 					if (autoFocusEl.hasAttribute('snc-select-all') && autoFocusEl instanceof HTMLInputElement) {
@@ -1232,6 +1351,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	override dispose(): void {
 		this.hidePyExpTooltip();
 		this.hideActionTooltip();
+		this.hideSimpleTooltip();
 		this.hideHoverMenu();
 		this.cleanupHoistedDropdown();
 		this.editor.removeOverlayWidget(this);
@@ -1326,6 +1446,29 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Trigger initial visualization when controller is created
 		this.triggerInitialVisualization();
+
+		// Track shift/alt/ctrl held state on document.body so the string visualizer's
+		// tool toolbar can highlight the transient override (shift -> literal,
+		// option/alt -> fuzzy, ctrl -> index) and switch the visualizer's
+		// chrome (e.g. hide regex anchors in index mode) without a Python roundtrip.
+		// Ctrl (not cmd/meta) is the index modifier - cmd is reserved for
+		// cmd-backspace / cmd-r / cmd-z editor actions.
+		// Listening on window catches releases that happen outside the editor DOM.
+		this._register(dom.addDisposableListener(window, 'keydown', (ev: KeyboardEvent) => {
+			if (ev.shiftKey) { document.body.classList.add('snc-shift-down'); }
+			if (ev.altKey) { document.body.classList.add('snc-alt-down'); }
+			if (ev.ctrlKey) { document.body.classList.add('snc-ctrl-down'); }
+		}, true));
+		this._register(dom.addDisposableListener(window, 'keyup', (ev: KeyboardEvent) => {
+			if (!ev.shiftKey) { document.body.classList.remove('snc-shift-down'); }
+			if (!ev.altKey) { document.body.classList.remove('snc-alt-down'); }
+			if (!ev.ctrlKey) { document.body.classList.remove('snc-ctrl-down'); }
+		}, true));
+		this._register(dom.addDisposableListener(window, 'blur', () => {
+			document.body.classList.remove('snc-shift-down');
+			document.body.classList.remove('snc-alt-down');
+			document.body.classList.remove('snc-ctrl-down');
+		}));
 
 		// Exposed for ui_testing_tools/ CDP scripts (buffer.js, scroll.js).
 		// Monaco only renders visible lines in the DOM, so CDP can't read the

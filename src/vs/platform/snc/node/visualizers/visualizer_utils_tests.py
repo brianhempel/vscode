@@ -8,7 +8,7 @@ Run:
 import unittest
 import html
 
-from visualizer_utils import ChildEvent, wrap_child_html, wrap_child_html_parts, route_child_event, aggregate_handled_keys, eval_caret_expr
+from visualizer_utils import ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys, eval_caret_expr
 
 
 class TestChildEvent(unittest.TestCase):
@@ -81,30 +81,6 @@ class TestWrapChildHtml(unittest.TestCase):
         wrapped = wrap_child_html(child_html, '0')
         self.assertIn('snc-mouse-down="A"', wrapped)
         self.assertIn('snc-mouse-down="B"', wrapped)
-
-
-class TestWrapChildHtmlParts(unittest.TestCase):
-    """Test wrap_child_html_parts returns a list that joins to the same result as wrap_child_html."""
-
-    def test_returns_list(self):
-        parts = wrap_child_html_parts('<span>X</span>', '0')
-        self.assertIsInstance(parts, list)
-
-    def test_joins_to_same_as_wrap_child_html(self):
-        child_html = '<span snc-mouse-down="MouseDown(index=5)">X</span>'
-        self.assertEqual(''.join(wrap_child_html_parts(child_html, '0')),
-                         wrap_child_html(child_html, '0'))
-
-    def test_special_chars_same_as_wrap_child_html(self):
-        child_html = '<span>X</span>'
-        key = '0::field<name>'
-        self.assertEqual(''.join(wrap_child_html_parts(child_html, key)),
-                         wrap_child_html(child_html, key))
-
-    def test_complex_child_html_same_as_wrap_child_html(self):
-        child_html = '<span class="foo" style="color:red" snc-mouse-down="X">hello</span>'
-        self.assertEqual(''.join(wrap_child_html_parts(child_html, 'k')),
-                         wrap_child_html(child_html, 'k'))
 
 
 class TestRouteChildEvent(unittest.TestCase):
