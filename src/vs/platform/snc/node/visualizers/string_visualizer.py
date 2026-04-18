@@ -3457,7 +3457,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             if replace_visible
             else ">"
         )
-        discolure_button = f'<span snc-mouse-down="{html.escape(replace_toggle_event)}" data-tooltip="Replace / Map / Filter" class="search-button disclosure-button">{disclosure_icon}</span>'
+        discolure_button = f'<span snc-mouse-down="{html.escape(replace_toggle_event)}" data-tooltip="Toggle replace/map/filter" class="search-button disclosure-button">{disclosure_icon}</span>'
 
         replace_box_html = ""
         match_preview_html = ""

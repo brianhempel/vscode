@@ -12574,7 +12574,7 @@ class TestDisclosureButtonTooltip(unittest.TestCase):
         )
         self.assertIsNotNone(m, "Disclosure button not found")
         attrs = m.group(1)
-        self.assertIn('data-tooltip="Replace / Map / Filter"', attrs)
+        self.assertIn('data-tooltip="Toggle replace/map/filter"', attrs)
 
     def test_disclosure_button_has_tooltip_when_expanded(self):
         model = init_model("hello world")
@@ -12586,7 +12586,7 @@ class TestDisclosureButtonTooltip(unittest.TestCase):
         )
         self.assertIsNotNone(m, "Disclosure button not found")
         attrs = m.group(1)
-        self.assertIn('data-tooltip="Replace / Map / Filter"', attrs)
+        self.assertIn('data-tooltip="Toggle replace/map/filter"', attrs)
 
 
 if __name__ == '__main__':
