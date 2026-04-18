@@ -3887,5 +3887,68 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         self.assertIn("^['name'].upper()", new_model['columns'])
 
 
+class TestColumnHeaderTooltips(unittest.TestCase):
+    """The icon-only column header controls (drag handle, remove, add) must
+    use the snc-tooltip system (data-tooltip) instead of the native title
+    attribute, matching the string visualizer's tool toolbar pattern."""
+
+    def test_remove_column_button_has_data_tooltip(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        m = re.search(
+            r'<span snc-mouse-down="RemoveColumnClick[^"]*"([^>]*?)>',
+            output,
+        )
+        self.assertIsNotNone(m, "RemoveColumnClick button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Remove column"', attrs)
+        self.assertNotIn('title="Remove column"', attrs,
+                         "Should use data-tooltip instead of native title")
+
+    def test_drag_handle_has_data_tooltip(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        m = re.search(
+            r'<span snc-mouse-down="ColumnDragStart[^"]*"([^>]*?)>',
+            output,
+        )
+        self.assertIsNotNone(m, "ColumnDragStart handle not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Drag to reorder"', attrs)
+        self.assertNotIn('title="Drag to reorder"', attrs,
+                         "Should use data-tooltip instead of native title")
+
+    def test_add_column_button_has_data_tooltip(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bob'}]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        m = re.search(
+            r'<th([^>]*?)snc-mouse-down="AddColumnClick[^"]*"([^>]*?)>',
+            output,
+        )
+        self.assertIsNotNone(m, "AddColumnClick (+) button not found")
+        attrs = m.group(1) + ' ' + m.group(2)
+        self.assertIn('data-tooltip="Add column"', attrs)
+
+
+class TestSearchBoxTooltips(unittest.TestCase):
+    """The first-match toggle in the list search box is icon-only and must
+    carry a data-tooltip describing what the icon does."""
+
+    def test_first_match_toggle_has_data_tooltip(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        m = re.search(
+            r'<span class="search-button [^"]*"([^>]*)snc-mouse-down="FirstMatchToggle',
+            output,
+        )
+        self.assertIsNotNone(m, "FirstMatchToggle button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="First match only"', attrs)
+
+
 if __name__ == '__main__':
     unittest.main()

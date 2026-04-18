@@ -5306,7 +5306,7 @@ class TestFirstMatchToggleRendering(unittest.TestCase):
         self.assertIn('FirstMatchToggle', output)
         # In the search-button block surrounding FirstMatchToggle, the inactive class is applied by default.
         import re as _re
-        m = _re.search(r'<span class="search-button (\w+)" snc-mouse-down="FirstMatchToggle', output)
+        m = _re.search(r'<span class="search-button (\w+)"[^>]*snc-mouse-down="FirstMatchToggle', output)
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), 'inactive')
 
@@ -5316,7 +5316,7 @@ class TestFirstMatchToggleRendering(unittest.TestCase):
         model['search'] = r"r'hello'1"
         output = visualize("hello world", model, None, None)
         import re as _re
-        m = _re.search(r'<span class="search-button (\w+)" snc-mouse-down="FirstMatchToggle', output)
+        m = _re.search(r'<span class="search-button (\w+)"[^>]*snc-mouse-down="FirstMatchToggle', output)
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), 'active')
 
@@ -8705,7 +8705,7 @@ class TestIndexSliceToggles(unittest.TestCase):
     def _first_match_toggle_state(self, html_output):
         """Return 'active' / 'inactive' for the FirstMatchToggle button in HTML."""
         import re as _re
-        m = _re.search(r'<span class="search-button (\w+)" snc-mouse-down="FirstMatchToggle', html_output)
+        m = _re.search(r'<span class="search-button (\w+)"[^>]*snc-mouse-down="FirstMatchToggle', html_output)
         return m.group(1) if m else None
 
     def test_index_search_shows_first_match_highlighted(self):
@@ -12505,6 +12505,88 @@ class TestSearchBoxInputAcceptsRawString(unittest.TestCase):
     def test_raw_string_highlighting(self):
         highlights = parse_regex_for_highlighting("r'hello'", self.value)
         self.assertEqual(len(highlights), 1)
+
+
+class TestSearchToggleTooltips(unittest.TestCase):
+    """The icon-only search toggles (capture groups, match case, first match)
+    must carry data-tooltip attributes so the snc-tooltip system shows their
+    name on hover (matches the tool toolbar pattern)."""
+
+    def test_capture_groups_toggle_has_tooltip(self):
+        model = init_model("hello world")
+        output = visualize("hello world", model, None, None)
+        m = re.search(
+            r'<span class="search-button [^"]*"([^>]*)snc-mouse-down="CaptureGroupsToggle',
+            output,
+        )
+        self.assertIsNotNone(m, "CaptureGroupsToggle button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Use capture groups"', attrs)
+
+    def test_case_sensitive_toggle_has_tooltip(self):
+        model = init_model("hello world")
+        output = visualize("hello world", model, None, None)
+        m = re.search(
+            r'<span class="search-button [^"]*"([^>]*)snc-mouse-down="CaseSensitiveToggle',
+            output,
+        )
+        self.assertIsNotNone(m, "CaseSensitiveToggle button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Match case"', attrs)
+
+    def test_first_match_toggle_has_tooltip(self):
+        model = init_model("hello world")
+        output = visualize("hello world", model, None, None)
+        m = re.search(
+            r'<span class="search-button [^"]*"([^>]*)snc-mouse-down="FirstMatchToggle',
+            output,
+        )
+        self.assertIsNotNone(m, "FirstMatchToggle button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="First match only"', attrs)
+
+    def test_dimmed_toggles_still_have_tooltip(self):
+        """When index/slice forces toggles to be dimmed/non-interactive, they
+        still carry their tooltip so users can discover what the icons mean."""
+        model = init_model("hello world")
+        model['search'] = '0'  # int index forces dimmed cap-groups + match-case
+        output = visualize("hello world", model, None, None)
+        dimmed_buttons = re.findall(
+            r'<span class="search-button inactive dimmed"([^>]*)>',
+            output,
+        )
+        self.assertTrue(dimmed_buttons, "Expected at least one dimmed search-button")
+        for attrs in dimmed_buttons:
+            self.assertIn('data-tooltip="', attrs,
+                          f"Dimmed search-button missing data-tooltip: {attrs!r}")
+
+
+class TestDisclosureButtonTooltip(unittest.TestCase):
+    """The disclosure button (>) toggles the replace box; it's icon-only so
+    needs an info tooltip describing what it does."""
+
+    def test_disclosure_button_has_tooltip_when_collapsed(self):
+        model = init_model("hello world")
+        output = visualize("hello world", model, None, None)
+        m = re.search(
+            r'<span snc-mouse-down="ReplaceToggle\(\)"([^>]*)class="search-button disclosure-button"',
+            output,
+        )
+        self.assertIsNotNone(m, "Disclosure button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Replace / Map / Filter"', attrs)
+
+    def test_disclosure_button_has_tooltip_when_expanded(self):
+        model = init_model("hello world")
+        model['replace_visible'] = True
+        output = visualize("hello world", model, None, None)
+        m = re.search(
+            r'<span snc-mouse-down="ReplaceToggle\(\)"([^>]*)class="search-button disclosure-button"',
+            output,
+        )
+        self.assertIsNotNone(m, "Disclosure button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Replace / Map / Filter"', attrs)
 
 
 if __name__ == '__main__':

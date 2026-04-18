@@ -620,10 +620,12 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 f'snc-mouse-move="{html.escape(drag_over_event)}" '
                 f'snc-mouse-up="{html.escape(drag_end_event)}">'
                 f'<td snc-mouse-down="{html.escape(drag_start_event)}" '
-                f'class="handle full-opacity-on-hover" title="Drag to reorder">'
+                f'data-tooltip="Drag to reorder" '
+                f'class="handle full-opacity-on-hover">'
                 f'<span class="snc-hover-hidden">\u2630</span></td>'
                 f'<td snc-mouse-down="{html.escape(remove_event)}" '
-                f'class="remove full-opacity-on-hover" title="Remove field">'
+                f'data-tooltip="Remove attribute" '
+                f'class="remove full-opacity-on-hover">'
                 f'<span class="snc-hover-hidden">\u00d7</span></td>'
                 f'<td snc-mouse-down="{html.escape(click_event)}" class="field-name">'
                 f'{html.escape(strip_leading_caret(accessor_code))}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
@@ -638,7 +640,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
 
     add_event = repr(AddFieldClick())
     add_button = (
-        f'<tr snc-mouse-down="{html.escape(add_event)}" class="snc-hover-hidden-parent">'
+        f'<tr snc-mouse-down="{html.escape(add_event)}" data-tooltip="Add attribute" class="snc-hover-hidden-parent">'
         f'<td style="min-width:0.8em"></td><td style="min-width:1em"></td>'
         f'<td class="snc-hover-hide-border full-opacity-on-hover add" colspan=2>'
             f'<span class="snc-hover-hidden add-icon">+</span>'

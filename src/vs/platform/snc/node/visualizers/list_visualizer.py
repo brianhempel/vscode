@@ -935,12 +935,14 @@ def _render_column_header(col, index, model):
         f'snc-mouse-up="{html.escape(drag_end_event)}" '
         f'style="{th_style}">'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
+        f'data-tooltip="Drag to reorder" '
         f'style="color:{GRAY};cursor:grab;opacity:0.5;user-select:none;'
         f'font-size:8px;font-style:normal;" '
-        f'title="Drag to reorder" class="snc-hover-hidden full-opacity-on-hover">U</span>'
+        f'class="snc-hover-hidden full-opacity-on-hover">U</span>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
+        f'data-tooltip="Remove column" '
         f'style="color:{GRAY};cursor:pointer;opacity:0.5;user-select:none;" '
-        f'title="Remove column" class="snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
+        f'class="snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'style="color:{BLUE};cursor:pointer;">'
@@ -1089,6 +1091,7 @@ def _render_search_box_input(model, eval_in_scope=None):
     fm_event = repr(FirstMatchToggle())
     first_match_toggle_html = (
         f'<span class="search-button {"active" if first_match else "inactive"}"'
+        f' data-tooltip="First match only"'
         f' snc-mouse-down="{html.escape(fm_event)}">'
         f'{ICONS["match-first"]}'
         f'</span>'
@@ -1379,6 +1382,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     strs.append(
         f'<th class="snc-hover-hidden-parent" '
         f'snc-mouse-down="{html.escape(add_event)}" '
+        f'data-tooltip="Add column" '
         f'style="padding:0 4px;cursor:pointer;vertical-align:middle;">'
         f'<span class="snc-hover-hidden full-opacity-on-hover" '
         f'style="color:{GRAY};opacity:0.5;font-size:8px;font-style:normal;">+</span>'

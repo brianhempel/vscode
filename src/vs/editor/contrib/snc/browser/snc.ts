@@ -4,6 +4,7 @@ import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js
 import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates } from '../../../browser/editorBrowser.js';
 import { Position } from '../../../common/core/position.js';
 import { Range } from '../../../common/core/range.js';
+import { Selection } from '../../../common/core/selection.js';
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
 import { TrackedRangeStickiness } from '../../../common/model.js';
@@ -1359,6 +1360,68 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 }
 
+/**
+ * If the inserted edit text introduces a new identifier the user is likely to want
+ * to rename (an assignment target or a `for` loop iteration variable), return a
+ * Selection covering that identifier in the post-edit document.
+ *
+ * - Variable assignment `<indent><name> = <expr>` → selects `<name>`.
+ * - For loop `<indent>for <name> in ...` → selects `<name>`.
+ * - For loop with tuple unpacking `<indent>for <i>, <name> in ...` → selects the
+ *   non-index name (the last variable), since the index is usually fine as-is.
+ * - Imports and other statements → returns null (no selection change).
+ *
+ * `insertedRange` is the range of the inserted text in the post-edit document
+ * (as returned by `pushEditOperations`'s inverseEditOperations). When
+ * `isPrependedToFirstLine` is true the inserted text is `editText + '\n'` placed
+ * at the start of the file; otherwise it's `'\n' + editText` placed after some
+ * existing line, so the first line of editText starts on the line after
+ * `insertedRange.startLineNumber`.
+ */
+function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine: boolean, insertedRange: Range): Selection | null {
+	const firstLine = editText.split('\n')[0];
+
+	let baseLine: number;
+	let baseCol: number;
+	if (isPrependedToFirstLine) {
+		baseLine = insertedRange.startLineNumber;
+		baseCol = insertedRange.startColumn;
+	} else {
+		baseLine = insertedRange.startLineNumber + 1;
+		baseCol = 1;
+	}
+
+	// Variable assignment: `<indent><name> = ...` (avoid matching `==`).
+	const assignMatch = firstLine.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/);
+	if (assignMatch) {
+		const prefix = assignMatch[1];
+		const name = assignMatch[2];
+		const startCol = baseCol + prefix.length;
+		return new Selection(baseLine, startCol, baseLine, startCol + name.length);
+	}
+
+	// `for <name>[, <name>...] in ...` → select the last name. For tuple
+	// unpacking the leading names are usually indices (e.g. `i`) while the
+	// trailing name is the actual item the user wants to rename.
+	const forMatch = firstLine.match(/^(\s*for\s+)([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s+in\b/);
+	if (forMatch) {
+		const prefix = forMatch[1];
+		const varList = forMatch[2];
+		const idRegex = /[A-Za-z_][A-Za-z0-9_]*/g;
+		let lastIdStart = 0;
+		let lastId = '';
+		let m: RegExpExecArray | null;
+		while ((m = idRegex.exec(varList)) !== null) {
+			lastIdStart = m.index;
+			lastId = m[0];
+		}
+		const startCol = baseCol + prefix.length + lastIdStart;
+		return new Selection(baseLine, startCol, baseLine, startCol + lastId.length);
+	}
+
+	return null;
+}
+
 export class SNCController extends Disposable implements IEditorContribution {
 	public static readonly ID = 'editor.contrib.snc';
 
@@ -2129,7 +2192,28 @@ export class SNCController extends Disposable implements IEditorContribution {
 				};
 			});
 
-			model.pushEditOperations([], editOperations, () => null);
+			// After inserting, if any edit introduced a new variable name (assignment
+			// or `for` loop), pre-select that name so the user can immediately type
+			// to rename it.
+			const newSelections = model.pushEditOperations([], editOperations, (inverseEdits) => {
+				for (let i = 0; i < sortedEdits.length; i++) {
+					const edit = sortedEdits[i];
+					const inv = inverseEdits[i];
+					if (!inv) {
+						continue;
+					}
+					const sel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range);
+					if (sel) {
+						return [sel];
+					}
+				}
+				return null;
+			});
+
+			if (newSelections && newSelections.length > 0) {
+				this.editor.setSelection(newSelections[0]);
+				this.editor.focus();
+			}
 		} else if (command.type === 'ChangeSelectedText') {
 			this.handleChangeSelectedText(command.text);
 		} else if (command.type === 'CopyToClipboard') {

@@ -48,7 +48,7 @@ The tools are in `ui_testing_tools/*.js`:
 `node scroll.js down [pixels]` - scroll editor down (default 300px)
 `node scroll.js up [pixels]` - scroll editor up (default 300px)
 
-`node buffer.js` - print the current editor's text buffer (unsaved content)
+`node buffer.js` - print the current editor's text buffer to stdout (including unsaved content)
 
 `node cdp_send.js Domain.method '{"param":"value"}'` - send arbitrary CDP command (e.g. for mouse move/press/release sequences that click.js can't do, like `node cdp_send.js Input.dispatchMouseEvent '{"type":"mouseMoved","x":100,"y":200}'`)
 

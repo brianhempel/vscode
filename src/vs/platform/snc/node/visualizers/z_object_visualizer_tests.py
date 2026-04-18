@@ -1766,5 +1766,57 @@ class TestGetFields(unittest.TestCase):
             eval_caret_expr('^.nonexistent', Empty())
 
 
+class TestObjectVisualizerTooltips(unittest.TestCase):
+    """The icon-only object visualizer controls (drag handle, remove field,
+    add field) must use the snc-tooltip system (data-tooltip) instead of the
+    native title attribute, matching the string visualizer's tool toolbar."""
+
+    def test_remove_field_button_has_data_tooltip(self):
+        import re
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer)
+        model['fields'] = ['^.x', '^.y']
+        html_out = visualize(obj, model, _get_visualizer, None)
+        m = re.search(
+            r'<td snc-mouse-down="RemoveFieldClick[^"]*"([^>]*?)>',
+            html_out,
+        )
+        self.assertIsNotNone(m, "RemoveFieldClick button not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Remove attribute"', attrs)
+        self.assertNotIn('title="Remove field"', attrs,
+                         "Should use data-tooltip instead of native title")
+
+    def test_drag_handle_has_data_tooltip(self):
+        import re
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer)
+        model['fields'] = ['^.x', '^.y']
+        html_out = visualize(obj, model, _get_visualizer, None)
+        m = re.search(
+            r'<td snc-mouse-down="DragStart[^"]*"([^>]*?)>',
+            html_out,
+        )
+        self.assertIsNotNone(m, "DragStart handle not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Drag to reorder"', attrs)
+        self.assertNotIn('title="Drag to reorder"', attrs,
+                         "Should use data-tooltip instead of native title")
+
+    def test_add_field_button_has_data_tooltip(self):
+        import re
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer)
+        model['fields'] = ['^.x']
+        html_out = visualize(obj, model, _get_visualizer, None)
+        m = re.search(
+            r'<tr snc-mouse-down="AddFieldClick[^"]*"([^>]*?)>',
+            html_out,
+        )
+        self.assertIsNotNone(m, "AddFieldClick (+) row not found")
+        attrs = m.group(1)
+        self.assertIn('data-tooltip="Add attribute"', attrs)
+
+
 if __name__ == '__main__':
     unittest.main()

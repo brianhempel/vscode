@@ -3413,28 +3413,35 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # Index/slice searches force 1st on and disable Aa / (Cap)(Grps)
         idx_slice = is_index_or_slice_search(selection_regex, eval_in_scope)
 
+        # Icon-only toggles get a data-tooltip so the snc-tooltip system
+        # shows the human-readable name on hover (same pattern as the tool
+        # toolbar in the upper-right corner).
+
         # "(Cap)(Grps)" toggle: on = capture groups preserved, off = only adjacent literal groups
         cap_groups_on = is_capture_groups_mode(selection_regex)
         cg_event = repr(CaptureGroupsToggle())
+        cg_tooltip = 'data-tooltip="Use capture groups"'
         if idx_slice:
-            cap_groups_toggle_html = f'<span class="search-button inactive dimmed">{ICONS["regex-group"]}</span>'
+            cap_groups_toggle_html = f'<span class="search-button inactive dimmed" {cg_tooltip}>{ICONS["regex-group"]}</span>'
         else:
-            cap_groups_toggle_html = f'<span class="search-button {"active" if cap_groups_on else "inactive"}" snc-mouse-down="{html.escape(cg_event)}">{ICONS["regex-group"]}</span>'
+            cap_groups_toggle_html = f'<span class="search-button {"active" if cap_groups_on else "inactive"}" {cg_tooltip} snc-mouse-down="{html.escape(cg_event)}">{ICONS["regex-group"]}</span>'
 
         # "Aa" toggle: on (highlighted) = case-sensitive (default), off = case-insensitive
         # Dimmed and non-interactive for index/slice
         case_sensitive = not is_case_insensitive(selection_regex)
         cs_event = repr(CaseSensitiveToggle())
+        cs_tooltip = 'data-tooltip="Match case"'
         if idx_slice:
-            case_toggle_html = f'<span class="search-button inactive dimmed">{ICONS["caps"]}</span>'
+            case_toggle_html = f'<span class="search-button inactive dimmed" {cs_tooltip}>{ICONS["caps"]}</span>'
         else:
-            case_toggle_html = f'<span class="search-button {"active" if case_sensitive else "inactive"}" snc-mouse-down="{html.escape(cs_event)}">{ICONS["caps"]}</span>'
+            case_toggle_html = f'<span class="search-button {"active" if case_sensitive else "inactive"}" {cs_tooltip} snc-mouse-down="{html.escape(cs_event)}">{ICONS["caps"]}</span>'
 
         # "1st" toggle: off by default, on = first-match
         # Forced on for index/slice
         first_match = is_first_match_mode(selection_regex) or idx_slice
         fm_event = repr(FirstMatchToggle())
-        first_match_toggle_html = f'<span class="search-button {"active" if first_match else "inactive"}" snc-mouse-down="{html.escape(fm_event)}">{ICONS["match-first"]}</span>'
+        fm_tooltip = 'data-tooltip="First match only"'
+        first_match_toggle_html = f'<span class="search-button {"active" if first_match else "inactive"}" {fm_tooltip} snc-mouse-down="{html.escape(fm_event)}">{ICONS["match-first"]}</span>'
 
         toggles_html = (
             f'<span class="search-toggles-container">'
@@ -3450,7 +3457,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             if replace_visible
             else ">"
         )
-        discolure_button = f'<span snc-mouse-down="{html.escape(replace_toggle_event)}" class="search-button disclosure-button">{disclosure_icon}</span>'
+        discolure_button = f'<span snc-mouse-down="{html.escape(replace_toggle_event)}" data-tooltip="Replace / Map / Filter" class="search-button disclosure-button">{disclosure_icon}</span>'
 
         replace_box_html = ""
         match_preview_html = ""
