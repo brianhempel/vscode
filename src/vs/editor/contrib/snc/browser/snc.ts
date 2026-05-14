@@ -1473,6 +1473,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Register event handlers
 		this._register(editor.onDidChangeModelContent((e) => { this.onDidChangeModelContent(e); }));
 		this._register(editor.onDidChangeModel(() => {
+			// Cancel anything in-flight from the previous model so its results
+			// don't leak into the new (potentially non-Python) editor.
+			if (this.debounceTimer) {
+				clearTimeout(this.debounceTimer);
+				this.debounceTimer = null;
+			}
+			this.cancelCurrentRun();
+			this.visualizationItems = [];
 			this.clearVisualizationWidgets();
 			// Set up language change listener for the new model
 			this.setupLanguageChangeListener();
@@ -1543,7 +1551,26 @@ export class SNCController extends Disposable implements IEditorContribution {
 		return this.editor.getModel()!.getLinesContent().join('\n');
 	}
 
+	/**
+	 * SNC only runs for Python files. All execution paths (initial visualization,
+	 * keystroke debounce, editor visibility change, UI events) funnel through
+	 * runProgram, which short-circuits for non-Python models, but most callers
+	 * also gate themselves to avoid scheduling no-op timers.
+	 */
+	private isPythonModel(): boolean {
+		const model = this.editor.getModel();
+		if (!model) {
+			return false;
+		}
+		const languageId = model.getLanguageId();
+		return languageId === 'python' || languageId === 'py';
+	}
+
 	onDidChangeModelContent(e: IModelContentChangedEvent): void {
+		if (!this.isPythonModel()) {
+			return;
+		}
+
 		// Immediately adjust visualization items for line changes (deletions/insertions)
 		// so stale visualizers don't linger on deleted or shifted lines.
 		this.adjustVisualizationItemsForContentChange(e);
@@ -1774,28 +1801,37 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private onLanguageChanged(): void {
-		const model = this.editor.getModel();
-		if (!model) {
-			return;
-		}
-
-		const languageId = model.getLanguageId();
-
-		// If language changed to Python, trigger visualization
-		if (languageId === 'python' || languageId === 'py') {
+		if (this.isPythonModel()) {
 			this.triggerInitialVisualization();
+		} else {
+			// Language switched away from Python: tear down widgets, drop stale
+			// items, and cancel any pending/in-flight run so the now-non-Python
+			// buffer doesn't keep getting re-executed.
+			if (this.debounceTimer) {
+				clearTimeout(this.debounceTimer);
+				this.debounceTimer = null;
+			}
+			this.visualizationItems = [];
+			this.clearVisualizationWidgets();
+			this.cancelCurrentRun();
 		}
 	}
 
-	private onEditorsVisibilityChanged(): void {
-		// Check if this editor has a model and is Python
-		const model = this.editor.getModel();
-		if (!model) {
+	private cancelCurrentRun(): void {
+		if (!this.currentRunId) {
 			return;
 		}
+		const channel = this.mainProcessService.getChannel('sncProcess');
+		const runId = this.currentRunId;
+		this.currentRunId = null;
+		this.eventsBeingHandledCurrentRun = [];
+		try {
+			channel.call('cancel', [runId]).catch(() => { /* ignore */ });
+		} catch { /* ignore */ }
+	}
 
-		const languageId = model.getLanguageId();
-		if (languageId !== 'python' && languageId !== 'py') {
+	private onEditorsVisibilityChanged(): void {
+		if (!this.isPythonModel()) {
 			return;
 		}
 
@@ -1815,14 +1851,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private triggerInitialVisualization(): void {
-		// Only trigger for Python files
-		const model = this.editor.getModel();
-		if (!model) {
-			return;
-		}
-
-		const languageId = model.getLanguageId();
-		if (languageId !== 'python' && languageId !== 'py') {
+		if (!this.isPythonModel()) {
 			return;
 		}
 
@@ -2404,6 +2433,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private async runProgram(content: string, uiEvent?: UiEvent): Promise<void> {
+		// Defensive guard: every caller should already gate on isPythonModel(),
+		// but make sure we never spawn a Python worker for a non-Python buffer.
+		if (!this.isPythonModel()) {
+			return;
+		}
+
 		// Get the working directory from the first workspace folder
 		const workingDirectory = this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath || '';
 		const channel = this.mainProcessService.getChannel('sncProcess');
