@@ -88,7 +88,9 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 */
 	private spawnWorker(workingDirectory: string): PoolWorker | null {
 		try {
-			const child = spawn('python', [this.runnerPath, '--pool-worker', workingDirectory]);
+			const child = spawn('python', [this.runnerPath, '--pool-worker', workingDirectory], {
+				env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+			});
 
 			const worker: PoolWorker = {
 				child,
