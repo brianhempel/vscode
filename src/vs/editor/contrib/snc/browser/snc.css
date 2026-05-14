@@ -296,13 +296,35 @@
 	border-radius: 4px;
 	z-index: 100;
 	min-width: 100px;
-	font-size: 11px;
-	font-family: var(--snc-code-font-family);
+	font-size: var(--snc-menu-font-size);
+	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
 	padding: 3px;
 	box-shadow: var(--snc-panel-shadow);
 
   width: fit-content;
   margin-top: 5px;
+
+  /* Panels whose contents are regex/code (fuzzy-pattern picker, repetition
+     picker) opt into the monospace code font with the .code modifier. */
+  &.code {
+    font-family: var(--snc-code-font-family);
+    letter-spacing: normal;
+
+    /* Even inside a code-flavored panel, the category title (e.g. "Repetition")
+       reads as UI chrome and stays in the UI font. */
+    .snc-dropdown-category-name {
+      font-family: var(--snc-ui-widget-font-family);
+      letter-spacing: -0.025em;
+    }
+  }
+
+  /* Inline code utility for code values inside otherwise-UI labels
+     (e.g. the True/False after "Any (" in the predicate dropdown). */
+  .snc-code {
+    font-family: var(--snc-code-font-family);
+    letter-spacing: normal;
+  }
 
   &.categorized {
   	padding: 0px;
@@ -411,7 +433,7 @@
 	z-index: 10002;
 }
 
-/* Shared tooltip base (py-exp tooltip + action tooltip) */
+/* Shared tooltip base (py-exp tooltip + action tooltip + simple data-tooltip) */
 .snc-tooltip {
 	position: fixed;
 	background: var(--snc-bg);
@@ -429,6 +451,15 @@
 	gap: 6px;
 	white-space: nowrap;
 	box-shadow: var(--snc-panel-shadow);
+}
+
+/* Simple data-tooltip text labels (e.g. "Toggle replace/map/filter",
+   "Match case", "Drag to reorder", tool names) are UI chrome, not code,
+   so they get the same UI font as the surrounding action buttons. The
+   py-exp and action tooltips keep the code font (they show Python code). */
+.snc-tooltip.snc-simple-tooltip {
+	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
 }
 
 .snc-action-tooltip-expr {

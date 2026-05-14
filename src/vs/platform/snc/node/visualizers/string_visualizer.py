@@ -500,7 +500,7 @@ def _segment_pattern_label(pat_str: str, segment_index: int, model: dict, seg_le
                 f'{html.escape(label)}</div>'
             )
         dropdown_panel = (
-            f'<div class="snc-dropdown-panel left" snc-dropdown-align="left">{"".join(options_html)}</div>'
+            f'<div class="snc-dropdown-panel left code" snc-dropdown-align="left">{"".join(options_html)}</div>'
         )
 
     return (
@@ -629,7 +629,7 @@ def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, m
         )
 
         dropdown_panel = (
-            f'<div class="snc-dropdown-panel categorized right" snc-dropdown-align="right">'
+            f'<div class="snc-dropdown-panel categorized right code" snc-dropdown-align="right">'
             f'{rep_category}'
             f'</div>'
         )
@@ -3091,14 +3091,23 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     # Loop dropdown (shown on hover via CSS)
     loop_enabled = has_search and not first
+    # 'Over matched strings' generates `for s in re.findall(...)` which ignores
+    # the replace_expr, so it doesn't make sense alongside a replace/map/filter
+    # predicate (mirrors the same restriction on the top-level Substrs button).
+    loop_match_strings_enabled = loop_enabled and not has_replace
 
-    def loop_row(label, action):
-        return _dropdown_row(label, action, True, expr(action) if loop_enabled else '')
+    def loop_row(label, action, enabled):
+        return _dropdown_row(label, action, enabled, expr(action) if enabled else '')
 
+    # The 'loop' action loops over `val` (transformed) when has_replace, else over
+    # `mtch` (match objects). Mirror the find_or_map button's label switch
+    # (Match Objs <-> Map Matches) on replace_visible so opening the replace box
+    # gives immediate UI feedback.
+    over_match_label = 'Over mapped' if replace_visible else 'Over match objects'
     loop_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{loop_row("Over matched strings", "loop_match_strings")}'
-        f'{loop_row("Over match objects", "loop")}'
+        f'{loop_row("Over matched strings", "loop_match_strings", loop_match_strings_enabled)}'
+        f'{loop_row(over_match_label, "loop", loop_enabled)}'
         f'</div>'
     )
     loop_btn = (
@@ -3112,8 +3121,14 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     any_val, all_val = _compute_predicate_previews(
         selection_regex, value, replace_visible, model.get('replace_text'), match_count, eval_in_scope
     ) if has_search else (None, None)
-    any_suffix = f' ({any_val})' if any_val is not None else ''
-    all_suffix = f' ({all_val})' if all_val is not None else ''
+    # Wrap the True/False value in a snc-code span so the label text stays in
+    # the surrounding UI font but the boolean value renders in code font.
+    def _predicate_suffix(val):
+        if val is None:
+            return ''
+        return f' (<span class="snc-code">{html.escape(str(val))}</span>)'
+    any_suffix = _predicate_suffix(any_val)
+    all_suffix = _predicate_suffix(all_val)
 
     predicate_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'

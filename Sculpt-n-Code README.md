@@ -24,13 +24,18 @@ npm run watch-client # faster
 
 # Launch app. Run in separate terminal from watch-client
 ./scripts/code.sh
+.\scripts\code.bat # Windows
 ```
 
 After building once, you can edit `~/.vscode-oss-dev/argv.json` to disable crash reporting.
 
 **On Windows:** you must run `npm install` above in Visual Studio.
 
+**More details if you have trouble:** https://github.com/microsoft/vscode/wiki/How-to-Contribute#build-and-run
+
 Front-end code is at: `src/vs/editor/contrib/snc`
+
+If you change the Typescript or the CSS, need to hit Cmd-R in the running application to reload the front-end.
 
 Back-end runner is at: `src/vs/platform/snc`
 

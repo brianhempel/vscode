@@ -9,6 +9,7 @@
 - [x] literal and fuzzy selection as tool buttons
 - [x] remove \A \Z
 - [x] misaligned single-line generic visualizer
+- [ ] only turn it on  for Python files
 - [ ] cleaner handling of many visualizers
     - [ ] small mode for less relevant visualizers. current/next/previous line of code, unused variables
     - [ ] don't show string tools menu in small mode

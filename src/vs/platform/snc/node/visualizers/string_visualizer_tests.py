@@ -8086,6 +8086,84 @@ class TestActionButtonRendering(unittest.TestCase):
         self.assertIsNotNone(m, "Loop trigger should be present")
         self.assertNotIn('dimmed', m.group(1).split())
 
+    def test_loop_match_strings_disabled_in_replace_mode(self):
+        """The 'Over matched strings' loop row is dimmed when a replace/map/filter predicate is set.
+
+        loop_match_strings generates `for i, s in enumerate(re.findall(...))` which ignores the
+        replace_expr, so it doesn't make sense alongside a replace/map/filter predicate (mirrors
+        the same restriction on the top-level Substrs button)."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        model['replace_text'] = "^[0].upper()"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        cls = self._dropdown_option_class(html_output, 'loop_match_strings')
+        self.assertIsNotNone(cls, "Over matched strings dropdown row should be present")
+        self.assertIn('dimmed', cls.split())
+
+    def test_loop_match_strings_enabled_without_replace(self):
+        """The 'Over matched strings' loop row is enabled when no replace predicate is set."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        cls = self._dropdown_option_class(html_output, 'loop_match_strings')
+        self.assertIsNotNone(cls, "Over matched strings dropdown row should be present")
+        self.assertNotIn('dimmed', cls.split())
+
+    def test_loop_match_strings_enabled_when_replace_visible_but_empty(self):
+        """The replace box being visible (but empty) doesn't constitute a predicate."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        model['replace_text'] = ""
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        cls = self._dropdown_option_class(html_output, 'loop_match_strings')
+        self.assertIsNotNone(cls, "Over matched strings dropdown row should be present")
+        self.assertNotIn('dimmed', cls.split())
+
+    def test_loop_match_objects_enabled_in_replace_mode(self):
+        """The 'Over mapped' loop row (the 'loop' action) stays enabled in replace mode (it uses the predicate)."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        model['replace_text'] = "^[0].upper()"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        cls = self._dropdown_option_class(html_output, 'loop')
+        self.assertIsNotNone(cls, "loop dropdown row should be present")
+        self.assertNotIn('dimmed', cls.split())
+
+    # ---- Loop 'Over mapped' / 'Over match objects' label switching ----------
+
+    def test_loop_label_says_over_match_objects_without_replace(self):
+        """When the replace box is hidden, the 'loop' row label is 'Over match objects'."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Over match objects', html_output)
+        self.assertNotIn('Over mapped', html_output)
+
+    def test_loop_label_says_over_mapped_in_replace_mode(self):
+        """When the replace box is visible (map mode), the 'loop' row label is 'Over mapped'.
+
+        Mirrors the find_or_map button label which switches from 'Match Objs' to 'Map Matches'
+        once the replace box opens, since the same `loop` action then loops over mapped values."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Over mapped', html_output)
+        self.assertNotIn('Over match objects', html_output)
+
+    def test_loop_label_says_over_mapped_with_replace_text(self):
+        """The 'Over mapped' label also applies when there's a non-empty replace expression."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        model['replace_text'] = "^[0].upper()"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Over mapped', html_output)
+        self.assertNotIn('Over match objects', html_output)
+
     # ---- Any/All predicate dropdown -----------------------------------------
 
     def test_predicate_dropdown_grayed_when_no_search(self):
@@ -8108,29 +8186,32 @@ class TestActionButtonRendering(unittest.TestCase):
         self.assertNotIn('dimmed', m.group(1).split())
 
     def test_any_shows_true_when_match_exists(self):
-        """Any label shows (True) when search pattern matches."""
+        """Any label shows (True) when search pattern matches.
+
+        The True/False predicate value is wrapped in a `snc-code` span so it renders
+        in the code font even though the surrounding 'Any (...)' label is UI-font."""
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Any (True)', html_output)
+        self.assertIn('Any (<span class="snc-code">True</span>)', html_output)
 
     def test_any_shows_false_when_no_match(self):
         model = init_model(self.value)
         model['search'] = r"r'xyz'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Any (False)', html_output)
+        self.assertIn('Any (<span class="snc-code">False</span>)', html_output)
 
     def test_if_any_shows_true_when_match_exists(self):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('If Any (True)', html_output)
+        self.assertIn('If Any (<span class="snc-code">True</span>)', html_output)
 
     def test_if_any_shows_false_when_no_match(self):
         model = init_model(self.value)
         model['search'] = r"r'xyz'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('If Any (False)', html_output)
+        self.assertIn('If Any (<span class="snc-code">False</span>)', html_output)
 
     def test_all_shows_preview_in_replace_mode(self):
         """All label shows (True)/(False) in replace mode."""
@@ -8139,7 +8220,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('All (True)', html_output)
+        self.assertIn('All (<span class="snc-code">True</span>)', html_output)
 
     def test_if_all_shows_preview_in_replace_mode(self):
         model = init_model(self.value)
@@ -8147,15 +8228,15 @@ class TestActionButtonRendering(unittest.TestCase):
         model['replace_visible'] = True
         model['replace_text'] = "^[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('If All (True)', html_output)
+        self.assertIn('If All (<span class="snc-code">True</span>)', html_output)
 
     def test_all_no_preview_when_disabled(self):
         """All has no (True/False) suffix when not in replace mode (it's disabled)."""
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertNotIn('All (True)', html_output)
-        self.assertNotIn('All (False)', html_output)
+        self.assertNotIn('All (<span class="snc-code">True</span>)', html_output)
+        self.assertNotIn('All (<span class="snc-code">False</span>)', html_output)
 
     def test_all_disabled_in_first_match_mode(self):
         """All option in the predicate panel is dimmed in first-match mode."""
@@ -8178,6 +8259,55 @@ class TestActionButtonRendering(unittest.TestCase):
         cls = self._dropdown_option_class(html_output, 'if_all')
         self.assertIsNotNone(cls, "If All dropdown row should be present")
         self.assertIn('dimmed', cls.split())
+
+    # ---- Dropdown panel font: 'code' class on regex panels -----------------
+    #
+    # The default `.snc-dropdown-panel` font is the UI font so non-code labels
+    # (Repetition title, Loop options, Any/All) render in the same font as the
+    # surrounding action buttons. Panels whose contents are regex/code (the
+    # fuzzy-pattern picker and repetition picker) opt into the monospace code
+    # font by adding a `code` class on the panel element.
+
+    def test_loop_panel_does_not_have_code_class(self):
+        """Loop dropdown panel uses default UI font (no 'code' class)."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Over matched strings', html_output)
+        # Hover-menu panels (loop, predicate) align left and use data-hover-menu.
+        # A 'code' class on either would appear right before that attribute pair.
+        self.assertNotIn('code" snc-dropdown-align="left" data-hover-menu', html_output)
+
+    def test_predicate_panel_does_not_have_code_class(self):
+        """Predicate (Any/All) dropdown panel uses default UI font (no 'code' class).
+
+        The True/False *values* inside are wrapped in `snc-code` spans for code-font
+        rendering; the surrounding label text and panel itself are UI font."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIn('Any (<span class="snc-code">', html_output)
+        self.assertNotIn('code" snc-dropdown-align="left" data-hover-menu', html_output)
+
+    def test_fuzzy_pattern_panel_has_code_class(self):
+        """Fuzzy pattern dropdown panel uses code font (has 'code' class)."""
+        model = init_model("hello world")
+        model['search'] = r"r'(.*)'"
+        model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
+        html_output = visualize("hello world", model, None, None, max_width=400)
+        self.assertIn('snc-dropdown-panel left code"', html_output)
+
+    def test_repetition_panel_has_code_class(self):
+        """Repetition dropdown panel uses code font (has 'code' class) for regex options like *, ?, {n,m}.
+
+        The 'Repetition' category-name title still renders in UI font (a CSS rule
+        overrides .snc-dropdown-category-name back to UI font even inside .code panels)."""
+        model = init_model("hello world")
+        model['search'] = r"r'(.*)'"
+        model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
+        html_output = visualize("hello world", model, None, None, max_width=400)
+        self.assertIn('snc-dropdown-panel categorized right code"', html_output)
+        self.assertIn('snc-dropdown-category-name">Repetition</div>', html_output)
 
     # ---- Update behaviour ----------------------------------------------------
 
