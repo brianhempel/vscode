@@ -6,24 +6,29 @@ Setup:
 git clone https://github.com/brianhempel/vscode.git
 cd vscode
 git checkout snc
-npm install
+npm install # On Windows you have to run this in Visual Studio
 
 # Use your ordinary VS Code extensions
 mkdir ~/.vscode-oss-dev
 ln -s ~/.vscode/extensions ~/.vscode-oss-dev/extensions
+# Windows PowerShell equivalent:
+New-Item -ItemType Directory -Path "$HOME\.vscode-oss-dev"
+New-Item -ItemType SymbolicLink -Path "$HOME\.vscode-oss-dev\extensions" -Target "$HOME\.vscode\extensions"
 
 # Python stuff
 pip install pytest
 
 # Build (first build takes 66sec)
-npm run watch-client
-npm run watch # if you are working on extensions
+npm run watch # first build, and if you are working on extensions
+npm run watch-client # faster
 
-# In separate terminal
+# Launch app. Run in separate terminal from watch-client
 ./scripts/code.sh
 ```
 
 After building once, you can edit `~/.vscode-oss-dev/argv.json` to disable crash reporting.
+
+**On Windows:** you must run `npm install` above in Visual Studio.
 
 Front-end code is at: `src/vs/editor/contrib/snc`
 
