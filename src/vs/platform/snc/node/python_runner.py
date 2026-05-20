@@ -194,6 +194,31 @@ def _find_available_variable_name(source_code: str, desired_name: str) -> str:
         next_suffix += 1
 
 
+def _detect_insertion_indent(lines: List[str], line: int) -> str:
+    """Indent string for code inserted after `line` (1-indexed).
+
+    Uses the trigger line's own indent, but if the next non-empty line is
+    more indented (i.e., the trigger line opens a block like `for x:`),
+    uses that deeper indent so the new line lands inside the block body.
+    """
+    if not (1 <= line <= len(lines)):
+        return ""
+    current_line = lines[line - 1]
+    current_indent_len = len(current_line) - len(current_line.lstrip())
+    current_indent_str = current_line[:current_indent_len]
+
+    for i in range(line, len(lines)):  # 0-indexed; line itself is index line-1
+        nxt = lines[i]
+        if nxt.strip() == '':
+            continue
+        nxt_indent_len = len(nxt) - len(nxt.lstrip())
+        if nxt_indent_len > current_indent_len:
+            return nxt[:nxt_indent_len]
+        break
+
+    return current_indent_str
+
+
 def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str) -> List[Dict[str, Any]]:
     """Convert a (suggest_var_name, expr) tuple into a list of line-level edits.
 
@@ -213,12 +238,7 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
         assignment = expr
 
     lines = source_code.split('\n')
-    if 1 <= line <= len(lines):
-        current_line = lines[line - 1]
-        indent = len(current_line) - len(current_line.lstrip())
-        indent_str = current_line[:indent]
-    else:
-        indent_str = ""
+    indent_str = _detect_insertion_indent(lines, line)
 
     # Apply base indentation to all lines (supports multi-line statements like for loops)
     assignment_lines = assignment.split('\n')

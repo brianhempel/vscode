@@ -7,7 +7,7 @@ Run:
 
 import unittest
 
-from python_runner import split_leading_imports
+from python_runner import _build_new_code_edits, split_leading_imports
 
 
 class TestSplitLeadingImports(unittest.TestCase):
@@ -40,4 +40,90 @@ class TestSplitLeadingImports(unittest.TestCase):
         exec(body_code, globals_dict)
 
         self.assertEqual(logged, [(4, "hello world")])
+
+
+class TestBuildNewCodeEdits(unittest.TestCase):
+    """The insertion edit's text must carry the correct indentation for the
+    location after `line`. When `line` is a block-header (its body is the
+    deeper-indented next line), inserted code should match the body indent;
+    otherwise it should match `line`'s own indent."""
+
+    def _insert_text(self, source_code, line, expr='s.upper()', name='result'):
+        edits = _build_new_code_edits(source_code, line, name, expr)
+        # First edit is always the insertion at `line`; any later edits are imports.
+        return edits[0]['text']
+
+    def test_top_level_for_header_uses_body_indent(self):
+        source = "strings = ['a', 'b']\nfor s in strings:\n    pass\n"
+        self.assertEqual(self._insert_text(source, line=2), "    result = s.upper()")
+
+    def test_nested_for_header_uses_body_indent(self):
+        source = "def foo():\n    strings = ['a', 'b']\n    for s in strings:\n        pass\n"
+        self.assertEqual(self._insert_text(source, line=3), "        result = s.upper()")
+
+    def test_while_header_uses_body_indent(self):
+        source = "i = 0\nwhile i < 3:\n    i += 1\n"
+        self.assertEqual(self._insert_text(source, line=2), "    result = s.upper()")
+
+    def test_if_header_uses_body_indent(self):
+        source = "x = 1\nif x:\n    pass\n"
+        self.assertEqual(self._insert_text(source, line=2), "    result = s.upper()")
+
+    def test_def_header_uses_body_indent(self):
+        source = "def foo():\n    return 1\n"
+        self.assertEqual(self._insert_text(source, line=1), "    result = s.upper()")
+
+    def test_regular_statement_keeps_own_indent(self):
+        source = "def foo():\n    x = 1\n    y = 2\n"
+        self.assertEqual(self._insert_text(source, line=2), "    result = s.upper()")
+
+    def test_top_level_statement_keeps_zero_indent(self):
+        source = "x = 1\ny = 2\n"
+        self.assertEqual(self._insert_text(source, line=1), "result = s.upper()")
+
+    def test_last_line_of_body_before_eof_keeps_body_indent(self):
+        # Trigger on the last line of a for body with no line below.
+        # Lookahead finds no next line; fallback to trigger line's own indent (4).
+        source = "for s in strings:\n    x = s.upper()"
+        self.assertEqual(self._insert_text(source, line=2), "    result = s.upper()")
+
+    def test_last_line_of_body_before_dedent_keeps_body_indent(self):
+        # Trigger on last for-body line; next line is dedented top-level code.
+        # Next-line indent (0) is not > trigger indent (4), so stay in the loop.
+        source = "for s in strings:\n    x = s.upper()\nprint('done')\n"
+        self.assertEqual(self._insert_text(source, line=2), "    result = s.upper()")
+
+    def test_for_with_single_body_statement_no_pass(self):
+        # The "for loop with no pass" case: a single real body statement.
+        # Iteration-variable visualizer (line=1, the for header) gets body indent.
+        source = "for s in strings:\n    x = s.upper()\n"
+        self.assertEqual(self._insert_text(source, line=1), "    result = s.upper()")
+
+    def test_deeply_nested_for_header(self):
+        # for at indent 8 (inside class method) — body should be 12.
+        source = (
+            "class C:\n"
+            "    def m(self):\n"
+            "        for s in strings:\n"
+            "            pass\n"
+        )
+        self.assertEqual(self._insert_text(source, line=3), "            result = s.upper()")
+
+    def test_tab_indentation(self):
+        source = "for s in strings:\n\tpass\n"
+        self.assertEqual(self._insert_text(source, line=1), "\tresult = s.upper()")
+
+    def test_block_header_followed_by_blank_then_body(self):
+        # Blank lines between header and body should be skipped during lookahead.
+        source = "for s in strings:\n\n    pass\n"
+        self.assertEqual(self._insert_text(source, line=1), "    result = s.upper()")
+
+    def test_no_var_name_uses_bare_expr(self):
+        # When no variable name is suggested, the bare expression is inserted
+        # with the same indent rules.
+        edits = _build_new_code_edits(
+            "for s in strings:\n    pass\n", line=1, suggest_var_name=None, expr="s.upper()"
+        )
+        self.assertEqual(edits[0]['text'], "    s.upper()")
+
 
