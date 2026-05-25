@@ -57,14 +57,34 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	/** The currently executing worker (killed on the next run) */
 	private activeWorker: PoolWorker | null = null;
 
+	/**
+	 * Python executable used to spawn workers. Defaults to `python3`; the
+	 * renderer resolves the user's preferred interpreter via the Python
+	 * extension's `python.interpreterPath` command and updates this via
+	 * `setPythonExecutable`.
+	 */
+	private pythonExecutable: string = 'python3';
+
 	/** Active runs */
 	private readonly runs = new Map<string, RunState>();
 
 	/**
 	 * Callbacks waiting for any pool worker to become ready.
 	 * Resolved by processWorkerBuffer when a checkpoint_ready message arrives.
+	 * Rejected by handleSpawnFailure when the python executable can't be launched.
 	 */
-	private readonly workerWaiters: Array<(worker: PoolWorker) => void> = [];
+	private readonly workerWaiters: Array<{
+		resolve: (worker: PoolWorker) => void;
+		reject: (err: Error) => void;
+	}> = [];
+
+	/**
+	 * Set when the python executable fails to launch (e.g. ENOENT). While set,
+	 * we stop refilling pools and fail new runs fast with a user-visible
+	 * error. Cleared by `setPythonExecutable` when the user changes
+	 * configuration so we'll retry with the new value.
+	 */
+	private pythonSpawnError: string | null = null;
 
 	private _disposed = false;
 
@@ -88,7 +108,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 */
 	private spawnWorker(workingDirectory: string): PoolWorker | null {
 		try {
-			const child = spawn('python', [this.runnerPath, '--pool-worker', workingDirectory], {
+			const child = spawn(this.pythonExecutable, [this.runnerPath, '--pool-worker', workingDirectory], {
 				env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
 			});
 
@@ -109,8 +129,9 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				// Silently ignore stderr from pool workers
 			});
 
-			child.on('error', () => {
+			child.on('error', (err: Error) => {
 				this.removeWorkerFromPool(worker);
+				this.handleSpawnFailure(err);
 			});
 
 			child.on('close', () => {
@@ -118,9 +139,45 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			});
 
 			return worker;
-		} catch {
+		} catch (err) {
+			this.handleSpawnFailure(err instanceof Error ? err : new Error(String(err)));
 			return null;
 		}
+	}
+
+	/**
+	 * Called when a worker process fails to launch (e.g. python executable
+	 * doesn't exist). Marks the executable as broken so we stop filling pools,
+	 * tears down anything in flight, and notifies all active runs and
+	 * waiters so the user sees a real error instead of a hang.
+	 */
+	private handleSpawnFailure(err: Error): void {
+		if (this.pythonSpawnError) {
+			// Already in failed state — additional spawn errors from sibling
+			// workers in the same broken pool are expected. Don't re-notify.
+			return;
+		}
+
+		const code = (err as NodeJS.ErrnoException).code;
+		const message = code === 'ENOENT'
+			? `Sculpt-n-Code: failed to launch Python ('${this.pythonExecutable}'). Configure your interpreter via the Python extension or 'python.defaultInterpreterPath'.`
+			: `Sculpt-n-Code: failed to launch Python ('${this.pythonExecutable}'): ${err.message}`;
+
+		this.pythonSpawnError = message;
+		this.drainAllPools();
+
+		while (this.workerWaiters.length > 0) {
+			try { this.workerWaiters.shift()!.reject(new Error(message)); } catch { /* ignore */ }
+		}
+
+		for (const [runId, state] of this.runs) {
+			if (state.timeoutId) {
+				clearTimeout(state.timeoutId);
+			}
+			this._onStream.fire({ runId, type: 'error', error: message });
+		}
+		this.runs.clear();
+		this.activeWorker = null;
 	}
 
 	/**
@@ -128,6 +185,10 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 */
 	private ensurePoolFilled(workingDirectory: string): void {
 		if (this._disposed) { return; }
+		// While the python executable is known to be broken, don't keep
+		// retrying — that would just spin a spawn-error storm. The flag is
+		// cleared by setPythonExecutable when the user changes config.
+		if (this.pythonSpawnError) { return; }
 
 		// If working directory changed, drain everything and restart
 		if (this.poolWorkingDirectory && this.poolWorkingDirectory !== workingDirectory) {
@@ -205,8 +266,8 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		}
 
 		// No workers ready — wait for the next one to reach its checkpoint
-		return new Promise<PoolWorker>((resolve) => {
-			this.workerWaiters.push(resolve);
+		return new Promise<PoolWorker>((resolve, reject) => {
+			this.workerWaiters.push({ resolve, reject });
 		});
 	}
 
@@ -302,8 +363,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		if (inCP1 !== -1) { this.checkpoint1Pool.splice(inCP1, 1); }
 		if (inCP2 !== -1) { this.checkpoint2Pool.splice(inCP2, 1); }
 
-		const resolve = this.workerWaiters.shift()!;
-		resolve(worker);
+		this.workerWaiters.shift()!.resolve(worker);
 
 		// Replenish the pool after handing out a worker
 		if (this.poolWorkingDirectory) {
@@ -392,6 +452,15 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			timing: { spawnTimeMs: tSpawn }
 		});
 
+		// If we already know the python executable is broken, fail fast
+		// instead of trying to spawn (and re-notifying about it). The
+		// renderer's notification is already up.
+		if (this.pythonSpawnError) {
+			this._onStream.fire({ runId, type: 'error', error: this.pythonSpawnError });
+			this.runs.delete(runId);
+			return;
+		}
+
 		if (options?.timeout) {
 			state.timeoutId = setTimeout(() => {
 				if (!state.ended) {
@@ -420,9 +489,17 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.invalidateCheckpoint2Pool(content);
 		}
 
-		// Take a ready worker (or wait for one)
-		const workerOrPromise = this.takeReadyWorker(content);
-		const worker = workerOrPromise instanceof Promise ? await workerOrPromise : workerOrPromise;
+		// Take a ready worker (or wait for one). The waiter promise rejects
+		// if the python executable can't be launched; in that case
+		// handleSpawnFailure has already fired the user-facing error stream
+		// message and cleaned up `this.runs`, so we just return.
+		let worker: PoolWorker;
+		try {
+			const workerOrPromise = this.takeReadyWorker(content);
+			worker = workerOrPromise instanceof Promise ? await workerOrPromise : workerOrPromise;
+		} catch {
+			return;
+		}
 
 		// Send the run command
 		try {
@@ -442,6 +519,26 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 		// Replenish the pool
 		this.ensurePoolFilled(options.workingDirectory);
+	}
+
+	async setPythonExecutable(executable: string): Promise<void> {
+		const next = executable && executable.length > 0 ? executable : 'python3';
+		if (next === this.pythonExecutable) {
+			return;
+		}
+		this.pythonExecutable = next;
+
+		// Reset the broken-state flag so we'll retry with the new value;
+		// if it's still broken, handleSpawnFailure will notify again.
+		this.pythonSpawnError = null;
+
+		// Pre-warmed workers were spawned with the old interpreter — drop them
+		// and refill. The active worker (if any) is allowed to finish; it'll
+		// be killed by the next run as today.
+		this.drainAllPools();
+		if (this.poolWorkingDirectory && !this._disposed) {
+			this.ensurePoolFilled(this.poolWorkingDirectory);
+		}
 	}
 
 	async cancel(runId: string): Promise<void> {

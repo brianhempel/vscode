@@ -10,6 +10,7 @@
 - [x] remove \A \Z
 - [x] misaligned single-line generic visualizer
 - [x] only turn it on  for Python files
+- [x] find the correct python interpreter using the official Python extension's machinery
 - [ ] cleaner handling of many visualizers (b)
     - [ ] small mode for less relevant visualizers. current/next/previous line of code, unused variables (b)
     - [ ] don't show string tools menu in small mode (b)

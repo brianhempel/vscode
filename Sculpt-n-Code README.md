@@ -45,6 +45,16 @@ Visualizers use the Elm architecture (albeit a custom implementation in Python).
 
 User events trigger a full re-run to get back to the appropriate visualizer to run the event through its Elm-like update and visualize functions. To speed this up, Python is preloaded at two checkpoints to avoid paying startup costs. Checkpoint 1 is after the python_runner.py is started up; checkpoint 2 is after just the `import`s on the open file (to avoid re-paying import and source-to-source translation cost). Checkpoint 2 is used if the code didn't change, checkpoint 1 otherwise.
 
+### Python interpreter selection
+
+The pool workers are spawned with whichever interpreter the user has selected via the official Python extension (`ms-python.python`). Re-resolution happens on:
+
+- Controller construction (initial load).
+- `onDidChangeModel` (tab switch — interpreter may differ across workspace folders).
+- `onDidChangeConfiguration` for `python.defaultInterpreterPath` / `python.pythonPath`.
+
+Status-bar interpreter picks aren't surfaced as a config event, so they're picked up on the next tab switch rather than instantly. If the Python extension isn't installed or the command fails for any reason, SNC falls back to `python3` on PATH.
+
 See `Scuplt-n-Code README 2.md` for more architecture details.
 
 ## Committing
@@ -75,10 +85,6 @@ git push -f
 ```
 
 ## Scratch Notes (ignore)
-
-How to get the Python path etc: https://github.com/microsoft/vscode-python-debugger/blob/main/src/extension/common/python.ts
-
-All together: https://github.com/microsoft/vscode-python-debugger/blob/main/src/extension/debugger/configuration/resolvers/launch.ts
 
 Process spawning/killing: debugpy-main/src/debugpy/launcher/handlers.py debugpy-main/src/debugpy/launcher/debuggee.py
 

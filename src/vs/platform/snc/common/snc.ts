@@ -87,4 +87,13 @@ export interface ISNCProcessService {
 	 * Cancel a streaming run by runId. No-op if already finished or not found.
 	 */
 	cancel(runId: string): Promise<void>;
+
+	/**
+	 * Set the Python executable to use for spawning workers. The renderer
+	 * resolves this from the Python extension via `python.interpreterPath`
+	 * (or falls back to `'python3'`) and forwards it here. If the value
+	 * differs from the current one, both pools are drained and refilled
+	 * with the new interpreter.
+	 */
+	setPythonExecutable(executable: string): Promise<void>;
 }

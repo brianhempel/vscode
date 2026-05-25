@@ -15,6 +15,9 @@ import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.
 import { IHostService } from '../../../../workbench/services/host/browser/host.js';
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { INotificationService, INotificationHandle, Severity } from '../../../../platform/notification/common/notification.js';
 import * as dom from '../../../../base/browser/dom.js';
 import './snc.css';
 
@@ -1432,6 +1435,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	// Streaming state
 	private currentRunId: string | null = null;
+
+	// Sticky notification shown when the python executable can't be launched
+	// (e.g. neither the Python extension's selection nor the 'python3'
+	// fallback exists). Auto-dismissed when a subsequent run starts producing
+	// output, indicating Python is working again.
+	private pythonSpawnFailureNotification: INotificationHandle | null = null;
 	private eventsBeingHandledCurrentRun: { line: number; visIndex: number; events: UiEvent[] }[] = [];
 	private visualizationItems: IVisualizationItem[] = [];
 	private syntaxErrorActive = false;
@@ -1467,6 +1476,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		@IHostService private readonly hostService: IHostService,
 		@IEditorService private readonly editorService: IEditorService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
+		@ICommandService private readonly commandService: ICommandService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@INotificationService private readonly notificationService: INotificationService,
 	) {
 		super();
 
@@ -1484,6 +1496,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.clearVisualizationWidgets();
 			// Set up language change listener for the new model
 			this.setupLanguageChangeListener();
+			// Re-resolve the Python interpreter for the new model's workspace
+			// folder. In multi-root workspaces the user may have a different
+			// interpreter selected per-folder.
+			this.resolveAndSetPythonExecutable();
 			// Trigger initial visualization when a new model loads
 			this.triggerInitialVisualization();
 		}));
@@ -1541,10 +1557,87 @@ export class SNCController extends Disposable implements IEditorContribution {
 			document.body.classList.remove('snc-ctrl-down');
 		}));
 
+		// Re-resolve the Python interpreter when the user edits the relevant
+		// settings. Status-bar interpreter picks aren't surfaced as a config
+		// change, but tab switches re-resolve via onDidChangeModel above.
+		this._register(this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('python.defaultInterpreterPath')
+				|| e.affectsConfiguration('python.pythonPath')) {
+				this.resolveAndSetPythonExecutable();
+			}
+		}));
+
+		// Initial resolve. This races with the first run's pool spawn — if
+		// the resolve loses, the first run uses 'python3' and subsequent
+		// runs pick up the resolved interpreter once setPythonExecutable
+		// drains/refills the pools.
+		this.resolveAndSetPythonExecutable();
+
 		// Exposed for ui_testing_tools/ CDP scripts (buffer.js, scroll.js).
 		// Monaco only renders visible lines in the DOM, so CDP can't read the
 		// full text buffer or control scroll position without model access.
 		(globalThis as any)._sncEditor = editor;
+	}
+
+	/**
+	 * Ask the Python extension which interpreter to use for the current
+	 * editor's workspace folder, and forward it to the main-process pool.
+	 * Falls back to `'python3'` whenever the Python extension is missing,
+	 * not yet activated, or returns nothing useful.
+	 */
+	private async resolveAndSetPythonExecutable(): Promise<void> {
+		let executable = 'python3';
+		try {
+			const model = this.editor.getModel();
+			const folder = model
+				? this.workspaceContextService.getWorkspaceFolder(model.uri)
+				: this.workspaceContextService.getWorkspace().folders[0];
+			if (folder) {
+				const resolved = await this.commandService.executeCommand<string>(
+					'python.interpreterPath',
+					{ workspaceFolder: folder.uri.fsPath }
+				);
+				if (resolved && resolved.length > 0) {
+					executable = resolved;
+				}
+			}
+		} catch {
+			// Python extension not installed / not activated yet / command
+			// errored out — keep the 'python3' fallback.
+		}
+
+		try {
+			const channel = this.mainProcessService.getChannel('sncProcess');
+			await channel.call('setPythonExecutable', [executable]);
+		} catch (err) {
+			console.error('SNC: failed to set Python executable on main process:', err);
+		}
+	}
+
+	private showPythonSpawnFailureNotification(message: string): void {
+		if (this.pythonSpawnFailureNotification) {
+			this.pythonSpawnFailureNotification.updateMessage(message);
+			return;
+		}
+		const handle = this.notificationService.notify({
+			id: 'snc.python-spawn-failure',
+			severity: Severity.Error,
+			message,
+			sticky: true,
+		});
+		this.pythonSpawnFailureNotification = handle;
+		handle.onDidClose(() => {
+			if (this.pythonSpawnFailureNotification === handle) {
+				this.pythonSpawnFailureNotification = null;
+			}
+		});
+	}
+
+	private dismissPythonSpawnFailureNotification(): void {
+		if (!this.pythonSpawnFailureNotification) { return; }
+		const handle = this.pythonSpawnFailureNotification;
+		this.pythonSpawnFailureNotification = null;
+		try { handle.close(); } catch { /* ignore */ }
 	}
 
 	getProgram(): string {
@@ -2490,6 +2583,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 					const isFirstItem = !this.runFirstItemReceivedMsById.has(msg.runId);
 					if (isFirstItem) {
 						this.runFirstItemReceivedMsById.set(msg.runId, now());
+						// Python is producing output again — clear any stale
+						// spawn-failure toast so the user knows it's resolved.
+						this.dismissPythonSpawnFailureNotification();
 					}
 
 					// Timing: event-target item arrival
@@ -2598,6 +2694,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 					console.warn('SNC warning:', msg.warning);
 				} else if (msg.type === 'error') {
 					console.error('SNC streaming error:', msg.error);
+					// Surface python-spawn-failure errors as a sticky toast so
+					// the user understands why visualizers stopped working.
+					// Other errors (timeouts, etc.) still just log to console.
+					if (msg.error && msg.error.startsWith('Sculpt-n-Code: failed to launch Python')) {
+						this.showPythonSpawnFailureNotification(msg.error);
+					}
 					// Cleanup timing tracking on error
 					this.runTriggerMsById.delete(msg.runId);
 					this.runSpawnTimingById.delete(msg.runId);
