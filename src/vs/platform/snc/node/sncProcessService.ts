@@ -507,7 +507,8 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				type: 'run',
 				run_id: runId,
 				code: content,
-				models_and_events: options.modelsAndEventsJson || ''
+				models_and_events: options.modelsAndEventsJson || '',
+				focused_line: options.focusedLine ?? null
 			}) + '\n';
 			worker.child.stdin?.write(cmd);
 			state.tStdinEnd = Date.now();

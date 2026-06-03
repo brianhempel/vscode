@@ -7,7 +7,12 @@ Run:
 
 import unittest
 
-from python_runner import _build_new_code_edits, split_leading_imports
+from python_runner import (
+    GenericVisualizer,
+    VisualizerOfStaticVisualizer,
+    _build_new_code_edits,
+    split_leading_imports,
+)
 
 
 class TestSplitLeadingImports(unittest.TestCase):
@@ -125,5 +130,64 @@ class TestBuildNewCodeEdits(unittest.TestCase):
             "for s in strings:\n    pass\n", line=1, suggest_var_name=None, expr="s.upper()"
         )
         self.assertEqual(edits[0]['text'], "    s.upper()")
+
+
+class _StaticVisStub:
+    """Minimal static visualizer module: visualize(value) -> str."""
+    def can_visualize(self, value):
+        return True
+
+    def visualize(self, value):
+        return f'<b>{value}</b>'
+
+
+class TestGenericVisualizerDrag(unittest.TestCase):
+    """The generic/static visualizers should wrap their output in a draggable
+    snc-py-exp grab span when given an access-path expression via var_and_exp,
+    so nested (non-interactive) values are draggable to extract."""
+
+    def test_generic_wraps_with_py_exp_when_var_and_exp_given(self):
+        out = GenericVisualizer.visualize(
+            42, None, None, None, var_and_exp=(None, 'x[0]'))
+        self.assertIn('snc-py-exp="x[0]"', out)
+        self.assertIn('draggable="true"', out)
+        self.assertIn('class="py-exp-grab"', out)
+        self.assertIn('42', out)
+
+    def test_generic_no_wrap_without_var_and_exp(self):
+        out = GenericVisualizer.visualize(42, None, None, None)
+        self.assertNotIn('snc-py-exp', out)
+        self.assertNotIn('py-exp-grab', out)
+        self.assertEqual(out, '42')
+
+    def test_generic_wraps_in_small_mode_too(self):
+        out = GenericVisualizer.visualize(
+            42, None, None, None, small=True, var_and_exp=(None, 'x[0]'))
+        self.assertIn('snc-py-exp="x[0]"', out)
+        self.assertIn('class="py-exp-grab"', out)
+
+    def test_generic_escapes_expression_and_value(self):
+        out = GenericVisualizer.visualize(
+            '<a>', None, None, None, var_and_exp=(None, 'd["<k>"]'))
+        # Expression is HTML-escaped inside the attribute.
+        self.assertIn('snc-py-exp="d[&quot;&lt;k&gt;&quot;]"', out)
+        # repr value is escaped (note repr adds quotes).
+        self.assertIn('&lt;a&gt;', out)
+        self.assertNotIn('<a>', out)
+
+    def test_static_visualizer_wraps_with_py_exp(self):
+        vis = VisualizerOfStaticVisualizer(_StaticVisStub())
+        out = vis.visualize(7, None, None, None, var_and_exp=(None, 'items[2]'))
+        self.assertIn('snc-py-exp="items[2]"', out)
+        self.assertIn('draggable="true"', out)
+        self.assertIn('class="py-exp-grab"', out)
+        # Inner static-visualizer output is preserved.
+        self.assertIn('<b>7</b>', out)
+
+    def test_static_visualizer_no_wrap_without_var_and_exp(self):
+        vis = VisualizerOfStaticVisualizer(_StaticVisStub())
+        out = vis.visualize(7, None, None, None)
+        self.assertNotIn('snc-py-exp', out)
+        self.assertEqual(out, '<b>7</b>')
 
 

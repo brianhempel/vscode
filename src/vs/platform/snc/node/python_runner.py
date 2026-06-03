@@ -30,6 +30,16 @@ from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 from typing import List, Dict, Any, Optional, Callable, Protocol, TextIO, Tuple, cast
 
+# Make the built-in visualizers dir importable so we can share helpers (e.g.
+# wrap_drag_grab) with the visualizer modules. The same dir is also added per
+# loaded visualizer at runtime; doing it here keeps shared imports available
+# even when no third-party visualizer has been loaded yet.
+_BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'visualizers')
+if _BUILTIN_VISUALIZERS_DIR not in sys.path:
+    sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
+
+from visualizer_utils import wrap_drag_grab  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+
 # This is the only way to make a Module type in Python
 class StaticVisualizer(Protocol):
     can_visualize: Callable[[Any], bool]
@@ -47,6 +57,10 @@ class Visualizer(Protocol):
 execution_step = 0  # Incremental counter for each logged event
 line_emit_counter: Dict[int, int] = {}  # Per-line item index during a run
 _current_run_id: str = ""  # Run ID for preload mode, included in item/command messages
+# 1-indexed line whose top-level visualizer should render full-size; everything
+# else gets small=True. None means render everything full (e.g. before the
+# editor has reported a cursor position).
+_focused_line: Optional[int] = None
 
 # Each entry is (filepath, mtime, visualizer_module)
 _loaded_visualizers: List[tuple[str, float, Visualizer]] = []
@@ -102,8 +116,8 @@ class GenericVisualizer(Visualizer):
     def init_model(value, get_visualizer, eval_in_scope=None, var_and_exp=None) -> Any:
         return None
 
-    def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> str:
-        return html.escape(repr(value))
+    def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> str:
+        return wrap_drag_grab(html.escape(repr(value)), var_and_exp)
 
     def update(event: Any, var_and_exp, model: Any, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
         return (model, [])
@@ -123,8 +137,8 @@ class VisualizerOfStaticVisualizer():
     def init_model(self, value, get_visualizer, eval_in_scope=None, var_and_exp=None) -> Any:
         return GenericVisualizer.init_model(value, get_visualizer)
 
-    def visualize(self, value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> str:
-        return self.vis.visualize(value)
+    def visualize(self, value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> str:
+        return wrap_drag_grab(self.vis.visualize(value), var_and_exp)
 
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
         return GenericVisualizer.update(event, var_and_exp, model, value, get_visualizer)
@@ -300,17 +314,23 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         item_model_and_events = next((m_e for m_e in models_and_events if m_e.get('line') == line and m_e.get('visIndex') == idx_in_line), {})
 
         fingerprint = _type_fingerprint(value)
+        # Include the source expression in the cache key so renaming the
+        # variable (x -> y) rebuilds the model instead of reusing one whose
+        # cells eval the old name and blank out.
+        source_sig = [var_and_exp[0], var_and_exp[1]] if var_and_exp else None
         cached_model = item_model_and_events.get('model')
         fingerprint_matches = (
             cached_model is not None
             and isinstance(cached_model, dict)
             and cached_model.get('_type_fingerprint') == fingerprint
+            and cached_model.get('_source_expr_sig') == source_sig
         )
 
         if fingerprint_matches:
             model = cached_model
             if isinstance(model, dict):
                 del model['_type_fingerprint']
+                del model['_source_expr_sig']
         else:
             model = vis.init_model(value, get_visualizer,
                                    eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
@@ -325,8 +345,20 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
 
         if isinstance(model, dict):
             model['_type_fingerprint'] = fingerprint
+            model['_source_expr_sig'] = source_sig
 
-        html_content = vis.visualize(value, model, get_visualizer, eval_in_scope=eval_in_scope)
+        # When the editor reports a focused line, every other line's top-level
+        # visualizer renders compact (search box / tool toolbar / etc. hidden).
+        # Mirrors the focused_child pattern that nested visualizers already use.
+        is_small = (_focused_line is not None and line != _focused_line)
+        try:
+            html_content = vis.visualize(value, model, get_visualizer,
+                                         eval_in_scope=eval_in_scope, small=is_small)
+        except TypeError:
+            # Visualizer doesn't accept the `small` kwarg (e.g. older 3rd-party
+            # visualizers); fall back to the no-kwarg call so it still renders.
+            html_content = vis.visualize(value, model, get_visualizer,
+                                         eval_in_scope=eval_in_scope)
 
         assert isinstance(html_content, str)
 
@@ -1652,17 +1684,18 @@ def execute_code(code_object: Any, globals_dict: Dict[str, Any]) -> Dict[str, An
     }
 
 
-def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, globals_dict: Optional[Dict[str, Any]] = None) -> None:
+def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None) -> None:
     """Execute a run with the given code object and models/events.
 
     If globals_dict is provided (e.g. pre-populated with imports for checkpoint 2),
     it is used directly. Otherwise a fresh globals dict is created.
     """
-    global models_and_events, execution_step, line_emit_counter, _current_run_id
+    global models_and_events, execution_step, line_emit_counter, _current_run_id, _focused_line
 
     execution_step = 0
     line_emit_counter = {}
     _current_run_id = run_id
+    _focused_line = focused_line
 
     if models_and_events_json and models_and_events_json.strip():
         try:
@@ -1769,6 +1802,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
 
         run_id = cmd.get('run_id', '')
         m_and_e_json = cmd.get('models_and_events', '')
+        focused_line = cmd.get('focused_line')
         _source_code = code
         _current_run_id = run_id
         _reload_stale_visualizers()
@@ -1778,7 +1812,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         globals_dict: Dict[str, Any] = dict(import_globals)
         globals_dict['_log_value'] = log_value
         globals_dict['_log_and_return'] = log_and_return
-        _execute_run(body_code, m_and_e_json, run_id, globals_dict=globals_dict)
+        _execute_run(body_code, m_and_e_json, run_id, focused_line=focused_line, globals_dict=globals_dict)
         sys.exit(0)
 
     elif cmd.get('type') == 'run':
@@ -1786,6 +1820,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         code = cmd.get('code', '')
         run_id = cmd.get('run_id', '')
         m_and_e_json = cmd.get('models_and_events', '')
+        focused_line = cmd.get('focused_line')
         _source_code = code
         _current_run_id = run_id
         _reload_stale_visualizers()
@@ -1810,7 +1845,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         emit_meta('transform-done')
         code_object = compile(transformed_ast, filename='<string>', mode='exec')
         emit_meta('compile-done')
-        _execute_run(code_object, m_and_e_json, run_id)
+        _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line)
         sys.exit(0)
 
     else:

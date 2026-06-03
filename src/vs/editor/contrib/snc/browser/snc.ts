@@ -39,12 +39,32 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
 	private readonly onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void;
 	private readonly onInputEvent: (pythonEventStr: string, value: string) => void;
+	// Returns true when this widget's line is currently the focused line and
+	// thus rendered full-size. When false, the widget is in small mode and
+	// the first mousedown is intercepted as an "expand" request instead of
+	// being dispatched as a Python event.
+	private readonly isFocused: () => boolean;
+	private readonly onExpandRequest: () => void;
 	private moveThrottleTimer: any = null;
 	private readonly moveThrottleDelay = 16;
 	private lastRenderedHtml: string | null = null;
 	private focusRestoreVersion = 0;
 	private hoistedDropdown: HTMLElement | null = null;
 	private hoistedDropdownListeners: IDisposable[] = [];
+	// Segment-label anchors reparented to the widget root (out of the
+	// scrollable .string-visualizer that would otherwise clip them). Each entry
+	// remembers the scroll container and the anchor's char position (relative to
+	// the widget) captured at the scroll offset `baseScrollLeft/Top`, so the
+	// label can be re-glued to its character / hidden as the container scrolls.
+	private hoistedSegmentLabels: {
+		anchor: HTMLElement;
+		scroller: HTMLElement;
+		baseLeft: number;
+		baseTop: number;
+		baseScrollLeft: number;
+		baseScrollTop: number;
+	}[] = [];
+	private hoistedSegmentLabelListeners: IDisposable[] = [];
 	private useBlockLayout = false;
 	private readonly clipboardService: IClipboardService;
 	private pyExpTooltip: HTMLElement | null = null;
@@ -65,8 +85,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
-
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -75,6 +94,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onPointerEvent = onPointerEvent;
 		this.onKeyboardEvent = onKeyboardEvent;
 		this.onInputEvent = onInputEvent;
+		this.isFocused = isFocused;
+		this.onExpandRequest = onExpandRequest;
 		this.clipboardService = clipboardService;
 
 		// Create the widget DOM node
@@ -130,6 +151,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		this._register(dom.addDisposableListener(this.domNode, 'mousedown', (ev: MouseEvent) => {
 			this.lastMouseDownTarget = ev.target as Node;
+			// Small-mode click-to-expand: intercept the first mousedown so the
+			// click pins focus to this line instead of dispatching a Python
+			// event. We swallow the event because the small DOM is structurally
+			// different from full (e.g. z_object_visualizer's _visualize_small),
+			// so the event's target won't exist after the re-run.
+			if (!this.isFocused()) {
+				ev.preventDefault();
+				ev.stopPropagation();
+				this.onExpandRequest();
+				return;
+			}
 			if (this.handleAddAtCursor(ev)) { return; }
 			this.dispatch_mouse_python_event('snc-mouse-down', ev);
 		}));
@@ -796,6 +828,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			if (childKey) {
 				pythonEventStr = `ChildEvent(${childKey}, ${JSON.stringify(pythonEventStr)})`;
 			}
+			// Elements hoisted out of their original DOM ancestry (e.g. segment
+			// labels reparented to the widget root) carry their lost child-key
+			// chain here so events still resolve to the right nested model.
+			const chainStr = el.getAttribute('snc-child-key-chain');
+			if (chainStr) {
+				for (const ck of JSON.parse(chainStr) as string[]) {
+					pythonEventStr = `ChildEvent(${ck}, ${JSON.stringify(pythonEventStr)})`;
+				}
+			}
 			el = el.parentElement;
 		}
 		return pythonEventStr;
@@ -979,6 +1020,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// visual line to render below the code line.
 			pixelPosition.top += this.useBlockLayout ? lineHeight : -1;
 
+			// 8px of padding for visualizers on the same line
+			pixelPosition.left += this.useBlockLayout ? 0 : 8;
+
 			if (pixelPosition.top < 0 && this.lastOnscreenPixelPosition) {
 				// x coordinate is not reliable when lines are offscreen, use last known coordinate
 				return {
@@ -1069,6 +1113,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Now safe to clean up the old hoisted dropdown
 		this.cleanupHoistedDropdown();
+		this.cleanupHoistedSegmentLabels();
 
 		const trustedHtml = ttPolicy?.createHTML(html) ?? html;
 		this.domNode.innerHTML = trustedHtml as string;
@@ -1076,6 +1121,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Hoist any dropdown panel outside the overflow container
 		this.hoistDropdownPanel();
+		// Hoist segment labels out of the scrollable string container so they
+		// aren't clipped by its overflow.
+		this.hoistSegmentLabels();
 		this.updateLayoutMode();
 
 		// Scroll any element marked for scroll-into-view (e.g. selected autocomplete item)
@@ -1343,6 +1391,120 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
+	 * Reparent each segment-label anchor out of its scrollable
+	 * `.string-visualizer` (whose `overflow` would clip the absolutely
+	 * positioned label) onto the widget root. The anchor is zero-width; we set
+	 * its left/top so it lands exactly where it sat inline, and the inner
+	 * `.segment-label` keeps its original relative offsets so the visuals are
+	 * unchanged - just no longer clipped.
+	 *
+	 * The anchor stays a descendant of `this.domNode`, so the existing
+	 * mousedown delegation continues to resolve `snc-mouse-down`; we stash any
+	 * `snc-child-key` ancestors as `snc-child-key-chain` so nested-model events
+	 * still resolve after the move.
+	 */
+	private hoistSegmentLabels(): void {
+		const anchors = Array.from(this.domNode.querySelectorAll('.segment-label-anchor'))
+			.filter(dom.isHTMLElement)
+			// Skip anything already at the widget root (defensive; shouldn't happen).
+			.filter((a) => a.parentElement !== this.domNode);
+		if (anchors.length === 0) { return; }
+
+		const widgetRect = this.domNode.getBoundingClientRect();
+		const scrollers = new Set<HTMLElement>();
+
+		for (const anchor of anchors) {
+			const scroller = anchor.closest('.string-visualizer') as HTMLElement | null;
+			if (!scroller) { continue; }
+
+			// Capture position + child-key chain BEFORE detaching (ancestors are
+			// lost once removed from the DOM).
+			const anchorRect = anchor.getBoundingClientRect();
+			const childKeyChain: string[] = [];
+			let ancestor = anchor.parentElement;
+			while (ancestor && ancestor !== this.domNode) {
+				const ck = ancestor.getAttribute('snc-child-key');
+				if (ck) { childKeyChain.push(ck); }
+				ancestor = ancestor.parentElement;
+			}
+			if (childKeyChain.length > 0) {
+				anchor.setAttribute('snc-child-key-chain', JSON.stringify(childKeyChain));
+			}
+
+			const baseLeft = anchorRect.left - widgetRect.left;
+			const baseTop = anchorRect.top - widgetRect.top;
+
+			anchor.remove();
+			anchor.style.left = `${baseLeft}px`;
+			anchor.style.top = `${baseTop}px`;
+			this.domNode.appendChild(anchor);
+
+			this.hoistedSegmentLabels.push({
+				anchor,
+				scroller,
+				baseLeft,
+				baseTop,
+				baseScrollLeft: scroller.scrollLeft,
+				baseScrollTop: scroller.scrollTop,
+			});
+			scrollers.add(scroller);
+		}
+
+		// Keep labels glued to their characters as the string scrolls, and hide
+		// any that scroll outside their container's visible box.
+		this.repositionHoistedSegmentLabels();
+		for (const scroller of scrollers) {
+			this.hoistedSegmentLabelListeners.push(
+				dom.addDisposableListener(scroller, 'scroll', () => this.repositionHoistedSegmentLabels())
+			);
+		}
+	}
+
+	/**
+	 * Recompute hoisted segment-label positions from their scroll container and
+	 * hide any that have scrolled out of the container's visible area.
+	 */
+	private repositionHoistedSegmentLabels(): void {
+		if (this.hoistedSegmentLabels.length === 0) { return; }
+		const widgetRect = this.domNode.getBoundingClientRect();
+		for (const entry of this.hoistedSegmentLabels) {
+			const { anchor, scroller, baseLeft, baseTop, baseScrollLeft, baseScrollTop } = entry;
+			// Re-glue to the character: shift the anchor by the scroll delta since
+			// it was hoisted (content scrolls left/up => label follows).
+			const left = baseLeft - (scroller.scrollLeft - baseScrollLeft);
+			const top = baseTop - (scroller.scrollTop - baseScrollTop);
+			anchor.style.left = `${left}px`;
+			anchor.style.top = `${top}px`;
+
+			// Hide when the character has scrolled outside the scroller's visible
+			// box (so labels don't float over neighbouring content). Compare the
+			// anchor's viewport position against the scroller's. The small top
+			// slack accounts for labels rendered just above the line.
+			const scrollerRect = scroller.getBoundingClientRect();
+			const anchorViewportLeft = widgetRect.left + left;
+			const anchorViewportTop = widgetRect.top + top;
+			const outOfView = anchorViewportLeft < scrollerRect.left - 1
+				|| anchorViewportLeft > scrollerRect.right + 1
+				|| anchorViewportTop < scrollerRect.top - 12
+				|| anchorViewportTop > scrollerRect.bottom + 1;
+			anchor.style.visibility = outOfView ? 'hidden' : '';
+		}
+	}
+
+	/**
+	 * Dispose segment-label scroll listeners. The reparented anchors live inside
+	 * `this.domNode` and are discarded when its innerHTML is replaced (or when
+	 * the widget is disposed), so they need no explicit removal here.
+	 */
+	private cleanupHoistedSegmentLabels(): void {
+		for (const d of this.hoistedSegmentLabelListeners) {
+			d.dispose();
+		}
+		this.hoistedSegmentLabelListeners = [];
+		this.hoistedSegmentLabels = [];
+	}
+
+	/**
 	 * Update the widget's position (called when scrolling or content changes)
 	 */
 	updatePosition(): void {
@@ -1358,6 +1520,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hideSimpleTooltip();
 		this.hideHoverMenu();
 		this.cleanupHoistedDropdown();
+		this.cleanupHoistedSegmentLabels();
 		this.editor.removeOverlayWidget(this);
 		super.dispose();
 	}
@@ -1447,6 +1610,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private streamSubscription: { dispose(): void } | null = null;
 	private streamUpdateTimer: any = null;
 	private cursorUpdateTimer: any = null;
+
+	// Focus state for small-mode handling. Default focused line is the cursor
+	// line; clicking a small widget pins focus to its line until the cursor
+	// moves to a different line. The effective focused line is sent to Python
+	// on every run so log_value can render non-focused lines with small=True.
+	private explicitFocusedLine: number | null = null;
+	private lastCursorLine: number | null = null;
+	private focusRerunTimer: any = null;
+	private readonly focusRerunDelay = 150; // ms
 
 	// Linked-editing state: tracks the editor selection that is live-synced with a visualizer
 	private linkedSelectionDecorationId: string | null = null;
@@ -1747,6 +1919,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Re-render visualizations when cursor moves; do NOT rerun the program
 		const data = this.visualizationItems;
 		if (!data || data.length === 0) {
+			this.lastCursorLine = this.editor.getPosition()?.lineNumber ?? null;
 			return;
 		}
 		if (this.cursorUpdateTimer) {
@@ -1755,6 +1928,53 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.cursorUpdateTimer = setTimeout(() => {
 			this.updateVisualizationWidgets(data);
 		}, 50);
+
+		// When the cursor moves to a different line, the effective focused line
+		// changes (cursor line is the default). Drop any pinned focus from a
+		// prior click and trigger a debounced re-run so non-focused widgets
+		// re-render with small=True (and the new focused widget renders full).
+		const newLine = this.editor.getPosition()?.lineNumber ?? null;
+		if (newLine !== this.lastCursorLine) {
+			this.lastCursorLine = newLine;
+			this.explicitFocusedLine = null;
+			if (this.isPythonModel()) {
+				if (this.focusRerunTimer) { clearTimeout(this.focusRerunTimer); }
+				this.focusRerunTimer = setTimeout(() => {
+					this.focusRerunTimer = null;
+					this.runProgram(this.getProgram());
+				}, this.focusRerunDelay);
+			}
+		}
+	}
+
+	/**
+	 * The 1-indexed line whose top-level visualizer should render full-size.
+	 * Cursor line by default; an explicit pin (from clicking a small widget)
+	 * wins until the cursor moves to a different line.
+	 */
+	private effectiveFocusedLine(): number | null {
+		if (this.explicitFocusedLine !== null) {
+			return this.explicitFocusedLine;
+		}
+		return this.editor.getPosition()?.lineNumber ?? null;
+	}
+
+	/**
+	 * Pin focus to `line` and immediately re-run so that line's top-level
+	 * widget renders with `small=False`. Called when the user clicks a small
+	 * (non-focused) widget.
+	 */
+	private requestExpand(line: number): void {
+		if (this.effectiveFocusedLine() === line) { return; }
+		this.explicitFocusedLine = line;
+		// Cancel any pending cursor-driven re-run; this click supersedes it.
+		if (this.focusRerunTimer) {
+			clearTimeout(this.focusRerunTimer);
+			this.focusRerunTimer = null;
+		}
+		if (this.isPythonModel()) {
+			this.runProgram(this.getProgram());
+		}
 	}
 
 	private onSelectionChanged(): void {
@@ -2176,6 +2396,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 							(pythonEventStr, ev, overrideRect?) => { this.onPointerEvent(lineNumber, visIndex, pythonEventStr, ev, overrideRect); },
 							(pythonEventStr, ev) => { this.onKeyboardEvent(lineNumber, visIndex, pythonEventStr, ev); },
 							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); },
+							() => this.effectiveFocusedLine() === lineNumber,
+							() => this.requestExpand(lineNumber),
 							this.clipboardService
 						);
 						widget.updateContent(item.html);
@@ -2747,10 +2969,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}))
 
 		try {
+			const focusedLine = this.effectiveFocusedLine();
 			const options: IProcessOptions = {
 				modelsAndEventsJson: JSON.stringify(models_and_events),
 				timeout: 60_000,
-				workingDirectory
+				workingDirectory,
+				...(focusedLine !== null ? { focusedLine } : {})
 			};
 			await channel.call('startProgram', [content, options, runId]);
 		} catch (error) {

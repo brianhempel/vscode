@@ -193,6 +193,23 @@ class Unlink:
     """Sent by the TypeScript front-end when an editor-visualizer link is broken."""
     pass
 
+def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
+    """Wrap a non-interactive (small-mode) visualizer's output in a draggable
+    snc-py-exp grab span.
+
+    Small-mode visualizers have no interactions, so their whole area can be a
+    drag-to-extract handle. When the parent supplies the access-path expression
+    via var_and_exp, the visualizer self-wraps; otherwise (top-level, no source
+    expression, or interactive/full mode) it renders bare so it keeps its mouse
+    events.
+    """
+    expr = var_and_exp[1] if var_and_exp else None
+    if not expr:
+        return inner_html
+    return (f'<span snc-py-exp="{html.escape(expr)}" draggable="true" '
+            f'class="py-exp-grab">{inner_html}</span>')
+
+
 def wrap_child_prefix(child_key: str) -> str:
     return f'<span snc-child-key="{html.escape(repr(child_key))}">'
 
@@ -242,6 +259,21 @@ def route_child_event(
         return (model, [])
 
     child_key = msg.child_key
+    is_mousedown = (event_json or {}).get('type') == 'mousedown'
+    is_focused = model.get('focused_child') == child_key
+
+    if not is_focused:
+        # Non-focused children do not receive events. The FIRST mousedown on a
+        # non-focused child pins focus (mirroring the top-level click-to-expand
+        # pattern); every other event (mousemove, mouseup, keystrokes, hover)
+        # is dropped so that hovering across cells, or finishing a drag begun
+        # in a focused sibling, doesn't accidentally yank focus.
+        if is_mousedown:
+            model['focused_child'] = child_key
+        return (model, [])
+
+    # Focused child: dispatch the event normally. focused_child is already
+    # set to child_key, so no need to re-assign at the end.
     child_value = child_value_getter(child_key)
     child_vis = get_visualizer(child_value)
 
@@ -259,7 +291,6 @@ def route_child_event(
 
     children[child_key] = new_child_model
     model['children'] = children
-    model['focused_child'] = child_key
     return (model, commands)
 
 

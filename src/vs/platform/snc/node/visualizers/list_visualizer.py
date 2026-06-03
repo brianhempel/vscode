@@ -50,11 +50,10 @@ from typing import Any, List, Tuple
 from visualizer_utils import (
     ChildEvent, EditorTextSelect, Unlink,
     route_child_event, aggregate_handled_keys,
-    wrap_child_prefix, wrap_child_suffix,
+    wrap_child_prefix, wrap_child_suffix, wrap_drag_grab,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     load_dotfile_list, save_dotfile_list,
     get_full_class_name,
-    BLUE, GRAY, GRAY_HALF_ALPHA, INPUT_BG, INPUT_BORDER, SUGGESTION_BG, SELECTED_BG,
     ICONS,
 )
 
@@ -912,14 +911,11 @@ def _render_column_header(col, index, model):
     is_drag_source = (drag_from == index)
     is_drag_target = (drag_from is not None and drag_over == index and drag_from != index)
 
-    th_style = 'padding:0 8px;text-align:left;'
+    th_classes = ['snc-hover-hidden-parent', 'col-header']
     if is_drag_source:
-        th_style += 'opacity:0.3;'
+        th_classes.append('col-drag-source')
     if is_drag_target:
-        if drag_from > drag_over:
-            th_style += f'border-left:2px solid {BLUE};'
-        else:
-            th_style += f'border-right:2px solid {BLUE};'
+        th_classes.append('col-drag-before' if drag_from > drag_over else 'col-drag-after')
 
     source_expr = model.get('_source_expr')
     if source_expr is not None:
@@ -930,22 +926,18 @@ def _render_column_header(col, index, model):
         py_exp_attr = ''
 
     return (
-        f'<th class="snc-hover-hidden-parent" '
+        f'<th class="{" ".join(th_classes)}" '
         f'snc-mouse-move="{html.escape(drag_over_event)}" '
-        f'snc-mouse-up="{html.escape(drag_end_event)}" '
-        f'style="{th_style}">'
+        f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
-        f'style="color:{GRAY};cursor:grab;opacity:0.5;user-select:none;'
-        f'font-size:8px;font-style:normal;" '
-        f'class="snc-hover-hidden full-opacity-on-hover">U</span>'
+        f'class="col-handle snc-hover-hidden full-opacity-on-hover">U</span>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'data-tooltip="Remove column" '
-        f'style="color:{GRAY};cursor:pointer;opacity:0.5;user-select:none;" '
-        f'class="snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
+        f'class="col-remove snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
-        f'style="color:{BLUE};cursor:pointer;">'
+        f'class="col-name">'
         f'{html.escape(strip_leading_caret(col) or col)}</span>'
         f'</th>'
     )
@@ -969,22 +961,16 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
         for i, suggestion in enumerate(suggestions[:10]):
             select_event = repr(ColumnSelect(name=suggestion))
             is_selected = (selected_idx == i)
-            bg = SELECTED_BG if is_selected else SUGGESTION_BG
+            option_cls = 'snc-dropdown-option col-suggestion' + (' selected' if is_selected else '')
             scroll_attr = ' snc-scroll-into-view' if is_selected else ''
             items.append(
                 f'<div snc-mouse-down="{html.escape(select_event)}" '
-                f'class="snc-dropdown-option"'
-                f'{scroll_attr} '
-                f'style="padding:2px 6px;cursor:pointer;color:{BLUE};white-space:nowrap;'
-                f'background:{bg};"'
+                f'class="{option_cls}"'
+                f'{scroll_attr}'
                 f'>{html.escape(suggestion)}</div>'
             )
         suggestion_html = (
-            f'<div class="snc-dropdown-panel" snc-dropdown-align="left" style="'
-            f'position:absolute;left:0;top:100%;'
-            f'border:1px solid {INPUT_BORDER};'
-            f'max-height:200px;overflow-y:auto;background:{SUGGESTION_BG};'
-            f'min-width:150px;font-size:12px;">'
+            f'<div class="snc-dropdown-panel left col-suggest-panel" snc-dropdown-align="left">'
             + '\n'.join(items)
             + '</div>'
         )
@@ -994,20 +980,18 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
         extra_attrs += ' snc-select-all'
 
     input_html = (
-        f'<span class="snc-dropdown-trigger" style="position:relative;display:inline-block;">'
+        f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="column name" '
         f'spellcheck="false"'
         f'{extra_attrs} '
-        f'style="background:{INPUT_BG};color:{BLUE};border:1px solid {INPUT_BORDER};'
-        f'padding:1px 4px;font-family:inherit;font-size:inherit;'
-        f'outline:none;width:120px;" />'
+        f'class="col-input" />'
         f'{suggestion_html}'
         f'</span>'
     )
 
-    return f'<th style="padding:0 8px;">{input_html}</th>'
+    return f'<th>{input_html}</th>'
 
 
 def _resolve_first_and_index(model, eval_in_scope):
@@ -1172,7 +1156,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
                 py_exp_attr = f' snc-py-exp="{html.escape(expr)}" snc-py-exp-align="right"'
         return (
             f'<div class="{cls}"{py_exp_attr}>'
-            f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
+            f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
             f'</div>'
         )
 
@@ -1257,7 +1241,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
                        if preview else '')
         rows.append(
             f'<div class="snc-dropdown-option"{py_exp_attr}>'
-            f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">'
+            f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">'
             f'{html.escape(sep_expr)}</span>'
             f'</div>'
         )
@@ -1276,7 +1260,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'value="{html.escape(custom_sep)}" '
         f'placeholder="expr" '
         f'spellcheck="false" '
-        f'class="snc-dropdown-input" style="width:60px;font-family:var(--snc-code-font-family);" />'
+        f'class="snc-dropdown-input join-sep-input" />'
         f'</div>'
     )
 
@@ -1305,7 +1289,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         parts.append(
             f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
             f' title="Unlink from selected code">'
-            f'<span class="search-icon" style="width:9px">\u26d3\ufe0e</span>'
+            f'<span class="search-icon sm">\u26d3\ufe0e</span>'
             f'<span class="text">Unlink</span>'
             f'</span>'
         )
@@ -1353,21 +1337,17 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         except Exception:
             pass
 
-    table_div_style = (
-        f'max-height: {(max_height or 400) - 32}px;'
-        'overflow: auto;'
-        'scrollbar-width: thin;'
-        'scrollbar-color: rgba(127, 127, 127, 0.1) transparent;'
-    )
+    table_div_style = f'max-height: {(max_height or 400) - 32}px;'
 
     key_handler = repr(ColumnKeyDown())
+    small_class = ' small' if small else ''
     strs = [
         f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" '
-        f'class="visualizer-container list-visualizer" style="outline:none;">'
+        f'class="visualizer-container list-visualizer{small_class}">'
     ]
-    strs.append(f'<div style="{table_div_style}font-family:var(--snc-code-font-family);">')
-    strs.append('<table style="border-collapse:collapse;font-family:var(--snc-code-font-family);"><tr>')
-    strs.append('<th style="padding:0 8px;"></th>')
+    strs.append(f'<div class="list-table-scroll" style="{table_div_style}">')
+    strs.append('<table><tr>')
+    strs.append('<th></th>')
 
     for ci, col in enumerate(columns):
         if model.get('editing_column_index') == ci:
@@ -1380,12 +1360,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     add_event = repr(AddColumnClick())
     strs.append(
-        f'<th class="snc-hover-hidden-parent" '
+        f'<th class="snc-hover-hidden-parent col-add" '
         f'snc-mouse-down="{html.escape(add_event)}" '
-        f'data-tooltip="Add column" '
-        f'style="padding:0 4px;cursor:pointer;vertical-align:middle;">'
-        f'<span class="snc-hover-hidden full-opacity-on-hover" '
-        f'style="color:{GRAY};opacity:0.5;font-size:8px;font-style:normal;">+</span>'
+        f'data-tooltip="Add column">'
+        f'<span class="col-add-icon snc-hover-hidden full-opacity-on-hover">+</span>'
         f'</th>'
     )
 
@@ -1398,19 +1376,17 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     for i, item in enumerate(lst):
         is_match = i in matched_indices
-        row_style = ''
+        row_class_attr = ''
         scroll_attr = ''
         if has_search and matched_indices:
             if is_match:
-                row_style = f' style="border-left:2px solid {BLUE};"'
+                row_class_attr = ' class="row-match"'
                 if scroll_to and i == first_match_row:
                     scroll_attr = ' snc-scroll-to-match'
             else:
-                row_style = ' style="opacity:0.4;"'
+                row_class_attr = ' class="row-dim"'
 
-        strs.append(f'<tr{row_style}{scroll_attr}><td style="color:')
-        strs.append(GRAY)
-        strs.append(';padding:0 8px;text-align:right;">')
+        strs.append(f'<tr{row_class_attr}{scroll_attr}><td class="row-index">')
         strs.append(str(i))
         strs.append('</td>')
 
@@ -1431,38 +1407,28 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     cell_model = cell_vis.init_model(cell_value, get_visualizer,
                                                      eval_in_scope=eval_in_scope)
                 child_small = (composite_key != focused_child)
-                if hasattr(cell_vis, 'visualize_els'):
-                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small)
-                else:
-                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small)]
 
-                is_generic = cell_model is None
-                cell_exp_attr = ''
+                cell_expr = None
                 if source_expr is not None:
                     cell_expr = replace_caret_in_py_exp(col, f'{source_expr}[{i}]')
-                    cell_exp_attr = f' snc-py-exp="{html.escape(cell_expr)}" draggable="true"'
 
-                if is_generic or not cell_exp_attr:
-                    strs.append('<td style="padding:0 8px;">')
-                    strs.append(wrap_child_prefix(composite_key))
-                    if cell_exp_attr:
-                        strs.append(f'<span{cell_exp_attr} class="py-exp-grab">')
-                    strs.extend(cell_htmls)
-                    if cell_exp_attr:
-                        strs.append('</span>')
-                    strs.append(wrap_child_suffix)
-                    strs.append('</td>')
+                # The parent no longer wraps children for drag. Each child is
+                # handed its access-path expression and self-wraps when it's
+                # small (non-interactive); the focused child renders full and
+                # keeps its mouse events, so it stays undraggable.
+                child_var_and_exp = (None, cell_expr) if cell_expr else None
+                if hasattr(cell_vis, 'visualize_els'):
+                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)
                 else:
-                    strs.append('<td style="padding:0;">')
-                    strs.append(f'<div{cell_exp_attr} class="py-exp-cell">')
-                    strs.append('<div draggable="false" class="py-exp-inner">')
-                    strs.append(wrap_child_prefix(composite_key))
-                    strs.extend(cell_htmls)
-                    strs.append(wrap_child_suffix)
-                    strs.append('</div></div>')
-                    strs.append('</td>')
+                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)]
+
+                strs.append('<td>')
+                strs.append(wrap_child_prefix(composite_key))
+                strs.extend(cell_htmls)
+                strs.append(wrap_child_suffix)
+                strs.append('</td>')
             else:
-                strs.append('<td style="padding:0 8px;"></td>')
+                strs.append('<td></td>')
 
         strs.append('</tr>')
 
@@ -1476,8 +1442,13 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     return ''.join(strs)
 
 
-def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
-    return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None):
+    table_html = _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+    # Small mode is non-interactive, so the whole list becomes a drag-to-extract
+    # handle (self-wrap; no parent wrapping). Full mode keeps its mouse events.
+    if small and var_and_exp:
+        return wrap_drag_grab(table_html, var_and_exp)
+    return table_html
 
 
 def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):

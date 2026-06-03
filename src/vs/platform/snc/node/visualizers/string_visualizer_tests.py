@@ -4942,7 +4942,7 @@ class TestSmallParameter(unittest.TestCase):
     def test_visualize_accepts_small_parameter(self):
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True)
-        self.assertIn('hello</span>', output)
+        self.assertIn('hello', output)
 
     def test_search_box_present_when_not_small(self):
         model = init_model("hello")
@@ -4960,6 +4960,120 @@ class TestSmallParameter(unittest.TestCase):
         model = init_model("hello")
         output = visualize("hello", model, None, None)
         self.assertIn('Search', output)
+
+    def test_small_self_wraps_for_drag_with_var_and_exp(self):
+        """Small mode + var_and_exp: the whole visualizer is a drag-to-extract
+        handle (self-wrap), no parent needed."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True,
+                           var_and_exp=(None, 'words[0]'))
+        self.assertIn('snc-py-exp="words[0]"', output)
+        self.assertIn('draggable="true"', output)
+        self.assertIn('class="py-exp-grab"', output)
+
+    def test_small_no_self_wrap_without_var_and_exp(self):
+        """Small mode without an expression renders bare (no drag wrapper)."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True)
+        self.assertNotIn('py-exp-grab', output)
+
+    def test_full_mode_not_draggable_even_with_var_and_exp(self):
+        """Full (interactive) mode is never wrapped as a drag handle."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=False,
+                           var_and_exp=(None, 'words[0]'))
+        self.assertNotIn('class="py-exp-grab"', output)
+
+    def test_tool_toolbar_hidden_when_small_short_string(self):
+        """The compact tool toolbar (literal/fuzzy/index/pick) should not render when small=True."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True)
+        self.assertNotIn('tool-toolbar', output)
+        self.assertNotIn('tool-dropdown-trigger', output)
+
+    def test_tool_toolbar_hidden_when_small_tall_string(self):
+        """The vertical tool toolbar (used for 4+ line strings) should not render when small=True."""
+        model = init_model("a\nb\nc\nd\ne")
+        output = visualize("a\nb\nc\nd\ne", model, None, None, small=True)
+        self.assertNotIn('tool-toolbar', output)
+
+    def test_tool_toolbar_present_when_not_small(self):
+        """The tool toolbar should render when small=False (default)."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=False)
+        self.assertIn('tool-toolbar', output)
+
+    def test_small_mode_omits_regex_anchors(self):
+        """Small mode's fast path doesn't generate the ^/$ regex anchors."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True)
+        self.assertNotIn('is-regex-anchor', output)
+        self.assertNotIn('is-special', output)
+
+    def test_small_mode_omits_highlights(self):
+        """Small mode skips selection/highlight computation entirely."""
+        model = init_model("hello")
+        model['search'] = r"r'l'"
+        output = visualize("hello", model, None, None, small=True)
+        self.assertNotIn('highlight', output)
+        self.assertNotIn('char-span', output)
+
+    def test_small_mode_prints_raw_string(self):
+        """Small mode prints the string as a single text group (wrapped in quotes)."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True)
+        self.assertIn('string-visualizer-text-group', output)
+        self.assertIn('&#x27;hello&#x27;</span>', output)
+
+    def test_small_mode_escapes_html(self):
+        """Small mode still HTML-escapes the string content."""
+        model = init_model("a<b>&'\"")
+        output = visualize("a<b>&'\"", model, None, None, small=True)
+        self.assertIn('a&lt;b&gt;&amp;&#x27;&quot;', output)
+
+    def test_small_mode_preserves_newlines_literally(self):
+        """Small mode renders \\n as a literal newline (white-space:pre handles it),
+        not as an escape display with anchors. Newlines after the first get a
+        leading space for vertical alignment under the opening quote."""
+        model = init_model("a\nb")
+        output = visualize("a\nb", model, None, None, small=True)
+        self.assertIn('a\n b', output)
+        self.assertNotIn('\\n', output)
+
+
+class TestSmallModeQuotes(unittest.TestCase):
+    """Small (non-focused) mode wraps the string in leading/trailing ' quotes."""
+
+    def test_small_mode_shows_leading_and_trailing_quote(self):
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True)
+        self.assertIn("&#x27;hello&#x27;", output)
+
+    def test_small_mode_empty_string_shows_quotes(self):
+        model = init_model("")
+        output = visualize("", model, None, None, small=True)
+        self.assertIn("&#x27;&#x27;", output)
+
+    def test_full_mode_does_not_show_wrapping_quotes(self):
+        """Focused (full) mode must not add the leading/trailing ' quotes."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=False)
+        self.assertNotIn("&#x27;hello&#x27;", output)
+
+    def test_small_mode_multiline_indents_subsequent_lines(self):
+        """Each newline after the first gets a leading space so lines align
+        vertically under the first line's content (which is shifted right by
+        the opening quote)."""
+        model = init_model("a\nb\nc")
+        output = visualize("a\nb\nc", model, None, None, small=True)
+        self.assertIn("&#x27;a\n b\n c&#x27;", output)
+
+    def test_small_mode_single_line_no_extra_space(self):
+        """A single-line string has no newline, so no leading spaces are added."""
+        model = init_model("abc")
+        output = visualize("abc", model, None, None, small=True)
+        self.assertIn("&#x27;abc&#x27;", output)
+        self.assertNotIn("&#x27; abc", output)
 
 
 class TestTextGrouping(unittest.TestCase):
@@ -8951,11 +9065,11 @@ class TestLenIndicator(unittest.TestCase):
         self.assertIn('>0<', html_output)
 
     def test_len_indicator_small_mode(self):
-        """Len indicator should still appear in small mode."""
+        """Len indicator should be omitted in small mode."""
         model = init_model("hi", var_and_exp=('s', 's'))
         html_output = visualize("hi", model, None, None, small=True)
-        self.assertIn('snc-py-exp="len(s)"', html_output)
-        self.assertIn('>2<', html_output)
+        self.assertNotIn('len-indicator', html_output)
+        self.assertNotIn('snc-py-exp="len(s)"', html_output)
 
     def test_len_indicator_draggable(self):
         """The len indicator element should have draggable=true."""
@@ -11209,14 +11323,14 @@ class TestIndexSelection(unittest.TestCase):
         self.assertEqual(model['tool'], 'fuzzy')
 
     def test_visualize_adds_tool_class_to_container(self):
-        """Visualizer container gets a tool-{literal|fuzzy|index} class so CSS can react."""
+        """Visualizer container gets a {literal|fuzzy|index}-tool-selected class so CSS can react."""
         value = "hello"
         for t in ('literal', 'fuzzy', 'index'):
             model = init_model(value)
             model['tool'] = t
             html_str = visualize(value, model, None, None)
-            self.assertIn(f'tool-{t}', html_str,
-                          f'Expected class tool-{t} in container HTML for tool={t!r}')
+            self.assertIn(f'{t}-tool-selected', html_str,
+                          f'Expected class {t}-tool-selected in container HTML for tool={t!r}')
 
 
 class TestSliceExprFormatting(unittest.TestCase):
@@ -12063,7 +12177,7 @@ class TestSegmentSelection(unittest.TestCase):
         model = init_model(value)
         model['tool'] = 'pick'
         html_str = visualize(value, model, None, None)
-        self.assertIn('tool-pick', html_str)
+        self.assertIn('pick-tool-selected', html_str)
 
     # --- segment-mode rendering ---------------------------------------------
 

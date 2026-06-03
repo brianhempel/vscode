@@ -1,16 +1,19 @@
 .string-visualizer {
-	line-height: 24px;
+	line-height: 22px;
 	max-height: 600px;
 	max-width: 800px;
 	overflow: auto;
 	scrollbar-width: thin;
 	scrollbar-color: rgba(127, 127, 127, 0.1) transparent;
-	margin: 0px 5px 5px 0px;
-	/* need some padding so the on-hover segment repetition/pattern widgets are not clipped;
-	   right padding leaves room for the .tool-toolbar so characters don't slide under it */
-	padding: 5px 34px 0 10px;
-	margin-bottom: 3px;
+	/* right padding leaves room for the .tool-toolbar so characters don't get stuck under it */
+	padding: 0px 34px 0px 4px;
 	white-space: pre;
+	display: flex; /* this removes the few extra vertical pixels added by overflow auto, even when scrollbar is not visible. stops the computation from saving space for descenders. but also need ANOTHER div just inside to break out of flex and do white-space:pre formatting */
+}
+
+.small .string-visualizer {
+	scrollbar-width: none;
+	padding-right: 4px
 }
 
 .string-visualizer-overlay {
@@ -55,35 +58,31 @@
 
 	&.is-special {
 		color: #a5a5a5;
-		visibility: hidden;
+	}
+
+	/* A highlighted special char becomes dark. Shared by every
+	   highlight variant (literal, fuzzy, slice, segment-group, segment-region) -
+	   `highlight` is always emitted together with one of those variant classes. */
+	&.highlight.is-special {
+		color: rgba(0, 0, 0, 0.8);
 	}
 
 	&.literal.highlight {
-		background: #0069ff24;
+		background: var(--snc-hl-literal);
 
 		&.is-interactive {
-			background: #0069ff3d;
+			background: var(--snc-hl-literal-strong);
 			cursor: pointer;
-		}
-
-		&.is-special {
-			color: rgba(0,0,0,0.8);
-			visibility: visible;
 		}
 	}
 
 	&.fuzzy.highlight {
-		background: #aaaaaa3d;
+		background: var(--snc-hl-fuzzy);
 
 		&.is-interactive {
    		border-bottom: 1px dashed #0000005e;
-     	background: #7d7d7d3d;
+     	background: var(--snc-hl-fuzzy-strong);
       cursor: pointer;
-		}
-
-		&.is-special {
-			color: rgba(0,0,0,0.8);
-			visibility: visible;
 		}
 	}
 
@@ -91,12 +90,7 @@
 	   non-interactive (no handles, no dropdowns). Static index labels are
 	   rendered at the segment ends via .segment-label.index-label. */
 	&.slice.highlight {
-		background: #0069ff24;
-
-		&.is-special {
-			color: rgba(0,0,0,0.8);
-			visibility: visible;
-		}
+		background: var(--snc-hl-literal);
 	}
 
 	/* Segment-selection mode: each capture group / whole match is a
@@ -104,20 +98,15 @@
 	   brightens on hover; .segment-selected (added when the segment ID
 	   is in model.selectedSegments) shifts to a saturated green. */
 	&.segment-group.highlight {
-		background: #0069ff24;
+		background: var(--snc-hl-literal);
 		cursor: pointer;
 
 		&:hover {
-			background: #0069ff52;
+			background: var(--snc-hl-literal-hover);
 		}
 
 		&.segment-selected {
-			background: #4caf5066;
-		}
-
-		&.is-special {
-			color: rgba(0,0,0,0.8);
-			visibility: visible;
+			background: var(--snc-hl-selected);
 		}
 	}
 
@@ -125,20 +114,15 @@
 	   suffix (match-end to string-end) regions. Lighter/grayer than the
 	   match itself so the match remains the visual focus. */
 	&.segment-region.highlight {
-		background: #aaaaaa3d;
+		background: var(--snc-hl-fuzzy);
 		cursor: pointer;
 
 		&:hover {
-			background: #aaaaaa66;
+			background: var(--snc-hl-fuzzy-hover);
 		}
 
 		&.segment-selected {
-			background: #4caf5066;
-		}
-
-		&.is-special {
-			color: rgba(0,0,0,0.8);
-			visibility: visible;
+			background: var(--snc-hl-selected);
 		}
 	}
 
@@ -153,10 +137,6 @@
 	&.end.start {
 		border-radius: 5px;
 	}
-}
-
-.string-visualizer:hover .char-span.is-special {
-	visibility: visible;
 }
 
 .string-visualizer > * {
@@ -177,7 +157,7 @@ span.overlay-container {
 
 span.overlay-content {
 	position: absolute;
-  background: #0069ff24;
+  background: var(--snc-hl-literal);
   color: rgba(0, 0, 0, 0);
   border-radius: 3px;
   opacity: 0.5;
@@ -189,7 +169,7 @@ span.overlay-content {
   }
 
   &.is-interactive {
-  	background: #0069ff3d;
+  	background: var(--snc-hl-literal-strong);
   }
 
   &.literal {
@@ -216,11 +196,6 @@ span.overlay-content {
 
 	&:hover {
 		border-right: 1px solid #00000073;
-		background: rgba(0,0,0,0.1);
-	}
-
-
-	&:hover {
 		background: rgba(0,0,0,0.06);
 	}
 }
@@ -258,6 +233,16 @@ span.overlay-content {
 	vertical-align: text-top;
 }
 
+/* Hoisted out of the scrollable .string-visualizer (which would clip the
+   absolutely-positioned label) and reparented to the widget root by snc.ts,
+   which positions it (left/top) so the label lands exactly where its inline
+   anchor used to be - but free of the overflow clip. The inner .segment-label
+   keeps its original relative offsets, so it looks identical. */
+.snc-visualization-widget > .segment-label-anchor {
+	position: absolute;
+	z-index: 10;
+}
+
 .segment-label {
 	position: absolute;
 	bottom: -2px;
@@ -273,6 +258,8 @@ span.overlay-content {
 
 	border-radius: 2px;
 	/* border: 1px solid transparent; */
+
+	background: var(--snc-bg);
 
 	&:hover {
 		opacity: 1;
@@ -310,7 +297,7 @@ span.overlay-content {
 	&.index-label {
 		cursor: pointer;
 		opacity: 0.85;
-		color: #3c53a7;
+		color: var(--snc-accent);
 
 		&:hover {
 			background: var(--snc-hover-bg);
@@ -359,11 +346,11 @@ span.overlay-content {
 
 .tool-toolbar {
 	position: absolute;
-	top: 5px;
-	right: 5px;
+	top: 1px;
+	right: 1px;
 	display: flex;
 	flex-direction: column;
-	padding: 2px;
+	/* padding: 2px; */
 	gap: 2px;
 	z-index: 50;
 	user-select: none;
@@ -372,14 +359,15 @@ span.overlay-content {
 	   the toolbar sits on top of the string content). */
 	background: var(--snc-bg);
 	border-radius: 4px;
+	outline: 1px solid var(--snc-bg); /* in case it's over the string itself */
 }
 
 .tool-button {
 	font-family: var(--snc-code-font-family);
 	font-size: 11px;
 	line-height: 1;
-	width: 22px;
-	height: 22px;
+	width: 20px;
+	height: 20px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -397,7 +385,7 @@ span.overlay-content {
 
 .tool-button.active {
 	background: var(--snc-hover-bg);
-	color: #3c53a7;
+	color: var(--snc-accent);
 }
 
 /* Dimmed tool buttons (e.g. pick tool with no current search) - visibly
@@ -425,12 +413,12 @@ body.snc-ctrl-down .tool-button.active {
 
 body.snc-ctrl-down .tool-button[data-tool="index"] {
 	background: var(--snc-hover-bg);
-	color: #3c53a7;
+	color: var(--snc-accent);
 }
 
 body.snc-alt-down .tool-button[data-tool="fuzzy"] {
 	background: var(--snc-hover-bg);
-	color: #3c53a7;
+	color: var(--snc-accent);
 }
 
 /* Alt beats ctrl */
@@ -441,7 +429,7 @@ body.snc-alt-down .tool-button[data-tool="index"] {
 
 body.snc-shift-down .tool-button[data-tool="literal"] {
 	background: var(--snc-hover-bg);
-	color: #3c53a7;
+	color: var(--snc-accent);
 }
 
 /* Shift beats alt and ctrl */
@@ -469,12 +457,10 @@ body.snc-shift-down .tool-button[data-tool="index"] {
 .tool-toolbar.tool-toolbar-compact {
 	flex-direction: row;
 	align-items: center;
-	padding: 0;
 }
 
 .tool-button.tool-dropdown-trigger-button {
 	width: auto;
-	height: 22px;
 	padding: 0 3px 0 5px;
 	gap: 2px;
 	font-size: 11px;
@@ -550,7 +536,7 @@ body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
 
 .tool-dropdown-option.active .tool-dropdown-name,
 .tool-dropdown-option.active .tool-dropdown-icon {
-	color: #3c53a7;
+	color: var(--snc-accent);
 	font-weight: 600;
 }
 
@@ -592,17 +578,17 @@ body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
    The visibility rules on anchors and escape displays use !important to
    override the default .is-special / hover-reveal rules. */
 body.snc-ctrl-down .visualizer-container .char-span-container.is-anchor-end,
-body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .char-span-container.is-anchor-end {
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .char-span-container.is-anchor-end {
 	display: none !important;
 }
 
 body.snc-ctrl-down .visualizer-container .char-span.is-anchor-start,
-body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .char-span.is-anchor-start {
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .char-span.is-anchor-start {
 	visibility: hidden !important;
 }
 
 body.snc-ctrl-down .visualizer-container .char-span.is-special:not(.is-regex-anchor),
-body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .char-span.is-special:not(.is-regex-anchor) {
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .char-span.is-special:not(.is-regex-anchor) {
 	visibility: visible !important;
 }
 
@@ -621,89 +607,83 @@ body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .c
 /* Prefix/suffix regions: lighter background than the match itself so the
    match still reads as the focus; brightens on hover and when selected. */
 .char-span.segment-region.highlight {
-	background: #aaaaaa30;
+	background: var(--snc-hl-fuzzy-soft);
 	cursor: pointer;
 }
 
 .char-span.segment-region.highlight:hover {
-	background: #aaaaaa55;
+	background: var(--snc-hl-fuzzy-soft-hover);
 }
 
 /* The match itself (capture groups OR whole match in pick mode). */
 .char-span.segment-group.highlight {
-	background: #0069ff3d;
+	background: var(--snc-hl-literal-strong);
 	cursor: pointer;
 }
 
 .char-span.segment-group.highlight:hover {
-	background: #0069ff5c;
+	background: var(--snc-hl-literal-hover-strong);
 }
 
 /* Selected segments use a brighter, saturated background so it's obvious which
    chips are active. Wins over the base highlight background. */
 .char-span.highlight.segment-selected {
-	background: #34c75966;
+	background: var(--snc-hl-selected-alt);
 }
 
 .char-span.highlight.segment-selected:hover {
-	background: #34c75988;
+	background: var(--snc-hl-selected-alt-hover);
 }
 
-/* Container for a clickable segment chip. .segment-label-anchor is reused
-   from the slice-label machinery so positioning math is consistent. */
-.segment-chip-anchor {
-	/* inherits .segment-label-anchor (zero-width float anchor) */
-}
-
-/* Mirror the visual treatment of .segment-label.index-label so the start/end
-   chips read as part of the existing above-char label vocabulary: no border,
-   transparent background, hover brightens. */
+/* Clickable segment chip (pick tool). The anchor element reuses
+   .segment-label-anchor (zero-width float anchor) for positioning; .segment-chip
+   mirrors the .segment-label.index-label vocabulary (small bold label above the
+   char). pat_str start/end chips carry the match-edge index expressions. */
 .segment-chip {
 	position: absolute;
 	bottom: -2px;
+	font-family: var(--snc-code-font-family);
 	font-size: 8px;
 	font-style: normal;
 	font-weight: bold;
 	line-height: 8px;
-	padding: 2px;
+	padding: 1px 3px;
 	border-radius: 2px;
-	z-index: 10;
+	z-index: 11;
 	cursor: pointer;
 	white-space: nowrap;
 	user-select: none;
-	color: #3c53a7;
-	opacity: 0.85;
-}
+	color: var(--snc-accent);
+	background: var(--snc-bg);
 
-.segment-chip:hover {
-	background: var(--snc-hover-bg);
-	opacity: 1;
-}
+	&:hover {
+		background: var(--snc-hl-literal-hover);
+	}
 
-.segment-chip.selected {
-	color: #258a3f;
-	opacity: 1;
-}
+	&.selected {
+		background: var(--snc-hl-selected-strong);
+		color: white;
+	}
 
-/* The start chip is inserted BEFORE the match's first char so its anchor
-   already sits at the match's left edge. The end chip is inserted AFTER the
-   match's last char so its anchor sits at the match's right edge. Both nudge
-   toward the anchor with small left offsets to read as part of the segment. */
-.segment-chip.pos-start {
-	left: -3px;
-}
+	/* The start chip is inserted BEFORE the match's first char (anchor at the
+	   left edge); the end chip AFTER the last char (anchor at the right edge).
+	   Small left offsets nudge each toward its segment. */
+	&.pos-start {
+		left: -3px;
+	}
 
-.segment-chip.pos-end {
-	left: -5px;
+	&.pos-end {
+		left: -5px;
+	}
 }
 
 /* In pick-tool mode, suppress the literal/fuzzy hover affordances and the
    resize handles - the only interaction in this mode is chip-click. */
-.visualizer-container.tool-pick .char-span.hover {
+.visualizer-container.pick-tool-selected .char-span.hover {
 	background: transparent;
 }
 
-.visualizer-container.tool-pick .char-span-resize-handle {
+.visualizer-container.pick-tool-selected .char-span-resize-handle {
 	display: none;
 }
 
@@ -711,73 +691,20 @@ body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.tool-index .c
    so the user can peek at the underlying view (and use the modifier's normal
    tool semantics for the next click/drag). The pick-mode click handlers
    on the wrappers still fire, but visually the chrome disappears. */
-body.snc-shift-down .visualizer-container.tool-pick .segment-chip,
-body.snc-alt-down .visualizer-container.tool-pick .segment-chip,
-body.snc-ctrl-down .visualizer-container.tool-pick .segment-chip {
+body.snc-shift-down .visualizer-container.pick-tool-selected .segment-chip,
+body.snc-alt-down .visualizer-container.pick-tool-selected .segment-chip,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .segment-chip {
 	display: none;
 }
 
-body.snc-shift-down .visualizer-container.tool-pick .char-span.segment-region.highlight,
-body.snc-alt-down .visualizer-container.tool-pick .char-span.segment-region.highlight,
-body.snc-ctrl-down .visualizer-container.tool-pick .char-span.segment-region.highlight,
-body.snc-shift-down .visualizer-container.tool-pick .char-span.segment-group.highlight,
-body.snc-alt-down .visualizer-container.tool-pick .char-span.segment-group.highlight,
-body.snc-ctrl-down .visualizer-container.tool-pick .char-span.segment-group.highlight,
-body.snc-shift-down .visualizer-container.tool-pick .char-span.segment-selected,
-body.snc-alt-down .visualizer-container.tool-pick .char-span.segment-selected,
-body.snc-ctrl-down .visualizer-container.tool-pick .char-span.segment-selected {
-	background: transparent;
-}
-
-/* =========================================================================
-   Pick tool segment chips
-   ========================================================================= */
-
-/* Inline chips that float above each segment (capture group, prefix,
-   suffix, start/end indices). Reuse the .segment-label-anchor positioning
-   pattern (zero-width inline-block) so chips don't disturb the layout
-   of surrounding characters. */
-.segment-chip-anchor {
-	/* Anchor inherits .segment-label-anchor positioning. */
-}
-
-.segment-chip {
-	position: absolute;
-	font-family: var(--snc-code-font-family);
-	font-size: 8px;
-	line-height: 8px;
-	font-weight: bold;
-	padding: 1px 3px;
-	border-radius: 2px;
-	cursor: pointer;
-	white-space: nowrap;
-	user-select: none;
-	z-index: 11;
-	color: #3c53a7;
-	background: var(--snc-hover-bg);
-	opacity: 0.8;
-
-	&:hover {
-		opacity: 1;
-		background: #0069ff52;
-	}
-
-	&.selected {
-		background: #4caf5099;
-		color: white;
-		opacity: 1;
-	}
-
-	&.side-top {
-		bottom: 0;
-		left: -2px;
-	}
-}
-
-/* Pick-tool container: suppress the literal-mode hover affordances on
-   plain (non-segment) chars so the focus is on the segment chips. The
-   regular literal/fuzzy/index rules still drive char styling outside the
-   first match's region. */
-.visualizer-container.tool-pick .char-span.hover {
+body.snc-shift-down .visualizer-container.pick-tool-selected .char-span.segment-region.highlight,
+body.snc-alt-down .visualizer-container.pick-tool-selected .char-span.segment-region.highlight,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .char-span.segment-region.highlight,
+body.snc-shift-down .visualizer-container.pick-tool-selected .char-span.segment-group.highlight,
+body.snc-alt-down .visualizer-container.pick-tool-selected .char-span.segment-group.highlight,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .char-span.segment-group.highlight,
+body.snc-shift-down .visualizer-container.pick-tool-selected .char-span.segment-selected,
+body.snc-alt-down .visualizer-container.pick-tool-selected .char-span.segment-selected,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .char-span.segment-selected {
 	background: transparent;
 }

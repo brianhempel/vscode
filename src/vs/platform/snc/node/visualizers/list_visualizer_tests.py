@@ -12,7 +12,7 @@ import re
 import shutil
 import tempfile
 
-from visualizer_utils import ChildEvent
+from visualizer_utils import ChildEvent, wrap_drag_grab
 import list_visualizer
 
 
@@ -83,8 +83,12 @@ class MockStringVisualizer:
         return None
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return {'selection': None, 'handledKeys': ['Escape', 'Enter']}
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
-        return f'<span snc-mouse-down="MouseDown(index=0)">{html.escape(value)}</span>'
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        inner = f'<span snc-mouse-down="MouseDown(index=0)">{html.escape(value)}</span>'
+        # Mirror real visualizers: self-wrap for drag only in small mode.
+        if small and var_and_exp:
+            return wrap_drag_grab(inner, var_and_exp)
+        return inner
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         model = dict(model)
         model['last_event'] = event['pythonEventStr']
@@ -101,7 +105,7 @@ class SmallTrackingVisualizer:
         return None
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return {'handledKeys': []}
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         self.visualize_calls.append({'value': value, 'small': small})
         return f'<span>{html.escape(value)}</span>'
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
@@ -109,13 +113,17 @@ class SmallTrackingVisualizer:
 
 
 class MockIntVisualizer:
-    """Mimics a simple int visualizer (no interactive model)."""
+    """Mimics a simple int visualizer (no interactive model -> generic).
+
+    Echoes the access-path expression it receives via var_and_exp so tests can
+    assert the parent delegates drag setup to the child."""
     def can_visualize(self, value):
         return isinstance(value, int)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
-        return f'<span>{value}</span>'
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        expr = var_and_exp[1] if var_and_exp else ''
+        return f'<span child-expr={expr}>{value}</span>'
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
@@ -128,7 +136,7 @@ class MockDictVisualizer:
         return [f"^[{repr(k)}]" for k in value.keys()]
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         return f'<span>{html.escape(repr(value))}</span>'
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
@@ -145,7 +153,7 @@ class MockObjectVisualizer:
         return [f'^.{name}' for name in names]
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         return f'<span>{html.escape(repr(value))}</span>'
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
@@ -159,7 +167,7 @@ class ListVisualizerAdapter:
         return list_visualizer.get_fields(value)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return list_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
@@ -287,6 +295,9 @@ class TestUpdate(unittest.TestCase):
     def test_child_event_routes_to_child_visualizer(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
+        # Pre-focus the child so the mousedown dispatches; the first mousedown
+        # on an unfocused child only pins focus (see TestFocusTracking).
+        model['focused_child'] = '0\x00^'
         event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
         new_model, commands = update(event, ('x', 'x'), model, lst, mock_get_visualizer)
         child_model = new_model['children']['0\x00^']
@@ -327,6 +338,7 @@ class TestUpdate(unittest.TestCase):
 
         lst = ["x"]
         model = init_model(lst, get_vis)
+        model['focused_child'] = '0\x00^'  # see TestFocusTracking
         event = make_child_mouse_event('0\x00^', 'X')
         _, commands = update(event, None, model, lst, get_vis)
         self.assertIn('test_command', commands)
@@ -494,7 +506,7 @@ class TestTableRendering(unittest.TestCase):
         unescaped = html.unescape(output)
         self.assertIn("^['a']", unescaped)
         self.assertIn("^['b']", unescaped)
-        self.assertIn('<td style="padding:0 8px;"></td>', output) # missing cell
+        self.assertIn('<td></td>', output) # missing cell
 
     def test_string_list_renders_as_table(self):
         lst = ["hello", "world"]
@@ -520,6 +532,7 @@ class TestTableEventRouting(unittest.TestCase):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         composite_key = "0\x00^['name']"
+        model['focused_child'] = composite_key  # see TestFocusTracking
         event = make_child_mouse_event(composite_key, 'MouseDown(index=0)')
         new_model, commands = update(event, None, model, lst, mock_get_visualizer)
         cell_model = new_model['children'][composite_key]
@@ -562,6 +575,7 @@ class TestTableEventRouting(unittest.TestCase):
 
         lst = [{'k': 'val'}]
         model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00^['k']"  # see TestFocusTracking
         event = make_child_mouse_event("0\x00^['k']", 'X')
         _, commands = update(event, None, model, lst, get_vis)
         self.assertIn('table_cmd', commands)
@@ -1344,6 +1358,7 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         composite_key = "0\x00^['name']"
+        model['focused_child'] = composite_key  # see TestFocusTracking
         event = make_child_mouse_event(composite_key, 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         cell_model = new_model['children'].get(composite_key)
@@ -1423,36 +1438,44 @@ class TestCellDraggablePyExp(unittest.TestCase):
         html_output = visualize(lst, model, mock_get_visualizer, None)
         self.assertNotIn('snc-py-exp', html_output)
 
-    def test_generic_cell_whole_draggable(self):
-        """Generic cells (int, model=None) are wrapped entirely in a draggable snc-py-exp span."""
+    def test_generic_cell_delegates_drag_to_child(self):
+        """Generic cells (int, model=None) get NO parent-emitted wrapper; the
+        child receives var_and_exp and self-wraps. The mock generic visualizer
+        echoes the expression it was given so we can verify propagation."""
         lst = [{'age': 25}, {'age': 30}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        expected_expr = html.escape("people[0]['age']")
-        self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
-        self.assertIn('class="py-exp-grab"', html_output)
-        expected_expr_1 = html.escape("people[1]['age']")
-        self.assertIn(f'snc-py-exp="{expected_expr_1}" draggable="true"', html_output)
+        # The child was handed the per-cell expression via var_and_exp.
+        self.assertIn("child-expr=people[0]['age']", html_output)
+        self.assertIn("child-expr=people[1]['age']", html_output)
+        # Parent does not also wrap generic cells in py-exp-cell.
+        self.assertNotIn('class="py-exp-cell"', html_output)
 
-    def test_generic_cell_content_inside_draggable_span(self):
-        """The cell content should be inside the draggable span for generic cells."""
-        lst = [{'age': 42}]
-        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
-        html_output = visualize(lst, model, mock_get_visualizer, None)
-        expected_expr = html.escape("data[0]['age']")
-        self.assertRegex(html_output,
-            r'snc-py-exp="' + re.escape(expected_expr) + r'"[^>]*class="py-exp-grab"[^>]*>.*?<span>42</span>.*?</span>')
-
-    def test_nongeneric_cell_border_drag(self):
-        """Non-generic cells (string, model=dict) use border-only drag with draggable=false inner."""
+    def test_nongeneric_small_cell_whole_area_grab(self):
+        """Non-generic small (non-focused) cells use whole-area py-exp-grab,
+        not the old py-exp-cell border."""
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         html_output = visualize(lst, model, mock_get_visualizer, None)
         expected_expr = html.escape("people[0]['name']")
-        # Outer div should have snc-py-exp and draggable=true
         self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
-        # Inner div should have draggable=false to protect cell interactions
-        self.assertIn('draggable="false"', html_output)
+        self.assertIn('class="py-exp-grab"', html_output)
+        # The bulky border pattern is gone.
+        self.assertNotIn('class="py-exp-cell"', html_output)
+        self.assertNotIn('draggable="false"', html_output)
+
+    def test_nongeneric_focused_cell_not_draggable(self):
+        """The focused (interactive, small=False) non-generic cell gets NO drag
+        wrapper - it needs its mouse events."""
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
+        model['focused_child'] = f"0{CELL_KEY_SEP}^['name']"
+        html_output = visualize(lst, model, mock_get_visualizer, None)
+        expected_expr = html.escape("people[0]['name']")
+        # No drag wrapper around the focused cell.
+        self.assertNotIn(f'snc-py-exp="{expected_expr}"', html_output)
+        self.assertNotIn('class="py-exp-grab"', html_output)
+        self.assertNotIn('class="py-exp-cell"', html_output)
 
     def test_nongeneric_cell_content_preserved(self):
         """Non-generic cell visualizer content should be present inside the wrapper."""
@@ -1462,15 +1485,32 @@ class TestCellDraggablePyExp(unittest.TestCase):
         # MockStringVisualizer renders: <span snc-mouse-down="MouseDown(index=0)">Bob</span>
         self.assertIn('Bob</span>', html_output)
 
-    def test_mixed_generic_and_nongeneric_cells(self):
-        """A table with both generic (int) and non-generic (str) columns handles both correctly."""
-        lst = [{'name': 'Alice', 'age': 25}]
-        model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
-        html_output = visualize(lst, model, mock_get_visualizer, None)
-        # Both cell expressions should be present
-        self.assertIn('snc-py-exp=', html_output)
-        # Should have at least one draggable="false" for the string cell
-        self.assertIn('draggable="false"', html_output)
+
+class TestListSelfWrapSmall(unittest.TestCase):
+    """The list visualizer self-wraps as a drag handle when rendered small."""
+
+    def test_small_with_var_and_exp_self_wraps(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
+        html_output = visualize(lst, model, mock_get_visualizer, None,
+                                small=True, var_and_exp=(None, 'nums'))
+        self.assertIn('snc-py-exp="nums"', html_output)
+        self.assertIn('draggable="true"', html_output)
+        self.assertIn('class="py-exp-grab"', html_output)
+
+    def test_small_without_var_and_exp_renders_bare(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
+        html_output = visualize(lst, model, mock_get_visualizer, None, small=True)
+        self.assertNotIn('py-exp-grab', html_output)
+
+    def test_full_mode_not_self_wrapped(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
+        html_output = visualize(lst, model, mock_get_visualizer, None,
+                                small=False, var_and_exp=(None, 'nums'))
+        # The list container itself is not a drag handle in full mode.
+        self.assertFalse(html_output.startswith('<span snc-py-exp'))
 
 
 class TestSourceExprInModel(unittest.TestCase):
@@ -2838,14 +2878,14 @@ class TestRowHighlighting(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '^ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
-        self.assertIn('border-left:2px solid', output)
+        self.assertIn('row-match', output)
 
     def test_unmatched_rows_dimmed(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '^ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
-        self.assertIn('opacity:0.4', output)
+        self.assertIn('row-dim', output)
 
     def test_all_rows_present(self):
         lst = [10, 20, 30]
@@ -2862,8 +2902,8 @@ class TestRowHighlighting(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, eval)
         tr_sections = output.split('<tr')
         for section in tr_sections[2:]:
-            self.assertNotIn('border-left:2px solid', section.split('</tr>')[0])
-            self.assertNotIn('opacity:0.4', section.split('</tr>')[0])
+            self.assertNotIn('row-match', section.split('</tr>')[0])
+            self.assertNotIn('row-dim', section.split('</tr>')[0])
 
     def test_first_match_mode_highlights_only_first(self):
         lst = [10, 20, 30]
@@ -2871,7 +2911,7 @@ class TestRowHighlighting(unittest.TestCase):
         model['search'] = '^ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, eval)
-        border_count = output.count('border-left:2px solid')
+        border_count = output.count('row-match')
         self.assertEqual(border_count, 1)
         self.assertIn('>10<', output)
         self.assertIn('>20<', output)
@@ -2890,7 +2930,7 @@ class TestRowHighlighting(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '1'
         output = visualize(lst, model, mock_get_visualizer, eval)
-        self.assertIn('border-left:2px solid', output)
+        self.assertIn('row-match', output)
         self.assertIn('>10<', output)
         self.assertIn('>20<', output)
         self.assertIn('>30<', output)
@@ -3797,6 +3837,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
         original_columns = list(model['columns'])
         event = make_child_mouse_event("0\x00^['name']", 'X')
         new_model, commands = update(event, ('x', 'x'), model, lst, get_vis)
@@ -3811,6 +3852,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = ['hello', 'world']
         model = init_model(lst, get_vis)
+        model['focused_child'] = '0\x00^'  # see TestFocusTracking
         event = make_child_mouse_event('0\x00^', 'X')
         _, commands = update(event, ('x', 'x'), model, lst, get_vis)
 
@@ -3825,6 +3867,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
         event = make_child_mouse_event("0\x00^['name']", 'X')
         _, commands = update(event, None, model, lst, get_vis)
 
@@ -3838,6 +3881,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
         event = make_child_mouse_event("0\x00^['name']", 'X')
         _, commands = update(event, None, model, lst, get_vis)
 
@@ -3863,6 +3907,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
         event = make_child_mouse_event("0\x00^['name']", 'X')
         update(event, ('x', 'x'), model, lst, get_vis)
 
@@ -3879,6 +3924,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
         event = make_child_mouse_event("0\x00^['name']", 'X')
         new_model, commands = update(event, None, model, lst, get_vis)
 

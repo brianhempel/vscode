@@ -127,7 +127,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, truncate_str, ICONS
+from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, truncate_str, ICONS, wrap_drag_grab
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -3047,7 +3047,7 @@ def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '') -> str
                     if expr else '')
     return (
         f'<div class="snc-dropdown-option{disabled}"{py_exp_attrs}>'
-        f'<span snc-mouse-down="{html.escape(act_event)}" style="flex:1;">{label}</span>'
+        f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
         f'</div>'
     )
 
@@ -3163,7 +3163,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         unlink_event = repr(Unlink())
         parts.append(
             f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
-            f'><span class="search-icon" style="width:9px">\u26d3\ufe0e</span><span class="text">Unlink</span></span>'
+            f'><span class="search-icon sm">\u26d3\ufe0e</span><span class="text">Unlink</span></span>'
         )
 
 
@@ -3310,12 +3310,36 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
     )
 
 
-def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> str:
-    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small))
+def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> str:
+    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, var_and_exp))
 
-def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False) -> List[str]:
+def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> List[str]:
     if eval_in_scope is None:
         eval_in_scope = lambda _c: eval(_c)
+
+    # Small mode: a non-interactive inline preview. Skip all the expensive
+    # selection/highlight machinery (preview regex, segment overlays, per-char
+    # anchors, hover) and just print the raw string. We don't generate the
+    # regex special chars (^/$ anchors, escape displays) at all here - small
+    # mode has no search/selection so they'd add nothing. white-space:pre on
+    # .string-visualizer renders the literal \n / \t correctly.
+    #
+    # Being non-interactive, the whole small preview is a drag-to-extract
+    # handle: it self-wraps in snc-py-exp when the parent hands down an
+    # access-path expression via var_and_exp.
+    if small:
+        # Non-focused preview: wrap the string in leading/trailing ' quotes so
+        # it reads as a string literal. Each newline after the first gets a
+        # leading space so subsequent lines align vertically under the first
+        # line's content (which the opening quote shifts one char to the right).
+        raw = value or ""
+        display = "'" + raw.replace("\n", "\n ") + "'"
+        small_html = (
+            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container literal-tool-selected small"><div class="string-visualizer"><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'{text_group_span(list(display), 0)}'
+            f'</div></div></div>'
+        )
+        return [wrap_drag_grab(small_html, var_and_exp)]
 
     # Build highlight_by_index from highlights (uses preview regex to include in-progress selection)
     preview_regex = build_preview_regex(model, value)
@@ -3405,8 +3429,9 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     index += 1
 
     # len() indicator at the top-left of the final character position
+    # (hidden when small - there's no room and it competes with the actual content)
     resolved_source_expr = model.get('_source_expr') if model else None
-    if resolved_source_expr is not None:
+    if resolved_source_expr is not None and not small:
         len_val = len(value)
         len_expr = f'len({resolved_source_expr})'
         char_els.append(
@@ -3531,7 +3556,10 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f"</div>"
         )
 
-    tool_toolbar_html = _render_tool_toolbar(model, value or '')
+    # The tool toolbar (literal/fuzzy/index/pick) is only useful when this is
+    # the focused visualizer; in small mode there's no room for it and it
+    # would just compete with the user's actual focus elsewhere.
+    tool_toolbar_html = '' if small else _render_tool_toolbar(model, value or '')
     active_tool = (model or {}).get('tool', 'literal')
     if active_tool not in ('literal', 'fuzzy', 'index', 'pick'):
         active_tool = 'literal'
@@ -3539,16 +3567,18 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # Compact (dropdown) toolbar is used when the string is < 4 lines tall.
     # The visualizer container gets a class so CSS can add a few extra
     # right-padding pixels to keep characters from overlapping the wider
-    # dropdown trigger.
+    # dropdown trigger. No need for that padding when the toolbar isn't there.
     line_count = (value.count('\n') + 1) if value else 1
     compact_class = ' tool-toolbar-compact-container' if line_count < 4 else ''
 
     # Add tabindex to make div focusable for keyboard events, and snc-key-down handler
-    # doing it like this to try to make less string garbage
+    # doing it like this to try to make less string garbage. Small mode returned
+    # early above (self-wrapped for drag), so this is always the full/interactive
+    # path - it keeps its mouse events and is not a drag handle.
     return [
-        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container tool-{active_tool}{compact_class}">{tool_toolbar_html}<div class="string-visualizer">''',
+        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container {active_tool}-tool-selected{compact_class}">{tool_toolbar_html}<div class="string-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
         *char_els,
-        f"""</div>{search_box_html}</div>""",
+        f"""</div></div>{search_box_html}</div>""",
     ]
 
 
@@ -3765,22 +3795,22 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
     """
     selection_regex = model.get('search')
     if not selection_regex:
-        return '<div class="match-object-preview"><span class="obj-small">No matches</span></div>'
+        return '<div class="match-object-preview"><span class="small">No matches</span></div>'
     if is_index_or_slice_search(selection_regex, eval_in_scope):
         matched = _eval_index_or_slice_match(selection_regex, value, eval_in_scope)
         if matched is None:
-            return '<div class="match-object-preview"><span class="obj-small">No matches</span></div>'
+            return '<div class="match-object-preview"><span class="small">No matches</span></div>'
         val_repr = _trunc_repr(matched)
         field_html = z_object_visualizer.render_small_field(
             '^', val_repr, '^', add_target='.search-box-input-replace')
-        return f'<div class="match-object-preview"><span class="obj-small">{field_html}</span></div>'
+        return f'<div class="match-object-preview"><span class="small">{field_html}</span></div>'
 
     matches = _find_matches(selection_regex, value, eval_in_scope)
     if not matches:
-        return '<div class="match-object-preview"><span class="obj-small">No matches</span></div>'
+        return '<div class="match-object-preview"><span class="small">No matches</span></div>'
     m = matches[0]
     if not isinstance(m, re.Match):
-        return '<div class="match-object-preview"><span class="obj-small">Match not a match object, ut oh</span></div>'
+        return '<div class="match-object-preview"><span class="small">Match not a match object, ut oh</span></div>'
 
     fields = ['^[0]', '^.start()', '^.end()']
     grouped_match = None

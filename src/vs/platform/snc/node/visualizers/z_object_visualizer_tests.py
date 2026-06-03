@@ -27,7 +27,7 @@ from z_object_visualizer import (
     load_fields_from_dotfile, save_fields_to_dotfile,
     _get_autocomplete_suggestions, _resolve_fields,
 )
-from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name
+from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name, wrap_drag_grab
 import z_object_visualizer
 
 
@@ -37,8 +37,13 @@ class _GenericVis:
         return True
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
-        return html_module.escape(repr(value))
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        inner = html_module.escape(repr(value))
+        expr = var_and_exp[1] if var_and_exp else None
+        if expr:
+            return (f'<span snc-py-exp="{html_module.escape(expr)}" draggable="true" '
+                    f'class="py-exp-grab">{inner}</span>')
+        return inner
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
@@ -48,7 +53,7 @@ class _ZObjectVisAdapter:
         return z_object_visualizer.can_visualize(value)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return z_object_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
@@ -1147,8 +1152,12 @@ class MockInteractiveVis:
         return isinstance(value, str)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return {'vis_type': 'mock_interactive', 'handledKeys': ['Escape']}
-    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False):
-        return f'<span snc-mouse-down="MockClick()">{html_module.escape(repr(value))}</span>'
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        inner = f'<span snc-mouse-down="MockClick()">{html_module.escape(repr(value))}</span>'
+        # Mirror real visualizers: self-wrap for drag only in small mode.
+        if small and var_and_exp:
+            return wrap_drag_grab(inner, var_and_exp)
+        return inner
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         model = dict(model)
         model['updated'] = True
@@ -1227,6 +1236,9 @@ class TestComposition(unittest.TestCase):
         obj = CompositionTestObj()
         model = init_model(obj, _interactive_get_visualizer)
         self.assertIn('^.greeting', model['children'])
+        # Pre-focus the child so the mousedown dispatches; the first mousedown
+        # on an unfocused child only pins focus (click-to-focus).
+        model['focused_child'] = '^.greeting'
         ce = ChildEvent(child_key='^.greeting', py_ev_str='MockClick()')
         event = {
             'pythonEventStr': repr(ce),
@@ -1532,6 +1544,31 @@ class TestSmallView(unittest.TestCase):
 # TestSmallViewPyExp
 # =============================================================================
 
+class TestSmallObjectSelfWrap(unittest.TestCase):
+    """The whole small object is a drag handle for the object expression."""
+
+    def test_small_with_var_and_exp_self_wraps_whole_object(self):
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
+        html_out = visualize(obj, model, _get_visualizer, None, small=True,
+                             var_and_exp=(None, 'obj'))
+        # The outer wrapper carries the whole-object expression.
+        self.assertTrue(html_out.startswith('<span snc-py-exp="obj" draggable="true" class="py-exp-grab">'))
+
+    def test_small_without_var_and_exp_not_self_wrapped(self):
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
+        html_out = visualize(obj, model, _get_visualizer, None, small=True)
+        self.assertFalse(html_out.startswith('<span snc-py-exp'))
+
+    def test_full_mode_object_not_self_wrapped(self):
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
+        html_out = visualize(obj, model, _get_visualizer, None, small=False,
+                             var_and_exp=(None, 'obj'))
+        self.assertFalse(html_out.startswith('<span snc-py-exp'))
+
+
 class TestSmallViewPyExp(unittest.TestCase):
     """Test snc-py-exp on the compact small=True visualization."""
 
@@ -1668,17 +1705,33 @@ class TestPyExpExtractable(unittest.TestCase):
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertIn('snc-py-exp="get_obj().x"', html_out)
 
-    def test_py_exp_on_child_visualizer_uses_border_drag(self):
-        """Child visualizer values use the border-drag pattern."""
+    def test_py_exp_on_small_child_visualizer_uses_whole_area_grab(self):
+        """Non-focused (small) child visualizer values use whole-area grab,
+        not the old py-exp-cell border."""
         obj = TestObj()
         model = init_model(obj, _interactive_get_visualizer,
                            var_and_exp=('obj', 'obj'))
         model['fields'] = ['^.name']
         html_out = visualize(obj, model, _interactive_get_visualizer, None)
         self.assertIn('snc-py-exp="obj.name"', html_out)
-        self.assertIn('class="py-exp-cell"', html_out)
-        self.assertIn('draggable="false"', html_out)
-        self.assertIn('class="py-exp-inner"', html_out)
+        self.assertIn('class="py-exp-grab"', html_out)
+        # The bulky border pattern is gone.
+        self.assertNotIn('class="py-exp-cell"', html_out)
+        self.assertNotIn('draggable="false"', html_out)
+        self.assertNotIn('class="py-exp-inner"', html_out)
+
+    def test_py_exp_on_focused_child_visualizer_not_draggable(self):
+        """The focused (interactive) child visualizer gets NO drag wrapper - it
+        needs its mouse events."""
+        obj = TestObj()
+        model = init_model(obj, _interactive_get_visualizer,
+                           var_and_exp=('obj', 'obj'))
+        model['fields'] = ['^.name']
+        model['focused_child'] = '^.name'
+        html_out = visualize(obj, model, _interactive_get_visualizer, None)
+        self.assertNotIn('snc-py-exp="obj.name"', html_out)
+        self.assertNotIn('class="py-exp-grab"', html_out)
+        self.assertNotIn('class="py-exp-cell"', html_out)
 
     def test_py_exp_plain_value_uses_grab(self):
         """Plain text values use the simple grab wrapper."""

@@ -30,6 +30,7 @@ export interface IProcessOptions {
 	timeout?: number; // Optional timeout in milliseconds
 	workingDirectory: string; // Required working directory for code execution
 	modelsAndEventsJson?: string; // visualizers state, and events to apply
+	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
 }
 
 export interface NewCodeEdit {

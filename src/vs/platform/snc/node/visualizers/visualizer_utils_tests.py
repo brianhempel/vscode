@@ -106,7 +106,9 @@ class TestRouteChildEvent(unittest.TestCase):
         mock_vis = self._make_mock_visualizer(updated_model='child_updated')
         get_vis = self._make_get_visualizer(mock_vis)
 
-        model = {'children': {'0': 'old_child_model'}, 'handledKeys': []}
+        # Pre-focus the child so the mousedown dispatches; the click-to-focus
+        # case is covered separately in TestClickToFocusChild.
+        model = {'children': {'0': 'old_child_model'}, 'handledKeys': [], 'focused_child': '0'}
         event = {
             'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
             'eventJSON': {'type': 'mousedown'}
@@ -126,7 +128,8 @@ class TestRouteChildEvent(unittest.TestCase):
         mock_vis = self._make_mock_visualizer(updated_model='new_child')
         get_vis = self._make_get_visualizer(mock_vis)
 
-        model = {'children': {}, 'handledKeys': []}
+        # Pre-focus so the dispatch (and lazy init_model) runs.
+        model = {'children': {}, 'handledKeys': [], 'focused_child': '0'}
         event = {
             'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
             'eventJSON': {'type': 'mousedown'}
@@ -142,7 +145,9 @@ class TestRouteChildEvent(unittest.TestCase):
         mock_vis = self._make_mock_visualizer(commands=['cmd1', 'cmd2'])
         get_vis = self._make_get_visualizer(mock_vis)
 
-        model = {'children': {'0': 'some_model'}, 'handledKeys': []}
+        # Pre-focus the child so the mousedown dispatches instead of just
+        # pinning focus (see TestClickToFocusChild for the unfocused case).
+        model = {'children': {'0': 'some_model'}, 'handledKeys': [], 'focused_child': '0'}
         event = {
             'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
             'eventJSON': {'type': 'mousedown'}
@@ -153,6 +158,114 @@ class TestRouteChildEvent(unittest.TestCase):
             event, model, value, lambda k: value[int(k)], get_vis,
         )
         self.assertEqual(commands, ['cmd1', 'cmd2'])
+
+
+class TestClickToFocusChild(unittest.TestCase):
+    """First mousedown on an unfocused child should only pin focus, not
+    dispatch the event to the child. Mirrors the top-level click-to-expand
+    behavior: clicking a small/unfocused widget expands it without firing a
+    stray Python event whose target may not exist post-expand.
+    """
+
+    def _make_dispatch_tracker(self):
+        """Visualizer that records every update() call so we can assert
+        whether dispatch happened."""
+        class TrackingVis:
+            def __init__(self):
+                self.update_calls = []
+            def can_visualize(self, value):
+                return True
+            def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+                return {'mock': True}
+            def visualize(self, value, model, get_visualizer):
+                return ''
+            def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                self.update_calls.append(event)
+                return ({'dispatched': True}, ['some_cmd'])
+        return TrackingVis()
+
+    def test_first_mousedown_on_unfocused_child_only_pins_focus(self):
+        tracker = self._make_dispatch_tracker()
+        get_vis = lambda v: tracker
+        model = {'children': {'0': 'old'}, 'handledKeys': []}
+        event = {
+            'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
+            'eventJSON': {'type': 'mousedown'},
+        }
+        new_model, commands = route_child_event(
+            event, model, ['item0'], lambda k: 'item0', get_vis,
+        )
+        self.assertEqual(new_model.get('focused_child'), '0')
+        self.assertEqual(tracker.update_calls, [],
+                         "Child's update() should NOT be called on first focus click")
+        self.assertEqual(commands, [])
+        self.assertEqual(new_model['children']['0'], 'old',
+                         "Child model should not be replaced on first focus click")
+
+    def test_mousedown_on_already_focused_child_dispatches(self):
+        tracker = self._make_dispatch_tracker()
+        get_vis = lambda v: tracker
+        model = {'children': {'0': 'old'}, 'handledKeys': [], 'focused_child': '0'}
+        event = {
+            'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
+            'eventJSON': {'type': 'mousedown'},
+        }
+        new_model, commands = route_child_event(
+            event, model, ['item0'], lambda k: 'item0', get_vis,
+        )
+        self.assertEqual(len(tracker.update_calls), 1)
+        self.assertEqual(commands, ['some_cmd'])
+        self.assertTrue(new_model['children']['0'].get('dispatched'))
+
+    def test_non_mousedown_event_on_unfocused_child_is_ignored(self):
+        """Hovering / finishing a drag over an unfocused child must NOT
+        dispatch and must NOT pin focus. Only mousedown can change focus."""
+        tracker = self._make_dispatch_tracker()
+        get_vis = lambda v: tracker
+        model = {'children': {'0': 'old'}, 'handledKeys': []}  # no focused_child
+        for ev_type in ('mousemove', 'mouseup', 'mouseover', 'keydown'):
+            event = {
+                'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
+                'eventJSON': {'type': ev_type},
+            }
+            new_model, commands = route_child_event(
+                event, model, ['item0'], lambda k: 'item0', get_vis,
+            )
+            self.assertEqual(tracker.update_calls, [],
+                             f"{ev_type} on unfocused child should be ignored")
+            self.assertEqual(commands, [])
+            self.assertNotIn('focused_child', new_model,
+                             f"{ev_type} must not pin focus")
+
+    def test_focused_child_receives_non_mousedown_events(self):
+        """Once focused, the child receives mousemove/mouseup/etc as normal."""
+        tracker = self._make_dispatch_tracker()
+        get_vis = lambda v: tracker
+        model = {'children': {'0': 'old'}, 'handledKeys': [], 'focused_child': '0'}
+        event = {
+            'pythonEventStr': "ChildEvent('0', 'SomeEvent()')",
+            'eventJSON': {'type': 'mousemove'},
+        }
+        _, commands = route_child_event(
+            event, model, ['item0'], lambda k: 'item0', get_vis,
+        )
+        self.assertEqual(len(tracker.update_calls), 1)
+        self.assertEqual(commands, ['some_cmd'])
+
+    def test_mousedown_switching_focus_between_children_only_pins(self):
+        tracker = self._make_dispatch_tracker()
+        get_vis = lambda v: tracker
+        model = {'children': {'0': 'a', '1': 'b'}, 'handledKeys': [], 'focused_child': '0'}
+        event = {
+            'pythonEventStr': "ChildEvent('1', 'SomeEvent()')",
+            'eventJSON': {'type': 'mousedown'},
+        }
+        new_model, commands = route_child_event(
+            event, model, ['item0', 'item1'], lambda k: 'item' + k, get_vis,
+        )
+        self.assertEqual(new_model.get('focused_child'), '1')
+        self.assertEqual(tracker.update_calls, [])
+        self.assertEqual(commands, [])
 
 
 class TestAggregateHandledKeys(unittest.TestCase):

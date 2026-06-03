@@ -49,7 +49,7 @@ from typing import List, Tuple, Any
 
 from visualizer_utils import (
     ChildEvent, EditorTextSelect, Unlink,
-    wrap_child_html, route_child_event, aggregate_handled_keys,
+    wrap_child_html, wrap_drag_grab, route_child_event, aggregate_handled_keys,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     load_dotfile_list, save_dotfile_list, get_full_class_name,
     truncate_str,
@@ -540,10 +540,10 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
         dyn_style += 'white-space:nowrap;text-overflow:ellipsis;'
     style_attr = f' style="{dyn_style}"' if dyn_style else ''
 
-    return f'<span class="obj-small"{style_attr}>{content}</span>'
+    return f'<span class="small"{style_attr}>{content}</span>'
 
 
-def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
+def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None):
     """
     Render the object as HTML with configurable field inspection.
 
@@ -554,7 +554,14 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
         return repr(obj)
 
     if small:
-        return _visualize_small(obj, model, eval_in_scope, max_width, max_height)
+        small_html = _visualize_small(obj, model, eval_in_scope, max_width, max_height)
+        # Small mode is non-interactive, so the whole object becomes a
+        # drag-to-extract handle for the object expression (the "dead space"
+        # between field chips). Field chips inside still extract their own
+        # fields. Full mode keeps its mouse events and stays undraggable.
+        if var_and_exp:
+            return wrap_drag_grab(small_html, var_and_exp)
+        return small_html
 
     full_class_name = get_full_class_name(obj)
     source_expr = model.get('_source_expr')
@@ -587,18 +594,17 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 if child_model is None:
                     child_model = child_vis.init_model(raw_value, get_visualizer,
                                                        eval_in_scope=eval_in_scope)
-                is_generic = child_model is None
                 child_small = (accessor_code != focused_child)
-                child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small)
+
+                # The parent no longer wraps children for drag. Each child is
+                # handed its access-path expression and self-wraps when it's
+                # small (non-interactive); the focused child renders full and
+                # keeps its mouse events, so it stays undraggable.
+                child_expr = field_expr if can_extract else None
+                child_var_and_exp = (None, child_expr) if child_expr else None
+                child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small, var_and_exp=child_var_and_exp)
                 child_wrapped = wrap_child_html(child_html, accessor_code)
-                if exp_attr and not is_generic:
-                    value_td = (f'<td style="padding:0;"><div{exp_attr} class="py-exp-cell">'
-                                f'<div draggable="false" class="py-exp-inner">{child_wrapped}</div>'
-                                f'</div></td>')
-                elif exp_attr:
-                    value_td = f'<td><span{exp_attr} class="py-exp-grab">{child_wrapped}</span></td>'
-                else:
-                    value_td = f'<td>{child_wrapped}</td>'
+                value_td = f'<td>{child_wrapped}</td>'
             else:
                 if exp_attr:
                     value_td = f'<td><span{exp_attr} class="py-exp-grab">{html.escape(val_str)}</span></td>'
