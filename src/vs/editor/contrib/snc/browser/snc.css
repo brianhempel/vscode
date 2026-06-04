@@ -8,6 +8,7 @@
 .editor-instance {
 	--snc-bg: #fcfcfc;
 	--snc-border-color: #c0c0c0;
+	--snc-table-cell-border-color: #dedede;
 	--snc-text-color: #4A4A4A;
 	--snc-text-muted: #888;
 	--snc-string-color: #315278;
@@ -630,8 +631,19 @@
 
 .list-visualizer th,
 .list-visualizer td {
-	padding: 0 8px;
+	padding: 0 2px;
+	border: solid 0px var(--snc-table-cell-border-color);
+	border-bottom-width: 1px;
+	border-right-width: 1px;
 }
+/* .list-table-scroll > table > tbody > tr:first-child > th,
+.list-table-scroll > table > tbody > tr:first-child > td {
+	border-top: none;
+}
+.list-table-scroll > table > tbody > tr > th:first-child,
+.list-table-scroll > table > tbody > tr > td:first-child {
+	border-left: none;
+} */
 
 /* Scroll container wrapping the table (dynamic max-height stays inline). */
 .list-table-scroll {

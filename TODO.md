@@ -17,13 +17,13 @@
     - [x] exit small mode on click instead of on hover (b)
     - [x] make sure lists of string look nice (b)
     - [ ] don't crash when visualizing adding a list of $T$ to each row of a list of $T$, this creates a recursion because the column config says "when I have a list of $T$, for each row show a list of $T$ (and the for each of those subrows, show a list of $T$, etc)" (b)
-- [ ] visual cleanups
+- [x] visual cleanups
 	- [x] override gutter color to be same color as background
 	- [x] strings: always show ^ $ \n in focused mode
 	- [x] string: show "" in non-focused mode
 	- [x] nested visualizers: don't show border
-	- [ ] tables: use cell borders, not visualizer borders
-	- [ ] grab only small visualizers
+	- [x] tables: use cell borders, not visualizer borders
+	- [x] grab only small visualizers
 
 - [ ] as soon as there is an interaction on a visualizer, auto-generate a linked next line of code
     - [ ] what is a way for a user to quickly back out and delete that LOC, in case they just wanted to use the *copy* or *drag-n-drop* features?
