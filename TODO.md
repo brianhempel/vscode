@@ -25,7 +25,7 @@
 	- [x] tables: use cell borders, not visualizer borders
 	- [x] grab only small visualizers
 
-- [ ] as soon as there is an interaction on a visualizer, auto-generate a linked next line of code
+- [x] as soon as there is an interaction on a visualizer, auto-generate a linked next line of code (string + list visualizers; first interaction inserts and self-links, later interactions update it in place; handles the import-shift case where an auto-added `import re` shifts the visualizer's line)
     - [ ] what is a way for a user to quickly back out and delete that LOC, in case they just wanted to use the *copy* or *drag-n-drop* features?
 - [x] first new object after a for loop needs correct indentation (j)
 - [ ] list join should work on a slice

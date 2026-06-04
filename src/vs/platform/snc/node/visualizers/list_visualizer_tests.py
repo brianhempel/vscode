@@ -2425,6 +2425,48 @@ class TestSearchBoxInput(unittest.TestCase):
         self.assertEqual(new_model['columns'], original_columns)
 
 
+class TestAutoLinkOnInteraction(unittest.TestCase):
+    """First interaction that yields a parseable expression auto-inserts a
+    linked filter LOC; subsequent interactions update it via ChangeSelectedText."""
+
+    def test_first_search_input_auto_inserts_linked_filter(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        event = make_search_input_event('^ > 15')
+        new_model, commands = update(event, ('data', 'data'), model, lst,
+                                     mock_get_visualizer, eval_in_scope=eval)
+
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        self.assertIsInstance(cmd, tuple)
+        self.assertIn('item for item in data if item > 15', cmd[1])
+        self.assertEqual(new_model['linked_action'], 'filter')
+        self.assertTrue(new_model.get('auto_linked_once'))
+
+    def test_second_search_input_updates_via_change_selected_text(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model, first = update(make_search_input_event('^ > 15'), ('data', 'data'),
+                              model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsInstance(first[0], tuple)
+
+        model, commands = update(make_search_input_event('^ > 25'), ('data', 'data'),
+                                 model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn('item > 25', commands[0].text)
+        self.assertTrue(model.get('auto_linked_once'))
+
+    def test_no_var_and_exp_does_not_auto_link(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        # var_and_exp=None -> no source context -> no auto-insert.
+        new_model, commands = update(make_search_input_event('^ > 15'), None,
+                                     model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(commands, [])
+        self.assertIsNone(new_model.get('linked_action'))
+
+
 class TestFirstMatchToggle(unittest.TestCase):
     """Test FirstMatchToggle event handling in update()."""
 
@@ -2960,7 +3002,8 @@ class TestEnterKeyFilter(unittest.TestCase):
         self.assertEqual(commands, [])
 
     def test_enter_column_commit_takes_priority(self):
-        """When adding a column, Enter commits the column instead of filtering."""
+        """When adding a column, Enter commits the column (the column commit
+        path doesn't filter; any auto-inserted LOC is the broad-link fallback)."""
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '^ > 15'
@@ -2969,8 +3012,9 @@ class TestEnterKeyFilter(unittest.TestCase):
         event = make_search_key_event('Enter')
         new_model, commands = update(event, ('data', 'data'), model, lst,
                                      mock_get_visualizer, eval_in_scope=eval)
+        # The column was committed (not left in adding-column state).
         self.assertFalse(new_model['adding_column'])
-        self.assertEqual(commands, [])
+        self.assertIn('^.x', new_model['columns'])
 
 
 class TestCmdDeleteKey(unittest.TestCase):

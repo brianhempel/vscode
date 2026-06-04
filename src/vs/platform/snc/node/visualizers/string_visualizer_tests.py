@@ -30,6 +30,7 @@ from string_visualizer import (
     ToolSelect,
     SegmentToggle,
     CopyToClipboard,
+    ChangeSelectedText,
     _format_slice_expr, _format_index_expr,
     SliceLabelInput,
     compute_internal_length,
@@ -138,6 +139,18 @@ def make_mouse_up_event(index: int, legacy_index: bool = True) -> dict:
             'buttons': 0,
         }
     }
+
+
+def _command_text(cmd) -> str:
+    """Return the code/text carried by a command, for substring assertions.
+
+    Handles NewCode tuples (suggest_name, expr), ChangeSelectedText, and
+    CopyToClipboard. Returns '' for anything else.
+    """
+    if isinstance(cmd, tuple) and len(cmd) == 2:
+        return cmd[1] or ''
+    text = getattr(cmd, 'text', None)
+    return text or ''
 
 
 def make_key_down_event(key: str, meta_key: bool = False, shift_key: bool = False) -> dict:
@@ -278,7 +291,9 @@ class TestSingleLiteralSelection(unittest.TestCase):
         self.assertIsNone(model['cursorIdx'])
         self.assertEqual(model['search'], r"r'hello'")
         self.assertEqual(model['undoHistory'], [None])
-        self.assertEqual(commands, [])
+        # Finalizing a selection now auto-inserts a linked find LOC.
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], tuple)
 
     def test_single_char_selection(self):
         """Click and release on same index selects single char 'h' -> /(h)/."""
@@ -968,17 +983,32 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
         self.assertEqual(commands, [])
 
-    def test_enter_generates_new_code_command(self):
-        """Enter key returns (suggest_var_name, expr) tuple for regex search."""
+    def test_selection_auto_inserts_find_code(self):
+        """Finalizing a selection auto-inserts the find LOC and links it."""
+        model = init_model(self.value)
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(6),
+                          self.var_and_exp, model, self.value)
+        model, commands = update(make_mouse_up_event(6),
+                                 self.var_and_exp, model, self.value)
+
+        self.assertEqual(len(commands), 1)
+        suggest_name, expr = commands[0]
+        self.assertEqual(suggest_name, "x_matches")
+        self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
+        self.assertEqual(model['linked_action'], 'find_or_map')
+
+    def test_enter_updates_linked_code(self):
+        """After auto-link, Enter re-emits the find expr via ChangeSelectedText."""
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
-        self.assertEqual(suggest_name, "x_matches")
-        self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("list(re.finditer(r'hello', x, flags=re.M))", commands[0].text)
 
     def test_enter_without_selection_does_nothing(self):
         """Enter without selection produces no commands."""
@@ -987,41 +1017,17 @@ class TestKeyboardEvents(unittest.TestCase):
 
         self.assertEqual(commands, [])
 
-    def test_backspace_generates_delete_code_command(self):
-        """Backspace key returns (suggest_var_name, expr) tuple for re.sub deletion."""
+    def test_backspace_switches_linked_action_to_delete(self):
+        """After auto-link, Cmd-Backspace switches the linked action to delete."""
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, model, self.value)
 
+        self.assertEqual(model['linked_action'], 'delete')
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
-        self.assertEqual(suggest_name, "x")
-        self.assertEqual(expr, "re.sub(r'hello', '', x, flags=re.M)")
-
-    def test_enter_suggests_name_regardless_of_collision(self):
-        """Enter key suggests var name without collision resolution (harness handles that)."""
-        model = self._create_hello_selection(self.model)
-
-        model, commands = update(make_key_down_event('Enter'),
-                                self.var_and_exp, model, self.value)
-
-        self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
-        self.assertEqual(suggest_name, "x_matches")
-        self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
-
-    def test_backspace_suggests_name_regardless_of_collision(self):
-        """Backspace key suggests var name without collision resolution (harness handles that)."""
-        model = self._create_hello_selection(self.model)
-
-        model, commands = update(make_key_down_event('Backspace', meta_key=True),
-                                self.var_and_exp, model, self.value)
-
-        self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
-        self.assertEqual(suggest_name, "x")
-        self.assertEqual(expr, "re.sub(r'hello', '', x, flags=re.M)")
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("re.sub(r'hello', '', x, flags=re.M)", commands[0].text)
 
     def test_backspace_without_selection_does_nothing(self):
         """Backspace without selection produces no commands."""
@@ -1051,7 +1057,9 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertEqual(model['search'], r"r'hello'")
         self.assertEqual(model['undoHistory'], [None])
         self.assertEqual(model['redoHistory'], [r"r'hello\s*'"])
-        self.assertEqual(commands, [])
+        # Undo while linked re-syncs the linked LOC to the restored pattern.
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
 
     def test_cmd_shift_z_redoes_selection(self):
         """Cmd-Shift-Z redoes the undone selection."""
@@ -1076,7 +1084,9 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertEqual(model['search'], r"r'hello\s*'")
         self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
         self.assertEqual(model['redoHistory'], [])
-        self.assertEqual(commands, [])
+        # Redo while linked re-syncs the linked LOC to the restored pattern.
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
 
     def test_undo_with_empty_history_does_nothing(self):
         """Cmd-Z with empty undo history does nothing."""
@@ -2741,7 +2751,9 @@ class TestSearchBoxBasics(unittest.TestCase):
                                 self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['search'], r"r'hello'")
-        self.assertEqual(commands, [])
+        # Typing a valid pattern now auto-inserts a linked find LOC.
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], tuple)
 
     def test_typing_regex_with_groups_sets_selection_regex(self):
         """Typing a regex with capturing groups works."""
@@ -3208,51 +3220,125 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
 
 
 class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
-    """Test that Enter key generates code from a search-box-entered regex."""
+    """Test code generation from a search-box-entered regex.
+
+    Typing a pattern now auto-inserts a linked find LOC (a tuple); the
+    subsequent Enter re-syncs that linked LOC via ChangeSelectedText.
+    """
 
     def setUp(self):
         self.value = "hello world"
         self.model = init_model(self.value)
         self.var_and_exp = ('x', 'x')
 
-    def test_enter_after_search_box_regex(self):
-        """Enter generates (suggest_name, expr) using the regex typed in the search box."""
-        model, _ = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
-                          self.var_and_exp, self.model, self.value)
-
-        model, commands = update(make_key_down_event('Enter'),
-                                self.var_and_exp, model, self.value)
-
-        self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+    def test_search_box_input_auto_inserts_find_code(self):
+        """Typing a grouped regex auto-inserts the find LOC; Enter re-syncs it."""
+        model, insert_cmds = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
+                                    self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(insert_cmds), 1)
+        suggest_name, expr = insert_cmds[0]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("list(re.finditer(r'hello.*world'", expr)
 
-    def test_enter_after_search_box_simple_regex(self):
-        """Enter generates (suggest_name, expr) for a simple regex without groups."""
-        model, _ = update(make_search_box_input_event(r"r'hello'"),
-                          self.var_and_exp, self.model, self.value)
-
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, model, self.value)
-
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("list(re.finditer(r'hello.*world'", commands[0].text)
+
+    def test_search_box_input_auto_inserts_simple_regex(self):
+        """A simple regex without groups auto-inserts the find LOC."""
+        model, insert_cmds = update(make_search_box_input_event(r"r'hello'"),
+                                    self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(insert_cmds), 1)
+        suggest_name, expr = insert_cmds[0]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("list(re.finditer(r'hello'", expr)
 
-    def test_enter_after_search_box_suggests_name_regardless_of_collision(self):
-        """Search-box Enter path suggests name without collision resolution."""
-        model, _ = update(make_search_box_input_event(r"r'hello'"),
-                          self.var_and_exp, self.model, self.value)
+    def test_search_box_input_suggests_name_regardless_of_collision(self):
+        """Search-box auto-insert suggests name without collision resolution."""
+        model, insert_cmds = update(make_search_box_input_event(r"r'hello'"),
+                                    self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(insert_cmds), 1)
+        suggest_name, expr = insert_cmds[0]
+        self.assertEqual(suggest_name, "x_matches")
+        self.assertIn("list(re.finditer(r'hello'", expr)
 
-        model, commands = update(make_key_down_event('Enter'),
-                                self.var_and_exp, model, self.value)
 
+class TestAutoLinkOnInteraction(unittest.TestCase):
+    """As soon as an interaction yields a parseable expression, auto-insert a
+    line of code and self-link, so subsequent interactions update it in place."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.var_and_exp = ('x', 'x')
+
+    def test_first_search_box_input_auto_inserts_linked_loc(self):
+        """Typing a valid pattern in the search box auto-generates a linked LOC."""
+        model, commands = update(make_search_box_input_event(r"r'hello'"),
+                                 self.var_and_exp, self.model, self.value)
+
+        # A NewCode tuple is emitted on the very first meaningful interaction.
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "x_matches")
-        self.assertIn("list(re.finditer(r'hello'", expr)
+        self.assertIn("re.finditer(r'hello'", expr)
+
+        # The model is now linked so further edits update in place.
+        self.assertEqual(model['linked_action'], 'find_or_map')
+        self.assertEqual(model['linked_source_expr'], 'x')
+        self.assertTrue(model.get('auto_linked_once'))
+
+    def test_second_interaction_updates_via_change_selected_text(self):
+        """After auto-linking, the next interaction emits ChangeSelectedText, not a new insert."""
+        model, first_commands = update(make_search_box_input_event(r"r'hello'"),
+                                       self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(first_commands), 1)
+        self.assertIsInstance(first_commands[0], tuple)
+
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value)
+
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("re.finditer(r'world'", commands[0].text)
+        # Still only auto-linked once; no second insert.
+        self.assertTrue(model.get('auto_linked_once'))
+
+    def test_no_insert_when_pattern_does_not_yield_expression(self):
+        """An interaction that cannot build a context yields no command."""
+        # Empty search: _get_search_context returns None -> nothing generated.
+        model, commands = update(make_search_box_input_event(''),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+        self.assertIsNone(model.get('linked_action'))
+
+    def test_no_double_insert_when_handler_already_generated(self):
+        """If the event's own handler already emitted a NewCode (e.g. Enter),
+        the auto-link block must not also emit a second insert."""
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          self.var_and_exp, self.model, self.value)
+        # First input already auto-linked. Pressing Enter while linked should
+        # produce a single ChangeSelectedText, never a tuple + a change.
+        model, commands = update(make_key_down_event('Enter'),
+                                 self.var_and_exp, model, self.value)
+        tuples = [c for c in commands if isinstance(c, tuple)]
+        self.assertEqual(len(tuples), 0)
+
+    def test_finalized_mouse_selection_auto_inserts_linked_loc(self):
+        """Finishing a literal selection with the mouse auto-inserts a linked LOC."""
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                          self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_move_event(6),
+                          self.var_and_exp, model, self.value)
+        model, commands = update(make_mouse_up_event(6),
+                                 self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], r"r'hello'")
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertEqual(model['linked_action'], 'find_or_map')
 
 
 class TestSingleQuoteEscaping(unittest.TestCase):
@@ -3290,8 +3376,8 @@ class TestSingleQuoteEscaping(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 var_and_exp, model, value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
-        self.assertIn("r'it\\'s'", expr)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("r'it\\'s'", commands[0].text)
 
     def test_backspace_with_single_quote_generates_valid_raw_string(self):
         value = "it's here"
@@ -3308,8 +3394,8 @@ class TestSingleQuoteEscaping(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 var_and_exp, model, value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
-        self.assertIn("r'it\\'s'", expr)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("r'it\\'s'", commands[0].text)
 
 
 class TestBareExpressionSuggestions(unittest.TestCase):
@@ -3653,7 +3739,8 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
         self.assertIsNotNone(model.get('handleDrag'))
         self.assertEqual(model['handleDrag']['segmentIndex'], 0)
         self.assertEqual(model['handleDrag']['side'], 'right')
-        self.assertEqual(commands, [])
+        # Drag start with a pattern already present auto-inserts the find LOC.
+        self.assertTrue(all('finditer' in _command_text(c) for c in commands))
 
     def test_handle_mouse_down_left_starts_drag(self):
         """HandleMouseDown on left side starts handle drag mode."""
@@ -7118,11 +7205,11 @@ class TestActionButtonReplace(unittest.TestCase):
         self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, count=1, flags=re.M)")
 
     def test_replace_button_not_in_replace_mode(self):
-        """Replace button does nothing when not in replace mode."""
+        """Replace button produces no replace (re.sub) code when not in replace mode."""
         self.model['replace_visible'] = False
         _, commands = update(make_action_button_event('replace'),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertFalse(any('re.sub' in _command_text(c) for c in commands))
 
     def test_cmd_r_key(self):
         """Cmd-R produces same as replace button."""
@@ -7184,10 +7271,14 @@ class TestActionButtonDelete(unittest.TestCase):
         self.assertEqual(expr, "re.sub(r'hello', '', x, flags=re.M)")
 
     def test_plain_backspace_no_longer_deletes(self):
-        """Plain Backspace key no longer produces delete commands."""
+        """Plain Backspace key no longer produces delete commands.
+
+        It may still auto-insert the default find LOC (broad auto-link), but
+        never a delete (re.sub) command.
+        """
         _, commands = update(make_key_down_event('Backspace'),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertFalse(any('re.sub' in _command_text(c) for c in commands))
 
     def test_copy_delete(self):
         """copy=True produces CopyToClipboard with delete expr."""
@@ -7246,14 +7337,14 @@ class TestActionButtonDelete(unittest.TestCase):
         self.model['tool'] = 'pick'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertFalse(any('re.sub' in _command_text(c) for c in commands))
 
     def test_cmd_backspace_no_op_when_replace_visible(self):
         """Cmd-Backspace does NOT produce delete commands when Replace box is open."""
         self.model['replace_visible'] = True
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertFalse(any('re.sub' in _command_text(c) for c in commands))
 
 
 # =============================================================================
@@ -7348,12 +7439,16 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         self.assertIn("re.findall(re.escape('hello')", expr)
 
     def test_match_strings_disabled_in_replace_mode(self):
-        """Match Strings produces no command in replace mode (has_replace=True prevents generation)."""
+        """Match Strings produces no match-strings command in replace mode.
+
+        (has_replace=True prevents generation; any command is the find fallback.)
+        """
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
-        _, commands = update(make_action_button_event('match_strings'),
+        model, commands = update(make_action_button_event('match_strings'),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertNotEqual(model.get('linked_action'), 'match_strings')
+        self.assertTrue(all('finditer' in _command_text(c) for c in commands))
 
     def test_match_strings_suggest_name(self):
         """Match Strings suggests x_strings."""
@@ -7495,10 +7590,14 @@ class TestActionButtonAll(unittest.TestCase):
         self.assertEqual(expr, "all(mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
     def test_all_non_replace_returns_nothing(self):
-        """All not in replace mode produces no commands."""
-        _, commands = update(make_action_button_event('all'),
+        """All not in replace mode produces no all(...) command.
+
+        (Any command emitted is the find fallback from broad auto-link.)
+        """
+        model, commands = update(make_action_button_event('all'),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertNotEqual(model.get('linked_action'), 'all')
+        self.assertFalse(any(_command_text(c).startswith('all(') for c in commands))
 
     def test_copy_all(self):
         """copy=True produces CopyToClipboard."""
@@ -7583,10 +7682,14 @@ class TestActionButtonIfAll(unittest.TestCase):
         self.assertIn("\n    pass", expr)
 
     def test_if_all_non_replace_returns_nothing(self):
-        """If All not in replace mode produces no commands."""
-        _, commands = update(make_action_button_event('if_all'),
+        """If All not in replace mode produces no if-all command.
+
+        (Any command emitted is the find fallback from broad auto-link.)
+        """
+        model, commands = update(make_action_button_event('if_all'),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(commands, [])
+        self.assertNotEqual(model.get('linked_action'), 'if_all')
+        self.assertFalse(any('if all(' in _command_text(c) for c in commands))
 
     def test_copy_if_all(self):
         """Copy If All copies just the all(...) expression."""
@@ -7676,12 +7779,16 @@ class TestActionButtonFilter(unittest.TestCase):
         self.assertEqual(expr, r"[mtch for mtch in re.finditer(r'\w+', x, flags=re.M) if len(mtch[0]) > 4]")
 
     def test_filter_not_in_replace_mode_returns_none(self):
-        """Filter without replace mode produces no command."""
+        """Filter without replace mode produces no filter command.
+
+        (Any command emitted is the find fallback from broad auto-link.)
+        """
         self.model['replace_visible'] = False
         self.model['replace_text'] = None
-        _, commands = update(make_action_button_event('filter'),
+        model, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value)
-        self.assertEqual(len(commands), 0)
+        self.assertNotEqual(model.get('linked_action'), 'filter')
+        self.assertTrue(all('finditer' in _command_text(c) for c in commands))
 
     def test_copy_filter(self):
         """copy=True produces CopyToClipboard."""

@@ -1624,6 +1624,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private linkedSelectionDecorationId: string | null = null;
 	private linkedVisualizerLine: number | null = null;
 	private linkedVisualizerVisIndex: number | null = null;
+	// True when the link was established programmatically by an auto-generated LOC
+	// (vs. by the user selecting text). Auto-established links must not be torn
+	// down just because the editor selection is empty — the user is interacting
+	// with the visualizer, not the editor.
+	private linkIsAutoEstablished = false;
 	private suppressSelectionEvent = false;
 	private selectionDebounceTimer: any = null;
 
@@ -1878,10 +1883,26 @@ export class SNCController extends Disposable implements IEditorContribution {
 				continue;
 			}
 
+			// A pure insertion at the very start of a line (empty range at
+			// column 1) prepends whole lines, pushing that line's existing content
+			// — and any visualizer anchored to it — downward. This happens when an
+			// auto-generated line of code also injects `import re` at the top of the
+			// file. Shift items at or below the insertion line so their models stay
+			// matched to the right source line.
+			const isStartOfLineInsertion =
+				change.range.startLineNumber === change.range.endLineNumber
+				&& change.range.startColumn === change.range.endColumn
+				&& change.range.startColumn === 1
+				&& lineDelta > 0;
+
 			const newItems: IVisualizationItem[] = [];
 
 			for (const item of this.visualizationItems) {
-				if (item.line < startLine) {
+				if (isStartOfLineInsertion && item.line >= startLine) {
+					// Content at/below the insertion point moved down.
+					newItems.push({ ...item, line: item.line + lineDelta });
+					itemsChanged = true;
+				} else if (item.line < startLine) {
 					// Before the change: unaffected
 					newItems.push(item);
 				} else if (item.line > endLine) {
@@ -1993,7 +2014,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const editorModel = this.editor.getModel();
 		const selection = this.editor.getSelection();
 		if (!editorModel || !selection || selection.isEmpty()) {
-			if (this.linkedVisualizerLine !== null) {
+			// An auto-established link (from an auto-generated LOC) is driven by the
+			// visualizer, not the editor selection; an empty editor selection (just
+			// a cursor) must not tear it down, or continued visualizer interaction
+			// would orphan the inserted line and trigger a duplicate insert.
+			if (this.linkedVisualizerLine !== null && !this.linkIsAutoEstablished) {
 				this.sendUnlinkEvent();
 			}
 			return;
@@ -2001,7 +2026,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const selectedText = editorModel.getValueInRange(selection);
 		if (!selectedText || selectedText.length < 3) {
-			if (this.linkedVisualizerLine !== null) {
+			if (this.linkedVisualizerLine !== null && !this.linkIsAutoEstablished) {
 				this.sendUnlinkEvent();
 			}
 			return;
@@ -2048,6 +2073,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.linkedSelectionDecorationId = decorationIds[0] ?? null;
 		this.linkedVisualizerLine = targetVisItem.line;
 		this.linkedVisualizerVisIndex = targetVisItem.visIndex;
+		// This link is driven by an explicit user text selection, not an
+		// auto-generated LOC, so empty-selection unlinking should apply to it.
+		this.linkIsAutoEstablished = false;
 
 		const pythonEventStr = "lambda e: EditorTextSelect(text=e.get('text', ''))";
 		const eventJSON = { type: 'editorTextSelect', text: selectedText };
@@ -2083,6 +2111,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 		this.linkedVisualizerLine = null;
 		this.linkedVisualizerVisIndex = null;
+		this.linkIsAutoEstablished = false;
 
 		this.sendEventToPython(event);
 	}
@@ -2280,21 +2309,28 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const widgetsToReposition: VisualizationWidget[] = [];
 
 		// Capture scroll state so we can stabilize after view zone changes.
-		// Anchor to the cursor line if visible, otherwise the line just above the viewport midpoint.
+		// Anchor to the focused visualizer's line if visible, otherwise the line
+		// just above the viewport midpoint. We do NOT bail when scrollTop === 0:
+		// focusing a visualizer shrinks the previously-focused one above it, and
+		// the focused line must stay anchored even when the file is at the top.
 		const scrollTop = this.editor.getScrollTop();
-		const shouldStabilizeScroll = scrollTop > 0 && !this.editor.hasPendingScrollAnimation();
+		const shouldStabilizeScroll = !this.editor.hasPendingScrollAnimation();
 		let anchorLineNumber = 0;
 		let anchorDelta = 0;
 
 		if (shouldStabilizeScroll) {
 			const visibleRanges = this.editor.getVisibleRanges();
 			if (visibleRanges.length > 0) {
-				const cursorPos = this.editor.getPosition();
+				const focusedLine = this.effectiveFocusedLine();
 				const firstVisibleLine = visibleRanges[0].startLineNumber;
 				const lastVisibleLine = visibleRanges[visibleRanges.length - 1].endLineNumber;
 
-				if (cursorPos && cursorPos.lineNumber >= firstVisibleLine && cursorPos.lineNumber <= lastVisibleLine) {
-					anchorLineNumber = cursorPos.lineNumber;
+				// Prefer anchoring to the focused visualizer's line (the
+				// explicitly focused line, or the cursor line) when it is
+				// visible, so the focused visualizer stays put as view zones
+				// are added/removed. Fall back to the viewport midpoint.
+				if (focusedLine !== null && focusedLine >= firstVisibleLine && focusedLine <= lastVisibleLine) {
+					anchorLineNumber = focusedLine;
 				} else {
 					const midPixel = scrollTop + this.editor.getLayoutInfo().height / 2;
 					anchorLineNumber = firstVisibleLine;
@@ -2522,6 +2558,30 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// Sort edits bottom-to-top so line numbers remain valid as we insert
 			const sortedEdits = [...command.edits].sort((a, b) => b.afterLine - a.afterLine);
 
+			// Capture a scroll anchor so inserting lines above the viewport (e.g.
+			// an auto-added `import re` at the top of the file) doesn't make the
+			// whole view jump down. Anchor to the focused visualizer's line when
+			// it is visible, falling back to the first visible line. Note we do
+			// NOT bail when scrollTop === 0: the very case we care about is the
+			// focused line being at the top of the file, where inserting above
+			// must scroll so the focused line stays put at the top.
+			const scrollTop = this.editor.getScrollTop();
+			const shouldStabilizeScroll = !this.editor.hasPendingScrollAnimation();
+			let anchorLineNumber = 0;
+			let anchorDelta = 0;
+			if (shouldStabilizeScroll) {
+				const visibleRanges = this.editor.getVisibleRanges();
+				if (visibleRanges.length > 0) {
+					const focusedLine = this.effectiveFocusedLine();
+					const firstVisibleLine = visibleRanges[0].startLineNumber;
+					const lastVisibleLine = visibleRanges[visibleRanges.length - 1].endLineNumber;
+					anchorLineNumber = (focusedLine !== null && focusedLine >= firstVisibleLine && focusedLine <= lastVisibleLine)
+						? focusedLine
+						: firstVisibleLine;
+					anchorDelta = scrollTop - this.editor.getTopForLineNumber(anchorLineNumber);
+				}
+			}
+
 			const editOperations = sortedEdits.map(edit => {
 				if (edit.afterLine === 0) {
 					return {
@@ -2536,33 +2596,108 @@ export class SNCController extends Disposable implements IEditorContribution {
 				};
 			});
 
-			// After inserting, if any edit introduced a new variable name (assignment
-			// or `for` loop), pre-select that name so the user can immediately type
-			// to rename it.
+			// After inserting, capture (a) the inverse range of the main inserted
+			// line so we can link it for live updates, and (b) a rename selection
+			// if a new variable name was introduced.
+			let mainInverseRange: Range | null = null;
 			const newSelections = model.pushEditOperations([], editOperations, (inverseEdits) => {
+				let renameSel: Selection | null = null;
 				for (let i = 0; i < sortedEdits.length; i++) {
 					const edit = sortedEdits[i];
 					const inv = inverseEdits[i];
 					if (!inv) {
 						continue;
 					}
-					const sel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range);
-					if (sel) {
-						return [sel];
+					// The main inserted line is the edit on the trigger line.
+					if (edit.afterLine === command.triggerLine) {
+						mainInverseRange = inv.range;
+					}
+					if (!renameSel) {
+						renameSel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range);
 					}
 				}
-				return null;
+				return renameSel ? [renameSel] : null;
 			});
 
-			if (newSelections && newSelections.length > 0) {
+			// Link the freshly inserted line so subsequent visualizer interactions
+			// update it in place (via ChangeSelectedText) instead of stacking new
+			// lines. The inverse range of a (\n + text) insert includes the leading
+			// newline boundary, so narrow it to just the inserted code line.
+			if (mainInverseRange) {
+				// Other edits inserted above the trigger line (e.g. an auto-added
+				// `import re`) shift the visualizer's source line down. Account for
+				// that so the link and cursor target the actual (post-edit) line.
+				const linesInsertedAbove = command.edits.reduce(
+					(n, e) => n + (e.afterLine < command.triggerLine ? 1 : 0), 0);
+				const actualTriggerLine = command.triggerLine + linesInsertedAbove;
+
+				// The assignment is always inserted immediately after the (shifted)
+				// trigger line. Derive the linked range directly from that line
+				// rather than from inverse-range arithmetic, which is unreliable
+				// across the multi-region edit when an import is also inserted.
+				const insertedLine = actualTriggerLine + 1;
+				const linkedRange = new Range(
+					insertedLine, model.getLineFirstNonWhitespaceColumn(insertedLine) || 1,
+					insertedLine, model.getLineMaxColumn(insertedLine)
+				);
+				this.establishLinkForRange(linkedRange, actualTriggerLine, command.triggerVisIndex);
+
+				// The user is still interacting with the triggering visualizer (e.g.
+				// typing in its search box). Inserting moved the editor cursor onto
+				// the new line, which would collapse the focused visualizer and steal
+				// DOM focus. Keep the cursor on the trigger line so that visualizer
+				// stays focused/expanded and the user can keep interacting.
+				this.suppressSelectionEvent = true;
+				const triggerCol = model.getLineMaxColumn(actualTriggerLine);
+				this.editor.setPosition({ lineNumber: actualTriggerLine, column: triggerCol });
+				setTimeout(() => { this.suppressSelectionEvent = false; }, 0);
+			} else if (newSelections && newSelections.length > 0) {
 				this.editor.setSelection(newSelections[0]);
 				this.editor.focus();
+			}
+
+			// Restore the scroll offset so the anchored line stays visually put.
+			// Lines inserted strictly above the anchor (e.g. an auto-added
+			// `import re`) push it down; count them and re-anchor accordingly.
+			if (shouldStabilizeScroll && anchorLineNumber > 0) {
+				const linesInsertedAboveAnchor = command.edits.reduce(
+					(n, e) => n + (e.afterLine < anchorLineNumber ? 1 : 0), 0);
+				const newAnchorLine = anchorLineNumber + linesInsertedAboveAnchor;
+				const newAnchorTop = this.editor.getTopForLineNumber(newAnchorLine);
+				this.editor.setScrollTop(newAnchorTop + anchorDelta, ScrollType.Immediate);
 			}
 		} else if (command.type === 'ChangeSelectedText') {
 			this.handleChangeSelectedText(command.text);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
+	}
+
+	/**
+	 * Track the given editor range as the linked selection for a visualizer, so
+	 * subsequent interactions update that range in place (ChangeSelectedText).
+	 * Mirrors the decoration bookkeeping in handleEditorSelection, but for a
+	 * range that SNC just inserted rather than one the user manually selected.
+	 */
+	private establishLinkForRange(range: Range, line: number, visIndex: number): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel) {
+			return;
+		}
+		const decorationIds = editorModel.deltaDecorations(
+			this.linkedSelectionDecorationId ? [this.linkedSelectionDecorationId] : [],
+			[{
+				range,
+				options: {
+					description: 'snc-linked-selection',
+					stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+				}
+			}]
+		);
+		this.linkedSelectionDecorationId = decorationIds[0] ?? null;
+		this.linkedVisualizerLine = line;
+		this.linkedVisualizerVisIndex = visIndex;
+		this.linkIsAutoEstablished = true;
 	}
 
 	private handleChangeSelectedText(newText: string): void {
@@ -2605,8 +2740,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 		);
 		this.linkedSelectionDecorationId = ids[0] ?? null;
 
-		// Keep the text selected so the user can see what's linked
-		this.editor.setSelection(newRange);
+		// Keep the text selected so the user can see what's linked, but only when
+		// the editor already has focus. If the user is driving this update from a
+		// visualizer control (e.g. typing in the search box of an auto-linked
+		// line), stealing the editor selection would yank DOM focus out of that
+		// control and break continued interaction.
+		if (this.editor.hasTextFocus()) {
+			this.editor.setSelection(newRange);
+		}
 
 		setTimeout(() => { this.suppressSelectionEvent = false; }, 0);
 	}

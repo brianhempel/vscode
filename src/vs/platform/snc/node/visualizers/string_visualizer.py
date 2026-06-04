@@ -3987,6 +3987,8 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "linked_action": None,         # When linked: the action name (e.g. 'replace')
         "linked_source_expr": None,  # When linked: variable from parsed code (e.g. 'str1')
         "linked_prefix": None,         # When linked: assignment prefix (e.g. 'str2 = ') or ''
+        "auto_linked_once": False,     # True once an interaction has auto-inserted+linked a LOC
+                                       # (prevents inserting a second line on later interactions)
         "tool": "literal",             # Active selection tool: 'literal', 'fuzzy', 'index', or 'pick'
         "selectedSegments": [],        # In pick-tool mode: list of selected segment IDs
                                        # ('start', 'end', 'prefix', 'group_0', 'group_N', 'suffix')
@@ -5586,8 +5588,48 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             result = generate_action(model['linked_action'], ctx)
             if result:
                 _emit_linked_update(result[1], model, commands)
+    elif (not model.get('linked_action')
+          and not model.get('auto_linked_once')
+          and not commands
+          and not isinstance(msg, (EditorTextSelect, Unlink))):
+        # First meaningful interaction: if it yields a parseable expression,
+        # auto-insert a line of code and self-link so subsequent interactions
+        # update it in place via ChangeSelectedText (the linked block above).
+        _maybe_auto_link(msg, var_and_exp, model, commands, eval_in_scope=eval_in_scope)
 
     return (model, commands)
+
+
+# Default action used when auto-linking on the first interaction. Mirrors the
+# Enter-key behavior (find or map).
+_AUTO_LINK_ACTION = 'find_or_map'
+
+
+def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_scope=None) -> None:
+    """If the current model state yields a parseable default expression, set up
+    linked editing and append a NewCode tuple to insert the linked line.
+
+    No-op if no search context is available or the generated code doesn't parse.
+    """
+    ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+    if not ctx:
+        return
+    result = generate_action(_AUTO_LINK_ACTION, ctx)
+    if not result:
+        return
+    suggest_name, expr = result
+    prefix = f'{suggest_name} = ' if suggest_name else ''
+    try:
+        ast.parse(prefix + expr)
+    except SyntaxError:
+        return
+    # Mirror how _get_search_context derives source_expr so the linked-update
+    # block (which re-resolves via source_expr) rebuilds the same context.
+    model['linked_action'] = _AUTO_LINK_ACTION
+    model['linked_source_expr'] = ctx.get('source_expr')
+    model['linked_prefix'] = prefix
+    model['auto_linked_once'] = True
+    commands.append(result)
 
 
 def _emit_linked_update(expr: str, model: dict, commands: list) -> None:
