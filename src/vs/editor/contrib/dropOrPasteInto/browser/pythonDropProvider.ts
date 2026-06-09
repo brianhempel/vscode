@@ -76,7 +76,7 @@ class PythonFileReadDropProvider implements DocumentDropEditProvider {
 
 		return {
 			edits: [{
-				insertText: lines.join('\n') + '\n',
+				insertText: lines.join('\n'),
 				title: fileEntries.length > 1 ? 'Insert as Python open().read() calls' : 'Insert as Python open().read()',
 				kind: this.kind,
 				handledMimeType: Mimes.uriList,
