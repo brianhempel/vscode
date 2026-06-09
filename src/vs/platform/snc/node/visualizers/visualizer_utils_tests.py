@@ -7,8 +7,15 @@ Run:
 
 import unittest
 import html
+import os
+import shutil
+import tempfile
 
 from visualizer_utils import ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys, eval_caret_expr
+from visualizer_utils import (
+    config_key, parse_slots, load_root_slots, save_slots_at_path,
+    child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
+)
 
 
 class TestChildEvent(unittest.TestCase):
@@ -368,6 +375,175 @@ class TestEvalCaretExpr(unittest.TestCase):
     def test_error_propagates(self):
         with self.assertRaises(Exception):
             eval_caret_expr('^.nonexistent', 42)
+
+
+class TestConfigKey(unittest.TestCase):
+    """config_key selects the per-element type so a list-of-T and a single T
+    share one config."""
+
+    def test_list_of_str(self):
+        self.assertEqual(config_key(['a', 'b']), 'builtins.str')
+
+    def test_list_of_dict(self):
+        self.assertEqual(config_key([{'a': 1}]), 'builtins.dict')
+
+    def test_empty_list_is_none(self):
+        self.assertIsNone(config_key([]))
+
+    def test_single_string_matches_list_of_string(self):
+        self.assertEqual(config_key('hi'), config_key(['hi']))
+
+    def test_object_class_name(self):
+        class Foo:
+            pass
+        self.assertIn('Foo', config_key(Foo()))
+
+    def test_int(self):
+        self.assertEqual(config_key(5), 'builtins.int')
+
+
+class TestParseSlots(unittest.TestCase):
+    """parse_slots splits a slot list into (exprs, slot_children)."""
+
+    def test_bare_strings(self):
+        exprs, children = parse_slots(['^', '^.x'])
+        self.assertEqual(exprs, ['^', '^.x'])
+        self.assertEqual(children, {})
+
+    def test_dict_entries_without_children(self):
+        exprs, children = parse_slots([{'expr': '^'}, {'expr': '^.x'}])
+        self.assertEqual(exprs, ['^', '^.x'])
+        self.assertEqual(children, {})
+
+    def test_children_collected_by_expr(self):
+        spec = [{'expr': 'f', 'children': {'builtins.str': [{'expr': '^'}]}}]
+        exprs, children = parse_slots(spec)
+        self.assertEqual(exprs, ['f'])
+        self.assertEqual(children, {'f': {'builtins.str': [{'expr': '^'}]}})
+
+    def test_none_config(self):
+        exprs, children = parse_slots(None)
+        self.assertEqual(exprs, [])
+        self.assertEqual(children, {})
+
+    def test_expr_transform_applied(self):
+        exprs, _ = parse_slots(['x', '^.y'],
+                               expr_transform=lambda e: e if '^' in e else '^' + e)
+        self.assertEqual(exprs, ['^x', '^.y'])
+
+    def test_empty_children_not_stored(self):
+        _, children = parse_slots([{'expr': 'f', 'children': {}}])
+        self.assertEqual(children, {})
+
+    def test_invalid_entries_skipped(self):
+        exprs, _ = parse_slots([123, {'no_expr': 1}, '^'])
+        self.assertEqual(exprs, ['^'])
+
+
+class TestSaveSlotsAtPath(unittest.TestCase):
+    """save_slots_at_path persists a level's exprs at its path, preserving
+    siblings, other types, and descendants' nested children."""
+
+    def setUp(self):
+        self.orig = os.getcwd()
+        self.tmp = tempfile.mkdtemp()
+        os.chdir(self.tmp)
+        self.dot = '.snc_test_slots.json'
+
+    def tearDown(self):
+        os.chdir(self.orig)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_save_root(self):
+        save_slots_at_path(self.dot, 'builtins.str', [], ['^', 'f'])
+        self.assertEqual(load_root_slots(self.dot, 'builtins.str'),
+                         [{'expr': '^'}, {'expr': 'f'}])
+
+    def test_preserves_other_types(self):
+        save_slots_at_path(self.dot, 'A', [], ['^.x'])
+        save_slots_at_path(self.dot, 'B', [], ['^.y'])
+        self.assertEqual(load_root_slots(self.dot, 'A'), [{'expr': '^.x'}])
+        self.assertEqual(load_root_slots(self.dot, 'B'), [{'expr': '^.y'}])
+
+    def test_nested_path_creates_structure(self):
+        save_slots_at_path(self.dot, 'builtins.str',
+                           [('f', 'builtins.str')], ['^', '^.x'])
+        slots = load_root_slots(self.dot, 'builtins.str')
+        f_slot = next(s for s in slots if s['expr'] == 'f')
+        self.assertEqual(f_slot['children']['builtins.str'],
+                         [{'expr': '^'}, {'expr': '^.x'}])
+
+    def test_root_resave_preserves_children_by_expr(self):
+        save_slots_at_path(self.dot, 'builtins.str', [], ['^', 'f'])
+        save_slots_at_path(self.dot, 'builtins.str',
+                           [('f', 'builtins.str')], ['^'])
+        # Re-save the root with the columns reordered; the nested children
+        # under 'f' must survive (an ancestor never clobbers a descendant).
+        save_slots_at_path(self.dot, 'builtins.str', [], ['f', '^'])
+        slots = load_root_slots(self.dot, 'builtins.str')
+        f_slot = next(s for s in slots if s['expr'] == 'f')
+        self.assertEqual(f_slot.get('children'),
+                         {'builtins.str': [{'expr': '^'}]})
+
+    def test_remove_expr_drops_its_subtree(self):
+        save_slots_at_path(self.dot, 'T', [], ['a', 'b'])
+        save_slots_at_path(self.dot, 'T', [('b', 'X')], ['^'])
+        save_slots_at_path(self.dot, 'T', [], ['a'])
+        slots = load_root_slots(self.dot, 'T')
+        self.assertEqual([s['expr'] for s in slots], ['a'])
+
+    def test_legacy_string_entries_normalized(self):
+        # A pre-existing flat (legacy) file with bare strings.
+        import json
+        with open(self.dot, 'w') as f:
+            json.dump({'T': ['a', 'b']}, f)
+        save_slots_at_path(self.dot, 'T', [], ['a', 'b', 'c'])
+        self.assertEqual(load_root_slots(self.dot, 'T'),
+                         [{'expr': 'a'}, {'expr': 'b'}, {'expr': 'c'}])
+
+    def test_none_root_type_is_noop(self):
+        save_slots_at_path(self.dot, None, [], ['^'])
+        self.assertIsNone(load_root_slots(self.dot, None))
+
+
+class TestChildNestingKwargs(unittest.TestCase):
+    """child_nesting_kwargs computes the kwargs handed to a child visualizer."""
+
+    def test_returns_nested_slots_for_cell_type(self):
+        model = {
+            '_slot_children': {'f': {'builtins.str': [{'expr': '^'}]}},
+            '_config_root_type': 'builtins.str',
+            '_config_root_dotfile': '.snc_list_columns.json',
+            '_config_path': [],
+        }
+        kw = child_nesting_kwargs(model, 'f', ['a', 'b'])
+        self.assertEqual(kw['slots_config'], [{'expr': '^'}])
+        self.assertEqual(kw['config_root_type'], 'builtins.str')
+        self.assertEqual(kw['config_root_dotfile'], '.snc_list_columns.json')
+        self.assertEqual(kw['config_path'], [('f', 'builtins.str')])
+
+    def test_no_children_returns_none_slots(self):
+        model = {'_slot_children': {}, '_config_path': []}
+        kw = child_nesting_kwargs(model, 'f', ['a'])
+        self.assertIsNone(kw['slots_config'])
+        self.assertEqual(kw['config_path'], [('f', 'builtins.str')])
+
+    def test_path_appends_step(self):
+        model = {'_slot_children': {}, '_config_path': [('g', 'X')]}
+        kw = child_nesting_kwargs(model, 'f', 5)
+        self.assertEqual(kw['config_path'], [('g', 'X'), ('f', 'builtins.int')])
+
+
+class TestTooDeep(unittest.TestCase):
+    """too_deep caps nesting depth so cyclic values can't RecursionError."""
+
+    def test_shallow_not_too_deep(self):
+        self.assertFalse(too_deep([]))
+        self.assertFalse(too_deep(None))
+        self.assertFalse(too_deep([('a', 'T')] * (MAX_NEST_DEPTH - 1)))
+
+    def test_at_cap_too_deep(self):
+        self.assertTrue(too_deep([('a', 'T')] * MAX_NEST_DEPTH))
 
 
 if __name__ == '__main__':

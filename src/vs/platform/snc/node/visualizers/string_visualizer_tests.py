@@ -3341,6 +3341,48 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
         self.assertEqual(model['linked_action'], 'find_or_map')
 
 
+class TestLinkedActionChangeRenamesVar(unittest.TestCase):
+    """When the action changes on a linked line, the ChangeSelectedText command
+    should carry the newly-suggested variable name so the editor can rename the
+    assignment target (if the prior name is unused elsewhere in the code)."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        self.model = init_model(self.value)
+        # Auto-link via a first search-div interaction (action: find_or_map -> x_matches).
+        self.model, first = update(make_search_box_input_event(r"r'hello'"),
+                                   self.var_and_exp, self.model, self.value)
+        self.assertEqual(first[0][0], 'x_matches')
+        self.assertEqual(self.model['linked_prefix'], 'x_matches = ')
+
+    def test_action_change_emits_new_var_name(self):
+        """Switching to 'count' should suggest x_count as the new var name."""
+        model, commands = update(make_action_button_event('count'),
+                                 self.var_and_exp, self.model, self.value)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        # Backward-compat: text still carries the prior prefix.
+        self.assertEqual(change_cmds[0].new_var_name, 'x_count')
+
+    def test_no_new_var_name_when_name_unchanged(self):
+        """An action whose suggested name matches the current one carries no rename."""
+        # Re-emitting find_or_map (e.g. via search box change) keeps x_matches.
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, self.model, self.value)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertIsNone(change_cmds[0].new_var_name)
+
+    def test_new_var_name_none_for_statement_action(self):
+        """Statement actions (no assignment target) carry no new var name."""
+        model, commands = update(make_action_button_event('if_any'),
+                                 self.var_and_exp, self.model, self.value)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        if change_cmds:
+            self.assertIsNone(change_cmds[0].new_var_name)
+
+
 class TestSingleQuoteEscaping(unittest.TestCase):
     """Single quotes in regex literal segments must be escaped for r'' strings."""
 
@@ -7013,12 +7055,12 @@ class TestReplaceBoxVisualize(unittest.TestCase):
         self.assertIn('ReplaceBoxInput', html)
 
     def test_replace_input_has_target_class(self):
-        """Replace input has the search-box-input-replace class used by snc-add-target."""
+        """Replace input has the search-box-replace class used by snc-add-target."""
         model = init_model(self.value)
         model['replace_visible'] = True
         html = visualize(self.value, model, None, None, max_width=400)
-        # The class is part of the search-box-input space-separated class list.
-        self.assertIn('search-box-input-replace', html)
+        # The class is part of the search-box space-separated class list.
+        self.assertIn('search-box-replace', html)
 
     def test_replace_box_preserves_value(self):
         """Replace input preserves the current replace_text value."""
@@ -8736,7 +8778,7 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         self.assertIn('snc-add-at-cursor="^[1]"', result)
         self.assertIn('snc-add-at-cursor="^.start()"', result)
         self.assertIn('snc-add-at-cursor="^.end()"', result)
-        self.assertIn('snc-add-target=".search-box-input-replace"', result)
+        self.assertIn('snc-add-target=".search-box-replace"', result)
 
     def test_no_groups_still_has_add_at_cursor(self):
         """Preview spans have snc-add-at-cursor even without capture groups."""

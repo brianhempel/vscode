@@ -131,6 +131,170 @@ def get_full_class_name(obj) -> str:
 
 
 # =============================================================================
+# Nested "slots" config (shared by the list + object visualizers)
+# =============================================================================
+#
+# A "slot" is one column (for a list, evaluated per item) or one field (for an
+# object, evaluated on the object); in both cases `^` denotes "a value of type
+# T". The on-disk config maps a type key T -> [slot, ...]; a slot is a bare
+# expr string or {"expr": ..., "children": {T2: [slot, ...]}}. When descending
+# into a slot's cell, `children` is consulted by the cell's own type key, so a
+# type T only applies where it appears in the tree. This is what stops the
+# infinite recursion: a list/object whose cell is the same type does NOT re-read
+# the global type config; it uses the explicitly-nested config or a default.
+
+MAX_NEST_DEPTH = 5
+
+
+def config_key(value) -> 'str | None':
+    """The type key that selects a value's slots.
+
+    For a list it's the element type (so a list-of-T and a single T share one
+    config); for everything else it's the value's own class. Empty lists have
+    no key.
+    """
+    if isinstance(value, list):
+        if not value:
+            return None
+        return get_full_class_name(value[0])
+    return get_full_class_name(value)
+
+
+def parse_slots(slots_config, expr_transform=None):
+    """Split a slot list into (exprs, slot_children).
+
+    slot_children maps a slot's expr -> its {T2: [slot, ...]} children map
+    (only for slots that actually carry children). Bare-string entries are
+    treated as childless slots. `expr_transform` is applied to each expr (used
+    by the object visualizer to ensure a leading caret).
+    """
+    exprs = []
+    slot_children = {}
+    for entry in (slots_config or []):
+        if isinstance(entry, str):
+            expr, children = entry, None
+        elif isinstance(entry, dict) and 'expr' in entry:
+            expr, children = entry['expr'], entry.get('children')
+        else:
+            continue
+        if expr_transform is not None:
+            expr = expr_transform(expr)
+        exprs.append(expr)
+        if isinstance(children, dict) and children:
+            slot_children[expr] = children
+    return exprs, slot_children
+
+
+def too_deep(config_path) -> bool:
+    """True when nesting has reached the depth cap (a backstop against cyclic
+    values that would otherwise RecursionError)."""
+    return len(config_path or []) >= MAX_NEST_DEPTH
+
+
+def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value) -> dict:
+    """Compute the nesting kwargs to hand a child (sub-)visualizer.
+
+    The child receives the slot's nested config for the cell's type (or None ->
+    default), the inherited root type/dotfile, and the path extended by this
+    (slot_expr, cell_type) step (so it can persist edits at its own location).
+    """
+    children_map = (parent_model.get('_slot_children') or {}).get(slot_expr) or {}
+    t2 = config_key(cell_value)
+    slots_config = children_map.get(t2) if t2 is not None else None
+    return {
+        'slots_config': slots_config,
+        'config_root_type': parent_model.get('_config_root_type'),
+        'config_root_dotfile': parent_model.get('_config_root_dotfile'),
+        'config_path': (parent_model.get('_config_path') or []) + [(slot_expr, t2)],
+    }
+
+
+def load_root_slots(dotfile_name: str, root_type: 'str | None'):
+    """Load the raw slot list for a type from a dotfile (or None)."""
+    if not root_type:
+        return None
+    return load_dotfile_list(dotfile_name, root_type)
+
+
+def _load_dotfile_dict(dotfile_name: str) -> dict:
+    try:
+        path = os.path.join(os.getcwd(), dotfile_name)
+        with open(path, 'r') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _save_dotfile_dict(dotfile_name: str, data: dict) -> None:
+    path = os.path.join(os.getcwd(), dotfile_name)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def _normalize_slot_list(slot_list: list) -> None:
+    """Convert any legacy bare-string entries to {'expr': ...} dicts in place."""
+    for i, obj in enumerate(slot_list):
+        if isinstance(obj, str):
+            slot_list[i] = {'expr': obj}
+
+
+def _find_slot(slot_list: list, expr: str):
+    for obj in slot_list:
+        if isinstance(obj, dict) and obj.get('expr') == expr:
+            return obj
+    return None
+
+
+def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
+                       path, exprs: list) -> None:
+    """Persist a (sub-)level's slot exprs at its path in the dotfile.
+
+    `path` is a list of (slot_expr, child_type) steps from the root type. Only
+    this level's expr list is rewritten; each surviving slot keeps its existing
+    `children` (matched by expr), and other types/branches on disk are left
+    untouched. So an ancestor never clobbers a descendant's nested config.
+    """
+    if not root_type:
+        return
+    data = _load_dotfile_dict(dotfile_name)
+
+    target = data.get(root_type)
+    if not isinstance(target, list):
+        target = []
+        data[root_type] = target
+
+    for step in (path or []):
+        step_expr, step_type = step[0], step[1]
+        _normalize_slot_list(target)
+        obj = _find_slot(target, step_expr)
+        if obj is None:
+            obj = {'expr': step_expr}
+            target.append(obj)
+        children = obj.get('children')
+        if not isinstance(children, dict):
+            children = {}
+            obj['children'] = children
+        child_list = children.get(step_type)
+        if not isinstance(child_list, list):
+            child_list = []
+            children[step_type] = child_list
+        target = child_list
+
+    _normalize_slot_list(target)
+    old = list(target)
+    rebuilt = []
+    for e in exprs:
+        existing = _find_slot(old, e)
+        rebuilt.append(existing if existing is not None else {'expr': e})
+    target[:] = rebuilt
+
+    _save_dotfile_dict(dotfile_name, data)
+
+
+# =============================================================================
 # Caret (^) utilities
 # =============================================================================
 

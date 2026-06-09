@@ -45,17 +45,23 @@ import random
 import re
 from dataclasses import dataclass
 from math import sqrt
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Optional
 
 from visualizer_utils import (
     ChildEvent, EditorTextSelect, Unlink,
     route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix, wrap_drag_grab,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
-    load_dotfile_list, save_dotfile_list,
-    get_full_class_name,
+    get_full_class_name, truncate_str,
+    config_key, parse_slots, load_root_slots, save_slots_at_path,
+    child_nesting_kwargs, too_deep,
     ICONS,
 )
+
+# This visualizer participates in the shared nested-slots config (parents thread
+# per-slot config + path to it; see visualizer_utils). Used to decide whether to
+# pass nesting kwargs to a child.
+SUPPORTS_NESTED_CONFIG = True
 
 CELL_KEY_SEP = '\x00'
 
@@ -141,6 +147,11 @@ class CopyToClipboard:
 @dataclass(frozen=True, slots=True)
 class ChangeSelectedText:
     text: str
+    # When the action changed, this is the variable name now suggested for the
+    # assignment target. The editor renames the linked line's target to this
+    # (only if the prior name is unused elsewhere). None means "keep the
+    # current name".
+    new_var_name: Optional[str] = None
 
 
 # === Dotfile operations ===
@@ -156,13 +167,31 @@ def _get_item_type_key(lst):
 
 
 def load_columns_from_dotfile(type_key: str):
-    """Load saved columns for an item type from the dotfile. Returns list or None."""
-    return load_dotfile_list(COLUMN_DOTFILE_NAME, type_key)
+    """Load the saved slot list for an item type from the dotfile (or None).
+
+    Kept as the single root-read entry point so tests can patch it for isolation.
+    Returns the raw slot list (bare strings and/or {"expr", "children"} dicts).
+    """
+    return load_root_slots(COLUMN_DOTFILE_NAME, type_key)
 
 
-def save_columns_to_dotfile(type_key: str, columns: list):
-    """Save columns for an item type to the dotfile, preserving other types' entries."""
-    save_dotfile_list(COLUMN_DOTFILE_NAME, type_key, columns)
+def save_columns_to_dotfile(root_type, path, exprs, dotfile=COLUMN_DOTFILE_NAME):
+    """Path-scoped writer: persist a (sub-)table's column exprs at its location.
+
+    `path` is the list of (slot_expr, child_type) steps from the root type.
+    """
+    save_slots_at_path(dotfile, root_type, path, exprs)
+
+
+def _save_slots(model: dict) -> None:
+    """Persist a table model's columns at its config path (preserves nested
+    children of surviving columns and other types on disk)."""
+    save_columns_to_dotfile(
+        model.get('_config_root_type'),
+        model.get('_config_path') or [],
+        list(model.get('columns', [])),
+        model.get('_config_root_dotfile') or COLUMN_DOTFILE_NAME,
+    )
 
 
 # === Column autocomplete helpers ===
@@ -691,14 +720,32 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     return None
 
 
-def _emit_linked_update(expr: str, model: dict, commands: list) -> None:
-    """Append a ChangeSelectedText command only if the full text is valid Python."""
+def _current_linked_var_name(model: dict) -> 'str | None':
+    """The assignment target currently recorded in the linked prefix, if any."""
+    prefix = model.get('linked_prefix') or ''
+    m = re.match(r'\s*([A-Za-z_]\w*)\s*=\s*$', prefix)
+    return m.group(1) if m else None
+
+
+def _emit_linked_update(expr: str, model: dict, commands: list,
+                        suggest_name: 'str | None' = None) -> None:
+    """Append a ChangeSelectedText command only if the full text is valid Python.
+
+    `suggest_name` is the variable name now suggested for the current action.
+    When it differs from the linked line's current name, it is attached as
+    `new_var_name` so the editor can rename the assignment target (the editor
+    only renames when the prior name is unused elsewhere, and it stays
+    authoritative for the actual name in the document).
+    """
     text = (model.get('linked_prefix') or '') + expr
     try:
         ast.parse(text)
     except SyntaxError:
         return
-    commands.append(ChangeSelectedText(text=text))
+    new_var_name = None
+    if suggest_name and suggest_name != _current_linked_var_name(model):
+        new_var_name = suggest_name
+    commands.append(ChangeSelectedText(text=text, new_var_name=new_var_name))
 
 
 # === Matching indices for highlighting ===
@@ -852,9 +899,45 @@ _SEARCH_DEFAULTS = {
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
-def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+def _resolve_columns(lst, get_visualizer, slots_config, config_path):
+    """Return (columns, slot_children) for a list at this nesting position.
+
+    At the root (config_path is None) the dotfile is read by item type. When
+    nested, only the parent-supplied slots_config is used -- the type config is
+    NOT re-read, which is what breaks the infinite recursion. A missing config
+    falls back to auto-detected columns (or ['^']).
+    """
+    if config_path is None:
+        type_key = config_key(lst)
+        loaded = load_columns_from_dotfile(type_key) if type_key else None
+    else:
+        loaded = slots_config
+
+    if loaded is not None:
+        return parse_slots(loaded)
+
+    columns = _detect_table_columns(lst, get_visualizer)
+    if columns is None:
+        columns = ['^']
+    return columns, {}
+
+
+def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
+               slots_config=None, config_root_type=None, config_root_dotfile=None,
+               config_path=None):
+    is_root = config_path is None
+    root_type = config_key(lst) if is_root else config_root_type
+    root_dotfile = COLUMN_DOTFILE_NAME if is_root else config_root_dotfile
+    path = [] if is_root else config_path
+    config_fields = {
+        '_config_root_type': root_type,
+        '_config_root_dotfile': root_dotfile,
+        '_config_path': path,
+    }
+
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
+                '_slot_children': {}, **config_fields,
                 **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
     source_expr = None
@@ -862,15 +945,17 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
-    type_key = _get_item_type_key(lst)
-    saved_columns = load_columns_from_dotfile(type_key) if type_key else None
+    columns, slot_children = _resolve_columns(lst, get_visualizer, slots_config, config_path)
+    config_fields['_slot_children'] = slot_children
 
-    if saved_columns is not None:
-        columns = saved_columns
-    else:
-        columns = _detect_table_columns(lst, get_visualizer)
-        if columns is None:
-            columns = ['^']
+    # Depth backstop: beyond the cap, stop building nested children entirely
+    # (renders as a truncated repr) so cyclic values can't RecursionError.
+    if too_deep(path):
+        return {
+            'children': {}, 'handledKeys': list(_OWN_KEYS), 'display_mode': 'table',
+            'columns': columns, '_source_expr': source_expr, '_too_deep': True,
+            **config_fields, **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS,
+        }
 
     children = {}
     for i, item in enumerate(lst):
@@ -884,8 +969,10 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
                 cell_value = None
             if cell_value is not None:
                 cell_vis = get_visualizer(cell_value)
-                children[f"{i}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(cell_value, get_visualizer,
-                                                                          eval_in_scope=eval_in_scope)
+                extra = (child_nesting_kwargs(config_fields, col, cell_value)
+                         if getattr(cell_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
+                children[f"{i}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
+                    cell_value, get_visualizer, eval_in_scope=eval_in_scope, **extra)
 
     handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
     return {
@@ -894,6 +981,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         'display_mode': 'table',
         'columns': columns,
         '_source_expr': source_expr,
+        **config_fields,
         **_COLUMN_MGMT_DEFAULTS,
         **_SEARCH_DEFAULTS,
     }
@@ -1063,10 +1151,10 @@ def _preview_expr(model, action, eval_in_scope):
 
 
 def _render_search_box_input(model, eval_in_scope=None):
-    """Render the .search-box-input + .search-toggles-container row contents.
+    """Render the .search-box + .search-toggles-container row contents.
 
-    Returned HTML is the inside of a single .search-box-row (the input
-    wrapper). The outer .search-box wrapper is added by `_render_search_box`.
+    Returned HTML is the inside of a single .search-div-row (the input
+    wrapper). The outer .search-div wrapper is added by `_render_search_box`.
     """
     search_value = model.get('search') or ''
     search_input_event = "lambda e: SearchBoxInput(value=e.get('value', ''))"
@@ -1089,13 +1177,13 @@ def _render_search_box_input(model, eval_in_scope=None):
     )
 
     return (
-        f'<div class="search-box-input-wrapper">'
+        f'<div class="search-box-wrapper">'
         f'<input type="text" tabindex="0"'
         f' snc-input="{html.escape(search_input_event)}"'
         f' value="{html.escape(search_value)}"'
         f' placeholder="Search"'
         f' spellcheck="false"'
-        f' class="search-box-input" />'
+        f' class="search-box" />'
         f'{toggles_html}'
         f'</div>'
     )
@@ -1299,18 +1387,18 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
 
 
 def _render_search_box(model, lst, eval_in_scope=None, small=False):
-    """Render the full .search-box (search input row + action buttons row)."""
+    """Render the full .search-div (search input row + action buttons row)."""
     input_html = _render_search_box_input(model, eval_in_scope)
     if small:
         action_buttons_html = ''
     else:
         action_buttons_html = _render_action_buttons(model, lst, eval_in_scope)
     return (
-        f'<div class="search-box">'
-        f'<div class="search-box-row">'
+        f'<div class="search-div">'
+        f'<div class="search-div-row">'
         f'<div class="search-replace-container">{input_html}</div>'
         f'</div>'
-        f'<div class="search-box-row">'
+        f'<div class="search-div-row">'
         f'{action_buttons_html}'
         f'</div>'
         f'</div>'
@@ -1338,7 +1426,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         except Exception:
             pass
 
-    table_div_style = f'max-height: {(max_height or 400) - 32}px;'
+    actual_max_height = (max_height or 400) - 32
+    actual_min_height = min(22 * (len(lst) + 1), actual_max_height)
+
+    actual_max_width = f' max-width:{max_width}px;' if max_width is not None else ''
+
+    table_div_style = f'min-height: {actual_min_height}px; max-height: {actual_max_height}px;{actual_max_width}'
 
     key_handler = repr(ColumnKeyDown())
     small_class = ' small' if small else ''
@@ -1405,8 +1498,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 cell_vis = get_visualizer(cell_value)
                 cell_model = children.get(composite_key)
                 if cell_model is None:
+                    extra = (child_nesting_kwargs(model, col, cell_value)
+                             if getattr(cell_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
                     cell_model = cell_vis.init_model(cell_value, get_visualizer,
-                                                     eval_in_scope=eval_in_scope)
+                                                     eval_in_scope=eval_in_scope, **extra)
                 child_small = (composite_key != focused_child)
 
                 cell_expr = None
@@ -1444,6 +1539,11 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
 
 def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None):
+    # Depth-capped leaf: render a plain truncated repr instead of a nested table.
+    if model.get('_too_deep'):
+        inner = f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
+        return wrap_drag_grab(inner, var_and_exp) if var_and_exp else inner
+
     table_html = _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     # Small mode is non-interactive, so the whole list becomes a drag-to-extract
     # handle (self-wrap; no parent wrapping). Full mode keeps its mouse events.
@@ -1466,6 +1566,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
     if model is None:
         model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
+                 '_slot_children': {}, '_config_root_type': None,
+                 '_config_root_dotfile': None, '_config_path': [],
                  **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
     try:
@@ -1495,7 +1597,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _suggest_var_name, expr = cmd
                 new_model['columns'].append(expr)
                 if type_key:
-                    save_columns_to_dotfile(type_key, new_model['columns'])
+                    _save_slots(new_model)
             else:
                 filtered_commands.append(cmd)
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
@@ -1525,7 +1627,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['adding_column'] = False
                 model['column_input_value'] = ''
                 if type_key:
-                    save_columns_to_dotfile(type_key, model['columns'])
+                    _save_slots(model)
             elif model.get('editing_column_index') is not None:
                 idx = model['editing_column_index']
                 if 0 <= idx < len(model['columns']):
@@ -1536,7 +1638,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 if type_key:
-                    save_columns_to_dotfile(type_key, model['columns'])
+                    _save_slots(model)
 
         case ColumnClick(index=idx):
             detail = event_json.get('detail', 1)
@@ -1557,7 +1659,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     elif model['editing_column_index'] > idx:
                         model['editing_column_index'] -= 1
                 if type_key:
-                    save_columns_to_dotfile(type_key, model['columns'])
+                    _save_slots(model)
 
         case ColumnDragStart(index=idx):
             if 0 <= idx < len(model['columns']):
@@ -1580,7 +1682,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     col = model['columns'].pop(drag_from)
                     model['columns'].insert(target, col)
                     if type_key:
-                        save_columns_to_dotfile(type_key, model['columns'])
+                        _save_slots(model)
             model['column_drag_from'] = None
             model['column_drag_over'] = None
 
@@ -1623,7 +1725,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if commit_val:
                         model['columns'].append(commit_val)
                         if type_key:
-                            save_columns_to_dotfile(type_key, model['columns'])
+                            _save_slots(model)
                     model['adding_column'] = False
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
@@ -1635,7 +1737,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
                         if type_key:
-                            save_columns_to_dotfile(type_key, model['columns'])
+                            _save_slots(model)
                     model['editing_column_index'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
@@ -1723,7 +1825,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         ctx['join_separator'] = join_sep
                     result = generate_action(action, ctx)
                     if result:
-                        _emit_linked_update(result[1], model, commands)
+                        _emit_linked_update(result[1], model, commands,
+                                            suggest_name=result[0])
             else:
                 ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx is None:
@@ -1765,7 +1868,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         if ctx:
             result = generate_action(model['linked_action'], ctx)
             if result:
-                _emit_linked_update(result[1], model, commands)
+                _emit_linked_update(result[1], model, commands,
+                                    suggest_name=result[0])
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands

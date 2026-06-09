@@ -42,7 +42,11 @@ export interface NewCodeEdit {
 export type SNCCommand =
 	| { type: 'NewCode'; triggerLine: number; triggerVisIndex: number; edits: NewCodeEdit[] }
 	| { type: 'CopyToClipboard'; text: string }
-	| { type: 'ChangeSelectedText'; text: string };
+	// new_var_name (when present and different from the current assignment
+	// target) is the variable name the visualizer now suggests for the linked
+	// line. The editor renames the assignment target to it only if the prior
+	// name is unused elsewhere in the document.
+	| { type: 'ChangeSelectedText'; text: string; new_var_name?: string | null };
 
 /**
  * Timing data for visualizer performance measurement.

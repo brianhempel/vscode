@@ -125,7 +125,7 @@ from re._constants import (  # type: ignore[import]
 )
 
 from dataclasses import dataclass
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Optional
 
 from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, truncate_str, ICONS, wrap_drag_grab
 import z_object_visualizer
@@ -139,6 +139,12 @@ class CopyToClipboard:
 @dataclass(frozen=True, slots=True)
 class ChangeSelectedText:
     text: str
+    # When the action changed, this is the variable name now suggested for the
+    # assignment target. The editor renames the linked line's target to this
+    # (only if the prior name is unused elsewhere). None means "keep the
+    # current name" (e.g. the name didn't change, or the action is a statement
+    # with no assignment target).
+    new_var_name: Optional[str] = None
 
 # === Event types ===
 
@@ -3334,8 +3340,9 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # line's content (which the opening quote shifts one char to the right).
         raw = value or ""
         display = "'" + raw.replace("\n", "\n ") + "'"
+        size_styling = f'style="max-width:{max_width}px"' if max_width is not None else ''
         small_html = (
-            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container literal-tool-selected small"><div class="string-visualizer"><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container literal-tool-selected small"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
             f'{text_group_span(list(display), 0)}'
             f'</div></div></div>'
         )
@@ -3508,26 +3515,26 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             preview_html = _render_transform_preview(model, value, eval_in_scope)
             match_preview_html = _render_match_object_preview(model, value, eval_in_scope)
             replace_box_html = (
-                f'<div class="search-box-input-wrapper">'
+                f'<div class="search-box-wrapper">'
                 f'<input type="text" tabindex="0"'
                 f' snc-input="{html.escape(replace_input_event)}"'
                 f' value="{html.escape(replace_text_value)}"'
                 f' placeholder="Replace/Map/Filter"'
                 f' spellcheck="false"'
-                f' class="search-box-input search-box-input-replace"'
+                f' class="search-box search-box-replace"'
                 f" />"
                 f'{preview_html}'
                 f'</div>'
             )
 
         search_input_html = (
-            f'<div class="search-box-input-wrapper">'
+            f'<div class="search-box-wrapper">'
             f'<input type="text" tabindex="0"'
             f' snc-input="{html.escape(search_input_event)}"'
             f' value="{html.escape(search_box_value)}"'
             f' placeholder="Find"'
             f' spellcheck="false"'
-            f' class="search-box-input"'
+            f' class="search-box"'
             f" />"
             f"{toggles_html}"
             f" </div>"
@@ -3539,8 +3546,8 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         )
 
         search_box_html = (
-            f'<div class="search-box {"expanded" if replace_visible else ""}">'
-            f'<div class="search-box-row">'
+            f'<div class="search-div {"expanded" if replace_visible else ""}">'
+            f'<div class="search-div-row">'
             f"{discolure_button}"
             f'<div class="search-replace-container">'
             f"{search_input_html}"
@@ -3548,7 +3555,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f"{replace_box_html}"
             f"</div>"
             f"</div>"
-            f'<div class="search-box-row">'
+            f'<div class="search-div-row">'
             f'<div class="disclosure-button-spacer"></div>'
             f'{action_buttons_html}'
             f"</div>"
@@ -3802,7 +3809,7 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
             return '<div class="match-object-preview"><span class="small">No matches</span></div>'
         val_repr = _trunc_repr(matched)
         field_html = z_object_visualizer.render_small_field(
-            '^', val_repr, '^', add_target='.search-box-input-replace')
+            '^', val_repr, '^', add_target='.search-box-replace')
         return f'<div class="match-object-preview"><span class="small">{field_html}</span></div>'
 
     matches = _find_matches(selection_regex, value, eval_in_scope)
@@ -3832,7 +3839,7 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
     match_model = {
         'fields': fields,
         '_source_expr': '^',
-        '_add_target': '.search-box-input-replace',
+        '_add_target': '.search-box-replace',
     }
     obj_html = z_object_visualizer.visualize(
         display_match, match_model, None, eval_in_scope, small=True)
@@ -5564,7 +5571,8 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 if ctx:
                     result = generate_action(action, ctx)
                     if result:
-                        _emit_linked_update(result[1], model, commands)
+                        _emit_linked_update(result[1], model, commands,
+                                            suggest_name=result[0])
             else:
                 ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx:
@@ -5587,7 +5595,8 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
         if ctx:
             result = generate_action(model['linked_action'], ctx)
             if result:
-                _emit_linked_update(result[1], model, commands)
+                _emit_linked_update(result[1], model, commands,
+                                    suggest_name=result[0])
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
@@ -5632,11 +5641,29 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     commands.append(result)
 
 
-def _emit_linked_update(expr: str, model: dict, commands: list) -> None:
-    """Append a ChangeSelectedText command only if the full text is valid Python."""
+def _current_linked_var_name(model: dict) -> 'str | None':
+    """The assignment target currently recorded in the linked prefix, if any."""
+    prefix = model.get('linked_prefix') or ''
+    m = re.match(r'\s*([A-Za-z_]\w*)\s*=\s*$', prefix)
+    return m.group(1) if m else None
+
+
+def _emit_linked_update(expr: str, model: dict, commands: list,
+                        suggest_name: 'str | None' = None) -> None:
+    """Append a ChangeSelectedText command only if the full text is valid Python.
+
+    `suggest_name` is the variable name now suggested for the current action.
+    When it differs from the linked line's current name, it is attached as
+    `new_var_name` so the editor can rename the assignment target (the editor
+    only renames when the prior name is unused elsewhere, and it stays
+    authoritative for the actual name in the document).
+    """
     text = (model.get('linked_prefix') or '') + expr
     try:
         ast.parse(text)
     except SyntaxError:
         return
-    commands.append(ChangeSelectedText(text=text))
+    new_var_name = None
+    if suggest_name and suggest_name != _current_linked_var_name(model):
+        new_var_name = suggest_name
+    commands.append(ChangeSelectedText(text=text, new_var_name=new_var_name))

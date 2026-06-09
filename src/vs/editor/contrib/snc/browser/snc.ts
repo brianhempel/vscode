@@ -2667,7 +2667,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.editor.setScrollTop(newAnchorTop + anchorDelta, ScrollType.Immediate);
 			}
 		} else if (command.type === 'ChangeSelectedText') {
-			this.handleChangeSelectedText(command.text);
+			this.handleChangeSelectedText(command.text, command.new_var_name ?? null);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
@@ -2700,7 +2700,46 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.linkIsAutoEstablished = true;
 	}
 
-	private handleChangeSelectedText(newText: string): void {
+	/**
+	 * Split an assignment line into (leadingWhitespace, varName, rhs). Returns
+	 * null if the text isn't a simple `name = rhs` assignment (e.g. a bare
+	 * expression or a statement), in which case the caller leaves it untouched.
+	 */
+	private static splitAssignment(text: string): { indent: string; name: string; rhs: string } | null {
+		const m = /^(\s*)([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/.exec(text);
+		if (!m) {
+			return null;
+		}
+		return { indent: m[1], name: m[2], rhs: m[3] };
+	}
+
+	/**
+	 * Whether `name` appears as an identifier anywhere in the document outside
+	 * the given range. Used to decide if renaming the linked line's assignment
+	 * target is safe (won't orphan references elsewhere).
+	 */
+	private isVarNameUsedOutsideRange(name: string, range: Range): boolean {
+		const editorModel = this.editor.getModel();
+		if (!editorModel) {
+			return true; // be conservative
+		}
+		const wordRe = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+		const fullText = editorModel.getValue();
+		const startOffset = editorModel.getOffsetAt(range.getStartPosition());
+		const endOffset = editorModel.getOffsetAt(range.getEndPosition());
+		let match: RegExpExecArray | null;
+		while ((match = wordRe.exec(fullText)) !== null) {
+			const idx = match.index;
+			// Ignore occurrences that fall inside the linked range itself.
+			if (idx >= startOffset && idx < endOffset) {
+				continue;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private handleChangeSelectedText(newText: string, newVarName: string | null = null): void {
 		const editorModel = this.editor.getModel();
 		if (!editorModel || !this.linkedSelectionDecorationId) {
 			return;
@@ -2711,6 +2750,23 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		const currentText = editorModel.getValueInRange(trackedRange);
+
+		// Resolve the assignment target. The editor's current line is the source
+		// of truth for the variable name; Python may rename it (new_var_name) only
+		// when the prior name is unused elsewhere in the document. We rebuild the
+		// new line's leading `name =` accordingly, ignoring whatever name Python
+		// happened to put in the text.
+		const incoming = SNCController.splitAssignment(newText);
+		if (incoming) {
+			const current = SNCController.splitAssignment(currentText);
+			let targetName = current ? current.name : incoming.name;
+			if (newVarName && current && newVarName !== current.name
+				&& !this.isVarNameUsedOutsideRange(current.name, trackedRange)) {
+				targetName = newVarName;
+			}
+			newText = `${incoming.indent}${targetName} = ${incoming.rhs}`;
+		}
+
 		if (currentText === newText) {
 			return;
 		}

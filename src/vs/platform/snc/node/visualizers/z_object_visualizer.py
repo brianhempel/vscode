@@ -51,9 +51,15 @@ from visualizer_utils import (
     ChildEvent, EditorTextSelect, Unlink,
     wrap_child_html, wrap_drag_grab, route_child_event, aggregate_handled_keys,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
-    load_dotfile_list, save_dotfile_list, get_full_class_name,
-    truncate_str,
+    get_full_class_name, truncate_str,
+    config_key, parse_slots, load_root_slots, save_slots_at_path,
+    child_nesting_kwargs, too_deep,
 )
+
+# This visualizer participates in the shared nested-slots config (parents thread
+# per-slot config + path to it; see visualizer_utils). Used to decide whether to
+# pass nesting kwargs to a child.
+SUPPORTS_NESTED_CONFIG = True
 
 # === Event types ===
 
@@ -136,13 +142,32 @@ def _ensure_caret_prefix(f):
 
 
 def load_fields_from_dotfile(full_class_name: str):
-    """Load saved fields for a type from the dotfile. Returns list or None."""
-    return load_dotfile_list(DOTFILE_NAME, full_class_name, transform=_ensure_caret_prefix)
+    """Load the raw slot list for a type from the dotfile (or None).
+
+    Kept as the single root-read entry point so tests can patch it for
+    isolation. The caret-prefix normalization is applied later by parse_slots
+    so it works uniformly with the nested slot format.
+    """
+    return load_root_slots(DOTFILE_NAME, full_class_name)
 
 
-def save_fields_to_dotfile(full_class_name: str, fields: list):
-    """Save fields for a type to the dotfile, preserving other types' entries."""
-    save_dotfile_list(DOTFILE_NAME, full_class_name, fields)
+def save_fields_to_dotfile(root_type, path, exprs, dotfile=DOTFILE_NAME):
+    """Path-scoped writer: persist a (sub-)object's field exprs at its location.
+
+    `path` is the list of (slot_expr, child_type) steps from the root type.
+    """
+    save_slots_at_path(dotfile, root_type, path, exprs)
+
+
+def _save_slots(model: dict) -> None:
+    """Persist an object model's fields at its config path (preserves nested
+    children of surviving fields and other types on disk)."""
+    save_fields_to_dotfile(
+        model.get('_config_root_type'),
+        model.get('_config_path') or [],
+        list(model.get('fields', [])),
+        model.get('_config_root_dotfile') or DOTFILE_NAME,
+    )
 
 
 def _get_non_trivial_names(obj) -> list:
@@ -152,13 +177,34 @@ def _get_non_trivial_names(obj) -> list:
 
 def _resolve_fields(obj) -> list:
     """Resolve fields using dotfile, defaults, then non-trivial names."""
-    full_class_name = get_full_class_name(obj)
-    fields = load_fields_from_dotfile(full_class_name)
-    if fields is None:
-        fields = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
-    if fields is None:
-        fields = _get_non_trivial_names(obj)
+    fields, _ = _resolve_fields_and_children(obj, None, None)
     return list(fields)
+
+
+def _resolve_fields_and_children(obj, slots_config, config_path):
+    """Return (fields, slot_children) for an object at this nesting position.
+
+    At the root (config_path is None) the dotfile is read by class. When nested,
+    only the parent-supplied slots_config is used -- the type config is NOT
+    re-read, which is what breaks config-driven recursion. A missing config
+    falls back to DEFAULT_FIELDS_FOR_TYPE, then non-trivial dir() names (value-
+    driven recursion there is bounded by the depth cap).
+    """
+    full_class_name = get_full_class_name(obj)
+
+    if config_path is None:
+        loaded = load_fields_from_dotfile(full_class_name)
+    else:
+        loaded = slots_config
+
+    if loaded is not None:
+        return parse_slots(loaded, expr_transform=_ensure_caret_prefix)
+
+    default = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
+    if default is not None:
+        return parse_slots(default, expr_transform=_ensure_caret_prefix)
+
+    return list(_get_non_trivial_names(obj)), {}
 
 
 def _get_autocomplete_suggestions(obj, current_fields: list, input_value: str) -> list:
@@ -205,16 +251,31 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None):
 
 # === Elm architecture functions ===
 
-def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
+               slots_config=None, config_root_type=None, config_root_dotfile=None,
+               config_path=None):
     """
     Initialize the model state for a new visualization.
 
-    Priority for fields: dotfile > DEFAULT_FIELDS_FOR_TYPE > non-trivial dir() names.
+    Priority for fields: (nested config | dotfile) > DEFAULT_FIELDS_FOR_TYPE >
+    non-trivial dir() names. Nested calls use the parent-supplied slots_config
+    and never re-read the type dotfile (breaks config-driven recursion).
     """
     source_expr = None
     if var_and_exp:
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
+
+    is_root = config_path is None
+    root_type = config_key(value) if is_root else config_root_type
+    root_dotfile = DOTFILE_NAME if is_root else config_root_dotfile
+    path = [] if is_root else config_path
+    config_fields = {
+        "_config_root_type": root_type,
+        "_config_root_dotfile": root_dotfile,
+        "_config_path": path,
+        "_slot_children": {},
+    }
 
     if value is None or isinstance(value, (int, float)):
         return {
@@ -228,9 +289,29 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
             "children": {},
             "handledKeys": list(_OWN_KEYS),
             "_source_expr": source_expr,
+            **config_fields,
         }
 
-    fields = _resolve_fields(value)
+    fields, slot_children = _resolve_fields_and_children(value, slots_config, config_path)
+    config_fields["_slot_children"] = slot_children
+
+    # Depth backstop: beyond the cap, stop building nested children entirely
+    # (renders as a truncated repr) so cyclic objects can't RecursionError.
+    if too_deep(path):
+        return {
+            "fields": fields,
+            "editing_index": None,
+            "adding_field": False,
+            "input_value": "",
+            "selected_suggestion_index": None,
+            "drag_from_index": None,
+            "drag_over_index": None,
+            "children": {},
+            "handledKeys": list(_OWN_KEYS),
+            "_source_expr": source_expr,
+            "_too_deep": True,
+            **config_fields,
+        }
 
     children = {}
     if get_visualizer is not None:
@@ -238,8 +319,10 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
             placeholder_args, val_str, raw_value, is_error = _eval_field(value, accessor_code, eval_in_scope)
             if not is_error and not placeholder_args and raw_value is not None:
                 child_vis = get_visualizer(raw_value)
+                extra = (child_nesting_kwargs(config_fields, accessor_code, raw_value)
+                         if getattr(child_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
                 children[accessor_code] = child_vis.init_model(raw_value, get_visualizer,
-                                                               eval_in_scope=eval_in_scope)
+                                                               eval_in_scope=eval_in_scope, **extra)
 
     handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
 
@@ -254,6 +337,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "children": children,
         "handledKeys": handled_keys,
         "_source_expr": source_expr,
+        **config_fields,
     }
 
 
@@ -314,7 +398,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                 model['adding_field'] = False
                 model['input_value'] = ''
                 if full_class_name:
-                    save_fields_to_dotfile(full_class_name, model['fields'])
+                    _save_slots(model)
             elif model.get('editing_index') is not None:
                 idx = model['editing_index']
                 if 0 <= idx < len(model['fields']):
@@ -322,7 +406,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                 model['editing_index'] = None
                 model['input_value'] = ''
                 if full_class_name:
-                    save_fields_to_dotfile(full_class_name, model['fields'])
+                    _save_slots(model)
 
         case RemoveFieldClick(index=idx):
             if 0 <= idx < len(model['fields']):
@@ -338,7 +422,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                     elif model['editing_index'] > idx:
                         model['editing_index'] -= 1
                 if full_class_name:
-                    save_fields_to_dotfile(full_class_name, model['fields'])
+                    _save_slots(model)
 
         case DragStart(index=idx):
             if 0 <= idx < len(model['fields']):
@@ -362,7 +446,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                     field = model['fields'].pop(drag_from)
                     model['fields'].insert(target, field)
                     if full_class_name:
-                        save_fields_to_dotfile(full_class_name, model['fields'])
+                        _save_slots(model)
             model['drag_from_index'] = None
             model['drag_over_index'] = None
 
@@ -416,7 +500,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                     if commit_val:
                         model['fields'].append(commit_val)
                         if full_class_name:
-                            save_fields_to_dotfile(full_class_name, model['fields'])
+                            _save_slots(model)
                     model['adding_field'] = False
                     model['input_value'] = ''
                     model['selected_suggestion_index'] = None
@@ -425,7 +509,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                     if commit_val and 0 <= idx < len(model['fields']):
                         model['fields'][idx] = commit_val
                         if full_class_name:
-                            save_fields_to_dotfile(full_class_name, model['fields'])
+                            _save_slots(model)
                     model['editing_index'] = None
                     model['input_value'] = ''
                     model['selected_suggestion_index'] = None
@@ -553,6 +637,11 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     if obj is None or isinstance(obj, int) or isinstance(obj, float):
         return repr(obj)
 
+    # Depth-capped leaf: render a plain truncated repr instead of a nested table.
+    if model.get('_too_deep'):
+        inner = f'<span class="small">{html.escape(truncate_str(repr(obj), 200))}</span>'
+        return wrap_drag_grab(inner, var_and_exp) if var_and_exp else inner
+
     if small:
         small_html = _visualize_small(obj, model, eval_in_scope, max_width, max_height)
         # Small mode is non-interactive, so the whole object becomes a
@@ -592,8 +681,10 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 child_vis = get_visualizer(raw_value)
                 child_model = children.get(accessor_code)
                 if child_model is None:
+                    extra = (child_nesting_kwargs(model, accessor_code, raw_value)
+                             if getattr(child_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
                     child_model = child_vis.init_model(raw_value, get_visualizer,
-                                                       eval_in_scope=eval_in_scope)
+                                                       eval_in_scope=eval_in_scope, **extra)
                 child_small = (accessor_code != focused_child)
 
                 # The parent no longer wraps children for drag. Each child is

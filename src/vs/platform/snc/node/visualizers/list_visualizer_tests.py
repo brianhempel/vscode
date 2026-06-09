@@ -12,7 +12,7 @@ import re
 import shutil
 import tempfile
 
-from visualizer_utils import ChildEvent, wrap_drag_grab
+from visualizer_utils import ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH
 import list_visualizer
 
 
@@ -161,12 +161,13 @@ class MockObjectVisualizer:
 
 class ListVisualizerAdapter:
     """Wraps the list_visualizer module to act like a visualizer object."""
+    SUPPORTS_NESTED_CONFIG = True
     def can_visualize(self, value):
         return list_visualizer.can_visualize(value)
     def get_fields(self, value):
         return list_visualizer.get_fields(value)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
-        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
+        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
@@ -672,7 +673,6 @@ class TestSmallParameter(unittest.TestCase):
         bob_call = next(c for c in tracker.visualize_calls if c['value'] == 'Bob')
         self.assertFalse(alice_call['small'])
         self.assertTrue(bob_call['small'])
-
 
 class TestFocusTracking(unittest.TestCase):
     """Test that update() sets focused_child when routing child events."""
@@ -1229,15 +1229,15 @@ class TestColumnDotfile(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_save_and_load_columns(self):
-        save_columns_to_dotfile('builtins.dict', ["^['name']", "^['age']"])
+        save_columns_to_dotfile('builtins.dict', [], ["^['name']", "^['age']"])
         result = load_columns_from_dotfile('builtins.dict')
-        self.assertEqual(result, ["^['name']", "^['age']"])
+        self.assertEqual(result, [{'expr': "^['name']"}, {'expr': "^['age']"}])
 
     def test_save_preserves_other_types(self):
-        save_columns_to_dotfile('type.A', ['^.x'])
-        save_columns_to_dotfile('type.B', ['^.y'])
-        self.assertEqual(load_columns_from_dotfile('type.A'), ['^.x'])
-        self.assertEqual(load_columns_from_dotfile('type.B'), ['^.y'])
+        save_columns_to_dotfile('type.A', [], ['^.x'])
+        save_columns_to_dotfile('type.B', [], ['^.y'])
+        self.assertEqual(load_columns_from_dotfile('type.A'), [{'expr': '^.x'}])
+        self.assertEqual(load_columns_from_dotfile('type.B'), [{'expr': '^.y'}])
 
     def test_load_corrupt_file(self):
         with open(COLUMN_DOTFILE_NAME, 'w') as f:
@@ -1258,7 +1258,7 @@ class TestColumnDotfile(unittest.TestCase):
         self.assertIn('Foo', key)
 
     def test_init_model_loads_from_dotfile(self):
-        save_columns_to_dotfile('builtins.dict', ["^['age']", "^['name']"])
+        save_columns_to_dotfile('builtins.dict', [], ["^['age']", "^['name']"])
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
@@ -3394,6 +3394,35 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertTrue(len(change_cmds) > 0)
 
+    def test_action_change_carries_new_var_name(self):
+        """Switching action on an auto-linked line suggests a new var name."""
+        from list_visualizer import ChangeSelectedText
+        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
+        # Assignment-form selection links with target 'data_filtered'.
+        event = make_editor_text_select_event(
+            'data_filtered = [item for item in data if item > 3]')
+        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        self.assertEqual(model.get('linked_prefix'), 'data_filtered = ')
+        # Switch to delete -> suggested name becomes 'data'.
+        event = make_action_button_event('delete')
+        model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertEqual(change_cmds[0].new_var_name, 'data')
+
+    def test_unchanged_name_carries_no_new_var_name(self):
+        """A search change that keeps the same action keeps the same name."""
+        from list_visualizer import ChangeSelectedText
+        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
+        event = make_editor_text_select_event(
+            'data_filtered = [item for item in data if item > 3]')
+        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        event = make_search_input_event('^ > 2')
+        model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertTrue(len(change_cmds) > 0)
+        self.assertIsNone(change_cmds[0].new_var_name)
+
     def test_linked_join_menu_updates_selected_text(self):
         from list_visualizer import ChangeSelectedText
         model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
@@ -4038,6 +4067,97 @@ class TestSearchBoxTooltips(unittest.TestCase):
         self.assertIsNotNone(m, "FirstMatchToggle button not found")
         attrs = m.group(1)
         self.assertIn('data-tooltip="First match only"', attrs)
+
+
+_FINDALL_COL = "re.findall(r'[A-Z]{3}', (^), flags=re.M)"
+
+
+class TestNestedSlotsConfig(unittest.TestCase):
+    """The list config is nested: a list-producing column does not re-apply the
+    type config to its cell sub-list (which would recurse forever); the sub-list
+    uses the column's explicitly-nested config or a non-recursive default."""
+
+    def _findall_key(self, row=0):
+        return f"{row}\x00{_FINDALL_COL}"
+
+    def test_list_of_str_with_list_column_does_not_recurse(self):
+        slots = [{'expr': '^'}, {'expr': _FINDALL_COL}]
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+            # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
+            model = init_model(['ABCdef'], mock_get_visualizer)
+        self.assertEqual(model['columns'], ['^', _FINDALL_COL])
+        # The re.findall cell is a list[str]; with no nested config it must fall
+        # back to the default single column, NOT re-read builtins.str's config.
+        child = model['children'][self._findall_key()]
+        self.assertEqual(child['columns'], ['^'])
+
+    def test_explicit_nested_children_applies(self):
+        slots = [
+            {'expr': '^'},
+            {'expr': _FINDALL_COL,
+             'children': {'builtins.str': [{'expr': '^.lower()'}]}},
+        ]
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+            model = init_model(['ABCdef'], mock_get_visualizer)
+        child = model['children'][self._findall_key()]
+        self.assertEqual(child['columns'], ['^.lower()'])
+
+    def test_root_model_stores_config_fields(self):
+        slots = [{'expr': '^'}]
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+            model = init_model(['x'], mock_get_visualizer)
+        self.assertEqual(model['_config_root_type'], 'builtins.str')
+        self.assertEqual(model['_config_root_dotfile'],
+                         list_visualizer.COLUMN_DOTFILE_NAME)
+        self.assertEqual(model['_config_path'], [])
+        self.assertEqual(model['_slot_children'], {})
+
+    def test_nested_child_carries_path_and_root(self):
+        slots = [{'expr': _FINDALL_COL,
+                  'children': {'builtins.str': [{'expr': '^'}]}}]
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+            model = init_model(['ABCdef'], mock_get_visualizer)
+        child = model['children'][self._findall_key()]
+        self.assertEqual(child['_config_root_type'], 'builtins.str')
+        self.assertEqual(child['_config_path'],
+                         [(_FINDALL_COL, 'builtins.str')])
+
+    def test_cyclic_list_is_depth_capped_not_recursion_error(self):
+        a = []
+        a.append(a)  # a == [a]; would recurse forever via auto-detected columns
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=None):
+            model = init_model(a, mock_get_visualizer)  # must not RecursionError
+        # Walk down the single nested child chain; a leaf must be marked too deep.
+        m, depth, hit_cap = model, 0, False
+        while m.get('children'):
+            key = next(iter(m['children']))
+            m = m['children'][key]
+            depth += 1
+            if m.get('_too_deep'):
+                hit_cap = True
+                break
+            if depth > MAX_NEST_DEPTH + 2:
+                break
+        self.assertTrue(hit_cap, 'expected a depth-capped leaf model')
+        self.assertLessEqual(depth, MAX_NEST_DEPTH + 1)
+
+
+class TestNestedSlotsSave(unittest.TestCase):
+    """Column edits persist via the path-scoped writer using the model's path."""
+
+    def test_add_column_saves_with_path_scoped_signature(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['adding_column'] = True
+        event = make_column_mouse_event(repr(ColumnSelect(name="^['x']")))
+        with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
+            update(event, None, model, lst, mock_get_visualizer)
+        mock_save.assert_called_once()
+        args = mock_save.call_args.args
+        # New signature: (root_type, path, exprs, [dotfile])
+        self.assertEqual(args[0], 'builtins.dict')
+        self.assertEqual(args[1], [])
+        self.assertIn("^['x']", args[2])
 
 
 if __name__ == '__main__':

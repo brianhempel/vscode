@@ -27,8 +27,9 @@ from z_object_visualizer import (
     load_fields_from_dotfile, save_fields_to_dotfile,
     _get_autocomplete_suggestions, _resolve_fields,
 )
-from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name, wrap_drag_grab
+from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name, wrap_drag_grab, MAX_NEST_DEPTH
 import z_object_visualizer
+import list_visualizer
 
 
 class _GenericVis:
@@ -49,21 +50,49 @@ class _GenericVis:
 
 class _ZObjectVisAdapter:
     """Adapter wrapping the z_object_visualizer module as a visualizer object."""
+    SUPPORTS_NESTED_CONFIG = True
     def can_visualize(self, value):
         return z_object_visualizer.can_visualize(value)
-    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
-        return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
+        return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return z_object_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
+
+class _ListVisAdapter:
+    """Adapter wrapping the list_visualizer module (for cross-type nesting tests)."""
+    SUPPORTS_NESTED_CONFIG = True
+    def can_visualize(self, value):
+        return list_visualizer.can_visualize(value)
+    def get_fields(self, value):
+        return list_visualizer.get_fields(value)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
+        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        return list_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
+
 _generic_vis = _GenericVis()
 _zobj_vis = _ZObjectVisAdapter()
+_list_vis = _ListVisAdapter()
 
 def _get_visualizer(value):
     """Simple visualizer resolver for tests."""
     return _generic_vis
+
+
+def _get_nesting_visualizer(value):
+    """Resolver that composes the real list + object visualizers (matches the
+    runtime priority: lists -> list visualizer, objects -> z_object, primitives
+    -> generic)."""
+    if isinstance(value, list):
+        return _list_vis
+    if value is None or isinstance(value, (int, float, str, bool)):
+        return _generic_vis
+    return _zobj_vis
 
 
 # =============================================================================
@@ -641,7 +670,7 @@ class TestUpdate(unittest.TestCase):
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             # Should save with the updated fields list
-            saved_fields = mock_save.call_args[0][1]
+            saved_fields = mock_save.call_args[0][2]
             self.assertIn('^.name', saved_fields)
 
     def test_enter_saves_dotfile(self):
@@ -840,7 +869,7 @@ class TestUpdate(unittest.TestCase):
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
-            saved_fields = mock_save.call_args[0][1]
+            saved_fields = mock_save.call_args[0][2]
             self.assertEqual(saved_fields, ['^.name'])
 
     def test_remove_field_out_of_range_is_noop(self):
@@ -1088,34 +1117,34 @@ class TestDotfile(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_save_fields_to_dotfile(self):
-        """Saves correct JSON structure."""
-        save_fields_to_dotfile('some.Type', ['^.x', '^.y'])
+        """Saves correct JSON structure (nested slot format)."""
+        save_fields_to_dotfile('some.Type', [], ['^.x', '^.y'])
 
         with open(DOTFILE_NAME, 'r') as f:
             data = json.load(f)
 
-        self.assertEqual(data['some.Type'], ['^.x', '^.y'])
+        self.assertEqual(data['some.Type'], [{'expr': '^.x'}, {'expr': '^.y'}])
 
     def test_save_preserves_other_types(self):
         """Saving for type A doesn't clobber type B entries."""
-        save_fields_to_dotfile('type.A', ['^.a1', '^.a2'])
-        save_fields_to_dotfile('type.B', ['^.b1', '^.b2'])
+        save_fields_to_dotfile('type.A', [], ['^.a1', '^.a2'])
+        save_fields_to_dotfile('type.B', [], ['^.b1', '^.b2'])
 
         with open(DOTFILE_NAME, 'r') as f:
             data = json.load(f)
 
-        self.assertEqual(data['type.A'], ['^.a1', '^.a2'])
-        self.assertEqual(data['type.B'], ['^.b1', '^.b2'])
+        self.assertEqual(data['type.A'], [{'expr': '^.a1'}, {'expr': '^.a2'}])
+        self.assertEqual(data['type.B'], [{'expr': '^.b1'}, {'expr': '^.b2'}])
 
     def test_save_overwrites_same_type(self):
         """Saving the same type again overwrites the previous entry."""
-        save_fields_to_dotfile('some.Type', ['^.x'])
-        save_fields_to_dotfile('some.Type', ['^.x', '^.y'])
+        save_fields_to_dotfile('some.Type', [], ['^.x'])
+        save_fields_to_dotfile('some.Type', [], ['^.x', '^.y'])
 
         with open(DOTFILE_NAME, 'r') as f:
             data = json.load(f)
 
-        self.assertEqual(data['some.Type'], ['^.x', '^.y'])
+        self.assertEqual(data['some.Type'], [{'expr': '^.x'}, {'expr': '^.y'}])
 
 
 # =============================================================================
@@ -1652,7 +1681,7 @@ class TestSmallViewPyExp(unittest.TestCase):
         model = {
             'fields': ['^[0]', '^.start()', '^.end()', '^[1]', '^[2]'],
             '_source_expr': '^',
-            '_add_target': '.search-box-input-replace',
+            '_add_target': '.search-box-replace',
         }
         html_out = self._small(m, model)
         self.assertIn('snc-py-exp="^[0]"', html_out)
@@ -1869,6 +1898,93 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         self.assertIsNotNone(m, "AddFieldClick (+) row not found")
         attrs = m.group(1)
         self.assertIn('data-tooltip="Add attribute"', attrs)
+
+
+class TestNestedSlotsConfig(unittest.TestCase):
+    """The object config is nested: a field whose value is the same type does
+    NOT re-apply the type config (which would recurse); nesting uses the field's
+    explicit children config or a depth-capped default."""
+
+    def test_root_model_stores_config_fields(self):
+        o = TestObj()
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['^.x']):
+            model = init_model(o, _get_nesting_visualizer)
+        self.assertEqual(model['_config_root_type'], _get_full_class_name(o))
+        self.assertEqual(model['_config_root_dotfile'], DOTFILE_NAME)
+        self.assertEqual(model['_config_path'], [])
+        self.assertEqual(model['_slot_children'], {})
+
+    def test_nested_fields_config_applies(self):
+        class Inner:
+            def __init__(self):
+                self.a = 1
+                self.b = 2
+
+        class Outer:
+            def __init__(self):
+                self.inner = Inner()
+
+        o = Outer()
+        inner_type = _get_full_class_name(o.inner)
+        slots = [{'expr': '^.inner', 'children': {inner_type: [{'expr': '^.a'}]}}]
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
+            model = init_model(o, _get_nesting_visualizer)
+        child = model['children']['^.inner']
+        self.assertEqual(child['fields'], ['^.a'])
+
+    def test_cross_type_object_field_list_uses_nested_columns(self):
+        class Holder:
+            def __init__(self):
+                self.items = ['ABCdef', 'GHIjkl']
+
+        o = Holder()
+        slots = [{'expr': '^.items',
+                  'children': {'builtins.str': [{'expr': '^.lower()'}]}}]
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
+            model = init_model(o, _get_nesting_visualizer)
+        child = model['children']['^.items']  # a list-visualizer model
+        self.assertEqual(child['columns'], ['^.lower()'])
+
+    def test_cyclic_object_is_depth_capped_not_recursion_error(self):
+        class Node:
+            def __init__(self):
+                self.me = None
+
+        o = Node()
+        o.me = o  # self-referential; would recurse forever via dir() fallback
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+            model = init_model(o, _get_nesting_visualizer)  # must not RecursionError
+
+        def find_too_deep(m):
+            if not isinstance(m, dict):
+                return False
+            if m.get('_too_deep'):
+                return True
+            return any(find_too_deep(c) for c in (m.get('children') or {}).values())
+
+        def max_path_len(m):
+            if not isinstance(m, dict):
+                return 0
+            here = len(m.get('_config_path') or [])
+            children = (m.get('children') or {}).values()
+            return max([here] + [max_path_len(c) for c in children])
+
+        self.assertTrue(find_too_deep(model), 'expected a depth-capped leaf model')
+        self.assertLessEqual(max_path_len(model), MAX_NEST_DEPTH)
+
+    def test_field_add_saves_with_path_scoped_signature(self):
+        o = TestObj()
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['^.x']):
+            model = init_model(o, _get_nesting_visualizer)
+        model['adding_field'] = True
+        event = make_mouse_down_event(repr(FieldSelect(accessor='^.y')))
+        with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
+            update(event, None, model, o, _get_nesting_visualizer)
+        mock_save.assert_called_once()
+        args = mock_save.call_args.args
+        self.assertEqual(args[0], _get_full_class_name(o))
+        self.assertEqual(args[1], [])
+        self.assertIn('^.y', args[2])
 
 
 if __name__ == '__main__':
