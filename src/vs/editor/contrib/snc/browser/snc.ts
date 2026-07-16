@@ -39,6 +39,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
 	private readonly onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void;
 	private readonly onInputEvent: (pythonEventStr: string, value: string) => void;
+	// Invoked when the user clicks the "+" button in an expression tooltip to
+	// assign that expression to a new variable on the line below.
+	private readonly onInsertNewVar: (expression: string) => void;
 	// Returns true when this widget's line is currently the focused line and
 	// thus rendered full-size. When false, the widget is in small mode and
 	// the first mousedown is intercepted as an "expand" request instead of
@@ -85,7 +88,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string) => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -94,6 +97,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onPointerEvent = onPointerEvent;
 		this.onKeyboardEvent = onKeyboardEvent;
 		this.onInputEvent = onInputEvent;
+		this.onInsertNewVar = onInsertNewVar;
 		this.isFocused = isFocused;
 		this.onExpandRequest = onExpandRequest;
 		this.clipboardService = clipboardService;
@@ -157,6 +161,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// different from full (e.g. z_object_visualizer's _visualize_small),
 			// so the event's target won't exist after the re-run.
 			if (!this.isFocused()) {
+				// Some controls opt out of click-to-focus so they work in the
+				// non-focused (small) preview - e.g. the string visualizer's
+				// expand/collapse toggle. Elements marked snc-unfocused-clickable
+				// dispatch their Python event directly instead of pinning focus.
+				const targetNode = ev.target as Node | null;
+				const targetEl = targetNode instanceof Element ? targetNode : (targetNode?.parentElement ?? null);
+				if (targetEl && targetEl.closest('[snc-unfocused-clickable]')) {
+					ev.preventDefault();
+					ev.stopPropagation();
+					this.dispatch_mouse_python_event('snc-mouse-down', ev, true);
+					return;
+				}
 				ev.preventDefault();
 				ev.stopPropagation();
 				this.onExpandRequest();
@@ -436,6 +452,25 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
+	 * Build a "+" button for an expression tooltip. Clicking it assigns the
+	 * expression to a new variable on the line below (via onInsertNewVar) and
+	 * dismisses the tooltip.
+	 */
+	private createNewVarButton(expression: string, hideTooltip: () => void): HTMLButtonElement {
+		const newVarBtn = document.createElement('button');
+		newVarBtn.className = 'snc-copy-btn snc-new-var-btn';
+		newVarBtn.textContent = '+';
+		newVarBtn.title = 'Assign to a new variable';
+		newVarBtn.addEventListener('mousedown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			hideTooltip();
+			this.onInsertNewVar(expression);
+		});
+		return newVarBtn;
+	}
+
+	/**
 	 * Show a tooltip with the Python expression and a copy button near the given element.
 	 */
 	private showPyExpTooltip(target: Element): void {
@@ -464,6 +499,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
 		});
 		tooltip.appendChild(copyBtn);
+
+		tooltip.appendChild(this.createNewVarButton(expression, () => this.hidePyExpTooltip()));
 
 		const exprSpan = document.createElement('span');
 		exprSpan.textContent = expression;
@@ -583,6 +620,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
 		});
 		tooltip.appendChild(copyBtn);
+
+		tooltip.appendChild(this.createNewVarButton(expression, () => this.hideActionTooltip()));
 
 		const exprSpan = document.createElement('span');
 		exprSpan.className = 'snc-action-tooltip-expr';
@@ -842,7 +881,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		return pythonEventStr;
 	}
 
-	private dispatch_mouse_python_event(attr_name: string, ev: MouseEvent): void {
+	private dispatch_mouse_python_event(attr_name: string, ev: MouseEvent, forceDispatch = false): void {
+		// Only the focused visualizer receives events. A non-focused widget's
+		// first mousedown pins focus (handled in the mousedown listener); all
+		// other mouse events (move/up/out) on a non-focused widget must not be
+		// dispatched — hovering a non-focused auto-linked line would otherwise
+		// re-run its linked action and rewrite the linked line.
+		// forceDispatch is set for snc-unfocused-clickable controls (e.g. the
+		// expand/collapse toggle) that intentionally act without pinning focus.
+		if (!this.isFocused() && !forceDispatch) { return; }
 		if (!ev.target) { return; }
 
 		let node = ev.target as Node;
@@ -897,6 +944,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	private dispatch_keyboard_event(attr_name: string, ev: KeyboardEvent): void {
+		if (!this.isFocused()) { return; }
 		if (!ev.target) { return; }
 
 		let node = ev.target as Node;
@@ -922,6 +970,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	private dispatch_input_event(attr_name: string, ev: Event): void {
+		if (!this.isFocused()) { return; }
 		const target = ev.target as HTMLElement;
 		if (!target) { return; }
 
@@ -1593,6 +1642,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	private visualizationWidgets: Map<number, VisualizationWidget[]> = new Map();
 	private viewZones: Map<number, string> = new Map(); // line number -> view zone id
+	// Synthetic empty space above line 1. Used to keep a focused/clicked
+	// visualizer pixel-stable when content above it shrinks while the file is
+	// scrolled near the top: scrollTop can't go below 0, so the deficit is
+	// added as a spacer instead of letting the anchor jump upward.
+	private topSpacerZoneId: string | null = null;
+	private topSpacerHeight = 0;
+	private isAdjustingTopSpacer = false;
 	private debounceTimer: any = null;
 	private readonly debounceDelay = 100; // ms
 
@@ -1620,15 +1676,23 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private focusRerunTimer: any = null;
 	private readonly focusRerunDelay = 150; // ms
 
-	// Linked-editing state: tracks the editor selection that is live-synced with a visualizer
-	private linkedSelectionDecorationId: string | null = null;
-	private linkedVisualizerLine: number | null = null;
-	private linkedVisualizerVisIndex: number | null = null;
-	// True when the link was established programmatically by an auto-generated LOC
-	// (vs. by the user selecting text). Auto-established links must not be torn
-	// down just because the editor selection is empty — the user is interacting
-	// with the visualizer, not the editor.
-	private linkIsAutoEstablished = false;
+	// Linked-editing state: each entry tracks one editor range that is live-synced
+	// with a specific visualizer, keyed by that visualizer's (line, visIndex).
+	// A per-visualizer list (rather than a single global link) is required so
+	// several auto-linked lines can coexist without cross-talk: an update from
+	// one visualizer must edit its own inserted line, not whichever line was
+	// linked most recently.
+	//
+	// autoEstablished is true when the link was created programmatically by an
+	// auto-generated LOC (vs. by the user selecting text). Auto-established links
+	// must not be torn down just because the editor selection is empty — the user
+	// is interacting with the visualizer, not the editor.
+	private linkedSelections: {
+		line: number;
+		visIndex: number;
+		decorationId: string;
+		autoEstablished: boolean;
+	}[] = [];
 	private suppressSelectionEvent = false;
 	private selectionDebounceTimer: any = null;
 
@@ -1691,6 +1755,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Register scroll event handler to update overlay widget positions
 		this._register(editor.onDidScrollChange(() => {
 			this.updateOverlayWidgetPositions();
+			this.absorbTopSpacerOnScroll();
 		}));
 
 		// Register window focus change handler to update visualizations when window becomes visible
@@ -1921,6 +1986,34 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 
 			this.visualizationItems = newItems;
+
+			// Keep linked-selection keys aligned with the shifted visualizer
+			// lines. The linked range decoration tracks its own position via
+			// stickiness; here we only fix each link's (line) key so a later
+			// ChangeSelectedText from that visualizer still resolves to it.
+			if (this.linkedSelections.length > 0) {
+				const editorModel = this.editor.getModel();
+				const survivingLinks: typeof this.linkedSelections = [];
+				for (const link of this.linkedSelections) {
+					if (isStartOfLineInsertion && link.line >= startLine) {
+						link.line += lineDelta;
+						survivingLinks.push(link);
+					} else if (link.line < startLine) {
+						survivingLinks.push(link);
+					} else if (link.line > endLine) {
+						link.line += lineDelta;
+						survivingLinks.push(link);
+					} else if (lineDelta < 0 && link.line > startLine + newLineCount - 1) {
+						// The visualizer's trigger line was deleted; drop the link.
+						if (editorModel) {
+							editorModel.deltaDecorations([link.decorationId], []);
+						}
+					} else {
+						survivingLinks.push(link);
+					}
+				}
+				this.linkedSelections = survivingLinks;
+			}
 		}
 
 		if (itemsChanged) {
@@ -2018,17 +2111,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// visualizer, not the editor selection; an empty editor selection (just
 			// a cursor) must not tear it down, or continued visualizer interaction
 			// would orphan the inserted line and trigger a duplicate insert.
-			if (this.linkedVisualizerLine !== null && !this.linkIsAutoEstablished) {
-				this.sendUnlinkEvent();
-			}
+			this.unlinkUserSelections();
 			return;
 		}
 
 		const selectedText = editorModel.getValueInRange(selection);
 		if (!selectedText || selectedText.length < 3) {
-			if (this.linkedVisualizerLine !== null && !this.linkIsAutoEstablished) {
-				this.sendUnlinkEvent();
-			}
+			this.unlinkUserSelections();
 			return;
 		}
 
@@ -2059,9 +2148,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 
+		// Moving the selection to a different visualizer supersedes any prior
+		// user-established link; tear those down first (auto links are untouched).
+		this.unlinkUserSelections();
+
 		// Track the selection range via a decoration so it survives edits
+		const existing = this.findLink(targetVisItem.line, targetVisItem.visIndex);
 		const decorationIds = editorModel.deltaDecorations(
-			this.linkedSelectionDecorationId ? [this.linkedSelectionDecorationId] : [],
+			existing ? [existing.decorationId] : [],
 			[{
 				range: selection,
 				options: {
@@ -2070,12 +2164,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 				}
 			}]
 		);
-		this.linkedSelectionDecorationId = decorationIds[0] ?? null;
-		this.linkedVisualizerLine = targetVisItem.line;
-		this.linkedVisualizerVisIndex = targetVisItem.visIndex;
-		// This link is driven by an explicit user text selection, not an
-		// auto-generated LOC, so empty-selection unlinking should apply to it.
-		this.linkIsAutoEstablished = false;
+		const decorationId = decorationIds[0] ?? null;
+		if (decorationId) {
+			// This link is driven by an explicit user text selection, not an
+			// auto-generated LOC, so empty-selection unlinking should apply to it.
+			this.setLink(targetVisItem.line, targetVisItem.visIndex, decorationId, false);
+		}
 
 		const pythonEventStr = "lambda e: EditorTextSelect(text=e.get('text', ''))";
 		const eventJSON = { type: 'editorTextSelect', text: selectedText };
@@ -2088,32 +2182,46 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.sendEventToPython(event);
 	}
 
-	private sendUnlinkEvent(): void {
-		if (this.linkedVisualizerLine === null || this.linkedVisualizerVisIndex === null) {
-			return;
-		}
-		const pythonEventStr = 'lambda e: Unlink()';
-		const eventJSON = { type: 'unlink' };
-		const event: UiEvent = {
-			line: this.linkedVisualizerLine,
-			visIndex: this.linkedVisualizerVisIndex,
-			pythonEventStr,
-			eventJSON,
-		};
+	/** Find the link tracked for a specific visualizer, if any. */
+	private findLink(line: number, visIndex: number) {
+		return this.linkedSelections.find(l => l.line === line && l.visIndex === visIndex);
+	}
 
-		// Clean up linked state
-		if (this.linkedSelectionDecorationId) {
-			const editorModel = this.editor.getModel();
+	/**
+	 * Record (or update) the link for a visualizer. Replaces any existing entry
+	 * for the same (line, visIndex) in place, keeping the list one-per-visualizer.
+	 */
+	private setLink(line: number, visIndex: number, decorationId: string, autoEstablished: boolean): void {
+		const existing = this.findLink(line, visIndex);
+		if (existing) {
+			existing.decorationId = decorationId;
+			existing.autoEstablished = autoEstablished;
+		} else {
+			this.linkedSelections.push({ line, visIndex, decorationId, autoEstablished });
+		}
+	}
+
+	/**
+	 * Tear down every user-established (non-auto) link: remove its decoration and
+	 * notify its visualizer so its Python model clears its linked state. Auto
+	 * links (from auto-generated LOCs) are left intact.
+	 */
+	private unlinkUserSelections(): void {
+		const editorModel = this.editor.getModel();
+		const userLinks = this.linkedSelections.filter(l => !l.autoEstablished);
+		this.linkedSelections = this.linkedSelections.filter(l => l.autoEstablished);
+		for (const link of userLinks) {
 			if (editorModel) {
-				editorModel.deltaDecorations([this.linkedSelectionDecorationId], []);
+				editorModel.deltaDecorations([link.decorationId], []);
 			}
-			this.linkedSelectionDecorationId = null;
+			const event: UiEvent = {
+				line: link.line,
+				visIndex: link.visIndex,
+				pythonEventStr: 'lambda e: Unlink()',
+				eventJSON: { type: 'unlink' },
+			};
+			this.sendEventToPython(event);
 		}
-		this.linkedVisualizerLine = null;
-		this.linkedVisualizerVisIndex = null;
-		this.linkIsAutoEstablished = false;
-
-		this.sendEventToPython(event);
 	}
 
 	private getLineIndent(lineNumber: number): number {
@@ -2223,13 +2331,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 		this.visualizationWidgets.clear();
 
-		// Remove all view zones
+		// Remove all view zones (including the top spacer)
 		this.editor.changeViewZones((accessor) => {
 			for (const viewZoneId of this.viewZones.values()) {
 				accessor.removeZone(viewZoneId);
 			}
+			if (this.topSpacerZoneId !== null) {
+				accessor.removeZone(this.topSpacerZoneId);
+				this.topSpacerZoneId = null;
+			}
 		});
 		this.viewZones.clear();
+		this.topSpacerHeight = 0;
 	}
 
 	private setSyntaxErrorState(active: boolean): void {
@@ -2254,6 +2367,58 @@ export class SNCController extends Disposable implements IEditorContribution {
 			for (const widget of widgets) {
 				widget.updatePosition();
 			}
+		}
+	}
+
+	/**
+	 * Resize (or remove) the synthetic top spacer view zone placed before line
+	 * 1. Pass 0 to remove it. Kept out of `this.viewZones` so the per-line
+	 * add/remove bookkeeping never touches it.
+	 */
+	private setTopSpacerHeight(height: number): void {
+		const target = Math.max(0, Math.round(height));
+		if (target === this.topSpacerHeight && (target === 0) === (this.topSpacerZoneId === null)) {
+			return;
+		}
+		this.editor.changeViewZones((accessor) => {
+			if (this.topSpacerZoneId !== null) {
+				accessor.removeZone(this.topSpacerZoneId);
+				this.topSpacerZoneId = null;
+			}
+			if (target > 0) {
+				this.topSpacerZoneId = accessor.addZone({
+					afterLineNumber: 0,
+					heightInPx: target,
+					domNode: document.createElement('div'),
+					suppressMouseDown: true
+				});
+			}
+		});
+		this.topSpacerHeight = target;
+	}
+
+	/**
+	 * Convert spacer into real scroll as the user scrolls down. The spacer is
+	 * phantom space above line 1; any portion the user has scrolled past is
+	 * pointless, so trade it for an equal reduction in scrollTop. This keeps the
+	 * visible content perfectly still while the spacer melts away the moment the
+	 * user scrolls off the top, instead of leaving permanent empty space.
+	 */
+	private absorbTopSpacerOnScroll(): void {
+		if (this.isAdjustingTopSpacer || this.topSpacerHeight === 0) {
+			return;
+		}
+		const scrollTop = this.editor.getScrollTop();
+		const absorb = Math.min(scrollTop, this.topSpacerHeight);
+		if (absorb <= 0) {
+			return;
+		}
+		this.isAdjustingTopSpacer = true;
+		try {
+			this.setTopSpacerHeight(this.topSpacerHeight - absorb);
+			this.editor.setScrollTop(scrollTop - absorb, ScrollType.Immediate);
+		} finally {
+			this.isAdjustingTopSpacer = false;
 		}
 	}
 
@@ -2290,7 +2455,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			const usesBlockLayout = widgets.some(w => w.usesBlockLayout());
 
 			if (usesBlockLayout) {
-				return Math.max(Math.ceil(maxHeight) + 4, lineHeight);
+				return Math.max(Math.ceil(maxHeight) + 10, lineHeight);
 			}
 
 			if (maxHeight > 22) {
@@ -2434,6 +2599,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); },
 							() => this.effectiveFocusedLine() === lineNumber,
 							() => this.requestExpand(lineNumber),
+							(expression) => { this.insertNewVarFromExpression(lineNumber, expression); },
 							this.clipboardService
 						);
 						widget.updateContent(item.html);
@@ -2460,8 +2626,22 @@ export class SNCController extends Disposable implements IEditorContribution {
 		});
 
 		if (shouldStabilizeScroll && anchorLineNumber > 0) {
+			// Clear any prior spacer so the anchor's top reflects real content,
+			// then work out where restoring the anchor lands. `anchorDelta` is a
+			// spacer-independent viewport offset, so `desiredScrollTop` is the
+			// scroll (with no spacer) that keeps the anchor visually put.
+			this.setTopSpacerHeight(0);
 			const anchorTopAfter = this.editor.getTopForLineNumber(anchorLineNumber);
-			this.editor.setScrollTop(anchorTopAfter + anchorDelta, ScrollType.Immediate);
+			const desiredScrollTop = anchorTopAfter + anchorDelta;
+			if (desiredScrollTop < 0) {
+				// Not enough real lines above the anchor to absorb the shrink:
+				// scrollTop would clamp at 0 and let the anchor jump up. Fill the
+				// deficit with a top spacer so the anchor stays pixel-stable.
+				this.setTopSpacerHeight(-desiredScrollTop);
+				this.editor.setScrollTop(0, ScrollType.Immediate);
+			} else {
+				this.editor.setScrollTop(desiredScrollTop, ScrollType.Immediate);
+			}
 		}
 
 		for (const widget of widgetsToReposition) {
@@ -2667,10 +2847,57 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.editor.setScrollTop(newAnchorTop + anchorDelta, ScrollType.Immediate);
 			}
 		} else if (command.type === 'ChangeSelectedText') {
-			this.handleChangeSelectedText(command.text, command.new_var_name ?? null);
+			this.handleChangeSelectedText(command.text, command.new_var_name ?? null, command.triggerLine, command.triggerVisIndex);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
+	}
+
+	/**
+	 * Insert `new_var = <expression>` on the line below `lineNumber`, matching
+	 * that line's indentation, and place the cursor on the new variable name so
+	 * the user can rename it immediately. Triggered by the "+" button in an
+	 * expression tooltip.
+	 */
+	private insertNewVarFromExpression(lineNumber: number, expression: string): void {
+		const model = this.editor.getModel();
+		if (!model) {
+			return;
+		}
+		const expr = expression.trim();
+		if (!expr) {
+			return;
+		}
+
+		// Match the trigger line's indentation so the new statement lands at the
+		// same block level.
+		const firstNonWs = model.getLineFirstNonWhitespaceColumn(lineNumber);
+		const indent = firstNonWs > 0
+			? model.getLineContent(lineNumber).slice(0, firstNonWs - 1)
+			: '';
+		const editText = `${indent}new_var = ${expr}`;
+
+		const col = model.getLineMaxColumn(lineNumber);
+		const editOperation = {
+			range: new Range(lineNumber, col, lineNumber, col),
+			text: '\n' + editText
+		};
+
+		const newSelections = model.pushEditOperations([], [editOperation], (inverseEdits) => {
+			const inv = inverseEdits[0];
+			if (!inv) {
+				return null;
+			}
+			const sel = computeRenameSelectionForEdit(editText, false, inv.range);
+			return sel ? [sel] : null;
+		});
+
+		if (newSelections && newSelections.length > 0) {
+			this.editor.setSelection(newSelections[0]);
+		} else {
+			this.editor.setPosition({ lineNumber: lineNumber + 1, column: 1 });
+		}
+		this.editor.focus();
 	}
 
 	/**
@@ -2684,8 +2911,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (!editorModel) {
 			return;
 		}
+		const existing = this.findLink(line, visIndex);
 		const decorationIds = editorModel.deltaDecorations(
-			this.linkedSelectionDecorationId ? [this.linkedSelectionDecorationId] : [],
+			existing ? [existing.decorationId] : [],
 			[{
 				range,
 				options: {
@@ -2694,10 +2922,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 				}
 			}]
 		);
-		this.linkedSelectionDecorationId = decorationIds[0] ?? null;
-		this.linkedVisualizerLine = line;
-		this.linkedVisualizerVisIndex = visIndex;
-		this.linkIsAutoEstablished = true;
+		const decorationId = decorationIds[0] ?? null;
+		if (decorationId) {
+			this.setLink(line, visIndex, decorationId, true);
+		}
 	}
 
 	/**
@@ -2739,12 +2967,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 		return false;
 	}
 
-	private handleChangeSelectedText(newText: string, newVarName: string | null = null): void {
+	private handleChangeSelectedText(newText: string, newVarName: string | null, line: number, visIndex: number): void {
 		const editorModel = this.editor.getModel();
-		if (!editorModel || !this.linkedSelectionDecorationId) {
+		const link = this.findLink(line, visIndex);
+		if (!editorModel || !link) {
 			return;
 		}
-		const trackedRange = editorModel.getDecorationRange(this.linkedSelectionDecorationId);
+		const trackedRange = editorModel.getDecorationRange(link.decorationId);
 		if (!trackedRange) {
 			return;
 		}
@@ -2785,7 +3014,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			newEnd.lineNumber, newEnd.column
 		);
 		const ids = editorModel.deltaDecorations(
-			[this.linkedSelectionDecorationId],
+			[link.decorationId],
 			[{
 				range: newRange,
 				options: {
@@ -2794,7 +3023,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 				},
 			}]
 		);
-		this.linkedSelectionDecorationId = ids[0] ?? null;
+		const newDecorationId = ids[0] ?? null;
+		if (newDecorationId) {
+			link.decorationId = newDecorationId;
+		}
 
 		// Keep the text selected so the user can see what's linked, but only when
 		// the editor already has focus. If the user is driving this update from a

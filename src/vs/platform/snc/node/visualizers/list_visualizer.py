@@ -1020,10 +1020,10 @@ def _render_column_header(col, index, model):
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
-        f'class="col-handle snc-hover-hidden full-opacity-on-hover">U</span>'
+        f'class="col-handle snc-hover-hidden full-opacity-on-hover">⠿</span>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'data-tooltip="Remove column" '
-        f'class="col-remove snc-hover-hidden full-opacity-on-hover">\u00d7</span>'
+        f'class="col-remove snc-hover-hidden full-opacity-on-hover">×</span>'
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
@@ -1124,6 +1124,32 @@ def _resolve_first_and_index(model, eval_in_scope):
     return first, is_index_search
 
 
+def _is_plain_slice_search(model: dict, eval_in_scope) -> bool:
+    """True if the search is a contiguous slice (not a broadcast slice with
+    list bounds).
+
+    Plain slices select a multi-item region, so list-wide actions like Join
+    apply even though `first` is forced True for them.
+    """
+    search = model.get('search')
+    if not search:
+        return False
+    parsed = parse_search_term(search)
+    if not parsed or parsed[0] != 'slice':
+        return False
+    start_s, stop_s = parsed[1]
+    _eval = eval_in_scope or (lambda c: ast.literal_eval(c))
+    try:
+        start_val = _eval(start_s) if start_s else None
+    except Exception:
+        start_val = None
+    try:
+        stop_val = _eval(stop_s) if stop_s else None
+    except Exception:
+        stop_val = None
+    return not (_is_list_of_ints(start_val) or _is_list_of_ints(stop_val))
+
+
 def _preview_expr(model, action, eval_in_scope):
     """Pre-compute the Python expression an action would generate.
 
@@ -1148,6 +1174,47 @@ def _preview_expr(model, action, eval_in_scope):
     except Exception:
         return ''
     return result[1] if result else ''
+
+
+def _compute_predicate_previews(model: dict, eval_in_scope) -> tuple:
+    """Compute (any_val, all_val) boolean previews for the Any/All dropdown.
+
+    Mirrors the string visualizer: evaluate the actual `any(...)` / `all(...)`
+    expressions the buttons would generate so the dropdown can show the live
+    True/False result. Returns (bool|None, bool|None); None means the value is
+    not applicable (e.g. All in first-match mode) or couldn't be computed.
+    """
+    if eval_in_scope is None:
+        return (None, None)
+    search = model.get('search')
+    if search is None or search == '':
+        return (None, None)
+
+    def _eval_bool(action):
+        expr = _preview_expr(model, action, eval_in_scope)
+        if not expr:
+            return None
+        try:
+            return bool(eval_in_scope(expr))
+        except Exception:
+            return None
+
+    first, _ = _resolve_first_and_index(model, eval_in_scope)
+    any_val = _eval_bool('any')
+    # `all` is disabled in first-match mode (a single item), so no preview then.
+    all_val = _eval_bool('all') if not first else None
+    return (any_val, all_val)
+
+
+def _predicate_suffix(val) -> str:
+    """Render the ` (True)`/` (False)` suffix for an Any/All dropdown label.
+
+    The boolean value is wrapped in a `snc-code` span so it renders in the code
+    font while the surrounding label text stays in the UI font.
+    """
+    if val is None:
+        return ''
+    return f' (<span class="snc-code">{html.escape(str(val))}</span>)'
 
 
 def _render_search_box_input(model, eval_in_scope=None):
@@ -1258,9 +1325,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
 
     # 2. Filter / Find One
     filter_lbl = (
-        f'{ICONS["filter"]}<span class="text">Find One<span class="shortcut">\u23ce</span></span>'
+        f'{ICONS["filter"]}<span class="text">Find One<span class="shortcut">⏎</span></span>'
         if first
-        else f'{ICONS["filter"]}<span class="text">Filter<span class="shortcut">\u23ce</span></span>'
+        else f'{ICONS["filter"]}<span class="text">Filter<span class="shortcut">⏎</span></span>'
     )
     parts.append(action_btn(filter_lbl, 'filter', has_search, 'Filter matches (Enter)'))
 
@@ -1283,13 +1350,17 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'</span>'
     )
 
-    # 4. ? (Any/All) dropdown (hover-menu)
+    # 4. ? (Any/All) dropdown (hover-menu). Show a live True/False preview of
+    # the boolean each option would evaluate to (like the string visualizer).
     pred_trigger_cls = 'snc-dropdown-trigger'
+    any_val, all_val = _compute_predicate_previews(model, eval_in_scope)
+    any_suffix = _predicate_suffix(any_val)
+    all_suffix = _predicate_suffix(all_val)
     pred_rows = ''.join([
-        dropdown_row('Any', 'any', has_search),
-        dropdown_row('If Any', 'if_any', has_search),
-        dropdown_row('All', 'all', has_search and not (has_search and first)),
-        dropdown_row('If All', 'if_all', has_search and not (has_search and first)),
+        dropdown_row(f'Any{any_suffix}', 'any', has_search),
+        dropdown_row(f'If Any{any_suffix}', 'if_any', has_search),
+        dropdown_row(f'All{all_suffix}', 'all', has_search and not (has_search and first)),
+        dropdown_row(f'If All{all_suffix}', 'if_all', has_search and not (has_search and first)),
     ])
     parts.append(
         f'<span class="{pred_trigger_cls}">'
@@ -1304,9 +1375,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
 
     # 5. Delete
     delete_lbl = (
-        f'{ICONS["bin"]}<span class="text">Delete First<span class="shortcut">\u2318\u232b</span></span>'
+        f'{ICONS["bin"]}<span class="text">Delete First<span class="shortcut">⌘⌫</span></span>'
         if first
-        else f'{ICONS["bin"]}<span class="text">Delete All<span class="shortcut">\u2318\u232b</span></span>'
+        else f'{ICONS["bin"]}<span class="text">Delete All<span class="shortcut">⌘⌫</span></span>'
     )
     parts.append(action_btn(delete_lbl, 'delete', has_search, 'Delete matches'))
 
@@ -1314,7 +1385,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     # separator <input> lives inside the panel; hovering the panel keeps it
     # open while the user types.
     open_dropdown = model.get('openDropdown')
-    join_enabled = not (has_search and first)
+    # A plain slice targets a contiguous, multi-item region, so Join applies
+    # even though `first` is forced True for slices.
+    join_enabled = not (has_search and first) or _is_plain_slice_search(model, eval_in_scope)
     join_trigger_cls = 'snc-dropdown-trigger' + ('' if join_enabled else ' dimmed')
     join_btn_cls = 'action-button'
     if linked_action == 'join':
@@ -1378,7 +1451,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         parts.append(
             f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
             f' title="Unlink from selected code">'
-            f'<span class="search-icon sm">\u26d3\ufe0e</span>'
+            f'<span class="search-icon sm">⛓\ufe0e</span>'
             f'<span class="text">Unlink</span>'
             f'</span>'
         )

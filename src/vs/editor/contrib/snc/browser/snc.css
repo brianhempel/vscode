@@ -509,6 +509,11 @@
 	background: var(--snc-hover-bg);
 }
 
+.snc-new-var-btn {
+	font-size: 14px;
+	font-weight: 600;
+}
+
 /* Linked state for action buttons */
 .action-button.linked {
 	color: #e0a060;
@@ -523,6 +528,12 @@
 /* Selected dropdown option (e.g. autocomplete highlight) */
 .snc-dropdown-option.selected {
 	background: var(--snc-active-bg);
+}
+
+/* === Generic fallback visualizer === */
+
+.snc-generic-visualizer {
+	padding: 0 4px;
 }
 
 /* === Object visualizer === */

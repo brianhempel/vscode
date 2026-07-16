@@ -16,7 +16,7 @@
     - [x] don't show string tools menu in small mode (b)
     - [x] exit small mode on click instead of on hover (b)
     - [x] make sure lists of string look nice (b)
-    - [ ] don't crash when visualizing adding a list of $T$ to each row of a list of $T$, this creates a recursion because the column config says "when I have a list of $T$, for each row show a list of $T$ (and the for each of those subrows, show a list of $T$, etc)" (b)
+    - [x] don't crash when visualizing adding a list of $T$ to each row of a list of $T$, this creates a recursion because the column config says "when I have a list of $T$, for each row show a list of $T$ (and the for each of those subrows, show a list of $T$, etc)" (b)
 - [x] visual cleanups
 	- [x] override gutter color to be same color as background
 	- [x] strings: always show ^ $ \n in focused mode
@@ -28,12 +28,15 @@
 - [x] as soon as there is an interaction on a visualizer, auto-generate a linked next line of code (string + list visualizers; first interaction inserts and self-links, later interactions update it in place; handles the import-shift case where an auto-added `import re` shifts the visualizer's line)
     - [ ] what is a way for a user to quickly back out and delete that LOC, in case they just wanted to use the *copy* or *drag-n-drop* features?
 - [x] first new object after a for loop needs correct indentation (j)
-- [ ] list join should work on a slice
-- [ ] Restore true/false preview to any/all (like in the string visualizer)
+- [x] list join should work on a slice
+- [x] Restore true/false preview to any/all (like in the string visualizer)
+- [ ] add new var action in tooltip:
+    - [ ] better var names
+    - [ ] shouldn't assign a for-loop expression (or similar) to a var
 - [ ] nicer move/remove/add buttons for table columns (at one point they were just like braille six dots for move and an X and a plus)
 - [ ] errors shouldn't use string visualizer
 - [ ] tooltips (and maybe dropdowns too) shouldn't disappear before the mouse enters them
-- [ ] expression tooltips: add + button that makes a new var with the expression
+- [x] expression tooltips: add + button that makes a new var with the expression
 - [ ] make a pick segment mode for lists: can pick indices, whole rows, or just selected columns
 - [ ] figure out what table widgets should be per column
 - [ ] dictionary visualizer

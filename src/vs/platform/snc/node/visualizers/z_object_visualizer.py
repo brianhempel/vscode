@@ -123,8 +123,7 @@ _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
 def can_visualize(value):
-    return True
-
+    return value is not None and not isinstance(value, int) and not isinstance(value, float)
 
 def get_fields(value):
     if value is None or isinstance(value, (int, float)):
@@ -631,11 +630,8 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     """
     Render the object as HTML with configurable field inspection.
 
-    Primitives (None, int, float, bool) render as repr.
     Objects render as a table of accessor → value with interactive controls.
     """
-    if obj is None or isinstance(obj, int) or isinstance(obj, float):
-        return repr(obj)
 
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
@@ -719,11 +715,11 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 f'<td snc-mouse-down="{html.escape(drag_start_event)}" '
                 f'data-tooltip="Drag to reorder" '
                 f'class="handle full-opacity-on-hover">'
-                f'<span class="snc-hover-hidden">\u2630</span></td>'
+                f'<span class="snc-hover-hidden">☰</span></td>'
                 f'<td snc-mouse-down="{html.escape(remove_event)}" '
                 f'data-tooltip="Remove attribute" '
                 f'class="remove full-opacity-on-hover">'
-                f'<span class="snc-hover-hidden">\u00d7</span></td>'
+                f'<span class="snc-hover-hidden">×</span></td>'
                 f'<td snc-mouse-down="{html.escape(click_event)}" class="field-name">'
                 f'{html.escape(strip_leading_caret(accessor_code))}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
                 f'{value_td}'

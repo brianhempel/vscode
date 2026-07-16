@@ -3126,6 +3126,28 @@ class TestJoinDropdown(unittest.TestCase):
         cls = output[trigger_start + len('<span class="'):trigger_end]
         self.assertNotIn('dimmed', cls)
 
+    def test_join_dropdown_enabled_for_slice(self):
+        # A plain slice selects a contiguous, multi-item region, so Join
+        # applies even though `first` is forced True for slices.
+        lst = [10, 20, 30, 40, 50]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '2:5'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        join_pos = output.find('Join')
+        self.assertGreater(join_pos, -1)
+        trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, join_pos)
+        trigger_end = output.find('"', trigger_start + len('<span class="'))
+        cls = output[trigger_start + len('<span class="'):trigger_end]
+        self.assertNotIn('dimmed', cls)
+
+    def test_join_slice_preview_expr_present(self):
+        # The slice Join rows should carry a runnable preview expression.
+        lst = [10, 20, 30, 40, 50]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model['search'] = '2:5'
+        output = visualize(lst, model, mock_get_visualizer, lambda c: eval(c, {'data': lst}))
+        self.assertIn("&#x27;,&#x27;.join(str(item) for item in data[2:5])", output)
+
     def test_join_dropdown_highlighted_when_linked(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
@@ -3166,6 +3188,66 @@ class TestJoinDropdown(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn("join:", output)
         self.assertIn('JoinSeparatorInput', output)
+
+
+class TestPredicatePreview(unittest.TestCase):
+    """Any/All dropdown shows a live True/False preview (like the string visualizer)."""
+
+    def _scope(self, lst):
+        return lambda c: eval(c, {'data': lst})
+
+    def _viz(self, lst, search, **model_overrides):
+        model = init_model(lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        model['search'] = search
+        model.update(model_overrides)
+        return visualize(lst, model, mock_get_visualizer, self._scope(lst))
+
+    def test_any_shows_true_when_predicate_matches(self):
+        out = self._viz([10, 20, 30], '^ > 15')
+        self.assertIn('Any (<span class="snc-code">True</span>)', out)
+
+    def test_any_shows_false_when_no_match(self):
+        out = self._viz([10, 20, 30], '^ > 100')
+        self.assertIn('Any (<span class="snc-code">False</span>)', out)
+
+    def test_if_any_shows_preview(self):
+        out = self._viz([10, 20, 30], '^ > 15')
+        self.assertIn('If Any (<span class="snc-code">True</span>)', out)
+
+    def test_all_shows_true_when_all_match(self):
+        out = self._viz([10, 20, 30], '^ > 5')
+        self.assertIn('All (<span class="snc-code">True</span>)', out)
+
+    def test_all_shows_false_when_not_all_match(self):
+        out = self._viz([10, 20, 30], '^ > 15')
+        self.assertIn('All (<span class="snc-code">False</span>)', out)
+
+    def test_if_all_shows_preview(self):
+        out = self._viz([10, 20, 30], '^ > 5')
+        self.assertIn('If All (<span class="snc-code">True</span>)', out)
+
+    def test_no_preview_without_source_expr(self):
+        # Without a source expr the expression can't be built, so no suffix.
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        out = visualize(lst, model, mock_get_visualizer, self._scope(lst))
+        self.assertNotIn('Any (<span class="snc-code">', out)
+
+    def test_no_preview_without_eval_in_scope(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        model['search'] = '^ > 15'
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn('Any (<span class="snc-code">', out)
+
+    def test_all_no_preview_in_first_match_mode(self):
+        out = self._viz([10, 20, 30], '^ > 15', first_match=True)
+        # All is disabled in first-match mode → no suffix, but Any still previews.
+        self.assertNotIn('All (<span class="snc-code">', out)
+        self.assertIn('Any (<span class="snc-code">True</span>)', out)
 
 
 class TestSearchInitModel(unittest.TestCase):

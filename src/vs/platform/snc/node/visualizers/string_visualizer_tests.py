@@ -22,6 +22,7 @@ from string_visualizer import (
     DropdownToggle, DropdownSelect,
     SearchBoxInput,
     ReplaceBoxInput, ReplaceToggle,
+    ExpandToggle,
     RepetitionInput,
     FirstMatchToggle,
     CaseSensitiveToggle,
@@ -6822,6 +6823,89 @@ class TestReplaceToggle(unittest.TestCase):
         self.assertFalse(model['replace_visible'])
 
 
+def make_expand_toggle_event() -> dict:
+    """Create an ExpandToggle event dict (simulates clicking the expand/collapse toggle)."""
+    return {
+        'pythonEventStr': repr(ExpandToggle()),
+        'eventJSON': {},
+    }
+
+
+class TestExpandToggle(unittest.TestCase):
+    """Test the expand/collapse toggle for tall (>4 line) strings."""
+
+    def setUp(self):
+        # 5 lines -> more than 4, so the toggle applies.
+        self.tall_value = "l1\nl2\nl3\nl4\nl5"
+        self.short_value = "l1\nl2\nl3\nl4"  # exactly 4 lines
+        self.var_and_exp = ('x', 'x')
+
+    def test_expanded_defaults_false(self):
+        """A freshly initialized model is collapsed."""
+        model = init_model(self.tall_value)
+        self.assertFalse(model.get('expanded', False))
+
+    def test_toggle_flips_expanded(self):
+        """ExpandToggle flips the expanded flag on and off."""
+        model = init_model(self.tall_value)
+        model, _ = update(make_expand_toggle_event(),
+                          self.var_and_exp, model, self.tall_value)
+        self.assertTrue(model['expanded'])
+        model, _ = update(make_expand_toggle_event(),
+                          self.var_and_exp, model, self.tall_value)
+        self.assertFalse(model['expanded'])
+
+    def test_toggle_rendered_when_more_than_4_lines(self):
+        """The toggle is rendered for strings taller than 4 lines."""
+        model = init_model(self.tall_value)
+        html = visualize(self.tall_value, model, None, None)
+        self.assertIn('expand-toggle', html)
+        self.assertIn('ExpandToggle()', html)
+
+    def test_toggle_not_rendered_when_4_or_fewer_lines(self):
+        """The toggle is not rendered for strings 4 lines or shorter."""
+        model = init_model(self.short_value)
+        html = visualize(self.short_value, model, None, None)
+        self.assertNotIn('expand-toggle', html)
+        self.assertNotIn('ExpandToggle', html)
+
+    def test_toggle_rendered_in_small_mode_for_tall_strings(self):
+        """The toggle is offered in the non-focused small preview for tall strings,
+        marked snc-unfocused-clickable so it works without pinning focus."""
+        model = init_model(self.tall_value)
+        html = visualize(self.tall_value, model, None, None, small=True)
+        self.assertIn('expand-toggle', html)
+        self.assertIn('ExpandToggle()', html)
+        self.assertIn('snc-unfocused-clickable', html)
+
+    def test_toggle_not_rendered_in_small_mode_for_short_strings(self):
+        """Short strings aren't clipped, so no toggle in the small preview either."""
+        model = init_model(self.short_value)
+        html = visualize(self.short_value, model, None, None, small=True)
+        self.assertNotIn('expand-toggle', html)
+        self.assertNotIn('ExpandToggle', html)
+
+    def test_expanded_class_present_when_expanded_in_small_mode(self):
+        """When expanded, the small-mode container carries the expanded class."""
+        model = init_model(self.tall_value)
+        model['expanded'] = True
+        html = visualize(self.tall_value, model, None, None, small=True)
+        self.assertIn('expanded', html)
+
+    def test_expanded_class_present_when_expanded(self):
+        """When expanded, the container carries the expanded class."""
+        model = init_model(self.tall_value)
+        model['expanded'] = True
+        html = visualize(self.tall_value, model, None, None)
+        self.assertIn('literal-tool-selected expanded', html)
+
+    def test_expanded_class_absent_when_collapsed(self):
+        """When collapsed, the container does not carry the expanded class."""
+        model = init_model(self.tall_value)
+        html = visualize(self.tall_value, model, None, None)
+        self.assertNotIn('literal-tool-selected expanded', html)
+
+
 class TestReplaceBoxInput(unittest.TestCase):
     """Test replace box input updates model."""
 
@@ -8672,7 +8756,7 @@ class TestTransformPreview(unittest.TestCase):
         import html as html_mod
         full_repr = html_mod.escape(repr(long_value))
         self.assertNotIn(full_repr, html_output)
-        self.assertIn('\u2026', html_output)
+        self.assertIn('…', html_output)
 
     def test_no_preview_in_small_mode(self):
         """Preview is not rendered in small mode."""
@@ -10995,7 +11079,7 @@ class TestDropdownRow(unittest.TestCase):
         """_dropdown_row should not contain the snc-dropdown-copy span."""
         result = _dropdown_row('Any', 'any', True, expr='any(x)')
         self.assertNotIn('snc-dropdown-copy', result)
-        self.assertNotIn('\u29C9', result)
+        self.assertNotIn('⧉', result)
 
     def test_has_snc_py_exp(self):
         """_dropdown_row should emit snc-py-exp with the expression."""

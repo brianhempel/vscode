@@ -117,7 +117,7 @@ class GenericVisualizer(Visualizer):
         return None
 
     def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> str:
-        return wrap_drag_grab(html.escape(repr(value)), var_and_exp)
+        return wrap_drag_grab(f'<span class="snc-generic-visualizer">{html.escape(repr(value))}</span>', var_and_exp)
 
     def update(event: Any, var_and_exp, model: Any, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
         return (model, [])
@@ -282,6 +282,53 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     return edits
 
 
+def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
+                       model: Any, source_code: str) -> List[Dict[str, Any]]:
+    """Convert visualizer commands into the wire dicts sent to the front-end.
+
+    For a NewCode tuple ``(suggest_var_name, expr)`` the assignment name is
+    de-duplicated against ``source_code`` (so a fresh ``str1 = ...`` next to an
+    existing ``str1`` becomes ``str2``), and — crucially — the chosen name is
+    written back into the model's ``linked_prefix``. Without that sync the model
+    keeps the pre-dedup name while the inserted line uses the deduped one, and
+    later in-place updates (ChangeSelectedText) fight over the wrong name.
+
+    All commands are tagged with ``triggerLine`` / ``triggerVisIndex`` so the
+    editor can route each update to the specific visualizer that emitted it
+    (its own linked line), rather than to a single global link.
+    """
+    cmd_dicts: List[Dict[str, Any]] = []
+    for cmd in commands:
+        try:
+            if isinstance(cmd, tuple) and len(cmd) == 2:
+                suggest_var_name, expr = cmd
+                actual_var_name = (
+                    _find_available_variable_name(source_code, suggest_var_name)
+                    if suggest_var_name else None
+                )
+                edits = _build_new_code_edits(source_code, line, suggest_var_name, expr)
+                if actual_var_name and isinstance(model, dict) and model.get('linked_action'):
+                    model['linked_prefix'] = f'{actual_var_name} = '
+                cmd_dict: Dict[str, Any] = {
+                    "type": "NewCode",
+                    "triggerLine": line,
+                    "triggerVisIndex": idx_in_line,
+                    "edits": edits,
+                }
+            else:
+                cmd_dict = {"type": type(cmd).__name__}
+                if hasattr(cmd, '__dataclass_fields__'):
+                    for field_name in cmd.__dataclass_fields__:
+                        cmd_dict[field_name] = getattr(cmd, field_name)
+                cmd_dict["triggerLine"] = line
+                cmd_dict["triggerVisIndex"] = idx_in_line
+            cmd_dicts.append(cmd_dict)
+        except Exception:
+            # Never let a malformed command break user program execution.
+            pass
+    return cmd_dicts
+
+
 def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None) -> None:
     """
     Log any runtime value for visualization using the custom visualizer system.
@@ -365,6 +412,12 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
     except Exception as vis_err:
         html_content = f'<div style="white-space: pre-wrap;">{html.escape(type(vis_err).__name__)} during visualization. {html.escape(traceback.format_exc())}</div>'
 
+    # Convert commands to wire dicts BEFORE streaming the item. NewCode var-name
+    # de-duplication writes the chosen name back into `model`, and the item
+    # carries `model`, so this must run first for the streamed model to reflect
+    # the de-duplicated (non-colliding) assignment name.
+    cmd_dicts = _commands_to_dicts(commands, line, idx_in_line, model, _source_code)
+
     # Add to the global visualization data that will be output as JSON
     item = {
         "line": line,
@@ -390,22 +443,8 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         pass
 
     # Stream any commands from the visualizer
-    for cmd in commands:
+    for cmd_dict in cmd_dicts:
         try:
-            if isinstance(cmd, tuple) and len(cmd) == 2:
-                suggest_var_name, expr = cmd
-                edits = _build_new_code_edits(_source_code, line, suggest_var_name, expr)
-                cmd_dict: Dict[str, Any] = {
-                    "type": "NewCode",
-                    "triggerLine": line,
-                    "triggerVisIndex": idx_in_line,
-                    "edits": edits
-                }
-            else:
-                cmd_dict = {"type": type(cmd).__name__}
-                if hasattr(cmd, '__dataclass_fields__'):
-                    for field_name in cmd.__dataclass_fields__:
-                        cmd_dict[field_name] = getattr(cmd, field_name)
             cmd_msg: Dict[str, Any] = {"type": "command", "command": cmd_dict}
             if _current_run_id:
                 cmd_msg["run_id"] = _current_run_id

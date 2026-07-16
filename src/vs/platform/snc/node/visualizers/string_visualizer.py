@@ -195,6 +195,11 @@ class ReplaceToggle:
     pass
 
 @dataclass(frozen=True, slots=True)
+class ExpandToggle:
+    """Expand/collapse the string-visualizer pane (only offered for tall strings)."""
+    pass
+
+@dataclass(frozen=True, slots=True)
 class FirstMatchToggle:
     pass
 
@@ -478,9 +483,9 @@ def _format_repetition(min_count, max_count) -> str:
     elif min_count == 0 and max_count == 1:
         return '?'
     elif min_count == 0:
-        return f'\u2264{max_count}'
+        return f'≤{max_count}'
     elif max_count == float('inf'):
-        return f'\u2265{min_count}'
+        return f'≥{min_count}'
     else:
         return f'{min_count}-{max_count}'
 
@@ -3169,7 +3174,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         unlink_event = repr(Unlink())
         parts.append(
             f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
-            f'><span class="search-icon sm">\u26d3\ufe0e</span><span class="text">Unlink</span></span>'
+            f'><span class="search-icon sm">⛓\ufe0e</span><span class="text">Unlink</span></span>'
         )
 
 
@@ -3341,10 +3346,30 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         raw = value or ""
         display = "'" + raw.replace("\n", "\n ") + "'"
         size_styling = f'style="max-width:{max_width}px"' if max_width is not None else ''
+
+        # Expand/collapse toggle is offered even in the non-focused (small)
+        # preview so a tall string can be peeked at without pinning focus to
+        # its line. Mirrors the focused-mode behavior below: only tall strings
+        # (>4 lines) get it, since shorter ones aren't clipped by the 80px pane.
+        # The toggle is marked snc-unfocused-clickable so the frontend routes
+        # its mousedown through as an ExpandToggle event instead of swallowing
+        # it as a click-to-focus (see snc.ts).
+        expanded = bool(model.get('expanded', False)) if model else False
+        expanded_class = ' expanded' if expanded else ''
+        line_count = (raw.count('\n') + 1) if raw else 1
+        expand_toggle_html = ''
+        if line_count > 4:
+            expand_toggle_html = (
+                f'<div class="expand-toggle" draggable="false" snc-unfocused-clickable'
+                f' snc-mouse-down="{html.escape(repr(ExpandToggle()))}"'
+                f' data-tooltip="{"Collapse" if expanded else "Expand"}">'
+                f'<span class="chevron">⌄</span></div>'
+            )
+
         small_html = (
-            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container literal-tool-selected small"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container literal-tool-selected small{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
             f'{text_group_span(list(display), 0)}'
-            f'</div></div></div>'
+            f'</div></div>{expand_toggle_html}</div>'
         )
         return [wrap_drag_grab(small_html, var_and_exp)]
 
@@ -3578,14 +3603,29 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     line_count = (value.count('\n') + 1) if value else 1
     compact_class = ' tool-toolbar-compact-container' if line_count < 4 else ''
 
+    # Expand/collapse toggle: only offered for tall strings (>4 lines), where the
+    # 80px-tall pane clips the content. Clicking it expands the pane to its
+    # 600px max-height (see string-visualizer.css). The container carries an
+    # `expanded` class when open so the CSS can bump the max-height and rotate
+    # the chevron. Not shown in small mode (handled by the early return above).
+    expanded = bool(model.get('expanded', False)) if model else False
+    expanded_class = ' expanded' if expanded else ''
+    expand_toggle_html = ''
+    if line_count > 4:
+        expand_toggle_html = (
+            f'<div class="expand-toggle" snc-mouse-down="{html.escape(repr(ExpandToggle()))}"'
+            f' data-tooltip="{"Collapse" if expanded else "Expand"}">'
+            f'<span class="chevron">⌄</span></div>'
+        )
+
     # Add tabindex to make div focusable for keyboard events, and snc-key-down handler
     # doing it like this to try to make less string garbage. Small mode returned
     # early above (self-wrapped for drag), so this is always the full/interactive
     # path - it keeps its mouse events and is not a drag handle.
     return [
-        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container {active_tool}-tool-selected{compact_class}">{tool_toolbar_html}<div class="string-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}">{tool_toolbar_html}<div class="string-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
         *char_els,
-        f"""</div></div>{search_box_html}</div>""",
+        f"""</div></div>{expand_toggle_html}{search_box_html}</div>""",
     ]
 
 
@@ -3990,6 +4030,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "hoverIdx": None,         # Internal index of the character currently hovered
         "hoverType": None,        # "literal" or "fuzzy" based on mouse position in top/bottom half
         "replace_visible": False, # Whether the replace input box is visible
+        "expanded": False,        # Whether the (tall) string-visualizer pane is expanded
         "replace_text": None,     # The replacement text (a Python string literal, e.g., "'world'")
         "linked_action": None,         # When linked: the action name (e.g. 'replace')
         "linked_source_expr": None,  # When linked: variable from parsed code (e.g. 'str1')
@@ -5484,6 +5525,9 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
 
         case ReplaceToggle():
             model['replace_visible'] = not model.get('replace_visible', False)
+
+        case ExpandToggle():
+            model['expanded'] = not model.get('expanded', False)
 
         case ReplaceBoxInput(value=val):
             model['replace_text'] = val if val else None

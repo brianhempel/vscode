@@ -63,13 +63,13 @@ for _icon in _ICON_NAMES:
 # =============================================================================
 
 def truncate_str(s, max_len):
-    """Truncate a string, showing beginning + \u2026 + end if too long."""
+    """Truncate a string, showing beginning + … + end if too long."""
     if len(s) <= max_len:
         return s
     half = max_len // 2
     if max_len >= 5:
-        return s[:half] + '\u2026' + s[-half + 1:]
-    return s[:max(max_len - 1, 0)] + '\u2026'
+        return s[:half] + '…' + s[-half + 1:]
+    return s[:max(max_len - 1, 0)] + '…'
 
 
 def safe_repr(value):

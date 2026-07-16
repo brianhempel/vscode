@@ -1494,7 +1494,7 @@ class TestSmallView(unittest.TestCase):
         html_out = self._small(obj, model, max_width=300)
         # The 200-char string should be truncated, not fully present
         self.assertNotIn('x' * 200, html_out)
-        self.assertIn('\u2026', html_out)
+        self.assertIn('…', html_out)
 
     def test_skips_callable_fields(self):
         """Callable fields (methods) should be omitted in small view."""

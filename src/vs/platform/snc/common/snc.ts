@@ -46,7 +46,10 @@ export type SNCCommand =
 	// target) is the variable name the visualizer now suggests for the linked
 	// line. The editor renames the assignment target to it only if the prior
 	// name is unused elsewhere in the document.
-	| { type: 'ChangeSelectedText'; text: string; new_var_name?: string | null };
+	// triggerLine/triggerVisIndex identify the visualizer that emitted this
+	// update, so the editor can find that visualizer's own linked range instead
+	// of a single global one (avoids cross-talk between multiple linked lines).
+	| { type: 'ChangeSelectedText'; text: string; new_var_name?: string | null; triggerLine: number; triggerVisIndex: number };
 
 /**
  * Timing data for visualizer performance measurement.
