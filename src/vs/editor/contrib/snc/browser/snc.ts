@@ -452,15 +452,19 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Build a "+" button for an expression tooltip. Clicking it assigns the
-	 * expression to a new variable on the line below (via onInsertNewVar) and
-	 * dismisses the tooltip.
+	 * Build a "+" button for an expression tooltip. Clicking it inserts the
+	 * expression as new code on the line below (via onInsertNewVar) and
+	 * dismisses the tooltip. An assignable expression is wrapped in a
+	 * `<name> = <expr>` assignment; a whole statement (e.g. a visualizer-generated
+	 * `for`/`if` snippet) is inserted verbatim without an assignment.
 	 */
 	private createNewVarButton(expression: string, hideTooltip: () => void): HTMLButtonElement {
 		const newVarBtn = document.createElement('button');
 		newVarBtn.className = 'snc-copy-btn snc-new-var-btn';
 		newVarBtn.textContent = '+';
-		newVarBtn.title = 'Assign to a new variable';
+		newVarBtn.title = isAssignableExpression(expression)
+			? 'Assign to a new variable'
+			: 'Insert as new code';
 		newVarBtn.addEventListener('mousedown', (e) => {
 			e.preventDefault();
 			e.stopPropagation();
@@ -1635,6 +1639,84 @@ function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine:
 	}
 
 	return null;
+}
+
+/**
+ * Whether `expr` is a Python expression that can legally sit on the right-hand
+ * side of an assignment (`<name> = <expr>`). Some visualizer-generated snippets
+ * are whole statements rather than expressions — e.g. `for item in xs:\n    pass`
+ * or `if any(...):\n    pass` — and assigning those to a variable would produce
+ * invalid Python, so the tooltip's "new var" button is suppressed for them.
+ */
+export function isAssignableExpression(expr: string): boolean {
+	const e = expr.trim();
+	if (!e) { return false; }
+	// Generated statements (for/if/while bodies) always span multiple lines.
+	if (/\n/.test(e)) { return false; }
+	// A leading statement keyword means it isn't an expression.
+	if (/^(?:for|while|if|elif|else|with|def|class|return|import|from|pass|raise|try|except|finally|del|global|nonlocal|assert|break|continue|async|yield)\b/.test(e)) {
+		return false;
+	}
+	// A bare assignment/target list (`x = ...`, `a, b = ...`) isn't an RHS.
+	// Guard against comparison/aug ops so `x == y`, `x <= y`, `x += y` stay.
+	if (/^[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*=(?!=)/.test(e)) { return false; }
+	return true;
+}
+
+const NEW_VAR_METHOD_NAMES: Record<string, string> = {
+	join: 'joined', upper: 'uppercased', lower: 'lowercased',
+	strip: 'stripped', lstrip: 'stripped', rstrip: 'stripped',
+	split: 'parts', rsplit: 'parts', splitlines: 'lines',
+	replace: 'replaced', title: 'titled', capitalize: 'capitalized',
+	findall: 'matches', finditer: 'matches', group: 'group', groups: 'groups',
+	keys: 'keys', values: 'values', items: 'entries',
+};
+
+const NEW_VAR_FUNC_NAMES: Record<string, string> = {
+	len: 'length', sum: 'total', min: 'minimum', max: 'maximum',
+	sorted: 'ordered', reversed: 'reversed', any: 'result', all: 'result',
+	next: 'match', list: 'items', set: 'unique', tuple: 'items',
+	dict: 'mapping', abs: 'absolute', round: 'rounded', count: 'count',
+};
+
+/**
+ * Suggest a descriptive base variable name for an expression, so the "new var"
+ * tooltip action inserts something more meaningful than `new_var`. Falls back to
+ * `new_var` when no reasonable name can be derived. The caller is responsible for
+ * de-duplicating the name against identifiers already in the document.
+ *
+ * Heuristics (first match wins): a trailing method call (`s.upper()` → `uppercased`),
+ * a leading builtin/function call (`len(x)` → `length`, `foo(...)` → `foo`), a
+ * comprehension's iterable (`[i for i in orfs]` → `orfs`), or the leading root
+ * identifier of a subscript/attribute chain (`data[0]` → `data`).
+ */
+export function suggestVarNameForExpression(expr: string): string {
+	const e = expr.trim();
+	if (!e) { return 'new_var'; }
+
+	// Prefer the last method call: `<...>.method(...)`.
+	const methodMatches = [...e.matchAll(/\.([A-Za-z_]\w*)\s*\(/g)];
+	if (methodMatches.length > 0) {
+		const name = methodMatches[methodMatches.length - 1][1];
+		return NEW_VAR_METHOD_NAMES[name] ?? name;
+	}
+
+	// A leading function/builtin call: `len(x)`, `any(...)`, `foo(...)`.
+	const funcMatch = e.match(/^([A-Za-z_]\w*)\s*\(/);
+	if (funcMatch) {
+		const name = funcMatch[1];
+		return NEW_VAR_FUNC_NAMES[name] ?? name;
+	}
+
+	// A comprehension / generator: name after the iterable's root identifier.
+	const compMatch = e.match(/\bfor\b[\s\S]*?\bin\s+([A-Za-z_]\w*)/);
+	if (compMatch) { return compMatch[1]; }
+
+	// Subscript / attribute / plain reference: use the leading root identifier.
+	const rootMatch = e.match(/^([A-Za-z_]\w*)/);
+	if (rootMatch) { return rootMatch[1]; }
+
+	return 'new_var';
 }
 
 export class SNCController extends Disposable implements IEditorContribution {
@@ -2854,10 +2936,44 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
-	 * Insert `new_var = <expression>` on the line below `lineNumber`, matching
-	 * that line's indentation, and place the cursor on the new variable name so
-	 * the user can rename it immediately. Triggered by the "+" button in an
-	 * expression tooltip.
+	 * Return a variable name based on `desired` that doesn't collide with any
+	 * identifier already present in the document. Mirrors the Python runner's
+	 * `_find_available_variable_name`: appends/increments a numeric suffix
+	 * (`data` → `data2` → `data3`, `x1` → `x2`).
+	 */
+	private findAvailableVarName(desired: string): string {
+		const model = this.editor.getModel();
+		if (!model) {
+			return desired;
+		}
+		const existing = new Set(model.getValue().match(/[A-Za-z_]\w*/g) ?? []);
+		if (!existing.has(desired)) {
+			return desired;
+		}
+		const suffixMatch = desired.match(/^(.*?)(\d+)$/);
+		let base: string;
+		let next: number;
+		if (suffixMatch) {
+			base = suffixMatch[1];
+			next = parseInt(suffixMatch[2], 10) + 1;
+		} else {
+			base = desired;
+			next = 2;
+		}
+		while (existing.has(`${base}${next}`)) {
+			next++;
+		}
+		return `${base}${next}`;
+	}
+
+	/**
+	 * Insert the expression as new code on the line below `lineNumber`, matching
+	 * that line's indentation. An assignable expression becomes a
+	 * `<name> = <expr>` assignment (name derived from the expression and
+	 * de-duplicated); a whole statement (e.g. a `for`/`if` snippet) is inserted
+	 * verbatim without an assignment. The cursor is placed on the identifier the
+	 * user is most likely to rename (the assignment target or loop variable).
+	 * Triggered by the "+" button in an expression tooltip.
 	 */
 	private insertNewVarFromExpression(lineNumber: number, expression: string): void {
 		const model = this.editor.getModel();
@@ -2875,7 +2991,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const indent = firstNonWs > 0
 			? model.getLineContent(lineNumber).slice(0, firstNonWs - 1)
 			: '';
-		const editText = `${indent}new_var = ${expr}`;
+		let editText: string;
+		if (isAssignableExpression(expr)) {
+			// Derive a descriptive name from the expression, de-duplicated against
+			// identifiers already present so we don't shadow an existing variable.
+			const varName = this.findAvailableVarName(suggestVarNameForExpression(expr));
+			editText = `${indent}${varName} = ${expr}`;
+		} else {
+			// A whole statement (e.g. a `for`/`if` snippet): insert it verbatim,
+			// indenting every non-empty line to the trigger line's block level.
+			editText = expr.split('\n').map(line => (line ? indent + line : line)).join('\n');
+		}
 
 		const col = model.getLineMaxColumn(lineNumber);
 		const editOperation = {

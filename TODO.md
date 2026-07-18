@@ -32,7 +32,7 @@
 - [x] Restore true/false preview to any/all (like in the string visualizer)
 - [ ] add new var action in tooltip:
     - [ ] better var names
-    - [ ] shouldn't assign a for-loop expression (or similar) to a var
+    - [x] shouldn't assign a for-loop expression (or similar) to a var
 - [ ] nicer move/remove/add buttons for table columns (at one point they were just like braille six dots for move and an X and a plus)
 - [ ] errors shouldn't use string visualizer
 - [ ] tooltips (and maybe dropdowns too) shouldn't disappear before the mouse enters them
@@ -43,4 +43,4 @@
 - [ ] group by (i.e. dictionaries of lists)
 - [ ] generic object visualizer
 - [ ] make the above work nicely for large, nested JSON blobs (Ultorg lol)
-- [ ] use vs code debug config to know how to launch python and app
+- [ ] use VS Code debug config to know how to launch python and app
