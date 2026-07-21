@@ -755,10 +755,23 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const triggerRect = trigger.getBoundingClientRect();
 		const align = panel.getAttribute('snc-dropdown-align') || 'left';
 
+		// Capture child-key chain before hoisting (clone loses nested ancestors).
+		// Same pattern as hoistDropdownPanel / hoistSegmentLabels.
+		const childKeyChain: string[] = [];
+		let ancestor: Element | null = trigger.parentElement;
+		while (ancestor && ancestor !== this.domNode) {
+			const ck = ancestor.getAttribute('snc-child-key');
+			if (ck) { childKeyChain.push(ck); }
+			ancestor = ancestor.parentElement;
+		}
+
 		const clone = panel.cloneNode(true) as HTMLElement;
 		clone.classList.add('snc-hover-menu');
 		clone.style.display = '';
 		clone.removeAttribute('data-hover-menu');
+		if (childKeyChain.length > 0) {
+			clone.setAttribute('snc-child-key-chain', JSON.stringify(childKeyChain));
+		}
 
 		if (align === 'right') {
 			clone.style.right = `${window.innerWidth - triggerRect.right}px`;
@@ -767,9 +780,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 		clone.style.top = `${triggerRect.bottom + 2}px`;
 
-		// Wire up event listeners on the hoisted panel
+		// Wire up event listeners on the hoisted panel. Walk only within the
+		// clone, then re-apply the stashed ChildEvent envelope so nested
+		// visualizers (e.g. string tool select inside a list cell) still route.
 		const wrapEvent = (raw: string, attrEl: Element): string => {
-			return this.wrapWithChildKeys(raw, attrEl.parentElement, this.domNode);
+			let wrapped = this.wrapWithChildKeys(raw, attrEl.parentElement, clone);
+			const chainStr = clone.getAttribute('snc-child-key-chain');
+			if (chainStr) {
+				for (const ck of JSON.parse(chainStr) as string[]) {
+					wrapped = `ChildEvent(${ck}, ${JSON.stringify(wrapped)})`;
+				}
+			}
+			return wrapped;
 		};
 
 		this.hoverMenuListeners.push(
@@ -1992,6 +2014,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// so stale visualizers don't linger on deleted or shifted lines.
 		this.adjustVisualizationItemsForContentChange(e);
 
+		// Drop links whose tracked range collapsed or vanished (e.g. the user
+		// deleted the linked line). Skip while we ourselves are rewriting a
+		// linked range via ChangeSelectedText — that edit is not a teardown.
+		if (!this.suppressSelectionEvent) {
+			this.pruneDeadLinks();
+		}
+
 		// Debounce to avoid running on every keystroke
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
@@ -2074,8 +2103,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// stickiness; here we only fix each link's (line) key so a later
 			// ChangeSelectedText from that visualizer still resolves to it.
 			if (this.linkedSelections.length > 0) {
-				const editorModel = this.editor.getModel();
 				const survivingLinks: typeof this.linkedSelections = [];
+				const deadLinks: typeof this.linkedSelections = [];
 				for (const link of this.linkedSelections) {
 					if (isStartOfLineInsertion && link.line >= startLine) {
 						link.line += lineDelta;
@@ -2086,15 +2115,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 						link.line += lineDelta;
 						survivingLinks.push(link);
 					} else if (lineDelta < 0 && link.line > startLine + newLineCount - 1) {
-						// The visualizer's trigger line was deleted; drop the link.
-						if (editorModel) {
-							editorModel.deltaDecorations([link.decorationId], []);
-						}
+						// The visualizer's trigger line was deleted; tear down.
+						deadLinks.push(link);
 					} else {
 						survivingLinks.push(link);
 					}
 				}
 				this.linkedSelections = survivingLinks;
+				for (const link of deadLinks) {
+					this.teardownLink(link);
+				}
 			}
 		}
 
@@ -2284,25 +2314,53 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
-	 * Tear down every user-established (non-auto) link: remove its decoration and
-	 * notify its visualizer so its Python model clears its linked state. Auto
-	 * links (from auto-generated LOCs) are left intact.
+	 * Fully tear down a link: remove its decoration, drop it from
+	 * linkedSelections, and notify the visualizer so its Python model clears
+	 * linked_action (stops emitting ChangeSelectedText into a dead range).
+	 */
+	private teardownLink(link: { line: number; visIndex: number; decorationId: string; autoEstablished: boolean }): void {
+		const editorModel = this.editor.getModel();
+		if (editorModel) {
+			editorModel.deltaDecorations([link.decorationId], []);
+		}
+		this.linkedSelections = this.linkedSelections.filter(l => l !== link);
+		const event: UiEvent = {
+			line: link.line,
+			visIndex: link.visIndex,
+			pythonEventStr: 'lambda e: Unlink()',
+			eventJSON: { type: 'unlink' },
+		};
+		this.sendEventToPython(event);
+	}
+
+	/**
+	 * Tear down every link whose tracked decoration is missing or empty —
+	 * typically because the user deleted the linked line of code. Without this,
+	 * a later visualizer event would rewrite into the collapsed join point
+	 * (e.g. append the expression to the end of the previous line).
+	 */
+	private pruneDeadLinks(): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel || this.linkedSelections.length === 0) {
+			return;
+		}
+		const dead = this.linkedSelections.filter(link => {
+			const range = editorModel.getDecorationRange(link.decorationId);
+			return !range || range.isEmpty();
+		});
+		for (const link of dead) {
+			this.teardownLink(link);
+		}
+	}
+
+	/**
+	 * Tear down every user-established (non-auto) link. Auto links (from
+	 * auto-generated LOCs) are left intact.
 	 */
 	private unlinkUserSelections(): void {
-		const editorModel = this.editor.getModel();
 		const userLinks = this.linkedSelections.filter(l => !l.autoEstablished);
-		this.linkedSelections = this.linkedSelections.filter(l => l.autoEstablished);
 		for (const link of userLinks) {
-			if (editorModel) {
-				editorModel.deltaDecorations([link.decorationId], []);
-			}
-			const event: UiEvent = {
-				line: link.line,
-				visIndex: link.visIndex,
-				pythonEventStr: 'lambda e: Unlink()',
-				eventJSON: { type: 'unlink' },
-			};
-			this.sendEventToPython(event);
+			this.teardownLink(link);
 		}
 	}
 
@@ -3111,7 +3169,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 		const trackedRange = editorModel.getDecorationRange(link.decorationId);
-		if (!trackedRange) {
+		// Missing or empty range means the linked text is gone (deleted line,
+		// cleared selection). Tear down instead of inserting at the collapse
+		// point (which would append to the end of the previous line).
+		if (!trackedRange || trackedRange.isEmpty()) {
+			this.teardownLink(link);
 			return;
 		}
 

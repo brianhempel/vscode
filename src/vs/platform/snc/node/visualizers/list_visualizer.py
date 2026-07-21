@@ -731,12 +731,19 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 def _emit_linked_update(expr: str, model: dict, commands: list,
                         suggest_name: 'str | None' = None,
                         rename: bool = False) -> None:
-    """Send expression intent while leaving the concrete target to the editor."""
+    """Send expression intent while leaving the concrete target to the editor.
+
+    No-op when *expr* matches the last expression written for this link, so
+    events that do not change the search context do not rewrite the linked LOC.
+    """
+    if expr == model.get('last_linked_expr'):
+        return
     text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
     try:
         ast.parse(text)
     except SyntaxError:
         return
+    model['last_linked_expr'] = expr
     commands.append(ChangeSelectedText(
         expression=expr,
         suggested_var_name=suggest_name if rename else None,
@@ -888,6 +895,7 @@ _SEARCH_DEFAULTS = {
     'linked_action': None,
     'linked_source_expr': None,
     'linked_has_assignment': None,
+    'last_linked_expr': None,
     'auto_linked_once': False,
 }
 
@@ -1923,11 +1931,19 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['linked_action'] = parsed['action']
                     model['linked_source_expr'] = parsed['source_expr']
                     model['linked_has_assignment'] = bool(prefix)
+                    ctx = _get_search_context(model, var_and_exp,
+                                              source_expr=model['linked_source_expr'],
+                                              eval_in_scope=eval_in_scope)
+                    if ctx:
+                        result = generate_action(parsed['action'], ctx)
+                        if result:
+                            model['last_linked_expr'] = result[1]
 
         case Unlink():
             model['linked_action'] = None
             model['linked_source_expr'] = None
             model['linked_has_assignment'] = None
+            model['last_linked_expr'] = None
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
         ctx = _get_search_context(model, var_and_exp,
@@ -1975,5 +1991,6 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
     model['linked_action'] = _AUTO_LINK_ACTION
     model['linked_source_expr'] = ctx.get('source_expr')
     model['linked_has_assignment'] = bool(suggest_name)
+    model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
     commands.append(result)

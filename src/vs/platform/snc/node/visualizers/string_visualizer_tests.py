@@ -32,6 +32,7 @@ from string_visualizer import (
     SegmentToggle,
     CopyToClipboard,
     ChangeSelectedText,
+    Unlink,
     _format_slice_expr, _format_index_expr,
     SliceLabelInput,
     compute_internal_length,
@@ -1000,16 +1001,15 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
         self.assertEqual(model['linked_action'], 'find_or_map')
 
-    def test_enter_updates_linked_code(self):
-        """After auto-link, Enter re-emits the find expr via ChangeSelectedText."""
+    def test_enter_skips_unchanged_linked_expression(self):
+        """After auto-link, Enter with the same find expr emits no ChangeSelectedText."""
         model = self._create_hello_selection(self.model)
 
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, model, self.value)
 
-        self.assertEqual(len(commands), 1)
-        self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("list(re.finditer(r'hello', x, flags=re.M))", commands[0].expression)
+        self.assertEqual(commands, [])
+        self.assertEqual(model['linked_action'], 'find_or_map')
 
     def test_enter_without_selection_does_nothing(self):
         """Enter without selection produces no commands."""
@@ -3223,8 +3223,8 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
 class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
     """Test code generation from a search-box-entered regex.
 
-    Typing a pattern now auto-inserts a linked find LOC (a tuple); the
-    subsequent Enter re-syncs that linked LOC via ChangeSelectedText.
+    Typing a pattern auto-inserts a linked find LOC. Enter with an unchanged
+    expression is a no-op (does not re-emit ChangeSelectedText).
     """
 
     def setUp(self):
@@ -3233,7 +3233,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
         self.var_and_exp = ('x', 'x')
 
     def test_search_box_input_auto_inserts_find_code(self):
-        """Typing a grouped regex auto-inserts the find LOC; Enter re-syncs it."""
+        """Typing a grouped regex auto-inserts the find LOC; Enter is a no-op."""
         model, insert_cmds = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
                                     self.var_and_exp, self.model, self.value)
         self.assertEqual(len(insert_cmds), 1)
@@ -3243,9 +3243,8 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
 
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, model, self.value)
-        self.assertEqual(len(commands), 1)
-        self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("list(re.finditer(r'hello.*world'", commands[0].expression)
+        self.assertEqual(commands, [])
+        self.assertEqual(model['linked_action'], 'find_or_map')
 
     def test_search_box_input_auto_inserts_simple_regex(self):
         """A simple regex without groups auto-inserts the find LOC."""
@@ -3342,6 +3341,52 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
         self.assertEqual(model['linked_action'], 'find_or_map')
 
 
+class TestSkipUnchangedLinkedExpression(unittest.TestCase):
+    """Once linked, do not emit ChangeSelectedText when the presumptive
+    expression is identical to what was last written (e.g. hover / Enter)."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        self.model = init_model(self.value)
+        self.model, first = update(make_search_box_input_event(r"r'hello'"),
+                                   self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(first), 1)
+        self.assertIsInstance(first[0], tuple)
+        self.assertEqual(self.model.get('last_linked_expr'), first[0][1])
+
+    def test_hover_mouse_move_emits_nothing(self):
+        """Hover updates hoverIdx but must not rewrite the linked LOC."""
+        model, commands = update(
+            make_mouse_move_event(4, buttons=0, legacy_index=False),
+            self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+        self.assertEqual(model['linked_action'], 'find_or_map')
+
+    def test_changed_search_emits_change_selected_text(self):
+        """A search edit that changes the expression still updates the linked LOC."""
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertIn("re.finditer(r'world'", commands[0].expression)
+        self.assertEqual(model['last_linked_expr'], commands[0].expression)
+
+    def test_repeat_identical_search_emits_nothing(self):
+        """Re-sending the same search value must not emit another ChangeSelectedText."""
+        model, commands = update(make_search_box_input_event(r"r'hello'"),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+
+    def test_unlink_clears_last_linked_expr(self):
+        model, commands = update(
+            {'pythonEventStr': repr(Unlink()), 'eventJSON': {'type': 'unlink'}},
+            self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+        self.assertIsNone(model.get('linked_action'))
+        self.assertIsNone(model.get('last_linked_expr'))
+
+
 class TestLinkedActionChangeRenamesVar(unittest.TestCase):
     """When the action changes on a linked line, the ChangeSelectedText command
     should carry the newly-suggested variable name so the editor can rename the
@@ -3424,14 +3469,12 @@ class TestSingleQuoteEscaping(unittest.TestCase):
                          var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(5),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(5),
+        model, commands = update(make_mouse_up_event(5),
                          var_and_exp, model, value)
-
-        model, commands = update(make_key_down_event('Enter'),
-                                var_and_exp, model, value)
+        # Auto-link inserts the find LOC; expression must use a valid raw string.
         self.assertEqual(len(commands), 1)
-        self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("r'it\\'s'", commands[0].expression)
+        self.assertIsInstance(commands[0], tuple)
+        self.assertIn("r'it\\'s'", commands[0][1])
 
     def test_backspace_with_single_quote_generates_valid_raw_string(self):
         value = "it's here"
@@ -3493,14 +3536,17 @@ class TestBareExpressionSuggestions(unittest.TestCase):
         self.assertEqual(commands[0][0], 'result_slices')
         self.assertEqual(model['linked_source_expr'], '(str3)')
 
+        # Switching action still suggests result_* (not str3_*) when renaming.
         model, commands = update(
-            make_action_button_event('find_or_map'),
+            make_action_button_event('count'),
             (None, 'str3'),
             model,
             "hello world",
             eval_in_scope=eval_in_scope,
         )
-        self.assertEqual(commands[0].suggested_var_name, 'result_slices')
+        self.assertEqual(len(commands), 1)
+        self.assertIsInstance(commands[0], ChangeSelectedText)
+        self.assertEqual(commands[0].suggested_var_name, 'result_count')
 
 
 class TestSearchBoxEscape(unittest.TestCase):
@@ -6940,6 +6986,38 @@ class TestExpandToggle(unittest.TestCase):
         model = init_model(self.tall_value)
         html = visualize(self.tall_value, model, None, None)
         self.assertNotIn('literal-tool-selected expanded', html)
+
+    def test_fresh_literal_selection_preserves_expanded(self):
+        """Starting a fresh literal selection must not collapse an expanded pane.
+
+        MouseDown's fresh-start path re-inits the model (to clear selection
+        state) but must preserve UI chrome like expanded.
+        """
+        model = init_model(self.tall_value)
+        model, _ = update(make_expand_toggle_event(),
+                          self.var_and_exp, model, self.tall_value)
+        self.assertTrue(model['expanded'])
+
+        # Click index 1 ('l' of l1) to start a fresh literal selection.
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
+                          self.var_and_exp, model, self.tall_value)
+        self.assertTrue(model['expanded'],
+                        'fresh MouseDown must preserve expanded=True')
+        self.assertTrue(model['dragging'])
+
+    def test_fresh_index_selection_preserves_expanded(self):
+        """Starting a fresh index selection must not collapse an expanded pane."""
+        model = init_model(self.tall_value)
+        model, _ = update(make_expand_toggle_event(),
+                          self.var_and_exp, model, self.tall_value)
+        model['tool'] = 'index'
+        self.assertTrue(model['expanded'])
+
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
+                          self.var_and_exp, model, self.tall_value)
+        self.assertTrue(model['expanded'],
+                        'index-mode MouseDown must preserve expanded=True')
+        self.assertEqual(model['anchorType'], 'index')
 
 
 class TestReplaceBoxInput(unittest.TestCase):

@@ -4034,6 +4034,8 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "linked_action": None,         # When linked: the action name (e.g. 'replace')
         "linked_source_expr": None,  # When linked: variable from parsed code (e.g. 'str1')
         "linked_has_assignment": None, # When linked: whether the selected code is an assignment
+        "last_linked_expr": None,      # Last expression written to the linked LOC; skip
+                                       # ChangeSelectedText when unchanged (hover, etc.)
         "auto_linked_once": False,     # True once an interaction has auto-inserted+linked a LOC
                                        # (prevents inserting a second line on later interactions)
         "tool": "literal",             # Active selection tool: 'literal', 'fuzzy', 'index', or 'pick'
@@ -5179,9 +5181,11 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     return (model, commands)
                 saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_has_assignment'))
                 saved_tool = model.get('tool', 'literal')
+                saved_expanded = model.get('expanded', False)
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
                 model['linked_action'], model['linked_source_expr'], model['linked_has_assignment'] = saved_linked
                 model['tool'] = saved_tool
+                model['expanded'] = saved_expanded
                 model['anchorIdx'] = idx
                 model['anchorType'] = 'index'
                 model['cursorIdx'] = idx
@@ -5231,13 +5235,16 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model['extendDirection'] = None  # Not a simple left/right extend
                 model['insertAfterSegment'] = fuzzy_info['segment_index']  # Insert after this segment
             else:
-                # Fresh start: reset selection, preserving linked-editing state, search flags, and active tool
+                # Fresh start: reset selection, preserving linked-editing state,
+                # search flags, active tool, and expand/collapse chrome.
                 saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_has_assignment'))
                 saved_flags = get_search_flags(model.get('search'))
                 saved_tool = model.get('tool', 'literal')
+                saved_expanded = model.get('expanded', False)
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
                 model['linked_action'], model['linked_source_expr'], model['linked_has_assignment'] = saved_linked
                 model['tool'] = saved_tool
+                model['expanded'] = saved_expanded
                 if saved_flags:
                     model['search'] = '``' + saved_flags
                 if isinstance(idx, int):
@@ -5548,11 +5555,21 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['linked_action'] = parsed['action']
                     model['linked_source_expr'] = parsed['source_expr']
                     model['linked_has_assignment'] = bool(prefix)
+                    # Snapshot the expression already in the editor so the next
+                    # no-op event (hover, etc.) does not rewrite it identically.
+                    ctx = _get_search_context(model, var_and_exp,
+                                              source_expr=model['linked_source_expr'],
+                                              eval_in_scope=eval_in_scope)
+                    if ctx:
+                        result = generate_action(parsed['action'], ctx)
+                        if result:
+                            model['last_linked_expr'] = result[1]
 
         case Unlink():
             model['linked_action'] = None
             model['linked_source_expr'] = None
             model['linked_has_assignment'] = None
+            model['last_linked_expr'] = None
 
         case SegmentToggle(segment_id=seg_id):
             # Toggle the segment in the selection list (preserving canonical
@@ -5684,6 +5701,7 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     model['linked_action'] = _AUTO_LINK_ACTION
     model['linked_source_expr'] = ctx.get('source_expr')
     model['linked_has_assignment'] = bool(suggest_name)
+    model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
     commands.append(result)
 
@@ -5691,12 +5709,20 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
 def _emit_linked_update(expr: str, model: dict, commands: list,
                         suggest_name: 'str | None' = None,
                         rename: bool = False) -> None:
-    """Send expression intent while leaving the concrete target to the editor."""
+    """Send expression intent while leaving the concrete target to the editor.
+
+    No-op when *expr* matches the last expression written for this link, so
+    events that do not change the search context (e.g. hover) do not rewrite
+    the linked line of code.
+    """
+    if expr == model.get('last_linked_expr'):
+        return
     text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
     try:
         ast.parse(text)
     except SyntaxError:
         return
+    model['last_linked_expr'] = expr
     commands.append(ChangeSelectedText(
         expression=expr,
         suggested_var_name=suggest_name if rename else None,
