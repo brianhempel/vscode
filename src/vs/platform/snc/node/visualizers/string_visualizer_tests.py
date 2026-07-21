@@ -44,6 +44,7 @@ from string_visualizer import (
     replace_segment_pattern,
     replace_segment_repetition,
     resize_literal_segment,
+    resize_fuzzy_segment,
     extract_quantifier,
     _subpattern_to_string,
     strip_capturing_groups,
@@ -3836,6 +3837,64 @@ class TestResizeLiteralSegment(unittest.TestCase):
 
 
 # =============================================================================
+# Tests: resize_fuzzy_segment (core function)
+# =============================================================================
+
+class TestResizeFuzzySegment(unittest.TestCase):
+    """Test resize_fuzzy_segment, which re-runs fuzzy pattern inference on the
+    new boundaries instead of converting the segment to a literal.
+
+    For "hello world", internal indices are:
+        0=\\A, 1=^, 2=h, 3=e, 4=l, 5=l, 6=o, 7=' ', 8=w, 9=o, 10=r, 11=l, 12=d, 13=$, 14=\\Z
+    """
+
+    def setUp(self):
+        self.value = "hello world"
+
+    def test_lone_fuzzy_over_letters_infers_char_class(self):
+        r"""Resizing a lone /(.*)/ over "hello" infers [a-z]+ (both ends open -> +)."""
+        result = resize_fuzzy_segment(r"r'(.*)'", 0, self.value,
+                                      _legacy_internal_index(2), _legacy_internal_index(7),
+                                      prev_char='', next_char=' ')
+        self.assertEqual(result, r"r'([a-z]+)'")
+
+    def test_lone_fuzzy_stays_fuzzy_not_literal(self):
+        """Resizing a fuzzy segment must NOT produce escaped literal text."""
+        result = resize_fuzzy_segment(r"r'(.*)'", 0, self.value,
+                                      _legacy_internal_index(2), _legacy_internal_index(7),
+                                      prev_char='', next_char=' ')
+        self.assertNotIn('hello', result)
+
+    def test_fuzzy_adjacent_left_literal_uses_star(self):
+        r"""With a literal neighbor on the left (prev_char=None), inference uses *."""
+        result = resize_fuzzy_segment(r"r'(hello)(.*)'", 1, self.value,
+                                      _legacy_internal_index(7), _legacy_internal_index(8),
+                                      prev_char=None, next_char='w')
+        self.assertEqual(result, r"r'(hello)(\s*)'")
+
+    def test_fuzzy_adjacent_right_literal_uses_star(self):
+        r"""With a literal neighbor on the right (next_char=None), inference uses *."""
+        result = resize_fuzzy_segment(r"r'(.*)(world)'", 0, self.value,
+                                      _legacy_internal_index(2), _legacy_internal_index(7),
+                                      prev_char='', next_char=None)
+        self.assertEqual(result, r"r'([a-z]*)(world)'")
+
+    def test_no_change_if_empty_range(self):
+        """Empty range (new_end <= new_start) returns the original regex unchanged."""
+        result = resize_fuzzy_segment(r"r'(.*)'", 0, self.value,
+                                      _legacy_internal_index(5), _legacy_internal_index(5),
+                                      prev_char='', next_char='')
+        self.assertEqual(result, r"r'(.*)'")
+
+    def test_ungrouped_lone_fuzzy(self):
+        r"""Ungrouped /.*/ over "hello" infers [a-z]+ without adding a group."""
+        result = resize_fuzzy_segment(r"r'.*'", 0, self.value,
+                                      _legacy_internal_index(2), _legacy_internal_index(7),
+                                      prev_char='', next_char=' ')
+        self.assertEqual(result, r"r'[a-z]+'")
+
+
+# =============================================================================
 # Tests: Literal Drag Handle Update Logic
 # =============================================================================
 
@@ -4129,6 +4188,84 @@ class TestLiteralDragHandleUpdate(unittest.TestCase):
 
 
 # =============================================================================
+# Tests: Fuzzy Drag Handle Update Logic
+# =============================================================================
+
+class TestFuzzyDragHandleUpdate(unittest.TestCase):
+    """Dragging a fuzzy segment's handle re-runs fuzzy pattern inference on the
+    new range (it must NOT convert the segment into a literal).
+
+    For "abc 123", current internal indices are:
+        0=^, 1=a, 2=b, 3=c, 4=' ', 5=1, 6=2, 7=3, 8=$
+    """
+
+    def setUp(self):
+        self.value = "abc 123"
+        self.var_and_exp = ('x', 'x')
+
+    def test_drag_left_handle_infers_digit_class(self):
+        r"""Lone /(.*)/ dragged from the left down to "123" infers \d+ (open right)."""
+        model = init_model(self.value)
+        model['search'] = r"r'(.*)'"
+
+        model, _ = update(make_handle_mouse_down_event(0, 'left'),
+                          self.var_and_exp, model, self.value)
+        # Move left handle so the segment starts at the '1' (legacy index 6).
+        model, _ = update(make_mouse_move_event(6),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(6),
+                          self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], r"r'(\d+)'")
+
+    def test_drag_right_handle_infers_letter_class(self):
+        r"""Lone /(.*)/ dragged from the right down to "abc" infers [a-z]+ (open left)."""
+        model = init_model(self.value)
+        model['search'] = r"r'(.*)'"
+
+        # Move right handle so the segment ends after 'c' (cursor on 'c', legacy index 4).
+        model, _ = update(make_handle_mouse_down_event(0, 'right'),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(4),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(4),
+                          self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], r"r'([a-z]+)'")
+
+    def test_drag_fuzzy_handle_does_not_create_literal(self):
+        """Resizing a fuzzy segment never bakes the dragged text in as a literal."""
+        model = init_model(self.value)
+        model['search'] = r"r'(.*)'"
+
+        model, _ = update(make_handle_mouse_down_event(0, 'left'),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(6),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(6),
+                          self.var_and_exp, model, self.value)
+
+        self.assertNotIn('123', model['search'])
+
+    def test_drag_trailing_fuzzy_after_literal_uses_star(self):
+        r"""In /(abc)(.*)/, dragging the trailing fuzzy keeps a literal neighbor -> \s*."""
+        model = init_model(self.value)
+        model['search'] = r"r'(abc)(.*)'"
+
+        # Fuzzy segment (index 1) matches " 123" starting at the space (index 4).
+        # Drag its open right end back so it covers only the space (cursor on space,
+        # legacy index 5 -> current 4).
+        model, _ = update(make_handle_mouse_down_event(1, 'right'),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(5),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(5),
+                          self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], r"r'(abc)(\s*)'")
+
+
+# =============================================================================
 # Tests: Literal Drag Handle Rendering
 # =============================================================================
 
@@ -4166,26 +4303,47 @@ class TestLiteralDragHandleRendering(unittest.TestCase):
         html_output = visualize(self.value, model, None, None)
         self.assertIn('HandleMouseDown', html_output)
 
-    def test_fuzzy_segment_has_only_left_drag_handle(self):
-        """Fuzzy selection renders only a left-resize handle (literals get both)."""
+    def test_lone_fuzzy_segment_has_both_drag_handles(self):
+        """A standalone fuzzy selection has BOTH ends open, so it gets two handles."""
         model = init_model(self.value)
         model['search'] = r"r'(.*)'"
         html_output = visualize(self.value, model, None, None)
-        # Exactly one HandleMouseDown for fuzzy, on the left side.
-        self.assertEqual(html_output.count('HandleMouseDown'), 1)
-        self.assertIn("side=&#x27;left&#x27;", html_output)
-        self.assertNotIn("side=&#x27;right&#x27;", html_output)
+        # Exactly two HandleMouseDown for a lone fuzzy: one per open end.
+        self.assertEqual(html_output.count('HandleMouseDown'), 2)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;)", html_output)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;)", html_output)
 
-    def test_mixed_segments_only_literal_has_handles(self):
+    def test_fuzzy_open_right_has_right_handle_only(self):
+        """In /(hello)(.*)/, the trailing fuzzy has an open RIGHT end only."""
+        model = init_model(self.value)
+        model['search'] = r"r'(hello)(.*)'"
+        html_output = visualize(self.value, model, None, None)
+        # Fuzzy is segment index 1: right handle present, left handle absent.
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;)", html_output)
+        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;left&#x27;)", html_output)
+
+    def test_fuzzy_open_left_has_left_handle_only(self):
+        """In /(.*)(world)/, the leading fuzzy has an open LEFT end only."""
+        model = init_model(self.value)
+        model['search'] = r"r'(.*)(world)'"
+        html_output = visualize(self.value, model, None, None)
+        # Fuzzy is segment index 0: left handle present, right handle absent.
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;)", html_output)
+        self.assertNotIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;)", html_output)
+
+    def test_mixed_segments_flanked_fuzzy_has_no_handles(self):
         """In /(hello)(.*)(world)/, both literals get left+right handles, and the
-        in-between fuzzy segment gets a single left-resize handle."""
+        fuzzy segment is flanked on both sides so it gets NO resize handle."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)(.*)(world)'"
         html_output = visualize(self.value, model, None, None)
         self.assertIn('HandleMouseDown', html_output)
-        # 2 literals * 2 handles + 1 fuzzy left-resize handle = 5
+        # 2 literals * 2 handles + 0 fuzzy handles = 4
         handle_count = html_output.count('HandleMouseDown')
-        self.assertEqual(handle_count, 5)
+        self.assertEqual(handle_count, 4)
+        # The flanked fuzzy (segment index 1) has neither handle.
+        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;left&#x27;)", html_output)
+        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;)", html_output)
 
 
 # =============================================================================

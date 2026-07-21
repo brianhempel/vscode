@@ -814,6 +814,17 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 ):
                     segment_active = True
 
+        # Fuzzy segments only get a resize handle on an OPEN end (one that does
+        # not abut a neighbor segment). Primary segments have contiguous
+        # left-to-right indices, so a segment has a left/right neighbor iff it
+        # is not the first/last. Literal segments always get both handles.
+        primary_count = (model or {}).get('_primarySegmentCount')
+        has_left_neighbor = segment_index is not None and segment_index > 0
+        has_right_neighbor = (segment_index is not None and primary_count is not None
+                              and segment_index < primary_count - 1)
+        fuzzy_open_left = seg_type == 'fuzzy' and not has_left_neighbor
+        fuzzy_open_right = seg_type == 'fuzzy' and not has_right_neighbor
+
         if start == index:
             classes.append('start')
             if slice_center_label is not None:
@@ -834,11 +845,12 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 seg_len = end - start
                 if segment_active and seg_type == 'fuzzy':
                     pat_html = _segment_pattern_label(pat_str, segment_index, model, seg_len)
-                left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left'))
-                pat_html += (
-                    '<span class="char-span-start-handle-container">'
-                    f'<span class="char-span-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
-                )
+                if seg_type != 'fuzzy' or fuzzy_open_left:
+                    left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left'))
+                    pat_html += (
+                        '<span class="char-span-start-handle-container">'
+                        f'<span class="char-span-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
+                    )
         if end - 1 == index:
             classes.append('end')
             if slice_end_label is not None:
@@ -855,7 +867,7 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                     rep_str = _format_repetition(min_count, max_count)
                     seg_len = end - start
                     repetition_html = _segment_repetition_label(rep_str, segment_index, seg_type, model, seg_len, min_count, max_count)
-                if seg_type == 'literal':
+                if seg_type == 'literal' or fuzzy_open_right:
                     right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right'))
                     repetition_html += (
                         '<span class="char-span-start-handle-container">'
@@ -1364,10 +1376,16 @@ def resize_literal_segment(selection_regex: str, segment_index: int, string_valu
         return selection_regex
 
     text = extract_by_internal_indices(string_value, new_start, new_end)
+    new_content = ''.join(char_to_regex_literal(char) for char in text)
+    return _replace_segment_content(selection_regex, segment_index, new_content)
 
-    regex_parts = [char_to_regex_literal(char) for char in text]
-    new_content = ''.join(regex_parts)
 
+def _replace_segment_content(selection_regex: str, segment_index: int, new_content: str) -> str:
+    """Replace the pattern text of one segment, preserving grouping and flags.
+
+    Shared by resize_literal_segment / resize_fuzzy_segment: both differ only in
+    how they derive the replacement content from the dragged range.
+    """
     inner_pattern = get_regex_inner_pattern(selection_regex) or ""
     flags = get_search_flags(selection_regex)
     segments = parse_all_segments(inner_pattern)
@@ -1388,6 +1406,44 @@ def resize_literal_segment(selection_regex: str, segment_index: int, string_valu
     if 'c' in flags:
         result = ensure_all_groups(result)
     return result
+
+
+def resize_fuzzy_segment(selection_regex: str, segment_index: int, string_value: str,
+                         new_start: int, new_end: int,
+                         prev_char: str | None, next_char: str | None) -> str:
+    """
+    Resize a fuzzy segment to cover [new_start, new_end) in internal indices.
+
+    Unlike resize_literal_segment, this re-runs the fuzzy pattern inference
+    (synthesize_fuzzy_pattern) over the new range so the segment stays fuzzy
+    rather than being baked into an escaped literal. The boundary context
+    (prev_char / next_char) mirrors the new-fuzzy-selection logic:
+
+        - Pass '' for an open edge at the string boundary.
+        - Pass the adjacent character for an open edge in the middle of the
+          string (so inference can avoid overshooting it and pick + / {n}).
+        - Pass None for an edge that abuts an existing segment (so inference
+          uses * since the neighbor already anchors the match).
+
+    Args:
+        selection_regex: Regex search, e.g., "r'(.*)'"
+        segment_index: 0-based index of the segment to resize
+        string_value: The string being visualized
+        new_start: New start internal index (inclusive)
+        new_end: New end internal index (exclusive)
+        prev_char: Character context before the range (see above)
+        next_char: Character context after the range (see above)
+
+    Returns:
+        New regex pattern with the segment resized, or original if range is empty.
+    """
+    if new_end <= new_start:
+        return selection_regex
+
+    selected_text = extract_by_internal_indices(string_value, new_start, new_end)
+    actual_text = ''.join(c for c in selected_text if c not in _SENTINEL_CHARS)
+    new_content = synthesize_fuzzy_pattern(actual_text, prev_char, next_char)
+    return _replace_segment_content(selection_regex, segment_index, new_content)
 
 
 # Valid string literal prefixes (lowercase); checked case-insensitively.
@@ -2900,6 +2956,30 @@ def _compute_handle_drag_regex(model: dict, string_value: str) -> str | None:
             return selection_regex
         return _format_slice_expr(string_start, string_end, n)
 
+    if seg_type == 'fuzzy':
+        # Re-run fuzzy inference over the new range (keep the segment fuzzy).
+        # Boundary context depends on whether each edge abuts a neighbor
+        # segment: a neighbor anchors that side (None -> *), otherwise use the
+        # adjacent string character (or '' at the string boundary).
+        primary_count = sum(1 for h in highlights if h[5] is not None)
+        has_left_neighbor = segment_index > 0
+        has_right_neighbor = segment_index < primary_count - 1
+
+        if has_left_neighbor:
+            prev_char: str | None = None
+        else:
+            prev_text = extract_by_internal_indices(string_value, new_start - 1, new_start) if new_start > 0 else ''
+            prev_char = ''.join(c for c in prev_text if c not in _SENTINEL_CHARS)
+
+        if has_right_neighbor:
+            next_char: str | None = None
+        else:
+            next_text = extract_by_internal_indices(string_value, new_end, new_end + 1)
+            next_char = ''.join(c for c in next_text if c not in _SENTINEL_CHARS)
+
+        return resize_fuzzy_segment(selection_regex, segment_index, string_value,
+                                    new_start, new_end, prev_char, next_char)
+
     return resize_literal_segment(selection_regex, segment_index, string_value, new_start, new_end)
 
 
@@ -3391,6 +3471,13 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         start, end, _, _, _, _ = highlight
         for i in range(start, end):
             highlight_by_index[i] = highlight
+
+    # Count of primary (interactive) segments, used by char_span_els to decide
+    # whether a fuzzy segment has an open end (and thus a resize handle) on a
+    # given side. Primary segments have contiguous left-to-right indices, so a
+    # segment has a left/right neighbor iff its index isn't the first/last.
+    if model is not None:
+        model['_primarySegmentCount'] = sum(1 for h in highlights if h[5] is not None)
 
     # Inline chips (start/end index labels in segment mode) are rendered as
     # extra HTML inserted before / after the corresponding char's wrapper.
