@@ -11,6 +11,7 @@
 	--snc-table-cell-border-color: #dedede;
 	--snc-text-color: #4A4A4A;
 	--snc-text-muted: #888;
+	--snc-text-dimmed: rgba(0, 0, 0, 0.3);
 	--snc-string-color: #315278;
 	--snc-hover-bg: rgba(0, 0, 0, 0.06);
 	--snc-active-bg: rgba(0, 0, 0, 0.1);
@@ -517,6 +518,82 @@
 /* Linked state for action buttons */
 .action-button.linked {
 	color: #e0a060;
+}
+
+/* === Link chain icon (lower-left chrome of a linkable visualizer) === */
+.snc-link-chain {
+	position: absolute;
+	left: -8px;
+	bottom: 7px;
+	z-index: 1001;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	font-size: 11px;
+	line-height: 1;
+	cursor: pointer;
+	user-select: none;
+	border-radius: 3px;
+	/* border: 1px solid var(--snc-border-color); */
+	background-color: var(--snc-bg);
+	color: var(--snc-text-dimmed);
+}
+
+.snc-link-chain .snc-link-chain-x {
+	display: none;
+	font-size: 10px;
+}
+
+/* Linked: accent-colored chain; hovering it (or the arrow) swaps to an ✕. */
+.snc-link-chain.linked {
+	color: var(--snc-text-muted);
+}
+
+.snc-link-chain.linked:hover {
+	color: var(--snc-text-color);
+}
+
+.snc-link-chain.linked:hover .snc-link-chain-icon,
+.snc-link-chain.linked.snc-link-hover .snc-link-chain-icon {
+	display: none;
+}
+
+.snc-link-chain.linked:hover .snc-link-chain-x,
+.snc-link-chain.linked.snc-link-hover .snc-link-chain-x {
+	display: inline;
+}
+
+/* Unlinked: dimmed chain that persists so the user can re-link. */
+.snc-link-chain.unlinked {
+	color: var(--snc-text-dimmed);
+}
+
+.snc-link-chain.unlinked:hover {
+	color: var(--snc-text-color);
+}
+
+/* === Link arrow (chain icon → linked line of code) === */
+.snc-link-arrow {
+	position: fixed;
+	z-index: 1000;
+	pointer-events: none;
+	overflow: visible;
+}
+
+.snc-link-arrow-line {
+	fill: none;
+	stroke: var(--snc-text-muted);
+	stroke-width: 1;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	pointer-events: stroke;
+	cursor: pointer;
+}
+
+.snc-link-arrowhead {
+	fill: var(--snc-text-muted);
 }
 
 /* Dimmed dropdown option */

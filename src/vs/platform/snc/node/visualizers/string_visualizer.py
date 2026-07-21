@@ -128,7 +128,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, truncate_str, ICONS, wrap_drag_grab
+from visualizer_utils import replace_caret_in_py_exp, EditorTextSelect, Unlink, Relink, truncate_str, ICONS, wrap_drag_grab
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -3249,14 +3249,6 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace<span class="shortcut">⌘R</span></span>', 'replace', has_search and has_replace))
     parts.append(btn(f'{ICONS["filter"]}<span class="text">Filter</span>', 'filter', has_search and has_replace))
 
-    if linked_action:
-        unlink_event = repr(Unlink())
-        parts.append(
-            f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
-            f'><span class="search-icon sm">⛓\ufe0e</span><span class="text">Unlink</span></span>'
-        )
-
-
     return (
         f'<div class="action-buttons">'
         f'{"".join(parts)}'
@@ -4125,6 +4117,8 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
                                        # ChangeSelectedText when unchanged (hover, etc.)
         "auto_linked_once": False,     # True once an interaction has auto-inserted+linked a LOC
                                        # (prevents inserting a second line on later interactions)
+        "unlinked_action": None,       # Action stashed on Unlink so the chain icon can
+                                       # resume it when the user re-links
         "tool": "literal",             # Active selection tool: 'literal', 'fuzzy', 'index', or 'pick'
         "selectedSegments": [],        # In pick-tool mode: list of selected segment IDs
                                        # ('start', 'end', 'prefix', 'group_0', 'group_N', 'suffix')
@@ -5653,10 +5647,35 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             model['last_linked_expr'] = result[1]
 
         case Unlink():
+            # Stash the action so the chain icon can resume it on relink.
+            model['unlinked_action'] = model.get('linked_action')
             model['linked_action'] = None
             model['linked_source_expr'] = None
             model['linked_has_assignment'] = None
             model['last_linked_expr'] = None
+
+        case Relink(mode=mode):
+            action = model.get('unlinked_action') or _AUTO_LINK_ACTION
+            ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+            if ctx:
+                result = generate_action(action, ctx)
+                if result:
+                    suggest_name, expr = result
+                    model['linked_action'] = action
+                    model['linked_source_expr'] = ctx.get('source_expr')
+                    model['unlinked_action'] = None
+                    model['auto_linked_once'] = True
+                    model['last_linked_expr'] = expr
+                    if mode == 'takeover':
+                        # The front-end already linked an existing assignment
+                        # line; replace its RHS, keeping the user's var name.
+                        model['linked_has_assignment'] = True
+                        commands.append(ChangeSelectedText(expression=expr,
+                                                            suggested_var_name=None))
+                    else:
+                        # Insert a fresh linked line.
+                        model['linked_has_assignment'] = bool(suggest_name)
+                        commands.append(result)
 
         case SegmentToggle(segment_id=seg_id):
             # Toggle the segment in the selection list (preserving canonical
@@ -5738,8 +5757,16 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             commands.append(CopyToClipboard(text=result[1]))
                         else:
                             commands.append(result)
+                            # Link the freshly inserted LOC to this action so
+                            # subsequent interactions edit it in place (via
+                            # ChangeSelectedText) instead of stacking new lines.
+                            model['linked_action'] = action
+                            model['linked_source_expr'] = ctx.get('source_expr')
+                            model['linked_has_assignment'] = bool(result[0])
+                            model['last_linked_expr'] = result[1]
+                            model['auto_linked_once'] = True
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink, ToolSelect)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink, Relink, ToolSelect)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -5751,7 +5778,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (EditorTextSelect, Unlink))):
+          and not isinstance(msg, (EditorTextSelect, Unlink, Relink))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).

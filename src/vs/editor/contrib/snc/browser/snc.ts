@@ -48,6 +48,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// being dispatched as a Python event.
 	private readonly isFocused: () => boolean;
 	private readonly onExpandRequest: () => void;
+	// Invoked when the user clicks the link-chain icon in the widget's lower-left
+	// corner (unlink when currently linked, relink otherwise).
+	private readonly onLinkChainClick: () => void;
+	// Persistent chain-icon chrome (lower-left). Recreated content in
+	// updateContent wipes domNode.innerHTML, so this is re-appended each render.
+	private linkChainEl: HTMLElement | null = null;
 	private moveThrottleTimer: any = null;
 	private readonly moveThrottleDelay = 16;
 	private lastRenderedHtml: string | null = null;
@@ -88,7 +94,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string) => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -100,6 +106,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onInsertNewVar = onInsertNewVar;
 		this.isFocused = isFocused;
 		this.onExpandRequest = onExpandRequest;
+		this.onLinkChainClick = onLinkChainClick;
 		this.clipboardService = clipboardService;
 
 		// Create the widget DOM node
@@ -1056,6 +1063,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		return `editor.contrib.visualizationOverlayWidget-${this.lineNumber}-${this.visIndex}`;
 	}
 
+	getVisIndex(): number {
+		return this.visIndex;
+	}
+
 	getDomNode(): HTMLElement {
 		return this.domNode;
 	}
@@ -1193,6 +1204,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const trustedHtml = ttPolicy?.createHTML(html) ?? html;
 		this.domNode.innerHTML = trustedHtml as string;
 		this.lastRenderedHtml = html;
+
+		// Replacing innerHTML detached the persistent chain-icon chrome; put it
+		// back so its state survives content re-renders.
+		if (this.linkChainEl) {
+			this.domNode.appendChild(this.linkChainEl);
+		}
 
 		// Hoist any dropdown panel outside the overflow container
 		this.hoistDropdownPanel();
@@ -1587,6 +1604,66 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
+	 * Show/update or hide the link-chain icon in the widget's lower-left corner.
+	 *
+	 * - 'hidden':   no chain (widget doesn't support linking, or isn't focused).
+	 * - 'linked':   accent chain; hovering it (or the arrow) swaps to an ✕ that
+	 *               unlinks on click.
+	 * - 'unlinked': dimmed chain that persists so the user can re-link; clicking
+	 *               it re-establishes a link.
+	 */
+	setLinkChain(state: 'hidden' | 'linked' | 'unlinked'): void {
+		if (state === 'hidden') {
+			if (this.linkChainEl) {
+				this.linkChainEl.remove();
+				this.linkChainEl = null;
+			}
+			return;
+		}
+		if (!this.linkChainEl) {
+			const chain = document.createElement('div');
+			chain.className = 'snc-link-chain';
+			const icon = document.createElement('span');
+			icon.className = 'snc-link-chain-icon';
+			icon.textContent = '\u26D3\uFE0E'; // ⛓ chain
+			const x = document.createElement('span');
+			x.className = 'snc-link-chain-x';
+			x.textContent = '\u2715'; // ✕
+			chain.appendChild(icon);
+			chain.appendChild(x);
+			// Swallow the mousedown so it neither starts a visualizer drag nor
+			// (in small mode) triggers click-to-expand.
+			this._register(dom.addDisposableListener(chain, 'mousedown', (ev: MouseEvent) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				this.onLinkChainClick();
+			}));
+			this.linkChainEl = chain;
+			this.domNode.appendChild(chain);
+		}
+		this.linkChainEl.classList.toggle('linked', state === 'linked');
+		this.linkChainEl.classList.toggle('unlinked', state === 'unlinked');
+		this.linkChainEl.title = state === 'linked'
+			? 'Linked to a line of code — click to unlink'
+			: 'Click to link this visualizer to a line of code';
+	}
+
+	/** Viewport rect of the chain icon, for drawing the arrow. Null if hidden. */
+	getLinkChainAnchorRect(): DOMRect | null {
+		if (!this.linkChainEl) {
+			return null;
+		}
+		return this.linkChainEl.getBoundingClientRect();
+	}
+
+	/** Toggle the hover cue (chain → ✕) driven from the arrow, not the icon. */
+	setLinkHoverCue(on: boolean): void {
+		if (this.linkChainEl) {
+			this.linkChainEl.classList.toggle('snc-link-hover', on);
+		}
+	}
+
+	/**
 	 * Dispose of the widget
 	 */
 	override dispose(): void {
@@ -1797,6 +1874,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		decorationId: string;
 		autoEstablished: boolean;
 	}[] = [];
+	// SVG arrows drawn from a focused, linked visualizer's chain icon to its
+	// linked line of code, keyed by `${line}:${visIndex}`. Only top-level
+	// widgets get an arrow — nested visualizers never do.
+	private linkArrows: Map<string, HTMLElement> = new Map();
 	private suppressSelectionEvent = false;
 	private selectionDebounceTimer: any = null;
 
@@ -2333,6 +2414,227 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.sendEventToPython(event);
 	}
 
+	/** Whether a visualizer model participates in linked editing. */
+	private static supportsLinking(model: unknown): boolean {
+		return !!model && typeof model === 'object' && 'linked_action' in (model as object);
+	}
+
+	/**
+	 * Handle a click on a widget's chain icon. When the visualizer is currently
+	 * linked, unlink it; otherwise (re)establish a link.
+	 */
+	private onLinkChainClick(line: number, visIndex: number): void {
+		const editorModel = this.editor.getModel();
+		const link = this.findLink(line, visIndex);
+		if (editorModel && link) {
+			const range = editorModel.getDecorationRange(link.decorationId);
+			if (range && !range.isEmpty()) {
+				this.teardownLink(link);
+				this.updateLinkChrome();
+				return;
+			}
+		}
+		this.relinkVisualizer(line, visIndex);
+	}
+
+	/**
+	 * Re-establish a link for a visualizer whose chain icon was clicked while
+	 * unlinked. Takes over the next line of code when it is an assignment at the
+	 * visualizer's own indentation; otherwise inserts a fresh linked line. The
+	 * concrete edit is produced by Python (Relink → ChangeSelectedText/NewCode).
+	 */
+	private relinkVisualizer(line: number, visIndex: number): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel) {
+			return;
+		}
+		const vizIndent = this.getLineIndent(line);
+		const lineCount = editorModel.getLineCount();
+
+		// Find the first non-blank line after the visualizer's source line.
+		let nextLine = 0;
+		for (let l = line + 1; l <= lineCount; l++) {
+			if (editorModel.getLineContent(l).trim() !== '') {
+				nextLine = l;
+				break;
+			}
+		}
+
+		let mode: 'takeover' | 'insert' = 'insert';
+		if (nextLine > 0) {
+			const nextContent = editorModel.getLineContent(nextLine);
+			const nextIndent = nextContent.length - nextContent.trimStart().length;
+			// Only take over a line at the same block level that is a simple
+			// assignment; a dedent, a deeper line, or a non-assignment statement
+			// means we insert a fresh line instead of clobbering existing code.
+			if (nextIndent === vizIndent && SNCController.splitAssignment(nextContent)) {
+				mode = 'takeover';
+				const linkedRange = new Range(
+					nextLine, editorModel.getLineFirstNonWhitespaceColumn(nextLine) || 1,
+					nextLine, editorModel.getLineMaxColumn(nextLine)
+				);
+				// Link the existing line first so the ChangeSelectedText that
+				// Python emits in response lands in it.
+				this.establishLinkForRange(linkedRange, line, visIndex);
+			}
+		}
+
+		const event: UiEvent = {
+			line,
+			visIndex,
+			pythonEventStr: "lambda e: Relink(mode=e.get('mode', 'insert'))",
+			eventJSON: { type: 'relink', mode },
+		};
+		this.sendEventToPython(event);
+	}
+
+	/**
+	 * Refresh chain-icon state on every top-level widget and (re)draw arrows for
+	 * focused, linked visualizers. Nested visualizers are rendered inside a
+	 * parent widget's HTML rather than as their own widget, so they are never
+	 * considered here and never get a chain icon or arrow.
+	 */
+	private updateLinkChrome(): void {
+		const editorModel = this.editor.getModel();
+		const focusedLine = this.effectiveFocusedLine();
+		const liveKeys = new Set<string>();
+		for (const [lineNumber, widgets] of this.visualizationWidgets.entries()) {
+			for (const widget of widgets) {
+				const visIndex = widget.getVisIndex();
+				const item = this.visualizationItems.find(
+					it => it.line === lineNumber && it.visIndex === visIndex);
+				const supported = !!item && SNCController.supportsLinking(item.model);
+				const key = `${lineNumber}:${visIndex}`;
+				// Chain icon and arrow are shown only for the active (focused)
+				// visualizer, keeping unfocused previews uncluttered.
+				if (!supported || focusedLine !== lineNumber) {
+					widget.setLinkChain('hidden');
+					this.removeLinkArrow(key);
+					continue;
+				}
+				const link = this.findLink(lineNumber, visIndex);
+				const range = link && editorModel
+					? editorModel.getDecorationRange(link.decorationId) : null;
+				const isLinked = !!range && !range.isEmpty();
+				widget.setLinkChain(isLinked ? 'linked' : 'unlinked');
+				if (isLinked && range) {
+					this.drawLinkArrow(key, widget, range.startLineNumber);
+					liveKeys.add(key);
+				} else {
+					this.removeLinkArrow(key);
+				}
+			}
+		}
+		// Drop arrows whose widget/link disappeared.
+		for (const key of Array.from(this.linkArrows.keys())) {
+			if (!liveKeys.has(key)) {
+				this.removeLinkArrow(key);
+			}
+		}
+	}
+
+	/**
+	 * Draw (or reposition) the arrow from a widget's chain icon to the first
+	 * column of its linked line. Hidden when the linked line is scrolled out of
+	 * view. Positioned with fixed/viewport coordinates like the SNC tooltips.
+	 */
+	private drawLinkArrow(key: string, widget: VisualizationWidget, targetLine: number): void {
+		const chainRect = widget.getLinkChainAnchorRect();
+		const targetPos = this.editor.getScrolledVisiblePosition({ lineNumber: targetLine, column: 1 });
+		const editorDom = this.editor.getDomNode();
+		if (!chainRect || !targetPos || !editorDom) {
+			this.removeLinkArrow(key);
+			return;
+		}
+		const editorRect = editorDom.getBoundingClientRect();
+		const lineHeight = this.editor.getOption(EditorOption.lineHeight);
+
+		const startX = chainRect.left;
+		const startY = chainRect.top + chainRect.height / 2;
+		const targetX = editorRect.left + targetPos.left - 2;
+		const targetY = editorRect.top + targetPos.top + lineHeight / 2;
+
+		// Hide when the linked line is outside the editor's visible band.
+		if (targetY < editorRect.top || targetY > editorRect.bottom) {
+			this.removeLinkArrow(key);
+			return;
+		}
+
+		const pad = 8; // margin
+		const xdist = 10; // how far left to go
+		const minX = Math.min(startX, targetX) - pad - xdist;
+		const minY = Math.min(startY, targetY) - pad;
+		const width = Math.abs(targetX - startX) + xdist + pad * 2;
+		const height = Math.abs(targetY - startY) + pad * 2;
+
+		let svg = this.linkArrows.get(key) as unknown as SVGSVGElement | undefined;
+		let path: SVGPathElement;
+		if (!svg) {
+			const ns = 'http://www.w3.org/2000/svg';
+			svg = document.createElementNS(ns, 'svg') as SVGSVGElement;
+			svg.setAttribute('class', 'snc-link-arrow');
+			const markerId = `snc-link-arrowhead-${key.replace(':', '-')}`;
+			const defs = document.createElementNS(ns, 'defs');
+			const marker = document.createElementNS(ns, 'marker');
+			marker.setAttribute('id', markerId);
+			marker.setAttribute('markerWidth', '6');
+			marker.setAttribute('markerHeight', '6');
+			marker.setAttribute('refX', '5');
+			marker.setAttribute('refY', '3');
+			marker.setAttribute('orient', 'auto');
+			const head = document.createElementNS(ns, 'path');
+			head.setAttribute('d', 'M0,0 L6,3 L0,6 Z');
+			head.setAttribute('class', 'snc-link-arrowhead');
+			marker.appendChild(head);
+			defs.appendChild(marker);
+			svg.appendChild(defs);
+			path = document.createElementNS(ns, 'path') as SVGPathElement;
+			path.setAttribute('class', 'snc-link-arrow-line');
+			path.setAttribute('marker-end', `url(#${markerId})`);
+			svg.appendChild(path);
+			// Hovering the arrow cues the chain's ✕ (unlink) affordance.
+			path.addEventListener('mouseenter', () => widget.setLinkHoverCue(true));
+			path.addEventListener('mouseleave', () => widget.setLinkHoverCue(false));
+			this.editor.getContainerDomNode().appendChild(svg);
+			this.linkArrows.set(key, svg as unknown as HTMLElement);
+		} else {
+			path = svg.querySelector('path.snc-link-arrow-line') as SVGPathElement;
+		}
+
+		svg.style.left = `${minX}px`;
+		svg.style.top = `${minY}px`;
+		svg.setAttribute('width', `${width}`);
+		svg.setAttribute('height', `${height}`);
+
+		// Orthogonal (right-angle) connector: drop vertically from the chain
+		// icon, round the corner, then run horizontally into the linked line.
+		const x1 = startX - minX;
+		const y1 = startY - minY;
+		const xleft = pad;
+		const x2 = targetX - minX;
+		const y2 = targetY - minY;
+		// const dirV = Math.sign(y2 - y1) || 1;
+		// const dirH = Math.sign(x2 - x1) || 1;
+		// const r = Math.max(0, Math.min(8, Math.abs(y2 - y1), Math.abs(x2 - x1)));
+		const d = `M ${x1} ${y1} L ${xleft} ${y1} L ${xleft} ${y2} L ${x2} ${y2}`;
+		path.setAttribute('d', d);
+	}
+
+	private removeLinkArrow(key: string): void {
+		const svg = this.linkArrows.get(key);
+		if (svg) {
+			svg.remove();
+			this.linkArrows.delete(key);
+		}
+	}
+
+	private clearLinkArrows(): void {
+		for (const svg of this.linkArrows.values()) {
+			svg.remove();
+		}
+		this.linkArrows.clear();
+	}
+
 	/**
 	 * Tear down every link whose tracked decoration is missing or empty —
 	 * typically because the user deleted the linked line of code. Without this,
@@ -2470,6 +2772,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		}
 		this.visualizationWidgets.clear();
+		this.clearLinkArrows();
 
 		// Remove all view zones (including the top spacer)
 		this.editor.changeViewZones((accessor) => {
@@ -2508,6 +2811,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				widget.updatePosition();
 			}
 		}
+		// Keep link arrows glued to their (moved) chain icons and code lines.
+		this.updateLinkChrome();
 	}
 
 	/**
@@ -2740,6 +3045,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							() => this.effectiveFocusedLine() === lineNumber,
 							() => this.requestExpand(lineNumber),
 							(expression) => { this.insertNewVarFromExpression(lineNumber, expression); },
+							() => { this.onLinkChainClick(lineNumber, visIndex); },
 							this.clipboardService
 						);
 						widget.updateContent(item.html);
@@ -2788,6 +3094,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			widget.updatePosition();
 		}
 		this.applySyntaxErrorClassToWidgets();
+		this.updateLinkChrome();
 	}
 
 	/**
@@ -3236,6 +3543,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (this.editor.hasTextFocus()) {
 			this.editor.setSelection(newRange);
 		}
+
+		// The linked line may have moved/resized; re-anchor its arrow.
+		this.updateLinkChrome();
 
 		setTimeout(() => { this.suppressSelectionEvent = false; }, 0);
 	}

@@ -357,6 +357,20 @@ class Unlink:
     """Sent by the TypeScript front-end when an editor-visualizer link is broken."""
     pass
 
+@dataclass(frozen=True, slots=True)
+class Relink:
+    """Sent by the TypeScript front-end when the user re-establishes a link via
+    the chain icon.
+
+    mode is either:
+      - 'takeover': the front-end already linked an existing assignment line;
+        the visualizer should replace its right-hand side (emit
+        ChangeSelectedText).
+      - 'insert':   there was no assignable line to take over; the visualizer
+        should insert a fresh linked line (emit a NewCode tuple).
+    """
+    mode: str = 'insert'
+
 def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
     """Wrap a non-interactive (small-mode) visualizer's output in a draggable
     snc-py-exp grab span.

@@ -49,7 +49,7 @@ from math import sqrt
 from typing import Any, List, Tuple, Optional
 
 from visualizer_utils import (
-    ChildEvent, EditorTextSelect, Unlink,
+    ChildEvent, EditorTextSelect, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix, wrap_drag_grab,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
@@ -897,6 +897,7 @@ _SEARCH_DEFAULTS = {
     'linked_has_assignment': None,
     'last_linked_expr': None,
     'auto_linked_once': False,
+    'unlinked_action': None,
 }
 
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
@@ -1449,16 +1450,6 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     parts.append(action_btn(indices_lbl, 'find_indices',
                             has_search and not is_index_search, 'Indices of matches'))
 
-    if linked_action:
-        unlink_event = repr(Unlink())
-        parts.append(
-            f'<span class="action-button linked" snc-mouse-down="{html.escape(unlink_event)}"'
-            f' title="Unlink from selected code">'
-            f'<span class="search-icon sm">⛓\ufe0e</span>'
-            f'<span class="text">Unlink</span>'
-            f'</span>'
-        )
-
     return f'<div class="action-buttons">{"".join(parts)}</div>'
 
 
@@ -1916,6 +1907,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             commands.append(CopyToClipboard(text=result[1]))
                         else:
                             commands.append(result)
+                            # Link the freshly inserted LOC to this action so
+                            # subsequent interactions edit it in place (via
+                            # ChangeSelectedText) instead of stacking new lines.
+                            model['linked_action'] = action
+                            model['linked_source_expr'] = ctx.get('source_expr')
+                            model['linked_has_assignment'] = bool(result[0])
+                            model['last_linked_expr'] = result[1]
+                            model['auto_linked_once'] = True
 
         case EditorTextSelect(text=selected_text):
             from list_visualizer_grammar import parse_generated_code_or_assignment
@@ -1940,12 +1939,39 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             model['last_linked_expr'] = result[1]
 
         case Unlink():
+            # Stash the action so the chain icon can resume it on relink.
+            model['unlinked_action'] = model.get('linked_action')
             model['linked_action'] = None
             model['linked_source_expr'] = None
             model['linked_has_assignment'] = None
             model['last_linked_expr'] = None
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
+        case Relink(mode=mode):
+            action = model.get('unlinked_action') or _AUTO_LINK_ACTION
+            ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+            if ctx is None:
+                ctx = _get_whole_list_context(model, var_and_exp)
+            if ctx:
+                result = generate_action(action, ctx)
+                if result:
+                    suggest_name, expr = result
+                    model['linked_action'] = action
+                    model['linked_source_expr'] = ctx.get('source_expr')
+                    model['unlinked_action'] = None
+                    model['auto_linked_once'] = True
+                    model['last_linked_expr'] = expr
+                    if mode == 'takeover':
+                        # The front-end already linked an existing assignment
+                        # line; replace its RHS, keeping the user's var name.
+                        model['linked_has_assignment'] = True
+                        commands.append(ChangeSelectedText(expression=expr,
+                                                            suggested_var_name=None))
+                    else:
+                        # Insert a fresh linked line.
+                        model['linked_has_assignment'] = bool(suggest_name)
+                        commands.append(result)
+
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -1957,7 +1983,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (EditorTextSelect, Unlink))):
+          and not isinstance(msg, (EditorTextSelect, Unlink, Relink))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).

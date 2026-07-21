@@ -33,6 +33,7 @@ from string_visualizer import (
     CopyToClipboard,
     ChangeSelectedText,
     Unlink,
+    Relink,
     _format_slice_expr, _format_index_expr,
     SliceLabelInput,
     compute_internal_length,
@@ -3340,6 +3341,116 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], tuple)
         self.assertEqual(model['linked_action'], 'find_or_map')
+
+
+class TestActionButtonClickAutoLinks(unittest.TestCase):
+    """Clicking an action button while unlinked must both insert the LOC and
+    enter linked mode, so the next interaction edits that line in place."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        self.model = init_model(self.value)
+        self.model['search'] = r"r'hello'"
+
+    def test_action_button_click_inserts_and_links(self):
+        model, commands = update(make_action_button_event('count'),
+                                 self.var_and_exp, self.model, self.value)
+        # Emits exactly one insert (NewCode tuple)...
+        tuples = [c for c in commands if isinstance(c, tuple)]
+        self.assertEqual(len(tuples), 1)
+        # ...and enters linked mode for the clicked action.
+        self.assertEqual(model['linked_action'], 'count')
+        self.assertEqual(model['linked_source_expr'], 'x')
+        self.assertTrue(model.get('auto_linked_once'))
+        self.assertEqual(model['last_linked_expr'], tuples[0][1])
+
+    def test_next_interaction_updates_in_place(self):
+        model, first = update(make_action_button_event('count'),
+                              self.var_and_exp, self.model, self.value)
+        self.assertTrue(any(isinstance(c, tuple) for c in first))
+        # Changing the search now edits the linked line rather than inserting.
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value)
+        self.assertFalse(any(isinstance(c, tuple) for c in commands))
+        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
+
+    def test_copy_click_does_not_link(self):
+        model, commands = update(make_action_button_event('count', copy=True),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertIsNone(model.get('linked_action'))
+
+
+def make_unlink_event() -> dict:
+    """Create an Unlink event dict."""
+    return {'pythonEventStr': repr(Unlink()), 'eventJSON': {'type': 'unlink'}}
+
+
+def make_relink_event(mode: str = 'insert') -> dict:
+    """Create a Relink event dict."""
+    return {'pythonEventStr': repr(Relink(mode=mode)), 'eventJSON': {'type': 'relink'}}
+
+
+class TestRelinkViaChainIcon(unittest.TestCase):
+    """The chain icon re-establishes a link after Unlink, resuming the prior
+    action. 'insert' emits a NewCode tuple; 'takeover' emits ChangeSelectedText."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        self.model = init_model(self.value)
+        self.model['search'] = r"r'hello'"
+        # Link via a button click, then unlink.
+        self.model, _ = update(make_action_button_event('count'),
+                               self.var_and_exp, self.model, self.value)
+        self.model, _ = update(make_unlink_event(),
+                               self.var_and_exp, self.model, self.value)
+        self.assertIsNone(self.model.get('linked_action'))
+
+    def test_relink_insert_emits_new_code_and_resumes_action(self):
+        model, commands = update(make_relink_event('insert'),
+                                 self.var_and_exp, self.model, self.value)
+        tuples = [c for c in commands if isinstance(c, tuple)]
+        self.assertEqual(len(tuples), 1)
+        self.assertEqual(model['linked_action'], 'count')
+        self.assertTrue(model.get('auto_linked_once'))
+        self.assertEqual(model['last_linked_expr'], tuples[0][1])
+
+    def test_relink_takeover_emits_change_selected_text_and_resumes_action(self):
+        model, commands = update(make_relink_event('takeover'),
+                                 self.var_and_exp, self.model, self.value)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertFalse(any(isinstance(c, tuple) for c in commands))
+        self.assertEqual(model['linked_action'], 'count')
+        self.assertTrue(model['linked_has_assignment'])
+
+    def test_relink_defaults_to_auto_link_action_when_none_stashed(self):
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model, _ = update(make_relink_event('insert'),
+                          self.var_and_exp, model, self.value)
+        self.assertEqual(model['linked_action'], 'find_or_map')
+
+    def test_relink_without_context_is_noop(self):
+        model = init_model(self.value)  # no search -> no context
+        model, commands = update(make_relink_event('insert'),
+                                 self.var_and_exp, model, self.value)
+        self.assertEqual(commands, [])
+        self.assertIsNone(model.get('linked_action'))
+
+
+class TestNoUnlinkButtonInActionBar(unittest.TestCase):
+    """The unlink affordance moved to the front-end chain icon, so the
+    visualizer no longer renders an 'Unlink' action button when linked."""
+
+    def test_linked_render_has_no_unlink_button(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        model['linked_action'] = 'find_or_map'
+        html_out = visualize(value, model, None, None)
+        self.assertNotIn('Unlink', html_out)
 
 
 class TestSkipUnchangedLinkedExpression(unittest.TestCase):
