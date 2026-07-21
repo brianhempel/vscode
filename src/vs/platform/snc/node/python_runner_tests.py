@@ -138,21 +138,17 @@ class TestBuildNewCodeEdits(unittest.TestCase):
 @dataclass
 class _FakeChangeCmd:
     """Stand-in for a dataclass command (e.g. ChangeSelectedText)."""
-    text: str
-    new_var_name: Optional[str] = None
+    expression: str
+    suggested_var_name: Optional[str] = None
 
 
 class TestCommandsToDicts(unittest.TestCase):
-    """`_commands_to_dicts` converts visualizer commands to wire dicts. For
-    NewCode tuples it must de-duplicate the assignment name against the current
-    source AND sync the chosen name back into the model's linked_prefix, so the
-    linked line and the model agree (otherwise later in-place updates re-emit a
-    stale, colliding name like `str1` instead of `str2`)."""
+    """`_commands_to_dicts` converts visualizer commands to wire dicts."""
 
-    def test_newcode_dedups_and_syncs_linked_prefix(self):
+    def test_newcode_dedups_without_storing_concrete_name_in_model(self):
         # Source already binds str1, so a fresh `str1 = ...` must become `str2`.
         source = "str1 = open('f').read()\nstr1 = str1.upper()\n"
-        model = {'linked_action': 'find_or_map', 'linked_prefix': 'str1 = '}
+        model = {'linked_action': 'find_or_map', 'linked_has_assignment': True}
         dicts = _commands_to_dicts(
             [('str1', "str1.replace('a', 'b')")],
             line=2, idx_in_line=0, model=model, source_code=source,
@@ -161,42 +157,44 @@ class TestCommandsToDicts(unittest.TestCase):
         self.assertEqual(dicts[0]['type'], 'NewCode')
         # The inserted line uses the de-duplicated name.
         self.assertEqual(dicts[0]['edits'][0]['text'], "str2 = str1.replace('a', 'b')")
-        # And the model now records that same de-duplicated name.
-        self.assertEqual(model['linked_prefix'], 'str2 = ')
+        self.assertNotIn('linked_prefix', model)
 
     def test_newcode_increments_past_existing_generated_names(self):
         # str1 and str2 already present -> next available is str3.
         source = "str1 = 'x'\nstr2 = 'y'\n"
-        model = {'linked_action': 'find_or_map', 'linked_prefix': 'str1 = '}
+        model = {'linked_action': 'find_or_map', 'linked_has_assignment': True}
         dicts = _commands_to_dicts(
             [('str1', "str1 + str2")],
             line=2, idx_in_line=0, model=model, source_code=source,
         )
         self.assertEqual(dicts[0]['edits'][0]['text'], "str3 = str1 + str2")
-        self.assertEqual(model['linked_prefix'], 'str3 = ')
+        self.assertNotIn('linked_prefix', model)
 
     def test_newcode_no_var_name_leaves_model_untouched(self):
         # Bare-expression insert (no assignment) must not touch linked_prefix.
-        model = {'linked_action': 'loop', 'linked_prefix': None}
+        model = {'linked_action': 'loop', 'linked_has_assignment': False}
         dicts = _commands_to_dicts(
             [(None, "print(x)")],
             line=1, idx_in_line=0, model=model, source_code="x = 1\n",
         )
         self.assertEqual(dicts[0]['edits'][0]['text'], "print(x)")
-        self.assertIsNone(model['linked_prefix'])
+        self.assertNotIn('linked_prefix', model)
 
     def test_dataclass_command_gets_trigger_identity(self):
         # Non-tuple commands must carry the emitting visualizer's identity so
         # the editor can route the update to that visualizer's own linked line.
         dicts = _commands_to_dicts(
-            [_FakeChangeCmd(text="str2 = str1.upper()", new_var_name='str2_upper')],
+            [_FakeChangeCmd(
+                expression="str1.upper()",
+                suggested_var_name='str2_upper',
+            )],
             line=5, idx_in_line=1, model=None, source_code="",
         )
         self.assertEqual(len(dicts), 1)
         cmd = dicts[0]
         self.assertEqual(cmd['type'], '_FakeChangeCmd')
-        self.assertEqual(cmd['text'], "str2 = str1.upper()")
-        self.assertEqual(cmd['new_var_name'], 'str2_upper')
+        self.assertEqual(cmd['expression'], "str1.upper()")
+        self.assertEqual(cmd['suggested_var_name'], 'str2_upper')
         self.assertEqual(cmd['triggerLine'], 5)
         self.assertEqual(cmd['triggerVisIndex'], 1)
 

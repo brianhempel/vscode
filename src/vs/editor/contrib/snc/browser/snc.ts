@@ -2929,7 +2929,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.editor.setScrollTop(newAnchorTop + anchorDelta, ScrollType.Immediate);
 			}
 		} else if (command.type === 'ChangeSelectedText') {
-			this.handleChangeSelectedText(command.text, command.new_var_name ?? null, command.triggerLine, command.triggerVisIndex);
+			this.handleChangeSelectedText(
+				command.expression,
+				command.suggested_var_name ?? null,
+				command.triggerLine,
+				command.triggerVisIndex
+			);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
@@ -2941,12 +2946,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * `_find_available_variable_name`: appends/increments a numeric suffix
 	 * (`data` → `data2` → `data3`, `x1` → `x2`).
 	 */
-	private findAvailableVarName(desired: string): string {
+	private findAvailableVarName(desired: string, excludedRange?: Range): string {
 		const model = this.editor.getModel();
 		if (!model) {
 			return desired;
 		}
-		const existing = new Set(model.getValue().match(/[A-Za-z_]\w*/g) ?? []);
+		let text = model.getValue();
+		if (excludedRange) {
+			const startOffset = model.getOffsetAt(excludedRange.getStartPosition());
+			const endOffset = model.getOffsetAt(excludedRange.getEndPosition());
+			text = text.slice(0, startOffset) + text.slice(endOffset);
+		}
+		const existing = new Set(text.match(/[A-Za-z_]\w*/g) ?? []);
 		if (!existing.has(desired)) {
 			return desired;
 		}
@@ -3093,7 +3104,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		return false;
 	}
 
-	private handleChangeSelectedText(newText: string, newVarName: string | null, line: number, visIndex: number): void {
+	private handleChangeSelectedText(expression: string, suggestedVarName: string | null, line: number, visIndex: number): void {
 		const editorModel = this.editor.getModel();
 		const link = this.findLink(line, visIndex);
 		if (!editorModel || !link) {
@@ -3106,20 +3117,21 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const currentText = editorModel.getValueInRange(trackedRange);
 
-		// Resolve the assignment target. The editor's current line is the source
-		// of truth for the variable name; Python may rename it (new_var_name) only
-		// when the prior name is unused elsewhere in the document. We rebuild the
-		// new line's leading `name =` accordingly, ignoring whatever name Python
-		// happened to put in the text.
-		const incoming = SNCController.splitAssignment(newText);
-		if (incoming) {
-			const current = SNCController.splitAssignment(currentText);
-			let targetName = current ? current.name : incoming.name;
-			if (newVarName && current && newVarName !== current.name
+		// The editor range is the sole source of truth for assignment shape and
+		// target name. Python sends only a replacement expression plus an
+		// optional semantic rename request when the action changes.
+		const current = SNCController.splitAssignment(currentText);
+		let newText: string;
+		if (current) {
+			let targetName = current.name;
+			if (suggestedVarName && suggestedVarName !== current.name
 				&& !this.isVarNameUsedOutsideRange(current.name, trackedRange)) {
-				targetName = newVarName;
+				targetName = this.findAvailableVarName(suggestedVarName, trackedRange);
 			}
-			newText = `${incoming.indent}${targetName} = ${incoming.rhs}`;
+			newText = `${current.indent}${targetName} = ${expression}`;
+		} else {
+			const indent = /^[ \t]*/.exec(currentText)?.[0] ?? '';
+			newText = `${indent}${expression}`;
 		}
 
 		if (currentText === newText) {

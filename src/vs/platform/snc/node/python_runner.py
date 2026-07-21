@@ -288,10 +288,8 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
 
     For a NewCode tuple ``(suggest_var_name, expr)`` the assignment name is
     de-duplicated against ``source_code`` (so a fresh ``str1 = ...`` next to an
-    existing ``str1`` becomes ``str2``), and — crucially — the chosen name is
-    written back into the model's ``linked_prefix``. Without that sync the model
-    keeps the pre-dedup name while the inserted line uses the deduped one, and
-    later in-place updates (ChangeSelectedText) fight over the wrong name.
+    existing ``str1`` becomes ``str2``). Concrete linked assignment names are
+    editor-owned and are intentionally not written into the visualizer model.
 
     All commands are tagged with ``triggerLine`` / ``triggerVisIndex`` so the
     editor can route each update to the specific visualizer that emitted it
@@ -302,13 +300,7 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
         try:
             if isinstance(cmd, tuple) and len(cmd) == 2:
                 suggest_var_name, expr = cmd
-                actual_var_name = (
-                    _find_available_variable_name(source_code, suggest_var_name)
-                    if suggest_var_name else None
-                )
                 edits = _build_new_code_edits(source_code, line, suggest_var_name, expr)
-                if actual_var_name and isinstance(model, dict) and model.get('linked_action'):
-                    model['linked_prefix'] = f'{actual_var_name} = '
                 cmd_dict: Dict[str, Any] = {
                     "type": "NewCode",
                     "triggerLine": line,
@@ -412,10 +404,7 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
     except Exception as vis_err:
         html_content = f'<div style="white-space: pre-wrap;">{html.escape(type(vis_err).__name__)} during visualization. {html.escape(traceback.format_exc())}</div>'
 
-    # Convert commands to wire dicts BEFORE streaming the item. NewCode var-name
-    # de-duplication writes the chosen name back into `model`, and the item
-    # carries `model`, so this must run first for the streamed model to reflect
-    # the de-duplicated (non-colliding) assignment name.
+    # Convert commands to wire dicts before streaming them.
     cmd_dicts = _commands_to_dicts(commands, line, idx_in_line, model, _source_code)
 
     # Add to the global visualization data that will be output as JSON

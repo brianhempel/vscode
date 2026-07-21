@@ -1009,7 +1009,7 @@ class TestKeyboardEvents(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("list(re.finditer(r'hello', x, flags=re.M))", commands[0].text)
+        self.assertIn("list(re.finditer(r'hello', x, flags=re.M))", commands[0].expression)
 
     def test_enter_without_selection_does_nothing(self):
         """Enter without selection produces no commands."""
@@ -1028,7 +1028,7 @@ class TestKeyboardEvents(unittest.TestCase):
         self.assertEqual(model['linked_action'], 'delete')
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("re.sub(r'hello', '', x, flags=re.M)", commands[0].text)
+        self.assertIn("re.sub(r'hello', '', x, flags=re.M)", commands[0].expression)
 
     def test_backspace_without_selection_does_nothing(self):
         """Backspace without selection produces no commands."""
@@ -3245,7 +3245,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
                                 self.var_and_exp, model, self.value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("list(re.finditer(r'hello.*world'", commands[0].text)
+        self.assertIn("list(re.finditer(r'hello.*world'", commands[0].expression)
 
     def test_search_box_input_auto_inserts_simple_regex(self):
         """A simple regex without groups auto-inserts the find LOC."""
@@ -3303,7 +3303,7 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("re.finditer(r'world'", commands[0].text)
+        self.assertIn("re.finditer(r'world'", commands[0].expression)
         # Still only auto-linked once; no second insert.
         self.assertTrue(model.get('auto_linked_once'))
 
@@ -3355,25 +3355,36 @@ class TestLinkedActionChangeRenamesVar(unittest.TestCase):
         self.model, first = update(make_search_box_input_event(r"r'hello'"),
                                    self.var_and_exp, self.model, self.value)
         self.assertEqual(first[0][0], 'x_matches')
-        self.assertEqual(self.model['linked_prefix'], 'x_matches = ')
+        self.assertTrue(self.model['linked_has_assignment'])
+        self.assertNotIn('linked_prefix', self.model)
 
-    def test_action_change_emits_new_var_name(self):
+    def test_action_change_emits_expression_and_name_suggestion(self):
         """Switching to 'count' should suggest x_count as the new var name."""
         model, commands = update(make_action_button_event('count'),
                                  self.var_and_exp, self.model, self.value)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(change_cmds), 1)
-        # Backward-compat: text still carries the prior prefix.
-        self.assertEqual(change_cmds[0].new_var_name, 'x_count')
+        self.assertEqual(change_cmds[0].suggested_var_name, 'x_count')
+        self.assertNotIn('x_matches = ', change_cmds[0].expression)
 
-    def test_no_new_var_name_when_name_unchanged(self):
-        """An action whose suggested name matches the current one carries no rename."""
+    def test_ordinary_update_preserves_editor_owned_name(self):
+        """Search edits update only the expression, preserving the editor's name."""
         # Re-emitting find_or_map (e.g. via search box change) keeps x_matches.
         model, commands = update(make_search_box_input_event(r"r'world'"),
                                  self.var_and_exp, self.model, self.value)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(change_cmds), 1)
-        self.assertIsNone(change_cmds[0].new_var_name)
+        self.assertIsNone(change_cmds[0].suggested_var_name)
+
+    def test_action_round_trip_resends_original_name_suggestion(self):
+        """Name suggestions follow action changes, not a cached assignment name."""
+        model, _ = update(make_action_button_event('delete'),
+                          self.var_and_exp, self.model, self.value)
+        model, commands = update(make_action_button_event('find_or_map'),
+                                 self.var_and_exp, model, self.value)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertEqual(change_cmds[0].suggested_var_name, 'x_matches')
 
     def test_new_var_name_none_for_statement_action(self):
         """Statement actions (no assignment target) carry no new var name."""
@@ -3381,7 +3392,7 @@ class TestLinkedActionChangeRenamesVar(unittest.TestCase):
                                  self.var_and_exp, self.model, self.value)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         if change_cmds:
-            self.assertIsNone(change_cmds[0].new_var_name)
+            self.assertIsNone(change_cmds[0].suggested_var_name)
 
 
 class TestSingleQuoteEscaping(unittest.TestCase):
@@ -3420,7 +3431,7 @@ class TestSingleQuoteEscaping(unittest.TestCase):
                                 var_and_exp, model, value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("r'it\\'s'", commands[0].text)
+        self.assertIn("r'it\\'s'", commands[0].expression)
 
     def test_backspace_with_single_quote_generates_valid_raw_string(self):
         value = "it's here"
@@ -3438,7 +3449,7 @@ class TestSingleQuoteEscaping(unittest.TestCase):
                                 var_and_exp, model, value)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn("r'it\\'s'", commands[0].text)
+        self.assertIn("r'it\\'s'", commands[0].expression)
 
 
 class TestBareExpressionSuggestions(unittest.TestCase):
@@ -3465,6 +3476,31 @@ class TestBareExpressionSuggestions(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertEqual(suggest_name, "result")
         self.assertIn("re.sub(r'hello'", expr)
+
+    def test_linked_bare_expression_keeps_result_name_for_slices(self):
+        """Linked source expressions must not become assignment-name prefixes."""
+        model = init_model("hello world")
+        search = '[item.start() for item in str3_matches]:'
+        eval_in_scope = lambda _expr: [0, 6]
+
+        model, commands = update(
+            make_search_box_input_event(search),
+            (None, 'str3'),
+            model,
+            "hello world",
+            eval_in_scope=eval_in_scope,
+        )
+        self.assertEqual(commands[0][0], 'result_slices')
+        self.assertEqual(model['linked_source_expr'], '(str3)')
+
+        model, commands = update(
+            make_action_button_event('find_or_map'),
+            (None, 'str3'),
+            model,
+            "hello world",
+            eval_in_scope=eval_in_scope,
+        )
+        self.assertEqual(commands[0].suggested_var_name, 'result_slices')
 
 
 class TestSearchBoxEscape(unittest.TestCase):
@@ -10382,7 +10418,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x_matches')
@@ -10393,7 +10429,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
             'replace_visible': True, 'replace_expr': "'world'",
         })
         self.assertIsNotNone(result)
@@ -10404,7 +10440,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x')
@@ -10423,7 +10459,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x_strings')
@@ -10434,7 +10470,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': True, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x_substring')
@@ -10454,7 +10490,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x_parts')
@@ -10464,7 +10500,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 'x_indices')
@@ -10475,7 +10511,7 @@ class TestDSLGenerateActionWrapper(_ActionTestBase):
             'is_expr': False, 'is_first': False, 'is_ci': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
-            'var_name': 'x', 'suggest_base': 'x',
+            'has_var': True, 'suggest_base': 'x',
             'replace_visible': True, 'replace_expr': "mtch.group().isdigit()",
         })
         self.assertIsNotNone(result)

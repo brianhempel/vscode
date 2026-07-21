@@ -378,11 +378,11 @@ _BARE_NAME_ACTIONS = frozenset({'replace', 'delete'})
 
 def _suggest_name(ctx: dict, suffix: str) -> str:
     base = ctx.get('suggest_base') or 'result'
-    return f"{base}_{suffix}" if ctx.get('var_name') else f"result_{suffix}"
+    return f"{base}_{suffix}" if ctx.get('has_var') else f"result_{suffix}"
 
 
 def _suggest_name_bare(ctx: dict) -> str:
-    return (ctx.get('suggest_base') or 'result') if ctx.get('var_name') else 'result'
+    return (ctx.get('suggest_base') or 'result') if ctx.get('has_var') else 'result'
 
 
 def _suggest_name_for_get(ctx: dict) -> str:

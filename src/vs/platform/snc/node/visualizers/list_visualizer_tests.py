@@ -1854,7 +1854,7 @@ class TestGenerateAction(unittest.TestCase):
     def _predicate_ctx(self, predicate='item > 100', first=False, src='data'):
         return {
             'source_expr': src,
-            'var_name': src,
+            'has_var': True,
             'suggest_base': src,
             'is_predicate': True,
             'predicate_expr': predicate,
@@ -1867,7 +1867,7 @@ class TestGenerateAction(unittest.TestCase):
     def _index_ctx(self, index='5', src='data'):
         return {
             'source_expr': src,
-            'var_name': src,
+            'has_var': True,
             'suggest_base': src,
             'is_index': True,
             'index_expr': index,
@@ -1880,7 +1880,7 @@ class TestGenerateAction(unittest.TestCase):
     def _slice_ctx(self, start='2', stop='5', src='data'):
         return {
             'source_expr': src,
-            'var_name': src,
+            'has_var': True,
             'suggest_base': src,
             'is_slice': True,
             'slice_start': start,
@@ -1894,7 +1894,7 @@ class TestGenerateAction(unittest.TestCase):
     def _multi_index_ctx(self, indices='[1,3,5]', src='data'):
         return {
             'source_expr': src,
-            'var_name': src,
+            'has_var': True,
             'suggest_base': src,
             'is_multi_index': True,
             'indices_expr': indices,
@@ -2073,7 +2073,7 @@ class TestGenerateAction(unittest.TestCase):
 
     def _broadcast_start_ctx(self, starts='[1,2,4]', stop='', src='data'):
         return {
-            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'source_expr': src, 'has_var': True, 'suggest_base': src,
             'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': False,
             'start_list_expr': starts, 'slice_stop': stop,
             'is_predicate': False, 'is_index': False, 'is_slice': False,
@@ -2082,7 +2082,7 @@ class TestGenerateAction(unittest.TestCase):
 
     def _broadcast_stop_ctx(self, start='', stops='[3,5,7]', src='data'):
         return {
-            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'source_expr': src, 'has_var': True, 'suggest_base': src,
             'is_broadcast_slice': True, 'has_start_list': False, 'has_stop_list': True,
             'stop_list_expr': stops, 'slice_start': start,
             'is_predicate': False, 'is_index': False, 'is_slice': False,
@@ -2091,7 +2091,7 @@ class TestGenerateAction(unittest.TestCase):
 
     def _broadcast_both_ctx(self, starts='[0,1]', stops='[3,2]', src='data'):
         return {
-            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'source_expr': src, 'has_var': True, 'suggest_base': src,
             'is_broadcast_slice': True, 'has_start_list': True, 'has_stop_list': True,
             'start_list_expr': starts, 'stop_list_expr': stops,
             'is_predicate': False, 'is_index': False, 'is_slice': False,
@@ -2100,7 +2100,7 @@ class TestGenerateAction(unittest.TestCase):
 
     def _multi_pair_ctx(self, pairs='[(0,2),(3,5)]', src='data'):
         return {
-            'source_expr': src, 'var_name': src, 'suggest_base': src,
+            'source_expr': src, 'has_var': True, 'suggest_base': src,
             'is_multi_pair': True, 'pairs_expr': pairs,
             'is_predicate': False, 'is_index': False, 'is_slice': False,
             'is_multi_index': False, 'is_first': False,
@@ -2209,7 +2209,7 @@ class TestGenerateAction(unittest.TestCase):
     def _whole_list_ctx(self, src='data'):
         return {
             'source_expr': src,
-            'var_name': src,
+            'has_var': True,
             'suggest_base': src,
             'is_whole_list': True,
             'is_predicate': False,
@@ -2454,8 +2454,33 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
                                  model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
-        self.assertIn('item > 25', commands[0].text)
+        self.assertIn('item > 25', commands[0].expression)
         self.assertTrue(model.get('auto_linked_once'))
+
+    def test_linked_bare_expression_keeps_result_name(self):
+        """A linked source expression must not become a variable-name prefix."""
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model, commands = update(
+            make_search_input_event('^ > 15'),
+            (None, 'data'),
+            model,
+            lst,
+            mock_get_visualizer,
+            eval_in_scope=eval,
+        )
+        self.assertEqual(commands[0][0], 'result_filtered')
+        self.assertEqual(model['linked_source_expr'], '(data)')
+
+        model, commands = update(
+            make_action_button_event('count'),
+            (None, 'data'),
+            model,
+            lst,
+            mock_get_visualizer,
+            eval_in_scope=eval,
+        )
+        self.assertEqual(commands[0].suggested_var_name, 'result_count')
 
     def test_no_var_and_exp_does_not_auto_link(self):
         lst = [10, 20, 30]
@@ -3431,7 +3456,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'filter')
         self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertEqual(model.get('linked_prefix'), '')
+        self.assertFalse(model.get('linked_has_assignment'))
 
     def test_editor_text_select_sets_search(self):
         model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
@@ -3444,7 +3469,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         event = make_editor_text_select_event('result = [item for item in data if item > 3]')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'filter')
-        self.assertEqual(model.get('linked_prefix'), 'result = ')
+        self.assertTrue(model.get('linked_has_assignment'))
 
     def test_editor_text_select_join_whole_list_enters_linked_mode(self):
         model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
@@ -3452,7 +3477,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'join')
         self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertEqual(model.get('linked_prefix'), '')
+        self.assertFalse(model.get('linked_has_assignment'))
 
     def test_unlink_clears_linked_state(self):
         model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
@@ -3463,7 +3488,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertIsNone(model.get('linked_action'))
         self.assertIsNone(model.get('linked_source_expr'))
-        self.assertIsNone(model.get('linked_prefix'))
+        self.assertIsNone(model.get('linked_has_assignment'))
 
     def test_linked_action_button_emits_change_selected_text(self):
         from list_visualizer import ChangeSelectedText
@@ -3484,13 +3509,14 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         event = make_editor_text_select_event(
             'data_filtered = [item for item in data if item > 3]')
         model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
-        self.assertEqual(model.get('linked_prefix'), 'data_filtered = ')
+        self.assertTrue(model.get('linked_has_assignment'))
+        self.assertNotIn('linked_prefix', model)
         # Switch to delete -> suggested name becomes 'data'.
         event = make_action_button_event('delete')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(change_cmds), 1)
-        self.assertEqual(change_cmds[0].new_var_name, 'data')
+        self.assertEqual(change_cmds[0].suggested_var_name, 'data')
 
     def test_unchanged_name_carries_no_new_var_name(self):
         """A search change that keeps the same action keeps the same name."""
@@ -3503,7 +3529,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertTrue(len(change_cmds) > 0)
-        self.assertIsNone(change_cmds[0].new_var_name)
+        self.assertIsNone(change_cmds[0].suggested_var_name)
 
     def test_linked_join_menu_updates_selected_text(self):
         from list_visualizer import ChangeSelectedText
@@ -3515,7 +3541,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         self.assertEqual(model.get('linked_action'), 'join')
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(change_cmds), 1)
-        self.assertEqual(change_cmds[0].text, "', '.join(str(item) for item in data)")
+        self.assertEqual(change_cmds[0].expression, "', '.join(str(item) for item in data)")
 
     def test_linked_search_change_emits_change_selected_text(self):
         from list_visualizer import ChangeSelectedText
@@ -3729,7 +3755,7 @@ class TestListGrammarFindIndices(_ListActionTestBase):
         """Bare-expression patterns can't roundtrip (too greedy for parse) but must generate."""
         result = self.generate_action('find_indices', {
             'is_index': True, 'is_slice': False, 'is_multi_index': False,
-            'index_expr': '5', 'source_expr': 'data', 'var_name': 'data', 'suggest_base': 'data',
+            'index_expr': '5', 'source_expr': 'data', 'has_var': True, 'suggest_base': 'data',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[1], '5')
@@ -3745,7 +3771,7 @@ class TestListGrammarFindIndices(_ListActionTestBase):
         result = self.generate_action('find_indices', {
             'is_slice': True, 'is_index': False, 'is_multi_index': False,
             'slice_start': '', 'slice_stop': '5', 'source_expr': 'data',
-            'var_name': 'data', 'suggest_base': 'data',
+            'has_var': True, 'suggest_base': 'data',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[1], 'list(range(0, 5))')
@@ -3757,7 +3783,7 @@ class TestListGrammarFindIndices(_ListActionTestBase):
         """Bare-expression patterns can't roundtrip (too greedy for parse) but must generate."""
         result = self.generate_action('find_indices', {
             'is_multi_index': True, 'is_index': False, 'is_slice': False,
-            'indices_expr': '[1,3,5]', 'source_expr': 'data', 'var_name': 'data', 'suggest_base': 'data',
+            'indices_expr': '[1,3,5]', 'source_expr': 'data', 'has_var': True, 'suggest_base': 'data',
         })
         self.assertIsNotNone(result)
         self.assertEqual(result[1], '[1,3,5]')
@@ -4031,7 +4057,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         self.assertEqual(commands[0].text, 'hello')
 
     def test_child_change_selected_text_passes_through(self):
-        nc_vis = self._make_newcode_vis([ChangeSelectedText(text='new_text')])
+        nc_vis = self._make_newcode_vis([ChangeSelectedText(expression='new_text')])
         get_vis = self._get_vis_for(nc_vis)
 
         lst = [{'name': 'Alice'}]

@@ -116,6 +116,7 @@ COMMANDS:
 
 import ast
 import html
+import keyword
 import os
 import re
 import re._parser as regex_parser  # type: ignore[import]
@@ -138,13 +139,11 @@ class CopyToClipboard:
 
 @dataclass(frozen=True, slots=True)
 class ChangeSelectedText:
-    text: str
-    # When the action changed, this is the variable name now suggested for the
-    # assignment target. The editor renames the linked line's target to this
-    # (only if the prior name is unused elsewhere). None means "keep the
-    # current name" (e.g. the name didn't change, or the action is a statement
-    # with no assignment target).
-    new_var_name: Optional[str] = None
+    # The backend owns expression generation; the editor owns the concrete
+    # assignment target in its linked range.
+    expression: str
+    # Set only for an action change that semantically suggests a new target.
+    suggested_var_name: Optional[str] = None
 
 # === Event types ===
 
@@ -4034,7 +4033,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "replace_text": None,     # The replacement text (a Python string literal, e.g., "'world'")
         "linked_action": None,         # When linked: the action name (e.g. 'replace')
         "linked_source_expr": None,  # When linked: variable from parsed code (e.g. 'str1')
-        "linked_prefix": None,         # When linked: assignment prefix (e.g. 'str2 = ') or ''
+        "linked_has_assignment": None, # When linked: whether the selected code is an assignment
         "auto_linked_once": False,     # True once an interaction has auto-inserted+linked a LOC
                                        # (prevents inserting a second line on later interactions)
         "tool": "literal",             # Active selection tool: 'literal', 'fuzzy', 'index', or 'pick'
@@ -4263,14 +4262,18 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
     kind, term, flags = parsed
 
     if source_expr:
-        suggest_base = source_expr
-        var_name = source_expr
+        # A linked source may be any expression (for example ``(str3)`` or
+        # ``items[0]``). Keep using it to generate the RHS, but only use it as
+        # an assignment-name base when it is actually a legal identifier.
+        has_var = source_expr.isidentifier() and not keyword.iskeyword(source_expr)
+        suggest_base = source_expr if has_var else "result"
     else:
         if var_and_exp is None:
             return None
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
+        has_var = bool(var_name)
 
     replace_visible = model.get('replace_visible', False)
     replace_text = model.get('replace_text')
@@ -4294,7 +4297,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
             return {
                 'selection_regex': selection_regex,
                 'source_expr': source_expr,
-                'var_name': var_name,
+                'has_var': has_var,
                 'suggest_base': suggest_base,
                 'is_index': False, 'is_slice': False,
                 'is_multi_index': True,
@@ -4307,7 +4310,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
             return {
                 'selection_regex': selection_regex,
                 'source_expr': source_expr,
-                'var_name': var_name,
+                'has_var': has_var,
                 'suggest_base': suggest_base,
                 'is_index': False, 'is_slice': False,
                 'is_multi_pair_slice': True,
@@ -4321,7 +4324,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
             return {
                 'selection_regex': selection_regex,
                 'source_expr': source_expr,
-                'var_name': var_name,
+                'has_var': has_var,
                 'suggest_base': suggest_base,
                 'is_index': True,
                 'is_slice': False,
@@ -4353,7 +4356,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
             ctx = {
                 'selection_regex': selection_regex,
                 'source_expr': source_expr,
-                'var_name': var_name,
+                'has_var': has_var,
                 'suggest_base': suggest_base,
                 'is_index': False, 'is_slice': False,
                 'is_broadcast_slice': True,
@@ -4375,7 +4378,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
         return {
             'selection_regex': selection_regex,
             'source_expr': source_expr,
-            'var_name': var_name,
+            'has_var': has_var,
             'suggest_base': suggest_base,
             'is_index': False,
             'is_slice': True,
@@ -4402,7 +4405,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
     return {
         'selection_regex': selection_regex,
         'source_expr': source_expr,
-        'var_name': var_name,
+        'has_var': has_var,
         'suggest_base': suggest_base,
         'is_first': first,
         'is_ci': ci,
@@ -5174,10 +5177,10 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             if anchor_type == 'index':
                 if not isinstance(idx, int):
                     return (model, commands)
-                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_prefix'))
+                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_has_assignment'))
                 saved_tool = model.get('tool', 'literal')
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-                model['linked_action'], model['linked_source_expr'], model['linked_prefix'] = saved_linked
+                model['linked_action'], model['linked_source_expr'], model['linked_has_assignment'] = saved_linked
                 model['tool'] = saved_tool
                 model['anchorIdx'] = idx
                 model['anchorType'] = 'index'
@@ -5229,11 +5232,11 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model['insertAfterSegment'] = fuzzy_info['segment_index']  # Insert after this segment
             else:
                 # Fresh start: reset selection, preserving linked-editing state, search flags, and active tool
-                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_prefix'))
+                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_has_assignment'))
                 saved_flags = get_search_flags(model.get('search'))
                 saved_tool = model.get('tool', 'literal')
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-                model['linked_action'], model['linked_source_expr'], model['linked_prefix'] = saved_linked
+                model['linked_action'], model['linked_source_expr'], model['linked_has_assignment'] = saved_linked
                 model['tool'] = saved_tool
                 if saved_flags:
                     model['search'] = '``' + saved_flags
@@ -5544,12 +5547,12 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     _ctx_to_model(parsed, model)
                     model['linked_action'] = parsed['action']
                     model['linked_source_expr'] = parsed['source_expr']
-                    model['linked_prefix'] = prefix
+                    model['linked_has_assignment'] = bool(prefix)
 
         case Unlink():
             model['linked_action'] = None
             model['linked_source_expr'] = None
-            model['linked_prefix'] = None
+            model['linked_has_assignment'] = None
 
         case SegmentToggle(segment_id=seg_id):
             # Toggle the segment in the selection list (preserving canonical
@@ -5616,7 +5619,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     result = generate_action(action, ctx)
                     if result:
                         _emit_linked_update(result[1], model, commands,
-                                            suggest_name=result[0])
+                                            suggest_name=result[0], rename=True)
             else:
                 ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx:
@@ -5680,34 +5683,21 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     # block (which re-resolves via source_expr) rebuilds the same context.
     model['linked_action'] = _AUTO_LINK_ACTION
     model['linked_source_expr'] = ctx.get('source_expr')
-    model['linked_prefix'] = prefix
+    model['linked_has_assignment'] = bool(suggest_name)
     model['auto_linked_once'] = True
     commands.append(result)
 
 
-def _current_linked_var_name(model: dict) -> 'str | None':
-    """The assignment target currently recorded in the linked prefix, if any."""
-    prefix = model.get('linked_prefix') or ''
-    m = re.match(r'\s*([A-Za-z_]\w*)\s*=\s*$', prefix)
-    return m.group(1) if m else None
-
-
 def _emit_linked_update(expr: str, model: dict, commands: list,
-                        suggest_name: 'str | None' = None) -> None:
-    """Append a ChangeSelectedText command only if the full text is valid Python.
-
-    `suggest_name` is the variable name now suggested for the current action.
-    When it differs from the linked line's current name, it is attached as
-    `new_var_name` so the editor can rename the assignment target (the editor
-    only renames when the prior name is unused elsewhere, and it stays
-    authoritative for the actual name in the document).
-    """
-    text = (model.get('linked_prefix') or '') + expr
+                        suggest_name: 'str | None' = None,
+                        rename: bool = False) -> None:
+    """Send expression intent while leaving the concrete target to the editor."""
+    text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
     try:
         ast.parse(text)
     except SyntaxError:
         return
-    new_var_name = None
-    if suggest_name and suggest_name != _current_linked_var_name(model):
-        new_var_name = suggest_name
-    commands.append(ChangeSelectedText(text=text, new_var_name=new_var_name))
+    commands.append(ChangeSelectedText(
+        expression=expr,
+        suggested_var_name=suggest_name if rename else None,
+    ))

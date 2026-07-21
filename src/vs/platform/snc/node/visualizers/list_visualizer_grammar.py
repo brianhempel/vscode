@@ -200,7 +200,7 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
     if action in _STATEMENT_ACTIONS:
         return None
     base = ctx.get('suggest_base') or 'result'
-    has_var = bool(ctx.get('var_name'))
+    has_var = bool(ctx.get('has_var'))
     if action == 'filter':
         if ctx.get('is_first'):
             suffix = 'match'

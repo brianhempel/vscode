@@ -41,6 +41,7 @@ Columns shown in the table are configurable and persisted:
 
 import ast
 import html
+import keyword
 import random
 import re
 from dataclasses import dataclass
@@ -146,12 +147,8 @@ class CopyToClipboard:
 
 @dataclass(frozen=True, slots=True)
 class ChangeSelectedText:
-    text: str
-    # When the action changed, this is the variable name now suggested for the
-    # assignment target. The editor renames the linked line's target to this
-    # (only if the prior name is unused elsewhere). None means "keep the
-    # current name".
-    new_var_name: Optional[str] = None
+    expression: str
+    suggested_var_name: Optional[str] = None
 
 
 # === Dotfile operations ===
@@ -320,6 +317,17 @@ def _is_list_of_int_pairs(val) -> bool:
                     for x in val))
 
 
+def _name_context_for_source(source_expr: str) -> tuple[bool, str]:
+    """Return (has_var, suggestion base) for a source expression.
+
+    has_var is True only when the source is a legal identifier, so it can serve
+    as an assignment-name base; otherwise callers fall back to "result".
+    """
+    if source_expr.isidentifier() and not keyword.iskeyword(source_expr):
+        return True, source_expr
+    return False, "result"
+
+
 def _get_search_context(model: dict, var_and_exp=None,
                         *, source_expr: str = None, eval_in_scope=None) -> dict | None:
     """Build search context dict from model + source info.
@@ -331,14 +339,14 @@ def _get_search_context(model: dict, var_and_exp=None,
         return None
 
     if source_expr:
-        var_name = source_expr
-        suggest_base = source_expr
+        has_var, suggest_base = _name_context_for_source(source_expr)
     else:
         if var_and_exp is None:
             return None
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
+        has_var = bool(var_name)
 
     first = bool(model.get('first_match', False))
     parsed = parse_search_term(search)
@@ -362,7 +370,7 @@ def _get_search_context(model: dict, var_and_exp=None,
         stop_is_list = _is_list_of_ints(stop_val)
         if start_is_list or stop_is_list:
             ctx = {
-                'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+                'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
                 'is_broadcast_slice': True,
                 'has_start_list': start_is_list, 'has_stop_list': stop_is_list,
                 'is_predicate': False, 'is_index': False, 'is_slice': False,
@@ -378,7 +386,7 @@ def _get_search_context(model: dict, var_and_exp=None,
                 ctx['slice_stop'] = slice_stop_raw
             return ctx
         return {
-            'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+            'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
             'is_slice': True, 'slice_start': slice_start_raw, 'slice_stop': slice_stop_raw,
             'is_index': False, 'is_predicate': False, 'is_multi_index': False,
             'is_first': True,
@@ -396,7 +404,7 @@ def _get_search_context(model: dict, var_and_exp=None,
 
     if isinstance(val, int) and not isinstance(val, bool):
         return {
-            'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+            'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
             'is_index': True, 'index_expr': expr_text,
             'is_slice': False, 'is_predicate': False, 'is_multi_index': False,
             'is_first': True,
@@ -404,7 +412,7 @@ def _get_search_context(model: dict, var_and_exp=None,
 
     if _is_list_of_ints(val):
         return {
-            'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+            'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
             'is_multi_index': True, 'indices_expr': expr_text,
             'is_index': False, 'is_slice': False, 'is_predicate': False,
             'is_first': first,
@@ -412,7 +420,7 @@ def _get_search_context(model: dict, var_and_exp=None,
 
     if _is_list_of_int_pairs(val):
         return {
-            'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+            'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
             'is_multi_pair': True, 'pairs_expr': expr_text,
             'is_index': False, 'is_slice': False, 'is_predicate': False, 'is_multi_index': False,
             'is_first': first,
@@ -430,7 +438,7 @@ def _get_search_context(model: dict, var_and_exp=None,
     predicate_expr = replace_caret_in_py_exp(predicate_with_caret, 'item')
 
     return {
-        'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+        'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
         'is_predicate': True, 'predicate_expr': predicate_expr,
         'is_index': False, 'is_slice': False, 'is_multi_index': False,
         'is_first': first,
@@ -441,17 +449,17 @@ def _get_whole_list_context(model: dict, var_and_exp=None,
                             *, source_expr: str = None) -> dict | None:
     """Build a context dict representing the whole list (no search filter)."""
     if source_expr:
-        var_name = source_expr
-        suggest_base = source_expr
+        has_var, suggest_base = _name_context_for_source(source_expr)
     else:
         if var_and_exp is None:
             return None
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
+        has_var = bool(var_name)
 
     return {
-        'source_expr': source_expr, 'var_name': var_name, 'suggest_base': suggest_base,
+        'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
         'is_whole_list': True,
         'is_predicate': False, 'is_index': False, 'is_slice': False,
         'is_multi_index': False, 'is_first': False,
@@ -488,7 +496,7 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
     if action in _STATEMENT_ACTIONS:
         return None
     base = ctx.get('suggest_base') or 'result'
-    has_var = bool(ctx.get('var_name'))
+    has_var = bool(ctx.get('has_var'))
     if action == 'filter':
         if ctx.get('is_first'):
             suffix = 'match'
@@ -720,32 +728,19 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     return None
 
 
-def _current_linked_var_name(model: dict) -> 'str | None':
-    """The assignment target currently recorded in the linked prefix, if any."""
-    prefix = model.get('linked_prefix') or ''
-    m = re.match(r'\s*([A-Za-z_]\w*)\s*=\s*$', prefix)
-    return m.group(1) if m else None
-
-
 def _emit_linked_update(expr: str, model: dict, commands: list,
-                        suggest_name: 'str | None' = None) -> None:
-    """Append a ChangeSelectedText command only if the full text is valid Python.
-
-    `suggest_name` is the variable name now suggested for the current action.
-    When it differs from the linked line's current name, it is attached as
-    `new_var_name` so the editor can rename the assignment target (the editor
-    only renames when the prior name is unused elsewhere, and it stays
-    authoritative for the actual name in the document).
-    """
-    text = (model.get('linked_prefix') or '') + expr
+                        suggest_name: 'str | None' = None,
+                        rename: bool = False) -> None:
+    """Send expression intent while leaving the concrete target to the editor."""
+    text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
     try:
         ast.parse(text)
     except SyntaxError:
         return
-    new_var_name = None
-    if suggest_name and suggest_name != _current_linked_var_name(model):
-        new_var_name = suggest_name
-    commands.append(ChangeSelectedText(text=text, new_var_name=new_var_name))
+    commands.append(ChangeSelectedText(
+        expression=expr,
+        suggested_var_name=suggest_name if rename else None,
+    ))
 
 
 # === Matching indices for highlighting ===
@@ -892,7 +887,7 @@ _SEARCH_DEFAULTS = {
     'openDropdown': None,
     'linked_action': None,
     'linked_source_expr': None,
-    'linked_prefix': None,
+    'linked_has_assignment': None,
     'auto_linked_once': False,
 }
 
@@ -1899,7 +1894,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     result = generate_action(action, ctx)
                     if result:
                         _emit_linked_update(result[1], model, commands,
-                                            suggest_name=result[0])
+                                            suggest_name=result[0], rename=True)
             else:
                 ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx is None:
@@ -1927,12 +1922,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _ctx_to_model(parsed, model)
                     model['linked_action'] = parsed['action']
                     model['linked_source_expr'] = parsed['source_expr']
-                    model['linked_prefix'] = prefix
+                    model['linked_has_assignment'] = bool(prefix)
 
         case Unlink():
             model['linked_action'] = None
             model['linked_source_expr'] = None
-            model['linked_prefix'] = None
+            model['linked_has_assignment'] = None
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink)):
         ctx = _get_search_context(model, var_and_exp,
@@ -1979,6 +1974,6 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
         return
     model['linked_action'] = _AUTO_LINK_ACTION
     model['linked_source_expr'] = ctx.get('source_expr')
-    model['linked_prefix'] = prefix
+    model['linked_has_assignment'] = bool(suggest_name)
     model['auto_linked_once'] = True
     commands.append(result)
