@@ -12,6 +12,7 @@ import { IProcessOptions, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCT
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
+import { FileAccess } from '../../../../base/common/network.js';
 import { IHostService } from '../../../../workbench/services/host/browser/host.js';
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -23,6 +24,53 @@ import './snc.css';
 
 // 'sncVisualization' is a trusted name defined in src/vs/code/electron-sandbox/workbench/workbench(-dev).html
 const ttPolicy = createTrustedTypesPolicy('sncVisualization', { createHTML: value => value });
+
+/**
+ * Normalize an Amadine (AMDN) SVG export so it can be styled from CSS.
+ *
+ * Amadine bakes color into inline `style="fill:#000000;..."` attributes, which
+ * CSS cannot override (short of `!important`). Mirroring the Python icon loader
+ * in visualizer_utils.py, this drops the XML prolog/comments and rewrites each
+ * `style="k:v;..."` into discrete presentation attributes (`k="v" ...`), which
+ * CSS rules *can* override — so `fill: currentColor` in snc.css wins.
+ */
+function cleanAmadineSvg(raw: string): string {
+	return raw
+		.replace(/<\?xml[^>]*\?>/g, '')
+		.replace(/<!--[\s\S]*?-->/g, '')
+		.replace(/\bstyle="([^"]*)"/g, (_match, decls: string) =>
+			decls
+				.split(';')
+				.map(decl => decl.trim())
+				.filter(decl => decl.includes(':'))
+				.map(decl => {
+					const idx = decl.indexOf(':');
+					return `${decl.slice(0, idx).trim()}="${decl.slice(idx + 1).trim()}"`;
+				})
+				.join(' ')
+		)
+		.trim();
+}
+
+// The link-chain icon is loaded from two_chain_links.svg on disk (copied to
+// out/ by the build; see the resource glob in build/gulpfile.vscode.js for
+// production packaging). It's fetched once, cleaned so CSS controls its `fill`,
+// and cached. `chainSvgMarkup` is populated asynchronously; setLinkChain fills
+// any icon created before the load resolves.
+const CHAIN_SVG_URI = FileAccess.asBrowserUri('vs/editor/contrib/snc/browser/two_chain_links.svg');
+let chainSvgMarkup: string | null = null;
+let chainSvgLoad: Promise<string> | null = null;
+function loadChainSvg(): Promise<string> {
+	if (!chainSvgLoad) {
+		chainSvgLoad = fetch(CHAIN_SVG_URI.toString(true))
+			.then(response => response.text())
+			.then(raw => (chainSvgMarkup = cleanAmadineSvg(raw)))
+			.catch(() => (chainSvgMarkup = ''));
+	}
+	return chainSvgLoad;
+}
+// Warm the cache at module load so the icon is ready by first render.
+loadChainSvg();
 
 
 /**
@@ -1625,7 +1673,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			chain.className = 'snc-link-chain';
 			const icon = document.createElement('span');
 			icon.className = 'snc-link-chain-icon';
-			icon.textContent = '\u26D3\uFE0E'; // ⛓ chain
+			const setIconSvg = (svg: string) => {
+				if (svg) {
+					icon.innerHTML = (ttPolicy?.createHTML(svg) ?? svg) as string;
+				}
+			};
+			if (chainSvgMarkup !== null) {
+				setIconSvg(chainSvgMarkup);
+			} else {
+				// SVG still loading: fill the icon once it arrives.
+				loadChainSvg().then(setIconSvg);
+			}
 			const x = document.createElement('span');
 			x.className = 'snc-link-chain-x';
 			x.textContent = '\u2715'; // ✕
@@ -2561,7 +2619,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		const pad = 8; // margin
-		const xdist = 10; // how far left to go
+		const xdist = 7; // how far left to go
 		const minX = Math.min(startX, targetX) - pad - xdist;
 		const minY = Math.min(startY, targetY) - pad;
 		const width = Math.abs(targetX - startX) + xdist + pad * 2;

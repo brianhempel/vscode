@@ -80,6 +80,9 @@ export const vscodeWebResourceIncludes = [
 	// Webview
 	'out-build/vs/workbench/contrib/webview/browser/pre/*.{js,html}',
 
+	// Sculpt-n-Code (SNC) editor contribution assets
+	'out-build/vs/editor/contrib/snc/browser/*.svg',
+
 	// Tree Sitter highlights
 	'out-build/vs/editor/common/languages/highlights/*.scm',
 
