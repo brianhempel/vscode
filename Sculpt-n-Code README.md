@@ -6,6 +6,9 @@ Setup:
 git clone https://github.com/brianhempel/vscode.git
 cd vscode
 git checkout snc
+
+# Node version: use the version in .nvmrc (currently 24.18.0). e.g. with fnm:
+fnm install && fnm use   # or: nvm install && nvm use
 npm install # On Windows you have to run this in Visual Studio
 
 # Use your ordinary VS Code extensions
@@ -67,20 +70,64 @@ git commit --no-verify -m 'message'
 git push -f
 ```
 
-After that, to update on latest VS Code see below. Currently can't move up because I need a C++20 compiler for tree-sitter on the newer versions of `node`.
+After that, to update on latest VS Code see below. Currently rebased on `1.130.0`.
+
+Note: don't use the old `git reset --hard TAG` + `git cherry-pick origin/snc` recipe. The
+snc branch and the current VS Code release branch diverge from a common ancestor that is
+*older* than the tag snc is based on, so a plain merge/cherry-pick drags in thousands of
+unrelated upstream-vs-upstream conflicts. Instead, apply only the net SNC diff onto the new
+tag. SNC touches ~14 upstream files (all tiny edits) plus a bunch of purely additive files.
 
 ```
 git fetch ms --tags
-git reset --hard TAG
-git cherry-pick --no-commit origin/snc
-# probably will have to "Accept Both" on all merge conflicts
-git add WHATEVER
+# OLD_TAG = the tag snc is currently based on (e.g. 1.130.0); NEW_TAG = target tag.
+git checkout -B snc-on-NEW_TAG NEW_TAG
+
+# Restore all SNC-added files verbatim (pure additions, no conflicts):
+git diff --diff-filter=A --name-only -z OLD_TAG snc | xargs -0 git checkout snc --
+
+# Re-apply the handful of upstream file edits by hand. See:
+git diff --diff-filter=M OLD_TAG snc
+# Watch for upstream file moves/renames (past moves: gulpfile.vscode*.js -> .ts,
+# workbench{,-dev}.html -> src/vs/code/electron-browser/, desktop.main.ts ->
+# src/vs/workbench/electron-browser/, editor font defaults editorOptions.ts -> fontInfo.ts).
+# If AGENTS.md conflicts with an upstream AGENTS.md, merge both.
+
+git add -A   # (make sure not to stage local scratch files)
 git commit --no-verify
 ```
 
-If everything still works:
+### Preferred: preserve the individual commits with `rebase --onto`
+
+The net-diff recipe above collapses all of SNC into one commit. To keep the full commit
+history, use `git rebase --onto` instead. The merge-base gotcha above does *not* apply here:
+`rebase --onto NEW_TAG OLD_TAG` replays only the `OLD_TAG..snc` commits (each as a small patch
+relative to `OLD_TAG`), so it never touches the ancient common ancestor and never drags in the
+upstream-vs-upstream conflicts.
 
 ```
+git fetch ms --tags
+# OLD_TAG = the tag snc is currently based on; NEW_TAG = target tag.
+git worktree add -b snc-on-NEW_TAG ../snc-rebase-wt NEW_TAG   # optional: keep your built tree intact
+cd ../snc-rebase-wt
+git reset --hard snc
+git rebase --onto NEW_TAG OLD_TAG
+```
+
+Only the ~14 upstream-file commits conflict; the additive-file commits apply cleanly. Resolve
+each conflict keeping the upstream (NEW_TAG) side and re-applying the small SNC edit, minding
+the file moves/renames listed above (git rename-detection follows most of them automatically,
+but not gulpfile.vscode.js -> .ts, and it can mis-route workbench-dev.html onto a copilot test
+fixture — redirect that edit to `src/vs/code/electron-browser/workbench/workbench-dev.html`).
+`git config rerere.enabled true` helps with the repeated AGENTS.md conflict.
+
+Then build (`npm i` with the .nvmrc node version, `npm run watch-client`) and fix any
+compile errors from API drift in `snc.ts` / `sncProcessService.ts` / `pythonDropProvider.ts`.
+
+If everything still works, fast-forward the `snc` branch and push:
+
+```
+git branch -f snc snc-on-NEW_TAG
 git push -f
 ```
 
