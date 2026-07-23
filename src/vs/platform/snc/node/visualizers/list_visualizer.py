@@ -49,7 +49,7 @@ from math import sqrt
 from typing import Any, List, Tuple, Optional
 
 from visualizer_utils import (
-    ChildEvent, EditorTextSelect, Unlink, Relink,
+    ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
     wrap_child_prefix, wrap_child_suffix, wrap_drag_grab,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
@@ -1916,28 +1916,6 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             model['last_linked_expr'] = result[1]
                             model['auto_linked_once'] = True
 
-        case EditorTextSelect(text=selected_text):
-            from list_visualizer_grammar import parse_generated_code_or_assignment
-            parsed, prefix = parse_generated_code_or_assignment(selected_text)
-            if parsed and parsed.get('action') and parsed.get('source_expr'):
-                valid = True
-                if var_and_exp:
-                    line_var = var_and_exp[0]
-                    if line_var and parsed['source_expr'] != line_var:
-                        valid = False
-                if valid:
-                    _ctx_to_model(parsed, model)
-                    model['linked_action'] = parsed['action']
-                    model['linked_source_expr'] = parsed['source_expr']
-                    model['linked_has_assignment'] = bool(prefix)
-                    ctx = _get_search_context(model, var_and_exp,
-                                              source_expr=model['linked_source_expr'],
-                                              eval_in_scope=eval_in_scope)
-                    if ctx:
-                        result = generate_action(parsed['action'], ctx)
-                        if result:
-                            model['last_linked_expr'] = result[1]
-
         case Unlink():
             # Stash the action so the chain icon can resume it on relink.
             model['unlinked_action'] = model.get('linked_action')
@@ -1946,32 +1924,39 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['linked_has_assignment'] = None
             model['last_linked_expr'] = None
 
-        case Relink(mode=mode):
-            action = model.get('unlinked_action') or _AUTO_LINK_ACTION
-            ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
-            if ctx is None:
-                ctx = _get_whole_list_context(model, var_and_exp)
-            if ctx:
-                result = generate_action(action, ctx)
-                if result:
-                    suggest_name, expr = result
-                    model['linked_action'] = action
-                    model['linked_source_expr'] = ctx.get('source_expr')
-                    model['unlinked_action'] = None
-                    model['auto_linked_once'] = True
-                    model['last_linked_expr'] = expr
-                    if mode == 'takeover':
-                        # The front-end already linked an existing assignment
-                        # line; replace its RHS, keeping the user's var name.
-                        model['linked_has_assignment'] = True
-                        commands.append(ChangeSelectedText(expression=expr,
-                                                            suggested_var_name=None))
-                    else:
-                        # Insert a fresh linked line.
-                        model['linked_has_assignment'] = bool(suggest_name)
-                        commands.append(result)
+        case Relink(mode=mode, text=text):
+            adopted = False
+            if mode == 'takeover' and not model.get('unlinked_action'):
+                # Fresh model over an existing generated line: adopt the line
+                # as-is (parse it into the model) instead of clobbering it.
+                adopted = _adopt_linked_line(text, var_and_exp, model,
+                                             eval_in_scope=eval_in_scope)
+            if not adopted:
+                action = model.get('unlinked_action') or _AUTO_LINK_ACTION
+                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+                if ctx is None:
+                    ctx = _get_whole_list_context(model, var_and_exp)
+                if ctx:
+                    result = generate_action(action, ctx)
+                    if result:
+                        suggest_name, expr = result
+                        model['linked_action'] = action
+                        model['linked_source_expr'] = ctx.get('source_expr')
+                        model['unlinked_action'] = None
+                        model['auto_linked_once'] = True
+                        model['last_linked_expr'] = expr
+                        if mode == 'takeover':
+                            # The front-end already linked an existing assignment
+                            # line; replace its RHS, keeping the user's var name.
+                            model['linked_has_assignment'] = True
+                            commands.append(ChangeSelectedText(expression=expr,
+                                                                suggested_var_name=None))
+                        else:
+                            # Insert a fresh linked line.
+                            model['linked_has_assignment'] = bool(suggest_name)
+                            commands.append(result)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, EditorTextSelect, Unlink, Relink)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -1983,7 +1968,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (EditorTextSelect, Unlink, Relink))):
+          and not isinstance(msg, (Unlink, Relink))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).
@@ -1994,6 +1979,39 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
 # Default action used when auto-linking on the first interaction.
 _AUTO_LINK_ACTION = 'filter'
+
+
+def _adopt_linked_line(text, var_and_exp, model: dict, *, eval_in_scope=None) -> bool:
+    """Parse an existing linked line and adopt it into the model in place.
+
+    Used when a fresh model is asked to take over a line that already contains
+    a previously-generated linked expression (relink-takeover after a file
+    reopen). Leaves the line's text untouched; only the model is updated.
+    Returns True on success.
+    """
+    from list_visualizer_grammar import parse_generated_code_or_assignment
+    parsed, prefix = parse_generated_code_or_assignment(text)
+    if not (parsed and parsed.get('action') and parsed.get('source_expr')):
+        return False
+    if var_and_exp:
+        line_var = var_and_exp[0]
+        if line_var and parsed['source_expr'] != line_var:
+            return False
+    _ctx_to_model(parsed, model)
+    model['linked_action'] = parsed['action']
+    model['linked_source_expr'] = parsed['source_expr']
+    model['linked_has_assignment'] = bool(prefix)
+    model['auto_linked_once'] = True
+    # Snapshot the expression already in the editor so the next no-op event
+    # (hover, etc.) does not rewrite it identically.
+    ctx = _get_search_context(model, var_and_exp,
+                              source_expr=model['linked_source_expr'],
+                              eval_in_scope=eval_in_scope)
+    if ctx:
+        result = generate_action(parsed['action'], ctx)
+        if result:
+            model['last_linked_expr'] = result[1]
+    return True
 
 
 def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=None) -> None:

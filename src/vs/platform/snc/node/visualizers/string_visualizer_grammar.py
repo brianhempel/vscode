@@ -479,10 +479,13 @@ def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str
     was an assignment, or ``''`` for a bare expression.  Returns
     ``(None, '')`` when parsing fails entirely.
     """
-    ctx = parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Action'], code_line)
-    if ctx is not None:
-        return (ctx, '')
+    # Try the assignment form first: the bare-expression Action grammar has a
+    # catch-all (find_indices) that would otherwise greedily match a whole
+    # ``var = expr`` line and hide the assignment.
     ctx = parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Assignment'], code_line)
     if ctx is not None and 'assign_var_name' in ctx:
         return (ctx, f"{ctx['assign_var_name']} = ")
+    ctx = parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Action'], code_line)
+    if ctx is not None:
+        return (ctx, '')
     return (None, '')

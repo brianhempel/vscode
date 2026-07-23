@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any
 
 from visualizer_utils import (
-    ChildEvent, EditorTextSelect, Unlink,
+    ChildEvent, Unlink,
     wrap_child_html, wrap_drag_grab, route_child_event, aggregate_handled_keys,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     get_full_class_name, truncate_str,

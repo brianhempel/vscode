@@ -1918,26 +1918,28 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// Linked-editing state: each entry tracks one editor range that is live-synced
 	// with a specific visualizer, keyed by that visualizer's (line, visIndex).
 	// A per-visualizer list (rather than a single global link) is required so
-	// several auto-linked lines can coexist without cross-talk: an update from
-	// one visualizer must edit its own inserted line, not whichever line was
-	// linked most recently.
-	//
-	// autoEstablished is true when the link was created programmatically by an
-	// auto-generated LOC (vs. by the user selecting text). Auto-established links
-	// must not be torn down just because the editor selection is empty — the user
-	// is interacting with the visualizer, not the editor.
+	// several linked lines can coexist without cross-talk: an update from one
+	// visualizer must edit its own inserted line, not whichever line was linked
+	// most recently. Every link is established programmatically (by an
+	// auto-generated LOC or a chain-icon relink); there is no user-text-selection
+	// path anymore.
 	private linkedSelections: {
 		line: number;
 		visIndex: number;
 		decorationId: string;
-		autoEstablished: boolean;
 	}[] = [];
 	// SVG arrows drawn from a focused, linked visualizer's chain icon to its
 	// linked line of code, keyed by `${line}:${visIndex}`. Only top-level
 	// widgets get an arrow — nested visualizers never do.
 	private linkArrows: Map<string, HTMLElement> = new Map();
-	private suppressSelectionEvent = false;
-	private selectionDebounceTimer: any = null;
+	// Guards our own linked-line rewrite (ChangeSelectedText) so the resulting
+	// model-content change doesn't make pruneDeadLinks react to the momentary
+	// mid-edit decoration collapse.
+	private isApplyingLinkedEdit = false;
+	// (line:visIndex) keys that already received a reconciliation Unlink, so we
+	// don't repeatedly re-send it while Python converges. Cleared once the model
+	// stops claiming to be linked.
+	private reconciledUnlinkKeys: Set<string> = new Set();
 
 	// Timing tracking: all frontend times use performance.now()
 	private runTriggerMsById: Map<string, number> = new Map();        // When runProgram was called (frontend)
@@ -1990,9 +1992,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this._register(editor.onDidDispose(() => { this.clearVisualizationWidgets(); }));
 		this._register(editor.onDidChangeCursorPosition(() => {
 			this.onCursorPositionChanged();
-		}));
-		this._register(editor.onDidChangeCursorSelection(() => {
-			this.onSelectionChanged();
 		}));
 
 		// Register scroll event handler to update overlay widget positions
@@ -2156,7 +2155,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Drop links whose tracked range collapsed or vanished (e.g. the user
 		// deleted the linked line). Skip while we ourselves are rewriting a
 		// linked range via ChangeSelectedText — that edit is not a teardown.
-		if (!this.suppressSelectionEvent) {
+		if (!this.isApplyingLinkedEdit) {
 			this.pruneDeadLinks();
 		}
 
@@ -2342,97 +2341,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 	}
 
-	private onSelectionChanged(): void {
-		if (this.suppressSelectionEvent) {
-			return;
-		}
-		if (this.selectionDebounceTimer) {
-			clearTimeout(this.selectionDebounceTimer);
-		}
-		this.selectionDebounceTimer = setTimeout(() => {
-			this.handleEditorSelection();
-		}, 150);
-	}
-
-	private handleEditorSelection(): void {
-		const editorModel = this.editor.getModel();
-		const selection = this.editor.getSelection();
-		if (!editorModel || !selection || selection.isEmpty()) {
-			// An auto-established link (from an auto-generated LOC) is driven by the
-			// visualizer, not the editor selection; an empty editor selection (just
-			// a cursor) must not tear it down, or continued visualizer interaction
-			// would orphan the inserted line and trigger a duplicate insert.
-			this.unlinkUserSelections();
-			return;
-		}
-
-		const selectedText = editorModel.getValueInRange(selection);
-		if (!selectedText || selectedText.length < 3) {
-			this.unlinkUserSelections();
-			return;
-		}
-
-		const selStartLine = selection.startLineNumber;
-		const selIndent = this.getLineIndent(selStartLine);
-
-		// Walk backward to find the first non-blank line with a visualizer at same/lesser indent
-		let targetVisItem: IVisualizationItem | undefined;
-		for (let line = selStartLine - 1; line >= 1; line--) {
-			const content = editorModel.getLineContent(line);
-			if (content.trim() === '') {
-				continue;
-			}
-			const lineIndent = content.length - content.trimStart().length;
-			if (lineIndent > selIndent) {
-				continue;
-			}
-			targetVisItem = this.visualizationItems.find(item => item.line === line);
-			if (targetVisItem) {
-				break;
-			}
-			if (lineIndent < selIndent) {
-				break;
-			}
-		}
-
-		if (!targetVisItem) {
-			return;
-		}
-
-		// Moving the selection to a different visualizer supersedes any prior
-		// user-established link; tear those down first (auto links are untouched).
-		this.unlinkUserSelections();
-
-		// Track the selection range via a decoration so it survives edits
-		const existing = this.findLink(targetVisItem.line, targetVisItem.visIndex);
-		const decorationIds = editorModel.deltaDecorations(
-			existing ? [existing.decorationId] : [],
-			[{
-				range: selection,
-				options: {
-					description: 'snc-linked-selection',
-					stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
-				}
-			}]
-		);
-		const decorationId = decorationIds[0] ?? null;
-		if (decorationId) {
-			// This link is driven by an explicit user text selection, not an
-			// auto-generated LOC, so empty-selection unlinking should apply to it.
-			this.setLink(targetVisItem.line, targetVisItem.visIndex, decorationId, false);
-		}
-
-		const pythonEventStr = "lambda e: EditorTextSelect(text=e.get('text', ''))";
-		const eventJSON = { type: 'editorTextSelect', text: selectedText };
-		const event: UiEvent = {
-			line: targetVisItem.line,
-			visIndex: targetVisItem.visIndex,
-			pythonEventStr,
-			eventJSON,
-		};
-		this.sendEventToPython(event);
-	}
-
 	/** Find the link tracked for a specific visualizer, if any. */
 	private findLink(line: number, visIndex: number) {
 		return this.linkedSelections.find(l => l.line === line && l.visIndex === visIndex);
@@ -2442,27 +2350,37 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * Record (or update) the link for a visualizer. Replaces any existing entry
 	 * for the same (line, visIndex) in place, keeping the list one-per-visualizer.
 	 */
-	private setLink(line: number, visIndex: number, decorationId: string, autoEstablished: boolean): void {
+	private setLink(line: number, visIndex: number, decorationId: string): void {
 		const existing = this.findLink(line, visIndex);
 		if (existing) {
 			existing.decorationId = decorationId;
-			existing.autoEstablished = autoEstablished;
 		} else {
-			this.linkedSelections.push({ line, visIndex, decorationId, autoEstablished });
+			this.linkedSelections.push({ line, visIndex, decorationId });
 		}
 	}
 
 	/**
-	 * Fully tear down a link: remove its decoration, drop it from
-	 * linkedSelections, and notify the visualizer so its Python model clears
-	 * linked_action (stops emitting ChangeSelectedText into a dead range).
+	 * Remove a link locally only: drop its decoration and its linkedSelections
+	 * entry (and its arrow), WITHOUT notifying Python. Used when the model
+	 * already agrees the link is gone, so sending Unlink would only trigger a
+	 * pointless re-run.
 	 */
-	private teardownLink(link: { line: number; visIndex: number; decorationId: string; autoEstablished: boolean }): void {
+	private removeLinkLocal(link: { line: number; visIndex: number; decorationId: string }): void {
 		const editorModel = this.editor.getModel();
 		if (editorModel) {
 			editorModel.deltaDecorations([link.decorationId], []);
 		}
 		this.linkedSelections = this.linkedSelections.filter(l => l !== link);
+		this.removeLinkArrow(`${link.line}:${link.visIndex}`);
+	}
+
+	/**
+	 * Fully tear down a link: remove it locally and notify the visualizer so its
+	 * Python model clears linked_action (stops emitting ChangeSelectedText into a
+	 * dead range).
+	 */
+	private teardownLink(link: { line: number; visIndex: number; decorationId: string }): void {
+		this.removeLinkLocal(link);
 		const event: UiEvent = {
 			line: link.line,
 			visIndex: link.visIndex,
@@ -2475,6 +2393,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 	/** Whether a visualizer model participates in linked editing. */
 	private static supportsLinking(model: unknown): boolean {
 		return !!model && typeof model === 'object' && 'linked_action' in (model as object);
+	}
+
+	/**
+	 * Whether a visualizer model is currently linked, per Python's own state
+	 * (its linked_action is truthy). Distinct from supportsLinking, which only
+	 * checks that the model participates in linking at all.
+	 */
+	private static isModelLinked(model: unknown): boolean {
+		return SNCController.supportsLinking(model)
+			&& !!(model as { linked_action?: unknown }).linked_action;
 	}
 
 	/**
@@ -2519,6 +2447,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		let mode: 'takeover' | 'insert' = 'insert';
+		let takeoverText = '';
 		if (nextLine > 0) {
 			const nextContent = editorModel.getLineContent(nextLine);
 			const nextIndent = nextContent.length - nextContent.trimStart().length;
@@ -2527,6 +2456,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// means we insert a fresh line instead of clobbering existing code.
 			if (nextIndent === vizIndent && SNCController.splitAssignment(nextContent)) {
 				mode = 'takeover';
+				// Send the taken-over line's content so a fresh Python model can
+				// adopt the existing expression instead of clobbering it.
+				takeoverText = nextContent.trim();
 				const linkedRange = new Range(
 					nextLine, editorModel.getLineFirstNonWhitespaceColumn(nextLine) || 1,
 					nextLine, editorModel.getLineMaxColumn(nextLine)
@@ -2540,8 +2472,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const event: UiEvent = {
 			line,
 			visIndex,
-			pythonEventStr: "lambda e: Relink(mode=e.get('mode', 'insert'))",
-			eventJSON: { type: 'relink', mode },
+			pythonEventStr: "lambda e: Relink(mode=e.get('mode', 'insert'), text=e.get('text', ''))",
+			eventJSON: { type: 'relink', mode, text: takeoverText },
 		};
 		this.sendEventToPython(event);
 	}
@@ -2573,7 +2505,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const link = this.findLink(lineNumber, visIndex);
 				const range = link && editorModel
 					? editorModel.getDecorationRange(link.decorationId) : null;
-				const isLinked = !!range && !range.isEmpty();
+				const rangeAlive = !!range && !range.isEmpty();
+				// Derive the icon state from Python's model (linked_action), gated
+				// by a live front-end range. This gives the right transient
+				// behavior: an unlink-click removes the decoration synchronously so
+				// the icon flips to "unlinked" instantly, while a relink shows
+				// "linked" only once the updated model returns.
+				const isLinked = SNCController.isModelLinked(item.model) && rangeAlive;
 				widget.setLinkChain(isLinked ? 'linked' : 'unlinked');
 				if (isLinked && range) {
 					this.drawLinkArrow(key, widget, range.startLineNumber);
@@ -2619,7 +2557,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		const pad = 8; // margin
-		const xdist = 7; // how far left to go
+		const xdist = 8; // how far left to go
 		const minX = Math.min(startX, targetX) - pad - xdist;
 		const minY = Math.min(startY, targetY) - pad;
 		const width = Math.abs(targetX - startX) + xdist + pad * 2;
@@ -2714,13 +2652,82 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
-	 * Tear down every user-established (non-auto) link. Auto links (from
-	 * auto-generated LOCs) are left intact.
+	 * Reconcile front-end links against the (now-fresh) Python models at the end
+	 * of a run, so the chain icon and decorations can't diverge from what the
+	 * model actually thinks. Two mismatch cases are fixed:
+	 *
+	 *  1. A front-end link is alive but the model is not linked → remove the
+	 *     orphan decoration LOCALLY only (the model already agrees; sending
+	 *     Unlink would just trigger a pointless re-run). This resolves the
+	 *     relink-takeover failure edge where the decoration was established
+	 *     before Python responded but adoption+generation both failed.
+	 *  2. The model claims linked_action but the front-end has no live link →
+	 *     send Unlink so Python clears its stale state. Converges after one
+	 *     re-run; tracked in reconciledUnlinkKeys so it isn't re-sent every run.
+	 *
+	 * Visualizers with still-queued events are skipped (their model is about to
+	 * change again).
 	 */
-	private unlinkUserSelections(): void {
-		const userLinks = this.linkedSelections.filter(l => !l.autoEstablished);
-		for (const link of userLinks) {
-			this.teardownLink(link);
+	private reconcileLinksWithModels(): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel) {
+			return;
+		}
+		const pendingKeys = new Set<string>();
+		for (const item of this.visualizationItems) {
+			if (item.unhandledEvents && item.unhandledEvents.length > 0) {
+				pendingKeys.add(`${item.line}:${item.visIndex}`);
+			}
+		}
+
+		// Case 1: front-end link alive but the fresh model is not linked.
+		for (const link of [...this.linkedSelections]) {
+			const key = `${link.line}:${link.visIndex}`;
+			if (pendingKeys.has(key)) {
+				continue;
+			}
+			const item = this.visualizationItems.find(
+				it => it.line === link.line && it.visIndex === link.visIndex);
+			if (item && SNCController.supportsLinking(item.model)
+				&& !SNCController.isModelLinked(item.model)) {
+				this.removeLinkLocal(link);
+			}
+		}
+
+		// Case 2: model claims a link but the front-end has none (or a dead range).
+		for (const item of this.visualizationItems) {
+			const key = `${item.line}:${item.visIndex}`;
+			if (!SNCController.isModelLinked(item.model)) {
+				// Model no longer claims linked; drop any reconciliation tracking.
+				this.reconciledUnlinkKeys.delete(key);
+				continue;
+			}
+			if (pendingKeys.has(key)) {
+				continue;
+			}
+			const link = this.findLink(item.line, item.visIndex);
+			const range = link ? editorModel.getDecorationRange(link.decorationId) : null;
+			const linkAlive = !!range && !range.isEmpty();
+			if (linkAlive) {
+				// Consistent (model linked + live range); drop any tracking.
+				this.reconciledUnlinkKeys.delete(key);
+				continue;
+			}
+			if (this.reconciledUnlinkKeys.has(key)) {
+				// Already asked Python to clear this; wait for it to converge.
+				continue;
+			}
+			this.reconciledUnlinkKeys.add(key);
+			// Remove a stale (dead-range) link entry locally before asking Python.
+			if (link) {
+				this.removeLinkLocal(link);
+			}
+			this.sendEventToPython({
+				line: item.line,
+				visIndex: item.visIndex,
+				pythonEventStr: 'lambda e: Unlink()',
+				eventJSON: { type: 'unlink' },
+			});
 		}
 	}
 
@@ -3332,10 +3339,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				// the new line, which would collapse the focused visualizer and steal
 				// DOM focus. Keep the cursor on the trigger line so that visualizer
 				// stays focused/expanded and the user can keep interacting.
-				this.suppressSelectionEvent = true;
 				const triggerCol = model.getLineMaxColumn(actualTriggerLine);
 				this.editor.setPosition({ lineNumber: actualTriggerLine, column: triggerCol });
-				setTimeout(() => { this.suppressSelectionEvent = false; }, 0);
 			} else if (newSelections && newSelections.length > 0) {
 				this.editor.setSelection(newSelections[0]);
 				this.editor.focus();
@@ -3463,8 +3468,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 	/**
 	 * Track the given editor range as the linked selection for a visualizer, so
 	 * subsequent interactions update that range in place (ChangeSelectedText).
-	 * Mirrors the decoration bookkeeping in handleEditorSelection, but for a
-	 * range that SNC just inserted rather than one the user manually selected.
+	 * Used for a range that SNC just inserted (auto-link) or an existing line
+	 * taken over via the chain-icon relink.
 	 */
 	private establishLinkForRange(range: Range, line: number, visIndex: number): void {
 		const editorModel = this.editor.getModel();
@@ -3484,7 +3489,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		);
 		const decorationId = decorationIds[0] ?? null;
 		if (decorationId) {
-			this.setLink(line, visIndex, decorationId, true);
+			this.setLink(line, visIndex, decorationId);
 		}
 	}
 
@@ -3565,7 +3570,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 
-		this.suppressSelectionEvent = true;
+		this.isApplyingLinkedEdit = true;
 		editorModel.pushEditOperations([], [{
 			range: trackedRange,
 			text: newText,
@@ -3593,19 +3598,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 			link.decorationId = newDecorationId;
 		}
 
-		// Keep the text selected so the user can see what's linked, but only when
-		// the editor already has focus. If the user is driving this update from a
-		// visualizer control (e.g. typing in the search box of an auto-linked
-		// line), stealing the editor selection would yank DOM focus out of that
-		// control and break continued interaction.
-		if (this.editor.hasTextFocus()) {
-			this.editor.setSelection(newRange);
-		}
-
 		// The linked line may have moved/resized; re-anchor its arrow.
 		this.updateLinkChrome();
 
-		setTimeout(() => { this.suppressSelectionEvent = false; }, 0);
+		setTimeout(() => { this.isApplyingLinkedEdit = false; }, 0);
 	}
 
 	/**
@@ -3897,6 +3893,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 							visItem.runId === this.currentRunId
 						);
 						this.setSyntaxErrorState(false);
+						// Every model is fresh now: reconcile front-end links against
+						// the models so the chain icon and decorations can't drift.
+						this.reconcileLinksWithModels();
 						this.updateVisualizationWidgets(this.visualizationItems);
 					}
 

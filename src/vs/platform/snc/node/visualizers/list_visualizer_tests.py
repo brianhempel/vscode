@@ -3431,15 +3431,7 @@ class TestScrollToMatch(unittest.TestCase):
 # Linked Editing Tests (bidirectional parsing integration)
 # =============================================================================
 
-from visualizer_utils import EditorTextSelect, Unlink, Relink
-
-
-def make_editor_text_select_event(text):
-    """Create an EditorTextSelect event."""
-    return {
-        'pythonEventStr': repr(EditorTextSelect(text=text)),
-        'eventJSON': {},
-    }
+from visualizer_utils import Unlink, Relink
 
 
 def make_unlink_event():
@@ -3450,11 +3442,11 @@ def make_unlink_event():
     }
 
 
-def make_relink_event(mode='insert'):
+def make_relink_event(mode='insert', text=''):
     """Create a Relink event."""
     return {
-        'pythonEventStr': repr(Relink(mode=mode)),
-        'eventJSON': {},
+        'pythonEventStr': repr(Relink(mode=mode, text=text)),
+        'eventJSON': {'type': 'relink', 'mode': mode, 'text': text},
     }
 
 
@@ -3511,6 +3503,67 @@ class TestRelinkViaChainIcon(unittest.TestCase):
         self.assertIsNone(model.get('linked_action'))
 
 
+class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
+    """On relink-takeover with a fresh model, the taken-over line is parsed and
+    adopted into the model (its text left untouched) instead of being clobbered
+    by a default-generated expression."""
+
+    def setUp(self):
+        self.lst = [1, 2, 3, 4, 5]
+        self.var_and_exp = ('data', 'data')
+        # A previously-generated linked line still present after a file reopen.
+        self.line = 'data_filtered = [item for item in data if item > 3]'
+
+    def test_fresh_takeover_adopts_line_without_commands(self):
+        model = init_model(self.lst, mock_get_visualizer)
+        model, commands = update(make_relink_event('takeover', text=self.line),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model.get('linked_action'), 'filter')
+        self.assertEqual(model.get('linked_source_expr'), 'data')
+        self.assertTrue(model.get('linked_has_assignment'))
+        self.assertTrue(model.get('auto_linked_once'))
+        self.assertIsNotNone(model.get('search'))
+        # The line is already in the editor; adoption must not rewrite it.
+        self.assertEqual(commands, [])
+
+    def test_interaction_after_adoption_emits_change_selected_text(self):
+        model = init_model(self.lst, mock_get_visualizer)
+        model, _ = update(make_relink_event('takeover', text=self.line),
+                          self.var_and_exp, model, self.lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        model, commands = update(make_search_input_event('^ > 2'),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
+        self.assertFalse(any(isinstance(c, tuple) for c in commands))
+
+    def test_stashed_unlink_action_wins_over_adoption(self):
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model, _ = update(make_action_button_event('filter'), self.var_and_exp,
+                          model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model.get('linked_action'))
+        model, commands = update(make_relink_event('takeover', text=self.line),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertEqual(model.get('linked_action'), 'filter')
+
+    def test_unparseable_takeover_falls_back_to_generate(self):
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = '^ > 3'
+        model, commands = update(
+            make_relink_event('takeover', text='???  not parseable  ???'),
+            self.var_and_exp, model, self.lst, mock_get_visualizer,
+            eval_in_scope=eval)
+        self.assertEqual(model.get('linked_action'), 'filter')
+        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
+
+
 class TestCtxToModel(unittest.TestCase):
     """Test _ctx_to_model sets model search/first_match from parsed context."""
 
@@ -3558,46 +3611,26 @@ class TestCtxToModel(unittest.TestCase):
         self.assertEqual(model['search'], '^.startswith("a")')
 
 
-class TestEditorTextSelectLinkedEditing(unittest.TestCase):
-    """Test EditorTextSelect event enters linked mode and ChangeSelectedText works."""
+class TestLinkedEditingBehavior(unittest.TestCase):
+    """Downstream linked-editing behavior once a link is established.
+
+    Formerly set up via the removed EditorTextSelect event; now the link is
+    established the way it is in production — a fresh model adopting an existing
+    generated line via Relink(mode='takeover')."""
 
     def setUp(self):
         self.var_and_exp = ('data', 'data')
         self.lst = [1, 2, 3, 4, 5]
 
-    def test_editor_text_select_enters_linked_mode(self):
+    def _adopt(self, text):
+        """Create a fresh model that has adopted an existing linked line."""
         model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
-        self.assertEqual(model.get('linked_action'), 'filter')
-        self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertFalse(model.get('linked_has_assignment'))
-
-    def test_editor_text_select_sets_search(self):
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
-        self.assertIsNotNone(model.get('search'))
-
-    def test_editor_text_select_assignment_form(self):
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('result = [item for item in data if item > 3]')
-        model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
-        self.assertEqual(model.get('linked_action'), 'filter')
-        self.assertTrue(model.get('linked_has_assignment'))
-
-    def test_editor_text_select_join_whole_list_enters_linked_mode(self):
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event("''.join(str(item) for item in data)")
-        model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
-        self.assertEqual(model.get('linked_action'), 'join')
-        self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertFalse(model.get('linked_has_assignment'))
+        model, _ = update(make_relink_event('takeover', text=text), self.var_and_exp,
+                          model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
 
     def test_unlink_clears_linked_state(self):
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt('[item for item in data if item > 3]')
         self.assertIsNotNone(model.get('linked_action'))
         event = make_unlink_event()
         model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
@@ -3607,9 +3640,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
 
     def test_linked_action_button_emits_change_selected_text(self):
         from list_visualizer import ChangeSelectedText
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt('[item for item in data if item > 3]')
         event = make_action_button_event('delete')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'delete')
@@ -3617,13 +3648,10 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
         self.assertTrue(len(change_cmds) > 0)
 
     def test_action_change_carries_new_var_name(self):
-        """Switching action on an auto-linked line suggests a new var name."""
+        """Switching action on an assignment-linked line suggests a new var name."""
         from list_visualizer import ChangeSelectedText
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        # Assignment-form selection links with target 'data_filtered'.
-        event = make_editor_text_select_event(
-            'data_filtered = [item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        # Assignment-form line links with target 'data_filtered'.
+        model = self._adopt('data_filtered = [item for item in data if item > 3]')
         self.assertTrue(model.get('linked_has_assignment'))
         self.assertNotIn('linked_prefix', model)
         # Switch to delete -> suggested name becomes 'data'.
@@ -3636,10 +3664,7 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
     def test_unchanged_name_carries_no_new_var_name(self):
         """A search change that keeps the same action keeps the same name."""
         from list_visualizer import ChangeSelectedText
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event(
-            'data_filtered = [item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt('data_filtered = [item for item in data if item > 3]')
         event = make_search_input_event('^ > 2')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
@@ -3648,9 +3673,8 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
 
     def test_linked_join_menu_updates_selected_text(self):
         from list_visualizer import ChangeSelectedText
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event("''.join(str(item) for item in data)")
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt("''.join(str(item) for item in data)")
+        self.assertEqual(model.get('linked_action'), 'join')
         event = make_action_button_event("join:', '")
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'join')
@@ -3660,37 +3684,24 @@ class TestEditorTextSelectLinkedEditing(unittest.TestCase):
 
     def test_linked_search_change_emits_change_selected_text(self):
         from list_visualizer import ChangeSelectedText
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt('[item for item in data if item > 3]')
         event = make_search_input_event('^ > 2')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertTrue(len(change_cmds) > 0)
 
     def test_linked_enter_changes_action_to_filter(self):
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt('[item for item in data if item > 3]')
         model['linked_action'] = 'delete'
         event = make_search_key_event('Enter')
         model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'filter')
 
     def test_linked_cmd_backspace_changes_action_to_delete(self):
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in data if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
+        model = self._adopt('[item for item in data if item > 3]')
         event = make_search_key_event('Backspace', meta=True)
         model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertEqual(model.get('linked_action'), 'delete')
-
-    def test_editor_text_select_mismatched_source_ignored(self):
-        """EditorTextSelect with wrong source_expr should be ignored."""
-        model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        event = make_editor_text_select_event('[item for item in other_var if item > 3]')
-        model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
-        self.assertIsNone(model.get('linked_action'))
 
     def test_nonlinked_action_button_emits_new_code(self):
         """Without linked mode, action buttons emit NewCode tuples, not ChangeSelectedText."""

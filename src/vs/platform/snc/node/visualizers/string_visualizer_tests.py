@@ -3386,9 +3386,10 @@ def make_unlink_event() -> dict:
     return {'pythonEventStr': repr(Unlink()), 'eventJSON': {'type': 'unlink'}}
 
 
-def make_relink_event(mode: str = 'insert') -> dict:
+def make_relink_event(mode: str = 'insert', text: str = '') -> dict:
     """Create a Relink event dict."""
-    return {'pythonEventStr': repr(Relink(mode=mode)), 'eventJSON': {'type': 'relink'}}
+    return {'pythonEventStr': repr(Relink(mode=mode, text=text)),
+            'eventJSON': {'type': 'relink', 'mode': mode, 'text': text}}
 
 
 class TestRelinkViaChainIcon(unittest.TestCase):
@@ -3438,6 +3439,72 @@ class TestRelinkViaChainIcon(unittest.TestCase):
                                  self.var_and_exp, model, self.value)
         self.assertEqual(commands, [])
         self.assertIsNone(model.get('linked_action'))
+
+
+class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
+    """On relink-takeover with a fresh model, the taken-over line is parsed and
+    adopted into the model (its text left untouched) instead of being clobbered
+    by a default-generated expression."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        # A previously-generated linked line still present in the code after a
+        # file reopen (fresh model). find_or_map with search r'hello' on x.
+        self.line = "x_matches = list(re.finditer(r'hello', x, flags=re.M))"
+
+    def test_fresh_takeover_adopts_line_without_commands(self):
+        model = init_model(self.value)
+        model, commands = update(make_relink_event('takeover', text=self.line),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertEqual(model.get('linked_action'), 'find_or_map')
+        self.assertEqual(model.get('linked_source_expr'), 'x')
+        self.assertTrue(model.get('linked_has_assignment'))
+        self.assertTrue(model.get('auto_linked_once'))
+        self.assertIsNotNone(model.get('search'))
+        # The line is already in the editor; adoption must not rewrite it.
+        self.assertEqual(commands, [])
+
+    def test_interaction_after_adoption_emits_change_selected_text(self):
+        model = init_model(self.value)
+        model, _ = update(make_relink_event('takeover', text=self.line),
+                          self.var_and_exp, model, self.value, eval_in_scope=eval)
+        # A subsequent meaningful interaction rewrites the linked line in place
+        # (ChangeSelectedText), rather than inserting a duplicate NewCode line.
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
+        self.assertFalse(any(isinstance(c, tuple) for c in commands))
+
+    def test_stashed_unlink_action_wins_over_adoption(self):
+        # Link via a button click, then unlink -> unlinked_action is stashed.
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model, _ = update(make_action_button_event('count'),
+                          self.var_and_exp, model, self.value, eval_in_scope=eval)
+        model, _ = update(make_unlink_event(),
+                          self.var_and_exp, model, self.value, eval_in_scope=eval)
+        self.assertIsNone(model.get('linked_action'))
+        # Relink-takeover with a stashed action resumes the stash (count) and
+        # emits ChangeSelectedText, ignoring the taken-over line text.
+        model, commands = update(make_relink_event('takeover', text=self.line),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertEqual(model.get('linked_action'), 'count')
+
+    def test_unparseable_takeover_falls_back_to_generate(self):
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model, commands = update(
+            make_relink_event('takeover', text='???  not parseable  ???'),
+            self.var_and_exp, model, self.value, eval_in_scope=eval)
+        # Fell back to the default generate-and-overwrite path.
+        self.assertEqual(model.get('linked_action'), 'find_or_map')
+        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
 
 
 class TestNoUnlinkButtonInActionBar(unittest.TestCase):

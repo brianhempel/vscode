@@ -345,14 +345,6 @@ class ChildEvent:
     py_ev_str: str
 
 @dataclass(frozen=True, slots=True)
-class EditorTextSelect:
-    """Sent by the TypeScript front-end when the user selects text in the editor.
-
-    Every visualizer's update() evals event strings in module scope, so this
-    must be importable everywhere an eval happens."""
-    text: str
-
-@dataclass(frozen=True, slots=True)
 class Unlink:
     """Sent by the TypeScript front-end when an editor-visualizer link is broken."""
     pass
@@ -368,8 +360,13 @@ class Relink:
         ChangeSelectedText).
       - 'insert':   there was no assignable line to take over; the visualizer
         should insert a fresh linked line (emit a NewCode tuple).
+
+    text is the content of the taken-over line (only meaningful for takeover
+    mode); a fresh model uses it to adopt the existing line instead of
+    clobbering it with a default-generated expression.
     """
     mode: str = 'insert'
+    text: str = ''
 
 def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
     """Wrap a non-interactive (small-mode) visualizer's output in a draggable
