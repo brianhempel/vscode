@@ -22,7 +22,7 @@ import { INotificationService, INotificationHandle, Severity } from '../../../..
 import * as dom from '../../../../base/browser/dom.js';
 import './snc.css';
 
-// 'sncVisualization' is a trusted name defined in src/vs/code/electron-sandbox/workbench/workbench(-dev).html
+// 'sncVisualization' is a trusted name defined in src/vs/code/electron-browser/workbench/workbench(-dev).html
 const ttPolicy = createTrustedTypesPolicy('sncVisualization', { createHTML: value => value });
 
 /**

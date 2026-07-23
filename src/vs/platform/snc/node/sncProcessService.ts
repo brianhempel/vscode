@@ -31,7 +31,7 @@ interface RunState {
 	runId: string;
 	buffer: string;
 	stderr: string;
-	timeoutId?: NodeJS.Timeout;
+	timeoutId?: ReturnType<typeof setTimeout>;
 	ended: boolean;
 	tSpawn: number;
 	tStdinEnd?: number;
