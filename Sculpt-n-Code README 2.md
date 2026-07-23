@@ -1,6 +1,4 @@
-# Sculpt-n-Code
-
-Sculpt-n-Code (SNC) is a modified version of VS Code that provides **live, inline visualizations of Python runtime values** as you type. When you open a Python file, SNC automatically executes it, captures the values produced by each statement, and renders interactive HTML visualizations directly in the editor next to the line that produced them. Visualizations are interactive; for example, users can select portions of a string by dragging to build regex patterns by demonstration.
+# Sculpt-n-Code  Implementation Details
 
 ## How It Works
 
