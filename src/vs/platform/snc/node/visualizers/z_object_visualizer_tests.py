@@ -1999,5 +1999,80 @@ class TestNestedSlotsConfig(unittest.TestCase):
         self.assertIn('^.y', args[2])
 
 
+class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
+    """A string visualizer in a field cell generates code about THAT FIELD.
+
+    The field accessor's ^ is the object; the string's ^ is the regex match.
+    Handing the child a bound name keeps them apart, and the accessor is
+    resolved back in - fully concrete here, since an object visualizer's
+    generated code goes to the editor rather than into a column config.
+    """
+
+    def test_generated_code_targets_the_field_not_the_object(self):
+        import re as _re
+        import string_visualizer
+
+        class Person:
+            def __init__(self, name):
+                self.name = name
+
+        p = Person('foo bar')
+        eval_in_scope = lambda code: eval(code, {'re': _re, 'p': p})
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else z_object_visualizer
+
+        model = init_model(p, get_vis, eval_in_scope=eval_in_scope, var_and_exp=('p', 'p'))
+        key = '^.name'
+        model['focused_child'] = key
+        cell = model['children'][key]
+        cell['search'] = "r'foo'"
+        cell['replace_visible'] = True
+        cell['tool'] = 'pick'
+
+        commands = []
+        for py_ev in (string_visualizer.SegmentToggle(segment_id='prefix'),
+                      string_visualizer.ActionButtonClick(action='find_or_map', copy=False)):
+            event = {'pythonEventStr': repr(ChildEvent(child_key=key, py_ev_str=repr(py_ev))),
+                     'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1, 'detail': 1}}
+            model, cmds = update(event, ('p', 'p'), model, p, get_vis, eval_in_scope)
+            commands += cmds
+
+        code = [c[1] for c in commands if isinstance(c, tuple) and len(c) == 2]
+        self.assertEqual(len(code), 1, f'expected one generated line, got {commands}')
+        self.assertEqual(eval_in_scope(code[0]), [''])
+
+    def test_copy_from_a_field_yields_pasteable_code(self):
+        import re as _re
+        import string_visualizer
+        from string_visualizer import CopyToClipboard
+
+        class Person:
+            def __init__(self, name):
+                self.name = name
+
+        p = Person('foo bar')
+        eval_in_scope = lambda code: eval(code, {'re': _re, 'p': p})
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else z_object_visualizer
+
+        model = init_model(p, get_vis, eval_in_scope=eval_in_scope, var_and_exp=('p', 'p'))
+        key = '^.name'
+        model['focused_child'] = key
+        cell = model['children'][key]
+        cell['search'] = "r'foo'"
+        cell['replace_visible'] = True
+        cell['tool'] = 'pick'
+
+        commands = []
+        for py_ev in (string_visualizer.SegmentToggle(segment_id='prefix'),
+                      string_visualizer.ActionButtonClick(action='find_or_map', copy=True)):
+            event = {'pythonEventStr': repr(ChildEvent(child_key=key, py_ev_str=repr(py_ev))),
+                     'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1, 'detail': 1}}
+            model, cmds = update(event, ('p', 'p'), model, p, get_vis, eval_in_scope)
+            commands += cmds
+
+        copies = [c for c in commands if isinstance(c, CopyToClipboard)]
+        self.assertEqual(len(copies), 1, f'expected one copy, got {commands}')
+        self.assertEqual(eval_in_scope(copies[0].text), [''])
+
+
 if __name__ == '__main__':
     unittest.main()

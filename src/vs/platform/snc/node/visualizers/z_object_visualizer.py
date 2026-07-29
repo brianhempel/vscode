@@ -50,7 +50,8 @@ from typing import List, Tuple, Any
 from visualizer_utils import (
     ChildEvent, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
-    strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
+    strip_leading_caret, eval_caret_expr, replace_carets_in_py_exp,
+    CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
@@ -368,9 +369,19 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
             return eval_caret_expr(accessor_key, _obj, eval_in_scope)
         new_model, child_cmds = route_child_event(
             event, model, value, _child_value_getter, get_visualizer,
-            var_and_exp=var_and_exp,
+            # The field's value is bound to a name for the child, so the code it
+            # generates is caret-free and about the FIELD rather than the object.
+            var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
+        # Resolve the binder back to this field. Unlike a list column - which is
+        # stored row-generically - an object visualizer's generated code goes
+        # straight to the editor, same as its clipboard text, so the accessor is
+        # resolved all the way to a concrete path for both.
+        field_expr = replace_carets_in_py_exp(
+            msg.child_key, [model.get('_source_expr') or link_source_expr(var_and_exp) or 'obj'])
+        child_cmds = [nest_child_command(cmd, field_expr, field_expr)
+                      for cmd in child_cmds]
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
         return (new_model, child_cmds)
 
@@ -601,7 +612,7 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
         if key == '_overflow':
             parts.append(f'<span class="punct">+{html.escape(val)}</span>')
         elif source_expr and not is_error:
-            field_expr = replace_caret_in_py_exp(acc, source_expr)
+            field_expr = replace_carets_in_py_exp(acc, [source_expr])
             parts.append(render_small_field(key, val, field_expr, add_target))
         else:
             parts.append(f'<span class="field">{html.escape(key)}</span>')
@@ -664,7 +675,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
 
             can_extract = source_expr and not is_error and not placeholder_args
             if can_extract:
-                field_expr = replace_caret_in_py_exp(accessor_code, source_expr)
+                field_expr = replace_carets_in_py_exp(accessor_code, [source_expr])
                 exp_attr = f' snc-py-exp="{html.escape(field_expr)}" draggable="true"'
             else:
                 exp_attr = ''

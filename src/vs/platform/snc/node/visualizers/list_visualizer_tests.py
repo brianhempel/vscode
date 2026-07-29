@@ -13,7 +13,8 @@ import re
 import shutil
 import tempfile
 
-from visualizer_utils import ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH
+from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
+                              replace_carets_in_py_exp, CHILD_SOURCE_BINDER)
 import list_visualizer
 
 
@@ -4555,8 +4556,13 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
 
-    def test_child_receives_column_as_var_and_exp(self):
-        """The child should receive (None, column_expr) as var_and_exp."""
+    def test_child_receives_binder_as_var_and_exp(self):
+        """The child gets a bound NAME for the cell value, not the column expr.
+
+        The column's ^ means the row; the child's ^ means whatever it binds
+        innermost. Handing over a name instead keeps the two apart, so the code
+        the child generates is caret-free and the column expression goes back in
+        afterwards (see nest_generated_expr)."""
         captured = {}
         class CapturingVis:
             def can_visualize(self, v): return isinstance(v, str)
@@ -4578,8 +4584,8 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         event = make_child_mouse_event("0\x00^['name']", 'X')
         update(event, ('x', 'x'), model, lst, get_vis)
 
-        self.assertEqual(captured['var_and_exp'], (None, "^['name']"),
-                         "Child should receive (None, column_expr) as var_and_exp")
+        self.assertEqual(captured['var_and_exp'], (None, CHILD_SOURCE_BINDER),
+                         "Child should receive the cell binder as var_and_exp")
 
     def test_mixed_commands_only_newcode_intercepted(self):
         """When child returns both NewCode and CopyToClipboard, only NewCode is intercepted."""
@@ -4752,6 +4758,141 @@ class TestNestedSlotsSave(unittest.TestCase):
         self.assertEqual(args[0], 'builtins.dict')
         self.assertEqual(args[1], [])
         self.assertIn("^['x']", args[2])
+
+
+class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
+    """A real string visualizer inside a cell speaks its own scope: ^ is the
+    match, ^^ the cell's string. The column it hands back must be in the LIST's
+    scope, where ^ is the row -- and must evaluate for every row.
+    """
+
+    def _drive(self, rows, column, events):
+        """Run *events* through the string visualizer in row 0's cell of a list
+        whose single column is *column*. Returns (model, commands)."""
+        import string_visualizer
+        eval_in_scope = lambda code: eval(code, {'re': re, 'rows': rows})
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else list_visualizer
+
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=[column]):
+            model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
+                               var_and_exp=('rows', 'rows'))
+        key = f'0{CELL_KEY_SEP}{column}'
+        model['focused_child'] = key
+        cell = model['children'][key]
+        cell['search'] = "r'foo'"
+        cell['replace_visible'] = True
+        cell['tool'] = 'pick'
+
+        commands = []
+        for py_ev in events:
+            event = {'pythonEventStr': repr(ChildEvent(child_key=key, py_ev_str=repr(py_ev))),
+                     'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1, 'detail': 1}}
+            model, cmds = update(event, ('rows', 'rows'), model, rows, get_vis,
+                                 eval_in_scope=eval_in_scope)
+            commands += cmds
+        return model, commands, eval_in_scope
+
+    def test_pick_then_action_yields_a_column_that_evaluates_for_every_row(self):
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        model, _cmds, eval_in_scope = self._drive(rows, '^', [
+            string_visualizer.SegmentToggle(segment_id='prefix'),
+            string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
+        ])
+        added = [c for c in model['columns'] if c != '^']
+        self.assertEqual(len(added), 1, f"expected one new column, got {model['columns']}")
+        col = added[0]
+        values = [eval_in_scope(replace_carets_in_py_exp(col, [f'rows[{i}]']))
+                  for i in range(len(rows))]
+        self.assertEqual(values, [[''], ['baz ']])
+
+    def test_cell_chips_drag_out_the_concrete_access_path(self):
+        """Chips are dragged into the editor, so they must name the cell
+        concretely -- neither the ^^ the replace box shows nor a placeholder."""
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        model, _cmds, eval_in_scope = self._drive(rows, '^', [
+            string_visualizer.SegmentToggle(segment_id='suffix'),
+        ])
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else list_visualizer
+        rendered = visualize(rows, model, get_vis, eval_in_scope)
+        chips = {html.unescape(m) for m in re.findall(r'snc-py-exp="([^"]*)"', rendered)}
+        placeholder = [c for c in chips if c.startswith('str[')]
+        self.assertEqual(placeholder, [],
+                         'cell chips fell back to the literal name "str"')
+        self.assertTrue([c for c in chips if 'rows[0]' in c and '.end()' in c],
+                        f'no cell chip names the concrete path; got {sorted(chips)}')
+
+    def test_a_cell_never_links(self):
+        """A cell's code becomes a column, not a line the visualizer owns.
+
+        There is no chain icon on a cell to break a link with, and a linked cell
+        would rewrite an editor line on every mouse event -- so a nested
+        visualizer neither auto-links nor emits ChangeSelectedText."""
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        model, commands, _eval = self._drive(rows, '^', [
+            string_visualizer.SegmentToggle(segment_id='prefix'),
+            string_visualizer.SegmentToggle(segment_id='suffix'),
+            string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
+            string_visualizer.SegmentToggle(segment_id='start'),
+        ])
+        self.assertEqual([c for c in commands if isinstance(c, ChangeSelectedText)], [],
+                         'a cell must not rewrite editor text')
+        cell = model['children'][f'0{CELL_KEY_SEP}^']
+        self.assertIsNone(cell.get('linked_action'))
+        # The one explicit action click is the only thing that adds a column.
+        self.assertEqual(len([c for c in model['columns'] if c != '^']), 1)
+
+    def test_copy_from_a_cell_yields_pasteable_code(self):
+        """Clipboard text is pasted into the editor as-is, so unlike a stored
+        column it must name the cell concretely rather than relative to a row."""
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        # 'foo bar' matching r'foo': prefix is '', suffix is ' bar'.
+        for action, segment, expected in (('find_or_map', 'prefix', ['']),
+                                          ('if_any', 'suffix', True)):
+            with self.subTest(action=action):
+                _model, commands, eval_in_scope = self._drive(rows, '^', [
+                    string_visualizer.SegmentToggle(segment_id=segment),
+                    string_visualizer.ActionButtonClick(action=action, copy=True),
+                ])
+                # The child's own command class travels out unwrapped.
+                copies = [c for c in commands
+                          if isinstance(c, string_visualizer.CopyToClipboard)]
+                self.assertEqual(len(copies), 1, f'expected one copy, got {commands}')
+                self.assertEqual(eval_in_scope(copies[0].text), expected)
+
+    def test_copy_of_a_statement_from_a_cell_is_pasteable(self):
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        _model, commands, eval_in_scope = self._drive(rows, '^', [
+            string_visualizer.SegmentToggle(segment_id='prefix'),
+            string_visualizer.ActionButtonClick(action='loop', copy=True),
+        ])
+        text = [c for c in commands
+                if isinstance(c, string_visualizer.CopyToClipboard)][0].text
+        self.assertNotIn(CHILD_SOURCE_BINDER, text)
+        ast.parse(text)  # raises if the pasted block wouldn't compile
+
+    def test_column_is_row_generic_for_a_non_trivial_column(self):
+        import string_visualizer
+
+        class Row:
+            def __init__(self, name):
+                self.name = name
+
+        rows = [Row('foo bar'), Row('baz foo')]
+        model, _cmds, eval_in_scope = self._drive(rows, '^.name', [
+            string_visualizer.SegmentToggle(segment_id='prefix'),
+            string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
+        ])
+        added = [c for c in model['columns'] if c != '^.name']
+        self.assertEqual(len(added), 1, f"expected one new column, got {model['columns']}")
+        col = added[0]
+        values = [eval_in_scope(replace_carets_in_py_exp(col, [f'rows[{i}]']))
+                  for i in range(len(rows))]
+        self.assertEqual(values, [[''], ['baz ']])
 
 
 if __name__ == '__main__':

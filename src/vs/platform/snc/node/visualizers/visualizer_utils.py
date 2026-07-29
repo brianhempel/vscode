@@ -1,6 +1,7 @@
 """Shared utilities for visualizer composition in Sculpt-n-Code."""
 
 import ast
+import dataclasses
 import html
 import json
 import os
@@ -301,25 +302,114 @@ def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
 # ^ is a rare python infix operator, generally invalid in variable position.
 # replace only ^ that are in variable position (not in strings, etc)
 # does this by replace-and-check one by one to see if parse succeeds with the ^ retained
-ONE_CARET_RE = re.compile(r'(?<!\^)\^(?!\^)')
+CARETS_RE = re.compile(r'(?<!\^)\^+(?!\^)')
 
-def replace_caret_in_py_exp(py_exp: str, replace_exp) -> str:
-    temp_names = []
+# replace_exps should be array, where replace_exps[0] is the replacement for ^, replace_exps[1] for ^^, etc
+# replace_exps should not have carets in them. if necessary, run this on them first
+# a run naming a scope beyond replace_exps is left as written - the caller only
+# knows the scopes it was given, and must not invent a binding for the rest
+def replace_carets_in_py_exp(py_exp: str, replace_exps) -> str:
+    temp_names = {} # temp name to number of carets
     def temp_replacer(m):
-        temp_name = f'_caret_{len(temp_names)}_'
-        temp_names.append(temp_name)
+        n_carets = len(m[0])
+        temp_name = f'_{n_carets}carets_{len(temp_names)}_'
+        temp_names[temp_name] = n_carets
         return temp_name
-    out = ONE_CARET_RE.sub(temp_replacer, py_exp)
+    out = CARETS_RE.sub(temp_replacer, py_exp)
 
-    for name in temp_names:
+    for name, n_carets in temp_names.items():
         try:
-            temp_str = out.replace(name, '^')
+            temp_str = out.replace(name, '^'*n_carets)
             ast.parse(temp_str)
-            out = temp_str
+            out = temp_str # parse succeeded, meaning the carets were likely in a string and should not be replaced
         except SyntaxError:
-            out = out.replace(name, replace_exp)
+            if n_carets <= len(replace_exps):
+                out = out.replace(name, replace_exps[n_carets-1])
+            else:
+                out = out.replace(name, '^'*n_carets)
 
     return out
+
+
+def caret_expr_parses(s: str, mode: str = 'eval') -> bool:
+    """Whether *s* is valid Python once every caret run is read as a value.
+
+    Used to validate text the user typed, which may name any number of scopes,
+    so the levels are collapsed to one placeholder rather than bound.
+    """
+    try:
+        ast.parse(s, mode=mode)
+        return True
+    except SyntaxError:
+        pass
+    if '^' not in s:
+        return False
+    try:
+        ast.parse(CARETS_RE.sub('_crt_', s), mode=mode)
+        return True
+    except SyntaxError:
+        return False
+
+
+# --- Nesting: how a child visualizer talks about its own value ----------------
+#
+# A caret run names a scope: ^ is the innermost value, ^^ its parent, and so on.
+# A list column or object field is written in ITS OWN scope, where ^ is the row
+# or the object. A child visualizer nested in one of those cells introduces a
+# new innermost scope (the string visualizer binds ^ to the current regex
+# match), so the cell's own value is one scope out: ^^.
+#
+# The child never emits carets in generated code, though. The parent binds the
+# cell value to CHILD_SOURCE_BINDER and hands that over as the child's source
+# expression; the child generates ordinary caret-free Python against it, and the
+# parent swaps its own (caret-bearing) expression back in via
+# nest_generated_expr when it takes the code. That keeps replace_exps caret-free
+# everywhere and keeps generated code parseable at every intermediate step.
+#
+# In its own UI the child still SHOWS that value as ^^, which is what the user
+# reads in the replace box.
+
+CHILD_SOURCE_BINDER = '_snc_cell_'
+CHILD_SOURCE_DISPLAY = '^^'
+
+
+def is_nested(var_and_exp) -> bool:
+    """Whether a visualizer is running inside a parent's cell.
+
+    A nested visualizer's code becomes a column or field in its parent rather
+    than a line in the editor, so it never links: there is no line for it to
+    own, and no chain icon on a cell to break the link with. Linking one would
+    also rewrite editor text on every mouse event that crossed it.
+    """
+    return bool(var_and_exp) and var_and_exp[1] == CHILD_SOURCE_BINDER
+
+
+def nest_generated_expr(expr: str, parent_expr: str) -> str:
+    """Bring a child's generated code into the parent's scope.
+
+    *parent_expr* is how the parent refers to the child's value in the parent's
+    own scope (a list column, an object field accessor) and may contain carets.
+    """
+    return expr.replace(CHILD_SOURCE_BINDER, f'({parent_expr})')
+
+
+def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
+    """Resolve the binder in one command coming back from a child visualizer.
+
+    The two expressions differ by destination, not by scope depth. Generated
+    code (a NewCode 2-tuple) may be headed for the parent's own config, where a
+    caret expression is exactly right - a list column has to stay row-generic.
+    Clipboard text is pasted into the editor verbatim, so it has to name the
+    value concretely; a parent whose code_expr is already concrete passes the
+    same expression twice.
+    """
+    if isinstance(cmd, tuple) and len(cmd) == 2:
+        return (cmd[0], nest_generated_expr(cmd[1], code_expr))
+    # Duck-typed: each visualizer declares its own CopyToClipboard.
+    text = getattr(cmd, 'text', None)
+    if isinstance(text, str) and CHILD_SOURCE_BINDER in text:
+        return dataclasses.replace(cmd, text=nest_generated_expr(text, clipboard_expr))
+    return cmd
 
 
 def strip_leading_caret(name: str) -> str:
@@ -335,7 +425,7 @@ def eval_caret_expr(field_expr: str, value, eval_in_scope=None):
     Uses local eval with the value bound directly.
     """
     _v = value
-    return eval(replace_caret_in_py_exp(field_expr, '_v'))
+    return eval(replace_carets_in_py_exp(field_expr, ['_v']))
 
 
 @dataclass(frozen=True, slots=True)

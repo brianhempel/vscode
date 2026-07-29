@@ -12,7 +12,9 @@ import os
 import shutil
 import tempfile
 
-from visualizer_utils import ChildEvent, wrap_child_html, route_child_event, aggregate_handled_keys, eval_caret_expr
+from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
+                              aggregate_handled_keys, eval_caret_expr,
+                              replace_carets_in_py_exp, caret_expr_parses)
 from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
@@ -377,6 +379,45 @@ class TestEvalCaretExpr(unittest.TestCase):
     def test_error_propagates(self):
         with self.assertRaises(Exception):
             eval_caret_expr('^.nonexistent', 42)
+
+
+class TestReplaceCaretsInPyExp(unittest.TestCase):
+    """A caret run names a scope: ^ is the innermost value, ^^ its parent, and
+    replace_exps binds them innermost-first."""
+
+    def test_binds_each_level_by_run_length(self):
+        self.assertEqual(
+            replace_carets_in_py_exp('(^^)[:^.start()]', ['mtch', '_snc_cell_']),
+            '(_snc_cell_)[:mtch.start()]')
+
+    def test_leaves_legal_python_carets_alone(self):
+        # A ^ that parses where it stands is the XOR operator or string content,
+        # not a scope reference.
+        cases = [
+            ('a ^ b', ['mtch'], 'a ^ b'),
+            ('"a ^ b" + ^[0]', ['mtch'], '"a ^ b" + mtch[0]'),
+            ("^.split('^')", ['mtch'], "mtch.split('^')"),
+        ]
+        self.assertEqual([replace_carets_in_py_exp(e, b) for e, b, _ in cases],
+                         [want for _, _, want in cases])
+
+    def test_unbound_level_is_left_alone(self):
+        # A caller that knows one scope shouldn't crash on text naming two, and
+        # must not invent a binding it doesn't have.
+        self.assertEqual(replace_carets_in_py_exp('^^ + ^[0]', ['mtch']),
+                         '^^ + mtch[0]')
+
+    def test_caret_expr_parses_reads_every_level_as_a_value(self):
+        self.assertEqual(
+            [caret_expr_parses(s) for s in
+             ('^.start()', '^^.foo', '^^ + ^', 'a ^ b', '^.(', 'def f(): pass')],
+            [True, True, True, True, False, False])
+
+    def test_binder_is_spliced_verbatim(self):
+        # The replacement is not re-scanned, so a multi-token binder lands whole.
+        self.assertEqual(
+            replace_carets_in_py_exp('^.upper()', ['rows[0].name']),
+            'rows[0].name.upper()')
 
 
 class TestConfigKey(unittest.TestCase):

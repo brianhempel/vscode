@@ -8697,7 +8697,7 @@ class TestCountViaGrammar(unittest.TestCase):
     def test_generates_same_code_as_button(self):
         """The count expression should be identical to what generate_action('count') produces."""
         from string_visualizer_grammar import generate_action
-        from string_visualizer import replace_caret_in_py_exp
+        from string_visualizer import replace_carets_in_py_exp
         model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
         ctx = {
             'source_expr': '_snc_v',
@@ -8705,7 +8705,7 @@ class TestCountViaGrammar(unittest.TestCase):
             'is_index': False, 'is_slice': False,
             'regex_pattern': '\\w+',
             'replace_visible': True, 'replace_text': 'len(^[0]) > 3',
-            'replace_expr': replace_caret_in_py_exp('len(^[0]) > 3', 'mtch'),
+            'replace_expr': replace_carets_in_py_exp('len(^[0]) > 3', ['mtch']),
         }
         result = generate_action('count', ctx)
         self.assertIsNotNone(result)
@@ -13649,6 +13649,52 @@ class TestDisclosureButtonTooltip(unittest.TestCase):
         self.assertIsNotNone(m, "Disclosure button not found")
         attrs = m.group(1)
         self.assertIn('data-tooltip="Toggle replace/map/filter"', attrs)
+
+
+from string_visualizer_grammar import generate_action
+from visualizer_utils import CHILD_SOURCE_BINDER
+
+
+class TestNestedScopeRoundTrip(unittest.TestCase):
+    """Nested in a cell, ^ is the match and ^^ is the string being searched.
+    The replace box shows those; generated code shows neither."""
+
+    def _nested_ctx(self, replace_text):
+        from string_visualizer import _get_search_context
+        model = init_model('foo bar')
+        model['search'] = "r'foo'"
+        model['replace_visible'] = True
+        model['replace_text'] = replace_text
+        return model, _get_search_context(
+            model, (None, CHILD_SOURCE_BINDER),
+            eval_in_scope=lambda code: eval(code))
+
+    def test_generated_code_binds_both_levels(self):
+        _model, ctx = self._nested_ctx('(^^)[:^.start()]')
+        code = generate_action('find_or_map', ctx)[1]
+        self.assertEqual(
+            code,
+            "[(_snc_cell_)[:mtch.start()] for mtch in "
+            "re.finditer(r'foo', _snc_cell_, flags=re.M)]")
+
+    def test_parsing_generated_code_restores_the_caret_levels(self):
+        from string_visualizer import _ctx_to_model, parse_generated_code_or_assignment
+        _model, ctx = self._nested_ctx('(^^)[:^.start()]')
+        code = generate_action('find_or_map', ctx)[1]
+        parsed, _prefix = parse_generated_code_or_assignment(code)
+        round_tripped = {}
+        _ctx_to_model(parsed, round_tripped)
+        self.assertEqual(round_tripped['replace_text'], '(^^)[:^.start()]')
+
+    def test_pick_builds_replace_text_in_caret_levels(self):
+        from string_visualizer import _build_segment_replace_text
+        model = init_model('foo bar')
+        model['search'] = "r'foo'"
+        model['selectedSegments'] = ['suffix']
+        self.assertEqual(
+            _build_segment_replace_text(model, (None, CHILD_SOURCE_BINDER),
+                                        'foo bar', lambda code: eval(code)),
+            '^^[^.end():]')
 
 
 if __name__ == '__main__':

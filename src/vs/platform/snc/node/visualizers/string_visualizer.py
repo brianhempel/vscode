@@ -128,8 +128,10 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import (replace_caret_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
-                              LinkConfig, handle_relink)
+from visualizer_utils import (replace_carets_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
+                              LinkConfig, handle_relink,
+                              CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
+                              caret_expr_parses, is_nested)
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -287,6 +289,11 @@ DC2 = chr(0x12)  # ^  - start of line/string anchor
 DC3 = chr(0x13)  # $  - end of line/string anchor
 
 _SENTINEL_CHARS = [DC2, DC3]
+
+# Lambda parameter the previews bind the string itself to, so a replace
+# expression that mentions ^^ (see CHILD_SOURCE_DISPLAY) can be evaluated
+# against the real value rather than a name only the generated code has.
+_PREVIEW_SOURCE_BINDER = '_snc_v'
 
 
 def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_char: str | None = '') -> str:
@@ -1563,18 +1570,7 @@ def _find_closing_delimiter(search: str | None) -> int | None:
 
 def _is_valid_python_expression(s: str) -> bool:
     """Check if s parses as a valid Python expression (supports ^ caret syntax)."""
-    try:
-        ast.parse(s, mode='eval')
-        return True
-    except SyntaxError:
-        pass
-    if '^' in s:
-        try:
-            ast.parse(replace_caret_in_py_exp(s, '_crt_'), mode='eval')
-            return True
-        except SyntaxError:
-            pass
-    return False
+    return caret_expr_parses(s)
 
 
 def parse_slice_parts(search: str | None) -> tuple | None:
@@ -1584,7 +1580,7 @@ def parse_slice_parts(search: str | None) -> tuple | None:
     are blank or parse as valid Python expressions, return (left, right).
     Returns None if no valid slice split is found.
 
-    Uses the same guess-and-check approach as replace_caret_in_py_exp.
+    Uses the same guess-and-check approach as replace_carets_in_py_exp.
     """
     if not search:
         return None
@@ -3402,6 +3398,14 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     if eval_in_scope is None:
         eval_in_scope = lambda _c: eval(_c)
 
+    # Where this value sits is a property of the render, not of the model: a
+    # parent's columns can change under a child that was built once. Adopt the
+    # access path we were just handed so the draggable chips and the len()
+    # indicator name the value the way the editor could evaluate it.
+    if model is not None and var_and_exp:
+        var_name, expr = var_and_exp
+        model['_source_expr'] = var_name if var_name else expr
+
     # Small mode: a non-interactive inline preview. Skip all the expensive
     # selection/highlight machinery (preview regex, segment overlays, per-char
     # anchors, hover) and just print the raw string. We don't generate the
@@ -3883,16 +3887,11 @@ def _compute_predicate_previews(selection_regex, value, replace_visible, replace
     if not matches:
         return (False, True)  # any([])=False, all([])=True per Python semantics
 
-    replace_expr_raw = replace_text
-    if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-        end = replace_expr_raw.find('`', 1)
-        if end > 0:
-            replace_expr_raw = replace_expr_raw[1:end]
-    replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
+    replace_expr = _replace_expr_bound(replace_text, 'mtch', _PREVIEW_SOURCE_BINDER)
 
     try:
-        transform_fn = eval_in_scope(f"(lambda mtch: {replace_expr})")
-        results = [transform_fn(m) for m in matches]
+        transform_fn = eval_in_scope(f"(lambda mtch, {_PREVIEW_SOURCE_BINDER}: {replace_expr})")
+        results = [transform_fn(m, value) for m in matches]
         return (any(results), all(results))
     except Exception:
         return (None, None)
@@ -3998,15 +3997,10 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
         result_str = ''
         replace_text = model.get('replace_text')
         if replace_text:
-            replace_expr_raw = replace_text
-            if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-                end = replace_expr_raw.find('`', 1)
-                if end > 0:
-                    replace_expr_raw = replace_expr_raw[1:end]
-            replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
+            replace_expr = _replace_expr_bound(replace_text, 'mtch', _PREVIEW_SOURCE_BINDER)
             try:
-                transform_fn = eval_in_scope(f"(lambda mtch: {replace_expr})")
-                result = transform_fn(matched_str)
+                transform_fn = eval_in_scope(f"(lambda mtch, {_PREVIEW_SOURCE_BINDER}: {replace_expr})")
+                result = transform_fn(matched_str, value)
                 result_str = html.escape(_trunc_repr(result))
             except Exception as e:
                 result_str = html.escape(str(e))
@@ -4059,16 +4053,11 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
     result_str = ''
     replace_text = model.get('replace_text')
     if replace_text:
-        replace_expr_raw = replace_text
-        if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-            end = replace_expr_raw.find('`', 1)
-            if end > 0:
-                replace_expr_raw = replace_expr_raw[1:end]
-        replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
+        replace_expr = _replace_expr_bound(replace_text, 'mtch', _PREVIEW_SOURCE_BINDER)
 
         try:
-            transform_fn = eval_in_scope(f"(lambda mtch: {replace_expr})")
-            result = transform_fn(transform_match)
+            transform_fn = eval_in_scope(f"(lambda mtch, {_PREVIEW_SOURCE_BINDER}: {replace_expr})")
+            result = transform_fn(transform_match, value)
             result_str = html.escape(_trunc_repr(result))
         except Exception as e:
             result_str = html.escape(str(e))
@@ -4312,7 +4301,11 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     replace_expr = ctx.get('replace_expr')
     if replace_expr:
         model['replace_visible'] = True
-        model['replace_text'] = re.sub(r'\bmtch\b', '^', replace_expr)
+        # Inverse of _replace_expr_bound: turn the bound names back into the
+        # caret levels the replace box shows.
+        model['replace_text'] = re.sub(
+            rf'\b{CHILD_SOURCE_BINDER}\b', CHILD_SOURCE_DISPLAY,
+            re.sub(r'\bmtch\b', '^', replace_expr))
     else:
         has_replace = ctx.get('has_replace', False)
         if not has_replace:
@@ -4327,6 +4320,47 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     model['handleDrag'] = None
     model['undoHistory'] = []
     model['redoHistory'] = []
+
+
+def _unwrap_backtick_expr(text: str) -> str:
+    """Strip the `...` delimiters an expression search is written with."""
+    if text.startswith('`') and len(text) >= 2:
+        end = text.find('`', 1)
+        if end > 0:
+            return text[1:end]
+    return text
+
+
+def _wrap_source_expr(expr: str) -> str:
+    """Parenthesize a source expression so it composes into generated code.
+
+    The parens are load-bearing beyond precedence: they also mark the source as
+    an expression rather than a named variable, which is what keeps a generated
+    assignment named `result_*` instead of borrowing the expression's text.
+    The nesting binder is exempt - it is a plain name the parent substitutes
+    into, and must stay a bare token for nest_generated_expr to find it.
+    """
+    return expr if expr == CHILD_SOURCE_BINDER else f"({expr})"
+
+
+def _display_source_expr(source_expr: str) -> str:
+    """How the source string is SHOWN (replace box, segment chips).
+
+    Nested in a list cell or object field, the value is bound to a name for code
+    generation - but the user reads it as ^^, one scope out from the ^ bound to
+    the current match.
+    """
+    return CHILD_SOURCE_DISPLAY if source_expr == CHILD_SOURCE_BINDER else source_expr
+
+
+def _replace_expr_bound(replace_text: str, *binders: str) -> str:
+    """The replace box's text as Python, with each caret level bound.
+
+    binders[0] binds ^ (the current match); binders[1] binds ^^ (the string
+    being searched) - a name when generating code, the value itself when
+    evaluating a preview.
+    """
+    return replace_carets_in_py_exp(_unwrap_backtick_expr(replace_text), list(binders))
 
 
 def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = None, eval_in_scope=None) -> dict | None:
@@ -4357,7 +4391,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
         if var_and_exp is None:
             return None
         var_name, expr = var_and_exp
-        source_expr = var_name if var_name else f"({expr})"
+        source_expr = var_name if var_name else _wrap_source_expr(expr)
         suggest_base = var_name if var_name else "result"
         has_var = bool(var_name)
 
@@ -4365,12 +4399,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
     replace_text = model.get('replace_text')
     replace_expr = None
     if replace_visible and replace_text:
-        replace_expr_raw = replace_text
-        if replace_expr_raw.startswith('`') and len(replace_expr_raw) >= 2:
-            end = replace_expr_raw.find('`', 1)
-            if end > 0:
-                replace_expr_raw = replace_expr_raw[1:end]
-        replace_expr = replace_caret_in_py_exp(replace_expr_raw, 'mtch')
+        replace_expr = _replace_expr_bound(replace_text, 'mtch', source_expr)
 
     # --- Multi-index: list[int] ---
     if kind == 'expr':
@@ -4788,6 +4817,12 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
 
     Index/slice searches always have a single match, so chip_exprs == replace_exprs.
 
+    The two sets also differ in how they name the SOURCE string. chip_exprs use
+    the concrete access path (`rows[0].name`) so a dragged-out expression stands
+    on its own; replace_exprs use the display form, which for a nested cell is
+    `^^` - one scope out from the `^` bound to the match (see
+    _display_source_expr). At the top level the two coincide.
+
     Returns dict:
       {
         'source_expr': str,
@@ -4812,31 +4847,45 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope) if var_and_exp else None
     source_expr = (ctx['source_expr'] if ctx
                    else (var_and_exp[0] if var_and_exp and var_and_exp[0] else 'str'))
+    display_expr = _display_source_expr(source_expr)
 
-    # Index / slice path: single match, so chip and replace expressions match.
+    # Index / slice path: single match, so chip and replace expressions differ
+    # only in how they name the source.
     if is_index_or_slice_search(selection_regex, eval_in_scope):
-        idx_ctx = _segment_context_for_index_slice(
-            selection_regex, source_expr, value, eval_in_scope)
-        if not idx_ctx:
+        def _idx_exprs(src):
+            idx_ctx = _segment_context_for_index_slice(
+                selection_regex, src, value, eval_in_scope)
+            if not idx_ctx:
+                return None
+            start_expr = idx_ctx['start_expr']
+            end_expr = idx_ctx['end_expr']
+            return idx_ctx, {
+                'start': start_expr,
+                'end': end_expr,
+                'prefix': f'{src}[:{start_expr}]',
+                'group_0': idx_ctx['group_0'],
+                'suffix': f'{src}[{end_expr}:]',
+            }
+
+        chip = _idx_exprs(source_expr)
+        replace = _idx_exprs(display_expr)
+        if not chip or not replace:
             return None
-        start_expr = idx_ctx['start_expr']
-        end_expr = idx_ctx['end_expr']
-        exprs = {
-            'start': start_expr,
-            'end': end_expr,
-            'prefix': f'{source_expr}[:{start_expr}]',
-            'group_0': idx_ctx['group_0'],
-            'suffix': f'{source_expr}[{end_expr}:]',
-        }
+        _, chip_exprs = chip
+        # The simplifications land in replace_text, so they use the display
+        # source throughout - including an open-ended slice's len(<source>).
+        display_idx_ctx, replace_exprs = replace
+        start_expr = display_idx_ctx['start_expr']
+        end_expr = display_idx_ctx['end_expr']
         return {
             'source_expr': source_expr,
             'is_index_slice': True,
-            'replace_exprs': dict(exprs),
-            'chip_exprs': dict(exprs),
+            'replace_exprs': replace_exprs,
+            'chip_exprs': chip_exprs,
             'simplifications': {
-                'full': source_expr,
-                'tail': f'{source_expr}[{start_expr}:]',
-                'head': f'{source_expr}[:{end_expr}]',
+                'full': display_expr,
+                'tail': f'{display_expr}[{start_expr}:]',
+                'head': f'{display_expr}[:{end_expr}]',
             },
         }
 
@@ -4844,23 +4893,26 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
     replace_exprs = {
         'start': '^.start()',
         'end': '^.end()',
-        'prefix': f'{source_expr}[:^.start()]',
+        'prefix': f'{display_expr}[:^.start()]',
         'group_0': '^[0]',
-        'suffix': f'{source_expr}[^.end():]',
+        'suffix': f'{display_expr}[^.end():]',
     }
 
     # Chip exprs match Replace exprs when the user is in 1st-mode. Otherwise
     # wrap each per-match expression in [... for m in re.finditer(...)] so a
     # dragged-out expression evaluates to the list across all matches.
     is_first = is_first_match_mode(selection_regex)
+    first_match_chip_exprs = {**replace_exprs,
+                              'prefix': f'{source_expr}[:^.start()]',
+                              'suffix': f'{source_expr}[^.end():]'}
     if is_first:
-        chip_exprs = dict(replace_exprs)
+        chip_exprs = first_match_chip_exprs
     else:
         finditer_call = _build_finditer_call(ctx) if ctx else None
         if finditer_call is None:
             # No usable finditer call (e.g. no source_expr context); fall back
             # to first-match form so chips still produce something draggable.
-            chip_exprs = dict(replace_exprs)
+            chip_exprs = first_match_chip_exprs
         else:
             chip_exprs = {
                 'start':   f'[m.start() for m in {finditer_call}]',
@@ -4876,9 +4928,9 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
         'replace_exprs': replace_exprs,
         'chip_exprs': chip_exprs,
         'simplifications': {
-            'full': source_expr,
-            'tail': f'{source_expr}[^.start():]',
-            'head': f'{source_expr}[:^.end()]',
+            'full': display_expr,
+            'tail': f'{display_expr}[^.start():]',
+            'head': f'{display_expr}[:^.end()]',
         },
     }
 
@@ -5729,11 +5781,16 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
-                            model['linked_action'] = action
-                            model['linked_source_expr'] = ctx.get('source_expr')
-                            model['linked_has_assignment'] = bool(result[0])
-                            model['last_linked_expr'] = result[1]
-                            model['auto_linked_once'] = True
+                            # Nested, there is no line to own - see is_nested.
+                            if not is_nested(var_and_exp):
+                                model['linked_action'] = action
+                                model['linked_source_expr'] = ctx.get('source_expr')
+                                model['linked_has_assignment'] = bool(result[0])
+                                model['last_linked_expr'] = result[1]
+                                model['auto_linked_once'] = True
+
+    if is_nested(var_and_exp):
+        return (model, commands)
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,

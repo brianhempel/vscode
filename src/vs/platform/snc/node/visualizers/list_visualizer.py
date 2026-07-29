@@ -55,7 +55,9 @@ from visualizer_utils import (
     with_pass_body,
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix,
-    strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
+    strip_leading_caret, eval_caret_expr, replace_carets_in_py_exp,
+    CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
+    caret_expr_parses, is_nested,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
@@ -274,18 +276,7 @@ def needs_implicit_caret(search: str) -> bool:
 
 
 def _is_valid_python_expression(s: str) -> bool:
-    try:
-        ast.parse(s, mode='eval')
-        return True
-    except SyntaxError:
-        pass
-    if '^' in s:
-        try:
-            ast.parse(replace_caret_in_py_exp(s, '_crt_'), mode='eval')
-            return True
-        except SyntaxError:
-            pass
-    return False
+    return caret_expr_parses(s)
 
 
 def parse_search_term(search: str | None) -> tuple | None:
@@ -438,7 +429,7 @@ def _get_search_context(model: dict, var_and_exp=None,
     else:
         predicate_with_caret = search
 
-    predicate_expr = replace_caret_in_py_exp(predicate_with_caret, 'item')
+    predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['item'])
 
     return {
         'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
@@ -836,7 +827,7 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
         else:
             predicate_with_caret = '^ ' + search.lstrip()
 
-    predicate_expr = replace_caret_in_py_exp(predicate_with_caret, '_item')
+    predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['_item'])
 
     matched = []
     for i, _item in enumerate(lst):
@@ -968,7 +959,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         for col in columns:
             try:
                 if source_expr is not None and eval_in_scope is not None:
-                    cell_value = eval_in_scope(replace_caret_in_py_exp(col, f'{source_expr}[{i}]'))
+                    cell_value = eval_in_scope(replace_carets_in_py_exp(col, [f'{source_expr}[{i}]']))
                 else:
                     cell_value = eval_caret_expr(col, item, eval_in_scope)
             except Exception:
@@ -1014,7 +1005,7 @@ def _render_column_header(col, index, model):
 
     source_expr = model.get('_source_expr')
     if source_expr is not None:
-        item_expr = replace_caret_in_py_exp(col, 'item')
+        item_expr = replace_carets_in_py_exp(col, ['item'])
         full_expr = f'[{item_expr} for item in {source_expr}]'
         py_exp_attr = f' snc-py-exp="{html.escape(full_expr)}" draggable="true"'
     else:
@@ -1559,7 +1550,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             composite_key = f"{i}{CELL_KEY_SEP}{col}"
             try:
                 if source_expr is not None and eval_in_scope is not None:
-                    cell_value = eval_in_scope(replace_caret_in_py_exp(col, f'{source_expr}[{i}]'))
+                    cell_value = eval_in_scope(replace_carets_in_py_exp(col, [f'{source_expr}[{i}]']))
                 else:
                     cell_value = eval_caret_expr(col, item, eval_in_scope)
             except Exception:
@@ -1577,7 +1568,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
                 cell_expr = None
                 if source_expr is not None:
-                    cell_expr = replace_caret_in_py_exp(col, f'{source_expr}[{i}]')
+                    cell_expr = replace_carets_in_py_exp(col, [f'{source_expr}[{i}]'])
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -1623,7 +1614,7 @@ def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
     idx = int(row_key)
     if source_expr is not None and eval_in_scope is not None:
-        return eval_in_scope(replace_caret_in_py_exp(field_key, f'{source_expr}[{idx}]'))
+        return eval_in_scope(replace_carets_in_py_exp(field_key, [f'{source_expr}[{idx}]']))
     return eval_caret_expr(field_key, lst[idx], eval_in_scope)
 
 
@@ -1649,14 +1640,24 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         return (model, [])
 
     if isinstance(msg, ChildEvent):
-        _row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
+        row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
         new_model, commands = route_child_event(
             event, model, value,
             child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope, model.get('_source_expr')),
             get_visualizer=get_visualizer,
-            var_and_exp=(None, cell_col),
+            # The cell's value is bound to a name for the child, so the code it
+            # generates is caret-free; the column expression goes back in below.
+            var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
+        # A column stays row-generic (the cell_col caret expression); anything
+        # bound for the clipboard names this row concretely, since the user
+        # pastes it into the editor as-is.
+        src = model.get('_source_expr')
+        concrete_cell = (replace_carets_in_py_exp(cell_col, [f'{src}[{row_key}]'])
+                         if src else cell_col)
+        commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
+
         filtered_commands: List[Any] = []
         type_key = _get_item_type_key(value) if value else None
         for cmd in commands:
@@ -1910,11 +1911,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
-                            model['linked_action'] = action
-                            model['linked_source_expr'] = ctx.get('source_expr')
-                            model['linked_has_assignment'] = bool(result[0])
-                            model['last_linked_expr'] = result[1]
-                            model['auto_linked_once'] = True
+                            # Nested, there is no line to own - see is_nested.
+                            if not is_nested(var_and_exp):
+                                model['linked_action'] = action
+                                model['linked_source_expr'] = ctx.get('source_expr')
+                                model['linked_has_assignment'] = bool(result[0])
+                                model['last_linked_expr'] = result[1]
+                                model['auto_linked_once'] = True
 
         case Unlink():
             # Stash the action so the chain icon can resume it on relink.
@@ -1927,6 +1930,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case Relink(mode=mode, text=text):
             handle_relink(_LINK_CONFIG, mode, text, var_and_exp, model, commands,
                           eval_in_scope=eval_in_scope)
+
+    if is_nested(var_and_exp):
+        return (model, commands)
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,
