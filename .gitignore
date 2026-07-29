@@ -52,4 +52,5 @@ dist
 .github/skills/.local/
 __pycache__
 .snc_object_fields.json
+.snc_io_cache/
 .vs

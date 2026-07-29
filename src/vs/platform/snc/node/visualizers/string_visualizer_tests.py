@@ -3418,7 +3418,9 @@ class TestRelinkViaChainIcon(unittest.TestCase):
         self.assertEqual(model['last_linked_expr'], tuples[0][1])
 
     def test_relink_takeover_emits_change_selected_text_and_resumes_action(self):
-        model, commands = update(make_relink_event('takeover'),
+        # The line still holds what the count action wrote before the unlink.
+        taken_over = "x_count = sum(1 for _ in re.finditer(r'hello', x, flags=re.M))"
+        model, commands = update(make_relink_event('takeover', text=taken_over),
                                  self.var_and_exp, self.model, self.value)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(change_cmds), 1)
@@ -3496,15 +3498,85 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
         self.assertEqual(len(change_cmds), 1)
         self.assertEqual(model.get('linked_action'), 'count')
 
-    def test_unparseable_takeover_falls_back_to_generate(self):
+    def test_unparseable_takeover_links_without_overwriting(self):
+        """An unrecognized line is still a valid link target, but the relink
+        must not write over it — only the user's next interaction may."""
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model, commands = update(
             make_relink_event('takeover', text='???  not parseable  ???'),
             self.var_and_exp, model, self.value, eval_in_scope=eval)
-        # Fell back to the default generate-and-overwrite path.
         self.assertEqual(model.get('linked_action'), 'find_or_map')
-        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
+        self.assertEqual(commands, [])
+
+
+class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
+    """Taking over a line this visualizer did not write: the link is recorded,
+    but the line is left alone until the user's next interaction. Recording
+    nothing used to leave the front-end linked to a line Python knew nothing
+    about, so the next interaction inserted a duplicate line."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        # Derived from `other`, not from this visualizer's `x`.
+        self.foreign = "hits = list(re.finditer(r'z', other, flags=re.M))"
+
+    def _took_over(self, text):
+        model = init_model(self.value)
+        return update(make_relink_event('takeover', text=text),
+                      self.var_and_exp, model, self.value, eval_in_scope=eval)
+
+    def test_links_without_touching_the_line(self):
+        model, commands = self._took_over(self.foreign)
+        self.assertEqual(commands, [])
+        self.assertEqual(model.get('linked_action'), 'find_or_map')
+        self.assertEqual(model.get('linked_source_expr'), 'x')
+        self.assertTrue(model.get('auto_linked_once'))
+        self.assertTrue(model.get('linked_has_assignment'))
+
+    def test_next_interaction_edits_the_line_instead_of_inserting(self):
+        model, _ = self._took_over(self.foreign)
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertFalse(any(isinstance(c, tuple) for c in commands))
+        self.assertEqual(len([c for c in commands
+                              if isinstance(c, ChangeSelectedText)]), 1)
+
+    def test_takeover_with_a_search_still_edits_the_line_next(self):
+        """The takeover writes nothing, so the expression it would have written
+        must not be remembered as already-written. Otherwise the next
+        interaction that regenerates it is suppressed as a no-op and the
+        foreign text sits there forever under a chain icon claiming a link."""
+        model = init_model(self.value)
+        model['search'] = r"r'world'"
+        model, _ = update(make_relink_event('takeover', text=self.foreign),
+                          self.var_and_exp, model, self.value, eval_in_scope=eval)
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertEqual([(type(c).__name__, c.expression) for c in commands],
+                         [('ChangeSelectedText',
+                           "list(re.finditer(r'world', x, flags=re.M))")])
+
+    def test_header_takeover_links_a_statement_action(self):
+        """Linking to a header must pick an action that generates a header, or
+        the first interaction would replace the block and orphan its body."""
+        from string_visualizer_grammar import _STATEMENT_ACTIONS
+        model, commands = self._took_over('if flag:')
+        self.assertEqual(commands, [])
+        self.assertIn(model.get('linked_action'), _STATEMENT_ACTIONS)
+        self.assertFalse(model.get('linked_has_assignment'))
+
+    def test_next_interaction_after_header_takeover_stays_a_header(self):
+        model, _ = self._took_over('if flag:')
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertTrue(changes[0].expression.rstrip().endswith(':'))
 
 
 class TestNoUnlinkButtonInActionBar(unittest.TestCase):
@@ -5509,15 +5581,15 @@ class TestSmallParameter(unittest.TestCase):
         output = visualize("hello", model, None, None)
         self.assertIn('Search', output)
 
-    def test_small_self_wraps_for_drag_with_var_and_exp(self):
-        """Small mode + var_and_exp: the whole visualizer is a drag-to-extract
-        handle (self-wrap), no parent needed."""
+    def test_small_does_not_self_wrap_with_var_and_exp(self):
+        """The string visualizer is never itself a drag handle: a handle over
+        its whole area claims every hover inside it, popping the expression
+        tooltip over the characters (which carry their own handles)."""
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True,
                            var_and_exp=(None, 'words[0]'))
-        self.assertIn('snc-py-exp="words[0]"', output)
-        self.assertIn('draggable="true"', output)
-        self.assertIn('class="py-exp-grab"', output)
+        self.assertFalse(output.startswith('<span snc-py-exp'))
+        self.assertNotIn('snc-py-exp="words[0]"', output)
 
     def test_small_no_self_wrap_without_var_and_exp(self):
         """Small mode without an expression renders bare (no drag wrapper)."""
@@ -7944,7 +8016,27 @@ class TestActionButtonLoop(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
         self.assertIn("for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):", expr)
-        self.assertIn("\n    pass", expr)
+        self.assertNotIn("pass", expr)
+
+    def test_copy_loop_copies_runnable_code(self):
+        """Copy hands the user a whole statement, so it keeps a body."""
+        import ast
+        from string_visualizer import CopyToClipboard
+        _, commands = update(make_action_button_event('loop', copy=True),
+                             self.var_and_exp, self.model, self.value)
+        copies = [c for c in commands if isinstance(c, CopyToClipboard)]
+        self.assertEqual(len(copies), 1)
+        self.assertTrue(copies[0].text.endswith('\n    pass'))
+        ast.parse(copies[0].text)
+
+    def test_hover_preview_of_loop_is_runnable(self):
+        """The preview is copied and dragged into the file, so it needs a body."""
+        import ast
+        from string_visualizer import _preview_expr
+        self.model['_source_expr'] = 'x'
+        preview = _preview_expr(self.model, 'loop', None)
+        self.assertTrue(preview.endswith('\n    pass'))
+        ast.parse(preview)
 
     def test_loop_replace_mode(self):
         """Loop in replace mode iterates over transformed values."""
@@ -8071,7 +8163,7 @@ class TestActionButtonLoopMatchStrings(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
         self.assertIn("for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):", expr)
-        self.assertIn("\n    pass", expr)
+        self.assertNotIn("pass", expr)
 
     def test_loop_match_strings_suggest_name_none(self):
         """Loop Match Strings returns suggest_name=None (statement)."""
@@ -8199,17 +8291,17 @@ class TestActionButtonIfAny(unittest.TestCase):
         self.var_and_exp = ('x', 'x')
 
     def test_if_any_non_replace(self):
-        """If Any in non-replace produces if re.search(...):\\n    pass."""
+        """If Any in non-replace produces the header if re.search(...):."""
         _, commands = update(make_action_button_event('if_any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
         self.assertIn("if re.search(r'hello', x, flags=re.M):", expr)
-        self.assertIn("\n    pass", expr)
+        self.assertNotIn("pass", expr)
 
     def test_if_any_replace_mode(self):
-        """If Any in replace mode produces if any(...):\\n    pass."""
+        """If Any in replace mode produces the header if any(...):."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('if_any'),
@@ -8218,7 +8310,7 @@ class TestActionButtonIfAny(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
         self.assertIn("if any(", expr)
-        self.assertIn("\n    pass", expr)
+        self.assertNotIn("pass", expr)
 
     def test_copy_if_any(self):
         """Copy If Any copies just the boolean expression."""
@@ -8246,7 +8338,7 @@ class TestActionButtonIfAll(unittest.TestCase):
         self.var_and_exp = ('x', 'x')
 
     def test_if_all_replace_mode(self):
-        """If All in replace mode produces if all(...):\\n    pass."""
+        """If All in replace mode produces the header if all(...):."""
         self.model['replace_visible'] = True
         self.model['replace_text'] = "^[0].upper()"
         _, commands = update(make_action_button_event('if_all'),
@@ -8255,7 +8347,7 @@ class TestActionButtonIfAll(unittest.TestCase):
         suggest_name, expr = commands[0]
         self.assertIsNone(suggest_name)
         self.assertIn("if all(", expr)
-        self.assertIn("\n    pass", expr)
+        self.assertNotIn("pass", expr)
 
     def test_if_all_non_replace_returns_nothing(self):
         """If All not in replace mode produces no if-all command.
@@ -10248,7 +10340,7 @@ class TestDSLLoopAction(_ActionTestBase):
             'is_index': False, 'is_slice': False, 'has_replace': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
         })
-        self.assertEqual(result[0], "for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):")
 
     def test_loop_replace(self):
         result = self._gen(self.ACTION, {
@@ -10257,7 +10349,7 @@ class TestDSLLoopAction(_ActionTestBase):
             'regex_pattern': 'hello', 'source_expr': 'x',
             'replace_expr': "mtch.group().upper()",
         })
-        self.assertEqual(result[0], "for i, val in enumerate(mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for i, val in enumerate(mtch.group().upper() for mtch in re.finditer(r'hello', x, flags=re.M)):")
 
     def test_roundtrip_loop_non_replace(self):
         self._roundtrip(self.ACTION, {
@@ -10275,7 +10367,14 @@ class TestDSLLoopAction(_ActionTestBase):
         })
 
     def test_parse_known_loop(self):
-        parsed = self._parse_action("for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
+        parsed = self._parse_action("for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['action'], 'loop')
+
+    def test_parse_known_loop_tolerates_body(self):
+        """parse_generated_code normalizes editor text that still has its body."""
+        parsed = self.parse_generated_code(
+            "for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):\n    pass")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'loop')
 
@@ -10369,7 +10468,7 @@ class TestDSLLoopMatchStringsAction(_ActionTestBase):
             'is_index': False, 'is_slice': False, 'has_replace': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
         })
-        self.assertEqual(result[0], "for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):\n    pass")
+        self.assertEqual(result[0], "for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):")
 
     def test_loop_match_strings_expr(self):
         result = self._gen(self.ACTION, {
@@ -10377,7 +10476,7 @@ class TestDSLLoopMatchStringsAction(_ActionTestBase):
             'is_index': False, 'is_slice': False, 'has_replace': False,
             'expr': "'hello'", 'source_expr': 'x',
         })
-        self.assertEqual(result[0], "for i, s in enumerate(re.findall(re.escape('hello'), x)):\n    pass")
+        self.assertEqual(result[0], "for i, s in enumerate(re.findall(re.escape('hello'), x)):")
 
     def test_roundtrip_loop_match_strings(self):
         self._roundtrip(self.ACTION, {
@@ -10387,7 +10486,7 @@ class TestDSLLoopMatchStringsAction(_ActionTestBase):
         })
 
     def test_parse_known_loop_match_strings(self):
-        parsed = self._parse_action("for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):\n    pass")
+        parsed = self._parse_action("for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'loop_match_strings')
 
@@ -10427,7 +10526,7 @@ class TestDSLBooleanActions(_ActionTestBase):
             'is_index': False, 'is_slice': False, 'has_replace': False,
             'regex_pattern': 'hello', 'source_expr': 'x',
         })
-        self.assertEqual(result[0], "if re.search(r'hello', x, flags=re.M):\n    pass")
+        self.assertEqual(result[0], "if re.search(r'hello', x, flags=re.M):")
 
     def test_if_any_replace(self):
         result = self._gen('if_any', {
@@ -10483,7 +10582,7 @@ class TestDSLBooleanActions(_ActionTestBase):
         self.assertEqual(parsed['action'], 'any')
 
     def test_parse_known_if_any(self):
-        parsed = self._parse_action("if re.search(r'hello', x, flags=re.M):\n    pass")
+        parsed = self._parse_action("if re.search(r'hello', x, flags=re.M):")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed['action'], 'if_any')
 
@@ -12597,6 +12696,42 @@ class TestSegmentSelection(unittest.TestCase):
         self.assertFalse(model.get('replace_visible', False))
         model, _ = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
         self.assertTrue(model.get('replace_visible'))
+
+    def test_tool_select_pick_switches_linked_action_to_find_or_map(self):
+        """Pick only makes sense with Map Matches, so switch the linked action to it."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        model['linked_action'] = 'match_strings'
+        model['linked_source_expr'] = 'x'
+        model['linked_has_assignment'] = True
+        model['last_linked_expr'] = "re.findall(r'hello', x, flags=re.M)"
+        model['auto_linked_once'] = True
+        model, commands = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertEqual(model['linked_action'], 'find_or_map')
+        self.assertTrue(model.get('replace_visible'))
+        change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(change_cmds), 1)
+        self.assertEqual(
+            change_cmds[0].expression,
+            "list(re.finditer(r'hello', x, flags=re.M))",
+        )
+
+    def test_tool_select_pick_keeps_find_or_map_when_already_linked(self):
+        """Entering Pick while already on find_or_map stays on Map Matches and opens replace."""
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+        model['linked_action'] = 'find_or_map'
+        model['linked_source_expr'] = 'x'
+        model['linked_has_assignment'] = True
+        model['last_linked_expr'] = "list(re.finditer(r'hello', x, flags=re.M))"
+        model['auto_linked_once'] = True
+        model, commands = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
+        self.assertEqual(model['linked_action'], 'find_or_map')
+        self.assertTrue(model.get('replace_visible'))
+        # No replace_text yet, so the generated find_or_map expr is unchanged.
+        self.assertEqual(commands, [])
 
     def test_tool_select_segment_auto_enables_capgroups_for_multi_segment(self):
         """Multi-segment regex /(hello)(world)/ -> 'c' flag flips on entering segment."""

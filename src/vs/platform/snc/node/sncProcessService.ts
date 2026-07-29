@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Disposable } from '../../../base/common/lifecycle.js';
+import { Promises } from '../../../base/node/pfs.js';
 import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData } from '../common/snc.js';
 import { Emitter } from '../../../base/common/event.js';
 
@@ -42,6 +43,12 @@ interface RunState {
 
 const CP1_POOL_SIZE = 5;
 const CP2_POOL_SIZE = 10;
+
+/**
+ * Directory the Python runner caches network reads in, beside the file being
+ * edited. Must match `CACHE_DIR_NAME` in `io_cache.py`.
+ */
+const IO_CACHE_DIR_NAME = '.snc_io_cache';
 
 export class SNCProcessService extends Disposable implements ISNCProcessService {
 
@@ -85,6 +92,13 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 * configuration so we'll retry with the new value.
 	 */
 	private pythonSpawnError: string | null = null;
+
+	/**
+	 * Network read caches emptied during this app session, by directory. This
+	 * service is created once per app session, so the presence of a key means
+	 * the cache has already been dealt with since the last reload.
+	 */
+	private readonly clearedIoCaches = new Map<string, Promise<void>>();
 
 	private _disposed = false;
 
@@ -427,6 +441,34 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		}
 	}
 
+	/**
+	 * Empty the runner's network read cache, once per cache directory per app
+	 * session. The cache exists to keep reruns cheap while the user edits, not
+	 * to outlive the window: reloading the app is how the user asks for fresh
+	 * data. Clearing it here rather than in the runner matters because every
+	 * rerun is a brand-new worker process, which would leave nothing cached.
+	 */
+	private clearIoCacheOnce(options: IProcessOptions): Promise<void> {
+		// Mirrors `cache_dir_for` in io_cache.py: beside the file being edited,
+		// falling back to the working directory the worker runs in.
+		const directory = options.filePath ? path.dirname(options.filePath) : options.workingDirectory;
+		const cacheDir = directory ? path.join(directory, IO_CACHE_DIR_NAME) : '';
+
+		// A relative or oddly shaped path could name any directory at all, so
+		// only ever delete something that is unmistakably a cache directory.
+		if (!path.isAbsolute(cacheDir) || path.basename(cacheDir) !== IO_CACHE_DIR_NAME) {
+			return Promise.resolve();
+		}
+
+		let cleared = this.clearedIoCaches.get(cacheDir);
+		if (!cleared) {
+			// A cache we can't delete is not a reason to fail the user's run.
+			cleared = Promises.rm(cacheDir).catch(() => { });
+			this.clearedIoCaches.set(cacheDir, cleared);
+		}
+		return cleared;
+	}
+
 	// -------------------------------------------------------------------
 	// Public API
 	// -------------------------------------------------------------------
@@ -489,6 +531,10 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.invalidateCheckpoint2Pool(content);
 		}
 
+		// Drop a cache left over from before this app session started, before any
+		// worker can read through it.
+		await this.clearIoCacheOnce(options);
+
 		// Take a ready worker (or wait for one). The waiter promise rejects
 		// if the python executable can't be launched; in that case
 		// handleSpawnFailure has already fired the user-facing error stream
@@ -507,6 +553,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				type: 'run',
 				run_id: runId,
 				code: content,
+				file_path: options.filePath ?? null,
 				models_and_events: options.modelsAndEventsJson || '',
 				focused_line: options.focusedLine ?? null
 			}) + '\n';

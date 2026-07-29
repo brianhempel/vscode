@@ -5,6 +5,7 @@ Run:
     python3 -m pytest visualizer_utils_tests.py -v
 """
 
+import ast
 import unittest
 import html
 import os
@@ -15,6 +16,7 @@ from visualizer_utils import ChildEvent, wrap_child_html, route_child_event, agg
 from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
+    opens_block, with_pass_body, without_pass_body,
 )
 
 
@@ -544,6 +546,87 @@ class TestTooDeep(unittest.TestCase):
 
     def test_at_cap_too_deep(self):
         self.assertTrue(too_deep([('a', 'T')] * MAX_NEST_DEPTH))
+
+
+class TestOpensBlock(unittest.TestCase):
+    """opens_block detects generated code that needs a body to be runnable."""
+
+    def test_single_line_header(self):
+        self.assertTrue(opens_block('for item in xs:'))
+        self.assertTrue(opens_block('if any(x > 1 for x in xs):'))
+
+    def test_multi_line_header(self):
+        self.assertTrue(opens_block('for i, item in enumerate(xs):\n    if item > 1:'))
+
+    def test_trailing_whitespace_still_a_header(self):
+        self.assertTrue(opens_block('for item in xs:   '))
+
+    def test_expressions_are_not_headers(self):
+        self.assertFalse(opens_block('xs[1:2]'))
+        self.assertFalse(opens_block('[x for x in xs if x > 1]'))
+        self.assertFalse(opens_block("','.join(str(item) for item in xs)"))
+        self.assertFalse(opens_block('{1: 2}'))
+
+    def test_empty_code_is_not_a_header(self):
+        self.assertFalse(opens_block(''))
+        self.assertFalse(opens_block('   '))
+
+
+class TestWithPassBody(unittest.TestCase):
+    """with_pass_body re-attaches the body that generation leaves off."""
+
+    def test_appends_pass_under_single_line_header(self):
+        self.assertEqual(with_pass_body('for item in xs:'),
+                         'for item in xs:\n    pass')
+
+    def test_indents_pass_under_deepest_header_line(self):
+        self.assertEqual(
+            with_pass_body('for i, item in enumerate(xs):\n    if item > 1:'),
+            'for i, item in enumerate(xs):\n    if item > 1:\n        pass')
+
+    def test_expression_returned_unchanged(self):
+        self.assertEqual(with_pass_body('xs[1:2]'), 'xs[1:2]')
+
+    def test_result_is_parseable(self):
+        for code in ['for item in xs:',
+                     'if all(x for x in xs):',
+                     'for i, item in enumerate(xs):\n    if item > 1:']:
+            with self.subTest(code=code):
+                ast.parse(with_pass_body(code))
+
+    def test_assignment_prefix_stays_parseable(self):
+        """Headers never carry an assignment prefix, but expressions do."""
+        ast.parse('_linked_result = ' + with_pass_body('xs[1:2]'))
+
+
+class TestWithoutPassBody(unittest.TestCase):
+    """without_pass_body normalizes editor text back to a bare header."""
+
+    def test_strips_placeholder_body(self):
+        self.assertEqual(without_pass_body('for item in xs:\n    pass'),
+                         'for item in xs:')
+
+    def test_strips_deeper_placeholder_body(self):
+        self.assertEqual(
+            without_pass_body('for i, item in enumerate(xs):\n    if item > 1:\n        pass'),
+            'for i, item in enumerate(xs):\n    if item > 1:')
+
+    def test_inverts_with_pass_body(self):
+        for code in ['for item in xs:',
+                     'if all(x for x in xs):',
+                     'for i, item in enumerate(xs):\n    if item > 1:',
+                     'xs[1:2]']:
+            with self.subTest(code=code):
+                self.assertEqual(without_pass_body(with_pass_body(code)), code)
+
+    def test_keeps_real_body(self):
+        """Only a placeholder body is scaffolding; user code must survive."""
+        code = 'for item in xs:\n    print(item)'
+        self.assertEqual(without_pass_body(code), code)
+
+    def test_expression_returned_unchanged(self):
+        self.assertEqual(without_pass_body('xs[1:2]'), 'xs[1:2]')
+        self.assertEqual(without_pass_body('compass'), 'compass')
 
 
 if __name__ == '__main__':

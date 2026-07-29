@@ -1183,7 +1183,8 @@ class MockInteractiveVis:
         return {'vis_type': 'mock_interactive', 'handledKeys': ['Escape']}
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         inner = f'<span snc-mouse-down="MockClick()">{html_module.escape(repr(value))}</span>'
-        # Mirror real visualizers: self-wrap for drag only in small mode.
+        # Stands in for a third-party visualizer that self-wraps when small, to
+        # check the parent hands down the expression and doesn't wrap children.
         if small and var_and_exp:
             return wrap_drag_grab(inner, var_and_exp)
         return inner
@@ -1574,15 +1575,26 @@ class TestSmallView(unittest.TestCase):
 # =============================================================================
 
 class TestSmallObjectSelfWrap(unittest.TestCase):
-    """The whole small object is a drag handle for the object expression."""
+    """The object visualizer is never itself a drag handle: the field chips it
+    renders carry their own (more specific) handles, and a whole-area handle
+    would claim every hover over them. Only the generic visualizers, which have
+    no content of their own, self-wrap."""
 
-    def test_small_with_var_and_exp_self_wraps_whole_object(self):
+    def test_small_with_var_and_exp_not_self_wrapped(self):
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         html_out = visualize(obj, model, _get_visualizer, None, small=True,
                              var_and_exp=(None, 'obj'))
-        # The outer wrapper carries the whole-object expression.
-        self.assertTrue(html_out.startswith('<span snc-py-exp="obj" draggable="true" class="py-exp-grab">'))
+        self.assertFalse(html_out.startswith('<span snc-py-exp'))
+        self.assertNotIn('snc-py-exp="obj"', html_out)
+
+    def test_depth_capped_leaf_not_self_wrapped(self):
+        obj = TestObj()
+        model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
+        model['_too_deep'] = True
+        html_out = visualize(obj, model, _get_visualizer, None, small=True,
+                             var_and_exp=(None, 'obj'))
+        self.assertNotIn('py-exp-grab', html_out)
 
     def test_small_without_var_and_exp_not_self_wrapped(self):
         obj = TestObj()

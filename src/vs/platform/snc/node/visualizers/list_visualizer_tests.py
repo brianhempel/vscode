@@ -5,6 +5,7 @@ Run:
     python3 -m pytest list_visualizer_tests.py -v
 """
 
+import ast
 import unittest
 import html
 import os
@@ -85,7 +86,8 @@ class MockStringVisualizer:
         return {'selection': None, 'handledKeys': ['Escape', 'Enter']}
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
         inner = f'<span snc-mouse-down="MouseDown(index=0)">{html.escape(value)}</span>'
-        # Mirror real visualizers: self-wrap for drag only in small mode.
+        # Stands in for a third-party visualizer that self-wraps when small, to
+        # check the parent hands down the expression and doesn't wrap children.
         if small and var_and_exp:
             return wrap_drag_grab(inner, var_and_exp)
         return inner
@@ -1486,17 +1488,19 @@ class TestCellDraggablePyExp(unittest.TestCase):
         self.assertIn('Bob</span>', html_output)
 
 
-class TestListSelfWrapSmall(unittest.TestCase):
-    """The list visualizer self-wraps as a drag handle when rendered small."""
+class TestListNeverSelfWraps(unittest.TestCase):
+    """The list visualizer is never itself a drag handle, in either size. A
+    handle over its whole area claims every hover inside it, so the expression
+    tooltip pops over content that has its own (more specific) handle. Only the
+    generic visualizers, which have no content of their own, self-wrap."""
 
-    def test_small_with_var_and_exp_self_wraps(self):
+    def test_small_with_var_and_exp_renders_bare(self):
         lst = [1, 2, 3]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
         html_output = visualize(lst, model, mock_get_visualizer, None,
                                 small=True, var_and_exp=(None, 'nums'))
-        self.assertIn('snc-py-exp="nums"', html_output)
-        self.assertIn('draggable="true"', html_output)
-        self.assertIn('class="py-exp-grab"', html_output)
+        self.assertFalse(html_output.startswith('<span snc-py-exp'))
+        self.assertNotIn('snc-py-exp="nums"', html_output)
 
     def test_small_without_var_and_exp_renders_bare(self):
         lst = [1, 2, 3]
@@ -1511,6 +1515,14 @@ class TestListSelfWrapSmall(unittest.TestCase):
                                 small=False, var_and_exp=(None, 'nums'))
         # The list container itself is not a drag handle in full mode.
         self.assertFalse(html_output.startswith('<span snc-py-exp'))
+
+    def test_depth_capped_leaf_renders_bare(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
+        model['_too_deep'] = True
+        html_output = visualize(lst, model, mock_get_visualizer, None,
+                                small=True, var_and_exp=(None, 'nums'))
+        self.assertNotIn('py-exp-grab', html_output)
 
 
 class TestSourceExprInModel(unittest.TestCase):
@@ -1937,7 +1949,7 @@ class TestGenerateAction(unittest.TestCase):
     def test_loop_no_idx_predicate(self):
         result = generate_action('loop_no_idx', self._predicate_ctx())
         name, code = result
-        self.assertEqual(code, 'for item in (item for item in data if item > 100):\n    pass')
+        self.assertEqual(code, 'for item in (item for item in data if item > 100):')
 
     def test_loop_orig_idx_predicate(self):
         result = generate_action('loop_orig_idx', self._predicate_ctx())
@@ -1971,14 +1983,12 @@ class TestGenerateAction(unittest.TestCase):
     def test_if_any_predicate(self):
         result = generate_action('if_any', self._predicate_ctx())
         name, code = result
-        self.assertIn('if any(item > 100 for item in data)', code)
-        self.assertIn('pass', code)
+        self.assertEqual(code, 'if any(item > 100 for item in data):')
 
     def test_if_all_predicate(self):
         result = generate_action('if_all', self._predicate_ctx())
         name, code = result
-        self.assertIn('if all(item > 100 for item in data)', code)
-        self.assertIn('pass', code)
+        self.assertEqual(code, 'if all(item > 100 for item in data):')
 
     # --- Delete ---
 
@@ -2223,19 +2233,19 @@ class TestGenerateAction(unittest.TestCase):
         result = generate_action('loop_no_idx', self._whole_list_ctx())
         self.assertIsNotNone(result)
         _, code = result
-        self.assertEqual(code, 'for item in data:\n    pass')
+        self.assertEqual(code, 'for item in data:')
 
     def test_whole_list_loop_orig_idx(self):
         result = generate_action('loop_orig_idx', self._whole_list_ctx())
         self.assertIsNotNone(result)
         _, code = result
-        self.assertEqual(code, 'for i, item in enumerate(data):\n    pass')
+        self.assertEqual(code, 'for i, item in enumerate(data):')
 
     def test_whole_list_loop_new_idx(self):
         result = generate_action('loop_new_idx', self._whole_list_ctx())
         self.assertIsNotNone(result)
         _, code = result
-        self.assertEqual(code, 'for i, item in enumerate(data):\n    pass')
+        self.assertEqual(code, 'for i, item in enumerate(data):')
 
     def test_whole_list_any(self):
         result = generate_action('any', self._whole_list_ctx())
@@ -2253,13 +2263,13 @@ class TestGenerateAction(unittest.TestCase):
         result = generate_action('if_any', self._whole_list_ctx())
         self.assertIsNotNone(result)
         _, code = result
-        self.assertEqual(code, 'if any(data):\n    pass')
+        self.assertEqual(code, 'if any(data):')
 
     def test_whole_list_if_all(self):
         result = generate_action('if_all', self._whole_list_ctx())
         self.assertIsNotNone(result)
         _, code = result
-        self.assertEqual(code, 'if all(data):\n    pass')
+        self.assertEqual(code, 'if all(data):')
 
     def test_whole_list_count(self):
         result = generate_action('count', self._whole_list_ctx())
@@ -3477,7 +3487,10 @@ class TestRelinkViaChainIcon(unittest.TestCase):
 
     def test_relink_takeover_emits_change_selected_text_and_resumes_action(self):
         model, lst = self._linked_then_unlinked()
-        model, commands = update(make_relink_event('takeover'), ('data', 'data'),
+        # The line still holds what the filter action wrote before the unlink.
+        taken_over = 'data_filtered = [item for item in data if item > 15]'
+        model, commands = update(make_relink_event('takeover', text=taken_over),
+                                 ('data', 'data'),
                                  model, lst, mock_get_visualizer, eval_in_scope=eval)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(change_cmds), 1)
@@ -3553,7 +3566,9 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
         self.assertEqual(len(change_cmds), 1)
         self.assertEqual(model.get('linked_action'), 'filter')
 
-    def test_unparseable_takeover_falls_back_to_generate(self):
+    def test_unparseable_takeover_links_without_overwriting(self):
+        """An unrecognized line is still a valid link target, but the relink
+        must not write over it — only the user's next interaction may."""
         model = init_model(self.lst, mock_get_visualizer)
         model['search'] = '^ > 3'
         model, commands = update(
@@ -3561,7 +3576,7 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
             self.var_and_exp, model, self.lst, mock_get_visualizer,
             eval_in_scope=eval)
         self.assertEqual(model.get('linked_action'), 'filter')
-        self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
+        self.assertEqual(commands, [])
 
 
 class TestCtxToModel(unittest.TestCase):
@@ -3711,6 +3726,246 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         tuple_cmds = [c for c in commands if isinstance(c, tuple)]
         self.assertTrue(len(tuple_cmds) > 0)
+
+
+class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
+    """Statement actions generate a bare header. The body below the header
+    belongs to the user, so a linked update must never re-emit one — that is
+    what stacked a second `pass` under the loop on every action change."""
+
+    def setUp(self):
+        self.lst = [10, 20, 30]
+        self.var_and_exp = ('data', 'data')
+
+    def _clicked(self, action, model=None):
+        model = model or init_model(self.lst, mock_get_visualizer)
+        model.setdefault('search', '^ > 15')
+        return update(make_action_button_event(action), self.var_and_exp,
+                      model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+
+    def test_inserted_statement_is_header_only(self):
+        model, commands = self._clicked('loop_no_idx')
+        tuples = [c for c in commands if isinstance(c, tuple)]
+        self.assertEqual(len(tuples), 1)
+        _, code = tuples[0]
+        self.assertTrue(code.rstrip().endswith(':'))
+        self.assertNotIn('pass', code)
+
+    def test_linked_action_change_emits_header_without_body(self):
+        from list_visualizer import ChangeSelectedText
+        model, _ = self._clicked('loop_no_idx')
+        self.assertEqual(model['linked_action'], 'loop_no_idx')
+        model, commands = self._clicked('loop_new_idx', model)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertTrue(changes[0].expression.rstrip().endswith(':'))
+        self.assertNotIn('pass', changes[0].expression)
+
+    def test_linked_search_change_still_updates_a_statement(self):
+        """The syntax guard must not silently drop statement updates."""
+        from list_visualizer import ChangeSelectedText
+        model, _ = self._clicked('loop_no_idx')
+        model, commands = update(make_search_input_event('^ > 25'), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertIn('item > 25', changes[0].expression)
+
+    def test_copy_statement_action_copies_runnable_code(self):
+        from list_visualizer import CopyToClipboard
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = '^ > 15'
+        model, commands = update(make_action_button_event('loop_no_idx', copy=True),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        copies = [c for c in commands if isinstance(c, CopyToClipboard)]
+        self.assertEqual(len(copies), 1)
+        self.assertTrue(copies[0].text.endswith('\n    pass'))
+        ast.parse(copies[0].text)
+
+    def test_hover_preview_of_statement_action_is_runnable(self):
+        """The preview is copied and dragged into the file, so it needs a body."""
+        from list_visualizer import _preview_expr
+        model = init_model(self.lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        model['search'] = '^ > 15'
+        preview = _preview_expr(model, 'loop_no_idx', eval)
+        self.assertTrue(preview.endswith('\n    pass'))
+        ast.parse(preview)
+
+    def test_hover_preview_of_expression_action_is_unchanged(self):
+        from list_visualizer import _preview_expr
+        model = init_model(self.lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        model['search'] = '^ > 15'
+        self.assertEqual(_preview_expr(model, 'filter', eval),
+                         '[item for item in data if item > 15]')
+
+
+class TestRelinkTakeoverOfStatementHeader(unittest.TestCase):
+    """A `for`/`if` header is a legitimate link target, so takeover must adopt
+    it like any other generated line rather than treating it as an assignment."""
+
+    def setUp(self):
+        self.lst = [1, 2, 3, 4, 5]
+        self.var_and_exp = ('data', 'data')
+        self.header = 'for item in (item for item in data if item > 3):'
+
+    def test_fresh_takeover_adopts_header_without_commands(self):
+        model = init_model(self.lst, mock_get_visualizer)
+        model, commands = update(make_relink_event('takeover', text=self.header),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model.get('linked_action'), 'loop_no_idx')
+        self.assertEqual(model.get('linked_source_expr'), 'data')
+        self.assertFalse(model.get('linked_has_assignment'))
+        self.assertEqual(commands, [])
+
+    def test_takeover_tolerates_a_body_in_the_taken_over_text(self):
+        model = init_model(self.lst, mock_get_visualizer)
+        model, commands = update(
+            make_relink_event('takeover', text=self.header + '\n    pass'),
+            self.var_and_exp, model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model.get('linked_action'), 'loop_no_idx')
+        self.assertEqual(commands, [])
+
+    def test_resumed_statement_action_is_not_marked_as_assignment(self):
+        """Unlink then relink a statement: the stashed action is regenerated,
+        and marking it as an assignment would make its updates unparseable."""
+        from list_visualizer import ChangeSelectedText
+        model = self._unlinked_after('loop_no_idx')
+        model, commands = update(make_relink_event('takeover', text=self.header),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(model.get('linked_action'), 'loop_no_idx')
+        self.assertFalse(model.get('linked_has_assignment'))
+
+    def _unlinked_after(self, action):
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = '^ > 3'
+        model, _ = update(make_action_button_event(action), self.var_and_exp,
+                          model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model.get('linked_action'))
+        return model
+
+    def test_fresh_takeover_adopts_whole_list_loop_header(self):
+        """A plain `for item in xs:` is the whole-list loop this visualizer
+        writes when there is no search, so takeover must recognize it."""
+        model = init_model(self.lst, mock_get_visualizer)
+        model, commands = update(make_relink_event('takeover', text='for item in data:'),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model.get('linked_action'), 'loop_no_idx')
+        self.assertEqual(model.get('linked_source_expr'), 'data')
+        self.assertFalse(model.get('linked_has_assignment'))
+        self.assertEqual(commands, [])
+
+
+class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
+    """Taking over a line this visualizer did not write.
+
+    The chain icon means "own the next line", so the link is established, but
+    nothing is written: the line changes only when the user next interacts. The
+    link must be recorded in the model even though no command is emitted —
+    otherwise the front-end is linked to a line Python knows nothing about, and
+    the next interaction inserts a duplicate line instead of editing it."""
+
+    def setUp(self):
+        self.lst = [1, 2, 3, 4, 5]
+        self.var_and_exp = ('item_matches', 'item_matches')
+        # Derived from `item`, not from this visualizer's `item_matches`.
+        self.foreign = "codons = re.findall(r'[A-Z]{3}', item, flags=re.M)"
+
+    def _took_over(self, text, search=None):
+        model = init_model(self.lst, mock_get_visualizer)
+        if search:
+            model['search'] = search
+        model, commands = update(make_relink_event('takeover', text=text),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        return model, commands
+
+    def test_links_without_touching_the_line(self):
+        model, commands = self._took_over(self.foreign)
+        self.assertEqual(commands, [])
+        self.assertIsNotNone(model.get('linked_action'))
+        self.assertEqual(model.get('linked_source_expr'), 'item_matches')
+        self.assertTrue(model.get('auto_linked_once'))
+        self.assertTrue(model.get('linked_has_assignment'))
+
+    def test_next_interaction_edits_the_line_instead_of_inserting(self):
+        from list_visualizer import ChangeSelectedText
+        model, _ = self._took_over(self.foreign)
+        model, commands = update(make_search_input_event('^ > 2'), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertFalse(any(isinstance(c, tuple) for c in commands))
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertIn('item for item in item_matches if item > 2', changes[0].expression)
+
+    def test_takeover_with_a_search_still_edits_the_line_next(self):
+        """The takeover writes nothing, so the expression it would have written
+        must not be remembered as already-written. Otherwise the next
+        interaction that regenerates it is suppressed as a no-op and the
+        foreign text sits there forever under a chain icon claiming a link."""
+        model, _ = self._took_over(self.foreign, search='^ > 2')
+        model, commands = update(make_search_input_event('^ > 2'), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual([(type(c).__name__, c.expression) for c in commands],
+                         [('ChangeSelectedText',
+                           '[item for item in item_matches if item > 2]')])
+
+    def test_header_takeover_links_a_statement_action(self):
+        """Linking to a header must pick an action that generates a header, or
+        the first interaction would replace the block and orphan its body."""
+        from list_visualizer_grammar import _STATEMENT_ACTIONS
+        model, commands = self._took_over('if flag:')
+        self.assertEqual(commands, [])
+        self.assertIn(model.get('linked_action'), _STATEMENT_ACTIONS)
+        self.assertFalse(model.get('linked_has_assignment'))
+
+    def test_next_interaction_after_header_takeover_stays_a_header(self):
+        from list_visualizer import ChangeSelectedText
+        model, _ = self._took_over('if flag:')
+        model, commands = update(make_search_input_event('^ > 2'), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertTrue(changes[0].expression.rstrip().endswith(':'))
+
+    def test_stashed_expression_action_is_dropped_for_a_header(self):
+        """A stashed `filter` would write a comprehension over the header."""
+        from list_visualizer_grammar import _STATEMENT_ACTIONS
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = '^ > 3'
+        model, _ = update(make_action_button_event('filter'), self.var_and_exp,
+                          model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        model, commands = update(make_relink_event('takeover', text='if flag:'),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(commands, [])
+        self.assertIn(model.get('linked_action'), _STATEMENT_ACTIONS)
+
+    def test_stashed_statement_action_is_dropped_for_an_assignment(self):
+        """The mirror case: a stashed loop would leave `x = for item in ...:`."""
+        from list_visualizer_grammar import _STATEMENT_ACTIONS
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = '^ > 3'
+        model, _ = update(make_action_button_event('loop_no_idx'), self.var_and_exp,
+                          model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        model, commands = update(make_relink_event('takeover', text='x = compute()'),
+                                 self.var_and_exp, model, self.lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(commands, [])
+        self.assertNotIn(model.get('linked_action'), _STATEMENT_ACTIONS)
 
 
 # =============================================================================
@@ -4075,6 +4330,111 @@ class TestListGrammarParse(_ListActionTestBase):
         result = self.parse_generated_code('for item in (item for item in data if item > 100):\n    pass')
         self.assertIsNotNone(result)
         self.assertEqual(result['action'], 'loop_no_idx')
+
+    def test_parse_loop_no_idx_header_alone(self):
+        """A linked header comes back from the editor without its body."""
+        result = self.parse_generated_code('for item in (item for item in data if item > 100):')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'loop_no_idx')
+
+    def test_parse_nested_loop_header_alone(self):
+        result = self.parse_generated_code('for i, item in enumerate(data):\n    if item > 100:')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'loop_orig_idx')
+
+    # --- Whole-list forms (no search) ---
+    #
+    # These are the actions available before the user types a search. They are
+    # generated by list_visualizer.generate_action, so the grammar has to parse
+    # them too or a relink can never recognize a plain `for item in xs:` as a
+    # line this visualizer wrote.
+
+    def test_parse_whole_list_loop(self):
+        result = self.parse_generated_code('for item in data:')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'loop_no_idx')
+        self.assertEqual(result['source_expr'], 'data')
+        self.assertTrue(result.get('is_whole_list'))
+
+    def test_parse_whole_list_loop_with_index(self):
+        result = self.parse_generated_code('for i, item in enumerate(data):')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'loop_orig_idx')
+        self.assertTrue(result.get('is_whole_list'))
+
+    def test_parse_whole_list_if_any(self):
+        result = self.parse_generated_code('if any(data):')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'if_any')
+        self.assertTrue(result.get('is_whole_list'))
+
+    def test_parse_whole_list_if_all(self):
+        result = self.parse_generated_code('if all(data):')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'if_all')
+
+    def test_parse_whole_list_any(self):
+        result = self.parse_generated_code('any(data)')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'any')
+
+    def test_parse_whole_list_all(self):
+        result = self.parse_generated_code('all(data)')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['action'], 'all')
+
+    def test_predicate_forms_still_win_over_whole_list(self):
+        """The whole-list templates must not swallow the more specific forms."""
+        for code, action in [
+            ('for item in (item for item in data if item > 1):', 'loop_no_idx'),
+            ('for i, item in enumerate(item for item in data if item > 1):', 'loop_new_idx'),
+            ('any(item > 1 for item in data)', 'any'),
+            ('if any(item > 1 for item in data):', 'if_any'),
+        ]:
+            with self.subTest(code=code):
+                result = self.parse_generated_code(code)
+                self.assertIsNotNone(result)
+                self.assertEqual(result['action'], action)
+                self.assertTrue(result.get('is_predicate'))
+                self.assertIsNone(result.get('is_whole_list'))
+
+
+class TestWholeListGrammarMatchesGeneration(unittest.TestCase):
+    """The grammar and list_visualizer.generate_action must agree on whole-list
+    code, since one writes the line and the other reads it back."""
+
+    WHOLE_LIST_ACTIONS = ['loop_no_idx', 'loop_orig_idx', 'loop_new_idx',
+                          'if_any', 'if_all', 'any', 'all']
+
+    def setUp(self):
+        from list_visualizer_grammar import generate_action as grammar_generate
+        from list_visualizer_grammar import parse_generated_code
+        self.grammar_generate = grammar_generate
+        self.parse_generated_code = parse_generated_code
+        self.ctx = {
+            'source_expr': 'data', 'has_var': True, 'suggest_base': 'data',
+            'is_whole_list': True, 'is_predicate': False, 'is_index': False,
+            'is_slice': False, 'is_multi_index': False, 'is_first': False,
+        }
+
+    def test_grammar_generates_what_the_visualizer_generates(self):
+        for action in self.WHOLE_LIST_ACTIONS:
+            with self.subTest(action=action):
+                self.assertEqual(self.grammar_generate(action, self.ctx),
+                                 generate_action(action, self.ctx))
+
+    def test_generated_code_parses_back(self):
+        for action in self.WHOLE_LIST_ACTIONS:
+            with self.subTest(action=action):
+                code = generate_action(action, self.ctx)[1]
+                parsed = self.parse_generated_code(code)
+                self.assertIsNotNone(parsed, f'{action} generated unparseable {code!r}')
+                self.assertTrue(parsed.get('is_whole_list'))
+                self.assertEqual(parsed['source_expr'], 'data')
+                # loop_orig_idx and loop_new_idx generate identical whole-list
+                # code, so parsing can only recover one of them.
+                if action != 'loop_new_idx':
+                    self.assertEqual(parsed['action'], action)
 
     def test_parse_find_indices_predicate(self):
         result = self.parse_generated_code('[i for i, item in enumerate(data) if item > 100]')

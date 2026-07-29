@@ -29,6 +29,7 @@ export interface IProcessResult {
 export interface IProcessOptions {
 	timeout?: number; // Optional timeout in milliseconds
 	workingDirectory: string; // Required working directory for code execution
+	filePath?: string; // Path of the file being run; sites the .snc_io_cache dir beside it
 	modelsAndEventsJson?: string; // visualizers state, and events to apply
 	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
 }
@@ -37,6 +38,10 @@ export interface NewCodeEdit {
 	type: 'insert';
 	afterLine: number; // 1-indexed; 0 means insert before line 1
 	text: string;
+	// How many of the inserted lines are the statement's header. A visualizer
+	// links only its header; the body below belongs to the user. Absent on
+	// incidental edits (e.g. an auto-added import).
+	headerLines?: number;
 }
 
 export type SNCCommand =

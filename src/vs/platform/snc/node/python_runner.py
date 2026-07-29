@@ -38,7 +38,9 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+
+import io_cache
 
 # This is the only way to make a Module type in Python
 class StaticVisualizer(Protocol):
@@ -67,6 +69,10 @@ _loaded_visualizers: List[tuple[str, float, Visualizer]] = []
 
 # Source code context for visualizers (set before execution)
 _source_code: str = ""
+
+# Path of the file being run, when the editor knows it. Sites the network read
+# cache beside the user's file.
+_file_path: str = ""
 
 
 # Prefer the original stdout stream for streaming messages; fall back to sys.stdout.
@@ -233,6 +239,44 @@ def _detect_insertion_indent(lines: List[str], line: int) -> str:
     return current_indent_str
 
 
+def _import_anchor_line(source_code: str) -> int:
+    """1-indexed line an auto-added import goes after (0 means before line 1).
+
+    The anchor is the end of the file's prologue — a module docstring plus the
+    leading imports — which is the same span `split_leading_imports` pre-executes.
+    An import placed above the docstring would leave it a body expression, which
+    the runner then visualizes as a value.
+    """
+    try:
+        body = ast.parse(source_code).body
+    except SyntaxError:
+        # Source mid-edit still needs a sensible anchor, so fall back to reading
+        # the leading lines. Docstrings aside, they say where the imports end.
+        anchor = 0
+        for i, l in enumerate(source_code.split('\n')):
+            stripped = l.strip()
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                anchor = i + 1
+            elif stripped and not stripped.startswith('#'):
+                break
+        return anchor
+
+    anchor = 0
+    for stmt in body:
+        # Only a string ahead of every import is the module docstring; a later one
+        # is code the body has to keep.
+        is_docstring = (
+            anchor == 0
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        )
+        if not (isinstance(stmt, (ast.Import, ast.ImportFrom)) or is_docstring):
+            break
+        anchor = stmt.end_lineno or stmt.lineno
+    return anchor
+
+
 def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str) -> List[Dict[str, Any]]:
     """Convert a (suggest_var_name, expr) tuple into a list of line-level edits.
 
@@ -249,7 +293,14 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
         var_name = _find_available_variable_name(source_code, suggest_var_name)
         assignment = f"{var_name} = {expr}"
     else:
-        assignment = expr
+        # Statements are generated as bare headers so that linked editing can
+        # rewrite the header without disturbing the body; a freshly inserted one
+        # needs a placeholder body to be runnable.
+        assignment = with_pass_body(expr)
+
+    # The editor links only the header, so it needs to know where the body it
+    # must leave alone begins.
+    header_lines = len(expr.split('\n'))
 
     lines = source_code.split('\n')
     indent_str = _detect_insertion_indent(lines, line)
@@ -257,23 +308,18 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     # Apply base indentation to all lines (supports multi-line statements like for loops)
     assignment_lines = assignment.split('\n')
     text = '\n'.join(indent_str + aline for aline in assignment_lines)
-    edits.append({"type": "insert", "afterLine": line, "text": text})
+    edits.append({"type": "insert", "afterLine": line, "text": text,
+                  "headerLines": header_lines})
 
     # Detect and insert needed imports
     needed_imports: List[str] = []
     if _re.search(r'\bre\.', expr):
         needed_imports.append('import re')
 
+    insert_after = _import_anchor_line(source_code) if needed_imports else 0
     for import_stmt in needed_imports:
         if any(l.strip() == import_stmt for l in lines):
             continue
-        insert_after = 0
-        for i, l in enumerate(lines):
-            stripped = l.strip()
-            if stripped.startswith('import ') or stripped.startswith('from '):
-                insert_after = i + 1  # 1-indexed line number
-            elif stripped and not stripped.startswith('#'):
-                break
         edits.append({"type": "insert", "afterLine": insert_after, "text": import_stmt})
         next_line_idx = insert_after  # 0-indexed line after the import block
         if next_line_idx < len(lines) and lines[next_line_idx].strip() != '':
@@ -392,10 +438,11 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         is_small = (_focused_line is not None and line != _focused_line)
         try:
             html_content = vis.visualize(value, model, get_visualizer,
-                                         eval_in_scope=eval_in_scope, small=is_small)
+                                         eval_in_scope=eval_in_scope, small=is_small,
+                                         var_and_exp=var_and_exp)
         except TypeError:
-            # Visualizer doesn't accept the `small` kwarg (e.g. older 3rd-party
-            # visualizers); fall back to the no-kwarg call so it still renders.
+            # Visualizer doesn't accept the `small`/`var_and_exp` kwargs (e.g.
+            # older 3rd-party visualizers); fall back so it still renders.
             html_content = vis.visualize(value, model, get_visualizer,
                                          eval_in_scope=eval_in_scope)
 
@@ -1747,6 +1794,22 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
     _stream_out.flush()
 
 
+def install_io_cache() -> Callable[[], None]:
+    """Serve the user program's network reads from disk across reruns.
+
+    Must run before the user's imports so `from urllib.request import urlopen`
+    binds the caching wrapper too. Returns a function that undoes the patch.
+    """
+    try:
+        return io_cache.install(
+            lambda: _source_code,
+            lambda: io_cache.cache_dir_for(_file_path, os.getcwd()),
+        )
+    except Exception as e:
+        emit_meta(f'io-cache-install-failed-{type(e).__name__}')
+        return lambda: None
+
+
 def run_pool_worker_mode(working_directory: str) -> None:
     """
     Run as a pool worker process (cross-platform, no os.fork).
@@ -1763,7 +1826,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         pre-loaded import globals, emit results, and exit.  (Checkpoint 2 path —
         used when code is unchanged and imports are already loaded.)
     """
-    global models_and_events, _source_code, execution_step, line_emit_counter, _current_run_id
+    global models_and_events, _source_code, _file_path, execution_step, line_emit_counter, _current_run_id
 
     emit_meta('pool-worker-start')
 
@@ -1778,6 +1841,9 @@ def run_pool_worker_mode(working_directory: str) -> None:
 
     _visualizers()
     emit_meta('visualizers-loaded')
+
+    install_io_cache()
+    emit_meta('io-cache-installed')
 
     emit_checkpoint_ready(1)
 
@@ -1832,6 +1898,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         m_and_e_json = cmd.get('models_and_events', '')
         focused_line = cmd.get('focused_line')
         _source_code = code
+        _file_path = cmd.get('file_path') or ''
         _current_run_id = run_id
         _reload_stale_visualizers()
 
@@ -1850,6 +1917,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         m_and_e_json = cmd.get('models_and_events', '')
         focused_line = cmd.get('focused_line')
         _source_code = code
+        _file_path = cmd.get('file_path') or ''
         _current_run_id = run_id
         _reload_stale_visualizers()
 
@@ -1911,6 +1979,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     emit_meta('chdir-done')
+    install_io_cache()
     code = sys.stdin.read()
     emit_meta('code-received')
 

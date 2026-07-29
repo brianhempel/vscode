@@ -523,19 +523,19 @@
 /* === Link chain icon (lower-left chrome of a linkable visualizer) === */
 .snc-link-chain {
 	position: absolute;
-	left: -5px;
-	bottom: 7px;
+	left: -8px;
+	bottom: 6px;
 	z-index: 1001;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 9px;
-	height: 13px;
-	font-size: 11px;
+	width: 15px;
+	height: 15px;
+	font-size: 15px;
 	line-height: 1;
 	cursor: pointer;
 	user-select: none;
-	border-radius: 3px;
+	border-radius: 5px;
 	/* border: 1px solid var(--snc-border-color); */
 	background-color: var(--snc-bg);
 	color: var(--snc-text-dimmed);
@@ -552,7 +552,8 @@
 .snc-link-chain-icon svg {
 	display: block;
 	width: auto;
-	height: 11px;
+	height: 16px;
+	transform: rotate(45deg);
 }
 
 .snc-link-chain-icon svg path {
@@ -561,7 +562,7 @@
 
 .snc-link-chain .snc-link-chain-x {
 	display: none;
-	font-size: 10px;
+	font-size: 15px;
 }
 
 /* Linked: accent-colored chain; hovering it (or the arrow) swaps to an ✕. */
@@ -879,6 +880,25 @@
 .py-exp-grab:hover {
 	border-color: rgba(127, 127, 127, 0.4);
 	background: var(--snc-hover-bg);
+}
+
+/* A handle wrapping a whole visualizer (one with no interactions of its own)
+   sits immediately inside the widget's frame, so its own border and hover fill
+   would double the widget's. The widget's frame is the highlight instead.
+   inline-block so the handle contains a block child (a static visualizer's
+   markup) rather than painting a stray inline strip beside it. */
+.monaco-editor .snc-visualization-widget > .py-exp-grab {
+	display: inline-block;
+	border: none;
+	border-radius: inherit;
+
+	&:hover {
+		background: none;
+	}
+}
+
+.monaco-editor .snc-visualization-widget:has(> .py-exp-grab:hover) {
+	border-color: rgba(127, 127, 127, 0.6);
 }
 
 .small {

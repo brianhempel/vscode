@@ -48,10 +48,13 @@ from dataclasses import dataclass
 from math import sqrt
 from typing import Any, List, Tuple, Optional
 
+from list_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
 from visualizer_utils import (
     ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
-    wrap_child_prefix, wrap_child_suffix, wrap_drag_grab,
+    with_pass_body,
+    LinkConfig, handle_relink,
+    wrap_child_prefix, wrap_child_suffix,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
@@ -489,7 +492,6 @@ _SUGGEST_SUFFIXES = {
     'filter': 'filtered', 'find_indices': 'indices',
     'join': 'joined',
 }
-_STATEMENT_ACTIONS = frozenset({'loop', 'loop_no_idx', 'loop_orig_idx', 'loop_new_idx', 'if_any', 'if_all'})
 
 
 def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
@@ -562,11 +564,11 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
             case 'filter':
                 code = f'[{src}[i] for i in {indices}]'
             case 'loop_no_idx':
-                code = f'for item in [{src}[i] for i in {indices}]:\n    pass'
+                code = f'for item in [{src}[i] for i in {indices}]:'
             case 'loop_orig_idx':
-                code = f'for i in {indices}:\n    pass'
+                code = f'for i in {indices}:'
             case 'loop_new_idx':
-                code = f'for i, item in enumerate({src}[i] for i in {indices}):\n    pass'
+                code = f'for i, item in enumerate({src}[i] for i in {indices}):'
             case 'delete':
                 code = f'[item for i, item in enumerate({src}) if i not in set({indices})]'
             case 'find_indices':
@@ -602,11 +604,11 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
             case 'filter':
                 code = f'[{iter_expr}]'
             case 'loop_no_idx':
-                code = f'for item in [{iter_expr}]:\n    pass'
+                code = f'for item in [{iter_expr}]:'
             case 'loop_orig_idx':
-                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+                code = f'for i, item in enumerate([{iter_expr}]):'
             case 'loop_new_idx':
-                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+                code = f'for i, item in enumerate([{iter_expr}]):'
             case 'delete':
                 if has_start and has_stop:
                     code = f'[item for i, item in enumerate({src}) if i not in set().union(*[range(s, e) for s, e in zip({ctx["start_list_expr"]}, {ctx["stop_list_expr"]})])]'
@@ -640,11 +642,11 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
             case 'filter':
                 code = f'[{iter_expr}]'
             case 'loop_no_idx':
-                code = f'for item in [{iter_expr}]:\n    pass'
+                code = f'for item in [{iter_expr}]:'
             case 'loop_orig_idx':
-                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+                code = f'for i, item in enumerate([{iter_expr}]):'
             case 'loop_new_idx':
-                code = f'for i, item in enumerate([{iter_expr}]):\n    pass'
+                code = f'for i, item in enumerate([{iter_expr}]):'
             case 'delete':
                 code = f'[item for i, item in enumerate({src}) if i not in set().union(*[range(s, e) for s, e in {pairs}])]'
             case 'count':
@@ -668,19 +670,19 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 else:
                     code = f'[item for item in {src} if {pred}]'
             case 'loop_no_idx':
-                code = f'for item in (item for item in {src} if {pred}):\n    pass'
+                code = f'for item in (item for item in {src} if {pred}):'
             case 'loop_orig_idx':
-                code = f'for i, item in enumerate({src}):\n    if {pred}:\n        pass'
+                code = f'for i, item in enumerate({src}):\n    if {pred}:'
             case 'loop_new_idx':
-                code = f'for i, item in enumerate(item for item in {src} if {pred}):\n    pass'
+                code = f'for i, item in enumerate(item for item in {src} if {pred}):'
             case 'any':
                 code = f'any({pred} for item in {src})'
             case 'all':
                 code = f'all({pred} for item in {src})'
             case 'if_any':
-                code = f'if any({pred} for item in {src}):\n    pass'
+                code = f'if any({pred} for item in {src}):'
             case 'if_all':
-                code = f'if all({pred} for item in {src}):\n    pass'
+                code = f'if all({pred} for item in {src}):'
             case 'delete':
                 if first:
                     code = f'next(({src}[:i] + {src}[i+1:] for i, item in enumerate({src}) if {pred}), {src})'
@@ -703,19 +705,19 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     if ctx.get('is_whole_list'):
         match action:
             case 'loop_no_idx':
-                code = f'for item in {src}:\n    pass'
+                code = f'for item in {src}:'
             case 'loop_orig_idx':
-                code = f'for i, item in enumerate({src}):\n    pass'
+                code = f'for i, item in enumerate({src}):'
             case 'loop_new_idx':
-                code = f'for i, item in enumerate({src}):\n    pass'
+                code = f'for i, item in enumerate({src}):'
             case 'any':
                 code = f'any({src})'
             case 'all':
                 code = f'all({src})'
             case 'if_any':
-                code = f'if any({src}):\n    pass'
+                code = f'if any({src}):'
             case 'if_all':
-                code = f'if all({src}):\n    pass'
+                code = f'if all({src}):'
             case 'count':
                 code = f'sum(1 for item in {src} if item)'
             case 'join':
@@ -740,7 +742,7 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
         return
     text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
     try:
-        ast.parse(text)
+        ast.parse(with_pass_body(text))
     except SyntaxError:
         return
     model['last_linked_expr'] = expr
@@ -1177,7 +1179,9 @@ def _preview_expr(model, action, eval_in_scope):
         result = generate_action(action, ctx)
     except Exception:
         return ''
-    return result[1] if result else ''
+    # The preview is copied and dragged into the file as-is, so a statement
+    # needs the body that generation leaves off.
+    return with_pass_body(result[1]) if result else ''
 
 
 def _compute_predicate_previews(model: dict, eval_in_scope) -> tuple:
@@ -1575,10 +1579,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 if source_expr is not None:
                     cell_expr = replace_caret_in_py_exp(col, f'{source_expr}[{i}]')
 
-                # The parent no longer wraps children for drag. Each child is
-                # handed its access-path expression and self-wraps when it's
-                # small (non-interactive); the focused child renders full and
-                # keeps its mouse events, so it stays undraggable.
+                # The parent doesn't wrap children for drag: each is handed its
+                # access-path expression and decides for itself, so a child with
+                # its own handles keeps them instead of being covered by one.
                 child_var_and_exp = (None, cell_expr) if cell_expr else None
                 if hasattr(cell_vis, 'visualize_els'):
                     cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)
@@ -1608,15 +1611,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None):
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
-        inner = f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
-        return wrap_drag_grab(inner, var_and_exp) if var_and_exp else inner
+        return f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
 
-    table_html = _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
-    # Small mode is non-interactive, so the whole list becomes a drag-to-extract
-    # handle (self-wrap; no parent wrapping). Full mode keeps its mouse events.
-    if small and var_and_exp:
-        return wrap_drag_grab(table_html, var_and_exp)
-    return table_html
+    # No whole-area drag handle in either size: the cells and column headers
+    # carry their own snc-py-exp, and a handle wrapping all of them would claim
+    # every hover in between. Only the generic visualizers self-wrap.
+    return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
 
 
 def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):
@@ -1904,7 +1904,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     result = generate_action(action, ctx)
                     if result:
                         if copy:
-                            commands.append(CopyToClipboard(text=result[1]))
+                            commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
                             commands.append(result)
                             # Link the freshly inserted LOC to this action so
@@ -1925,36 +1925,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['last_linked_expr'] = None
 
         case Relink(mode=mode, text=text):
-            adopted = False
-            if mode == 'takeover' and not model.get('unlinked_action'):
-                # Fresh model over an existing generated line: adopt the line
-                # as-is (parse it into the model) instead of clobbering it.
-                adopted = _adopt_linked_line(text, var_and_exp, model,
-                                             eval_in_scope=eval_in_scope)
-            if not adopted:
-                action = model.get('unlinked_action') or _AUTO_LINK_ACTION
-                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
-                if ctx is None:
-                    ctx = _get_whole_list_context(model, var_and_exp)
-                if ctx:
-                    result = generate_action(action, ctx)
-                    if result:
-                        suggest_name, expr = result
-                        model['linked_action'] = action
-                        model['linked_source_expr'] = ctx.get('source_expr')
-                        model['unlinked_action'] = None
-                        model['auto_linked_once'] = True
-                        model['last_linked_expr'] = expr
-                        if mode == 'takeover':
-                            # The front-end already linked an existing assignment
-                            # line; replace its RHS, keeping the user's var name.
-                            model['linked_has_assignment'] = True
-                            commands.append(ChangeSelectedText(expression=expr,
-                                                                suggested_var_name=None))
-                        else:
-                            # Insert a fresh linked line.
-                            model['linked_has_assignment'] = bool(suggest_name)
-                            commands.append(result)
+            handle_relink(_LINK_CONFIG, mode, text, var_and_exp, model, commands,
+                          eval_in_scope=eval_in_scope)
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,
@@ -1977,41 +1949,23 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     return (model, commands)
 
 
-# Default action used when auto-linking on the first interaction.
+# Default actions used when auto-linking on the first interaction, or when
+# relinking to a line whose shape rules out the previously stashed action.
 _AUTO_LINK_ACTION = 'filter'
+_AUTO_LINK_STATEMENT_ACTION = 'loop_no_idx'
 
-
-def _adopt_linked_line(text, var_and_exp, model: dict, *, eval_in_scope=None) -> bool:
-    """Parse an existing linked line and adopt it into the model in place.
-
-    Used when a fresh model is asked to take over a line that already contains
-    a previously-generated linked expression (relink-takeover after a file
-    reopen). Leaves the line's text untouched; only the model is updated.
-    Returns True on success.
-    """
-    from list_visualizer_grammar import parse_generated_code_or_assignment
-    parsed, prefix = parse_generated_code_or_assignment(text)
-    if not (parsed and parsed.get('action') and parsed.get('source_expr')):
-        return False
-    if var_and_exp:
-        line_var = var_and_exp[0]
-        if line_var and parsed['source_expr'] != line_var:
-            return False
-    _ctx_to_model(parsed, model)
-    model['linked_action'] = parsed['action']
-    model['linked_source_expr'] = parsed['source_expr']
-    model['linked_has_assignment'] = bool(prefix)
-    model['auto_linked_once'] = True
-    # Snapshot the expression already in the editor so the next no-op event
-    # (hover, etc.) does not rewrite it identically.
-    ctx = _get_search_context(model, var_and_exp,
-                              source_expr=model['linked_source_expr'],
-                              eval_in_scope=eval_in_scope)
-    if ctx:
-        result = generate_action(parsed['action'], ctx)
-        if result:
-            model['last_linked_expr'] = result[1]
-    return True
+# This visualizer's wiring for the shared relink logic in visualizer_utils.
+_LINK_CONFIG = LinkConfig(
+    parse_line=parse_generated_code_or_assignment,
+    get_context=_get_search_context,
+    generate_action=generate_action,
+    ctx_to_model=_ctx_to_model,
+    change_selected_text=ChangeSelectedText,
+    default_action=_AUTO_LINK_ACTION,
+    default_statement_action=_AUTO_LINK_STATEMENT_ACTION,
+    statement_actions=_STATEMENT_ACTIONS,
+    whole_value_context=_get_whole_list_context,
+)
 
 
 def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=None) -> None:
@@ -2029,7 +1983,7 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
     suggest_name, expr = result
     prefix = f'{suggest_name} = ' if suggest_name else ''
     try:
-        ast.parse(prefix + expr)
+        ast.parse(with_pass_body(prefix + expr))
     except SyntaxError:
         return
     model['linked_action'] = _AUTO_LINK_ACTION

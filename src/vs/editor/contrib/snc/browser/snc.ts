@@ -12,7 +12,7 @@ import { IProcessOptions, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCT
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
-import { FileAccess } from '../../../../base/common/network.js';
+import { FileAccess, Schemas } from '../../../../base/common/network.js';
 import { IHostService } from '../../../../workbench/services/host/browser/host.js';
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -598,7 +598,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 		});
 
-		const align = target.getAttribute('snc-py-exp-align');
+		// A handle wrapping the whole visualizer has no free space above it: the
+		// widget's top edge is against the line of code it belongs to, so a
+		// tooltip there covers either that code or the visualizer above it. Put
+		// it beside the widget, where nothing else is drawn.
+		const wrapsWholeWidget = target.parentElement === this.domNode;
+		const align = target.getAttribute('snc-py-exp-align')
+			?? (wrapsWholeWidget ? 'right' : null);
 
 		if (align === 'right') {
 			// Position to the right of the target, vertically centered
@@ -1668,9 +1674,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 			return;
 		}
+		// A link already points at a specific line, which need not be the next
+		// one; only re-linking is defined in terms of the next line.
+		const tooltip = state === 'linked'
+			? 'Unlink from line of code'
+			: 'Link to next line of code';
 		if (!this.linkChainEl) {
 			const chain = document.createElement('div');
 			chain.className = 'snc-link-chain';
+			// Set data-tooltip before appendChild so a mouseover that fires
+			// when the icon appears under the cursor already sees the attribute
+			// (the delegated tooltip attacher runs during insertion).
+			chain.setAttribute('data-tooltip', tooltip);
 			const icon = document.createElement('span');
 			icon.className = 'snc-link-chain-icon';
 			const setIconSvg = (svg: string) => {
@@ -1701,9 +1716,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 		this.linkChainEl.classList.toggle('linked', state === 'linked');
 		this.linkChainEl.classList.toggle('unlinked', state === 'unlinked');
-		this.linkChainEl.title = state === 'linked'
-			? 'Linked to a line of code — click to unlink'
-			: 'Click to link this visualizer to a line of code';
+		this.linkChainEl.setAttribute('data-tooltip', tooltip);
 	}
 
 	/** Viewport rect of the chain icon, for drawing the arrow. Null if hidden. */
@@ -2425,9 +2438,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	/**
 	 * Re-establish a link for a visualizer whose chain icon was clicked while
-	 * unlinked. Takes over the next line of code when it is an assignment at the
-	 * visualizer's own indentation; otherwise inserts a fresh linked line. The
-	 * concrete edit is produced by Python (Relink → ChangeSelectedText/NewCode).
+	 * unlinked. Takes over the next line of code when the visualizer could have
+	 * generated it there; otherwise inserts a fresh linked line. The concrete
+	 * edit is produced by Python (Relink → ChangeSelectedText/NewCode).
 	 */
 	private relinkVisualizer(line: number, visIndex: number): void {
 		const editorModel = this.editor.getModel();
@@ -2451,10 +2464,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (nextLine > 0) {
 			const nextContent = editorModel.getLineContent(nextLine);
 			const nextIndent = nextContent.length - nextContent.trimStart().length;
-			// Only take over a line at the same block level that is a simple
-			// assignment; a dedent, a deeper line, or a non-assignment statement
-			// means we insert a fresh line instead of clobbering existing code.
-			if (nextIndent === vizIndent && SNCController.splitAssignment(nextContent)) {
+			// Take over the line an insertion would have landed on: the same
+			// block level, or the first body line when the visualizer sits on a
+			// block header (a loop variable's visualizer owns code inside the
+			// loop). A dedent means the block ended, so there is nothing of ours
+			// to take over. The line itself must be shaped like generated code —
+			// an assignment or a statement header — rather than arbitrary code.
+			const ownsNextLine = nextIndent >= vizIndent;
+			const takeoverable = !!SNCController.splitAssignment(nextContent)
+				|| SNCController.opensBlock(nextContent);
+			if (ownsNextLine && takeoverable) {
 				mode = 'takeover';
 				// Send the taken-over line's content so a fresh Python model can
 				// adopt the existing expression instead of clobbering it.
@@ -2738,6 +2757,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 		const content = model.getLineContent(lineNumber);
 		return content.length - content.trimStart().length;
+	}
+
+	/** The line's leading whitespace, preserving tabs. */
+	private getLineIndentText(lineNumber: number): string {
+		const model = this.editor.getModel();
+		if (!model || lineNumber < 1 || lineNumber > model.getLineCount()) {
+			return '';
+		}
+		return model.getLineContent(lineNumber).slice(0, this.getLineIndent(lineNumber));
 	}
 
 	private setupLanguageChangeListener(): void {
@@ -3328,9 +3356,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 				// rather than from inverse-range arithmetic, which is unreliable
 				// across the multi-region edit when an import is also inserted.
 				const insertedLine = actualTriggerLine + 1;
+				// A statement's body is the user's, so the link covers only the
+				// header lines Python reported.
+				const mainEdit = command.edits.find(e => e.afterLine === command.triggerLine);
+				const lastHeaderLine = insertedLine + Math.max(1, mainEdit?.headerLines ?? 1) - 1;
 				const linkedRange = new Range(
 					insertedLine, model.getLineFirstNonWhitespaceColumn(insertedLine) || 1,
-					insertedLine, model.getLineMaxColumn(insertedLine)
+					lastHeaderLine, model.getLineMaxColumn(lastHeaderLine)
 				);
 				this.establishLinkForRange(linkedRange, actualTriggerLine, command.triggerVisIndex);
 
@@ -3494,6 +3526,82 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
+	 * Prefix every line after the first with `baseIndent`. A linked range starts
+	 * at its line's first non-whitespace column, so the opening line is already
+	 * positioned but the rest of a multi-line statement header starts at
+	 * column 1.
+	 */
+	private static indentContinuationLines(code: string, baseIndent: string): string {
+		if (!baseIndent || !code.includes('\n')) {
+			return code;
+		}
+		return code.split('\n')
+			.map((codeLine, i) => (i === 0 || codeLine === '' ? codeLine : baseIndent + codeLine))
+			.join('\n');
+	}
+
+	/** Leading whitespace of the last line of generated code, in characters. */
+	private static trailingHeaderDepth(code: string): number {
+		const lines = code.split('\n');
+		if (lines.length < 2) {
+			return 0;
+		}
+		const last = lines[lines.length - 1];
+		return last.length - last.trimStart().length;
+	}
+
+	/**
+	 * Edits that move a linked statement's body along with its header.
+	 *
+	 * Switching loop actions can nest the header a level deeper (`for ...:`
+	 * becoming `for ...:` plus `if ...:`) or lift it back out. The body below is
+	 * the user's code, so rather than regenerating it we shift it by the same
+	 * amount the header's depth changed, which also preserves whatever
+	 * indentation width the body already uses.
+	 */
+	private bodyReindentEdits(headerRange: Range, expression: string, baseIndent: string)
+		: { range: Range; text: string }[] {
+		const model = this.editor.getModel();
+		if (!model) {
+			return [];
+		}
+		const oldDepth = headerRange.endLineNumber > headerRange.startLineNumber
+			? Math.max(0, this.getLineIndent(headerRange.endLineNumber) - baseIndent.length)
+			: 0;
+		const delta = SNCController.trailingHeaderDepth(expression) - oldDepth;
+		if (delta === 0) {
+			return [];
+		}
+
+		const edits: { range: Range; text: string }[] = [];
+		for (let l = headerRange.endLineNumber + 1; l <= model.getLineCount(); l++) {
+			const firstNonWhitespace = model.getLineFirstNonWhitespaceColumn(l);
+			if (firstNonWhitespace === 0) {
+				continue; // blank line within the body
+			}
+			const indentLength = firstNonWhitespace - 1;
+			if (indentLength <= baseIndent.length) {
+				break; // dedent to the header's level or beyond ends the body
+			}
+			const existing = model.getLineContent(l).slice(0, indentLength);
+			const shifted = delta > 0
+				? existing + ' '.repeat(delta)
+				: existing.slice(0, Math.max(baseIndent.length + 1, indentLength + delta));
+			edits.push({ range: new Range(l, 1, l, firstNonWhitespace), text: shifted });
+		}
+		return edits;
+	}
+
+	/**
+	 * Whether a line is a block header (`for ...:`, `if ...:`). Such a line can
+	 * be a link target: the visualizer owns the header and the body below it
+	 * belongs to the user. Mirrors opens_block in visualizer_utils.py.
+	 */
+	private static opensBlock(text: string): boolean {
+		return text.trimEnd().endsWith(':');
+	}
+
+	/**
 	 * Split an assignment line into (leadingWhitespace, varName, rhs). Returns
 	 * null if the text isn't a simple `name = rhs` assignment (e.g. a bare
 	 * expression or a statement), in which case the caller leaves it untouched.
@@ -3549,6 +3657,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const currentText = editorModel.getValueInRange(trackedRange);
 
+		// A linked range starts past the line's indentation, so continuation
+		// lines of a multi-line statement header must carry it themselves.
+		const baseIndent = this.getLineIndentText(trackedRange.startLineNumber);
+		const indented = SNCController.indentContinuationLines(expression, baseIndent);
+
 		// The editor range is the sole source of truth for assignment shape and
 		// target name. Python sends only a replacement expression plus an
 		// optional semantic rename request when the action changes.
@@ -3560,10 +3673,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 				&& !this.isVarNameUsedOutsideRange(current.name, trackedRange)) {
 				targetName = this.findAvailableVarName(suggestedVarName, trackedRange);
 			}
-			newText = `${current.indent}${targetName} = ${expression}`;
+			newText = `${current.indent}${targetName} = ${indented}`;
 		} else {
 			const indent = /^[ \t]*/.exec(currentText)?.[0] ?? '';
-			newText = `${indent}${expression}`;
+			newText = `${indent}${indented}`;
 		}
 
 		if (currentText === newText) {
@@ -3571,10 +3684,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		this.isApplyingLinkedEdit = true;
-		editorModel.pushEditOperations([], [{
-			range: trackedRange,
-			text: newText,
-		}], () => null);
+		editorModel.pushEditOperations([], [
+			{ range: trackedRange, text: newText },
+			// A deeper or shallower header has to take its body with it; done in
+			// the same operation so it is a single undo step.
+			...this.bodyReindentEdits(trackedRange, expression, baseIndent),
+		], () => null);
 
 		// Update the tracked decoration to cover the newly inserted text
 		const startOffset = editorModel.getOffsetAt(trackedRange.getStartPosition());
@@ -3749,6 +3864,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Get the working directory from the first workspace folder
 		const workingDirectory = this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath || '';
+		const modelUri = this.editor.getModel()?.uri;
+		const filePath = modelUri?.scheme === Schemas.file ? modelUri.fsPath : '';
 		const channel = this.mainProcessService.getChannel('sncProcess');
 
 		// Cancel any previous streaming run
@@ -3970,6 +4087,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				modelsAndEventsJson: JSON.stringify(models_and_events),
 				timeout: 60_000,
 				workingDirectory,
+				filePath,
 				...(focusedLine !== null ? { focusedLine } : {})
 			};
 			await channel.call('startProgram', [content, options, runId]);

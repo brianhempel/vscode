@@ -310,7 +310,11 @@ def parse_bi_parts(
         leading_str = string[:lit_i]
         str_after_lit = string[lit_i+len(lit):]
         for (ctx2, i) in parse_nonlit_bi_parts(grammar, leading_non_lits, leading_str, ctx_in):
-            # if i == len(leading_str):
+            # The sub-rules have to account for every character before the
+            # literal. Accepting a prefix match would silently drop the rest,
+            # so `f(a for a in b)` would parse as if it were `f(a)`.
+            if i != len(leading_str):
+                continue
             for (ctx3, j) in parse_bi_parts(grammar, parts_after_lit, str_after_lit, ctx2):
                 yield (ctx3, lit_i + len(lit) + j)
 

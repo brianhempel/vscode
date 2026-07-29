@@ -101,3 +101,7 @@ Any Python file matching `*_visualizer.py` that exports `can_visualize()` and `v
 ## Cursor Position Awareness
 
 When a value is inside a loop, the visualizer displays either the **first** or **last** iteration's value depending on where the cursor is. If the cursor is positioned within the loop body (at or before the loop's last line, or on the line right after the loop), the first iteration is shown; otherwise, the last iteration is shown. This is tracked via the `last_line_in_containing_loop` field injected by the `CodeTransformer`.
+
+## Network read cache
+
+Because a rerun happens every ~100ms and each one is a fresh process, network I/O could slow things down. `io_cache.py` patches `urllib.request.urlopen` so user code that fetches URLs are served from a `.snc_io_cache` directory next to the file being edited. Editing the line is what forces a refetch.

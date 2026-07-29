@@ -128,7 +128,8 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import replace_caret_in_py_exp, Unlink, Relink, truncate_str, ICONS, wrap_drag_grab
+from visualizer_utils import (replace_caret_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
+                              LinkConfig, handle_relink)
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -3125,7 +3126,9 @@ def _preview_expr(model: dict, action: str, eval_in_scope) -> str:
     try:
         from string_visualizer_grammar import generate_action as _gen
         result = _gen(action, ctx)
-        return result[1] if result else ''
+        # The preview is copied and dragged into the file as-is, so a statement
+        # needs the body that generation leaves off.
+        return with_pass_body(result[1]) if result else ''
     except Exception:
         return ''
 
@@ -3406,9 +3409,9 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # mode has no search/selection so they'd add nothing. white-space:pre on
     # .string-visualizer renders the literal \n / \t correctly.
     #
-    # Being non-interactive, the whole small preview is a drag-to-extract
-    # handle: it self-wraps in snc-py-exp when the parent hands down an
-    # access-path expression via var_and_exp.
+    # The preview gets no whole-area drag handle: its characters carry their own
+    # snc-py-exp, and a handle around them would claim every hover over the
+    # string. Only the generic visualizers self-wrap.
     if small:
         # Non-focused preview: wrap the string in leading/trailing ' quotes so
         # it reads as a string literal. Each newline after the first gets a
@@ -3442,7 +3445,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f'{text_group_span(list(display), 0)}'
             f'</div></div>{expand_toggle_html}</div>'
         )
-        return [wrap_drag_grab(small_html, var_and_exp)]
+        return [small_html]
 
     # Build highlight_by_index from highlights (uses preview regex to include in-progress selection)
     preview_regex = build_preview_regex(model, value)
@@ -4503,7 +4506,10 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
     }
 
 
-from string_visualizer_grammar import generate_action, generate_copy_expr_for_if, parse_generated_code_or_assignment
+from string_visualizer_grammar import (
+    generate_action, generate_copy_expr_for_if, parse_generated_code_or_assignment,
+    _STATEMENT_ACTIONS,
+)
 
 
 # =============================================================================
@@ -5632,34 +5638,8 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             model['last_linked_expr'] = None
 
         case Relink(mode=mode, text=text):
-            adopted = False
-            if mode == 'takeover' and not model.get('unlinked_action'):
-                # Fresh model over an existing generated line: adopt the line
-                # as-is (parse it into the model) instead of clobbering it.
-                adopted = _adopt_linked_line(text, var_and_exp, model,
-                                             eval_in_scope=eval_in_scope)
-            if not adopted:
-                action = model.get('unlinked_action') or _AUTO_LINK_ACTION
-                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
-                if ctx:
-                    result = generate_action(action, ctx)
-                    if result:
-                        suggest_name, expr = result
-                        model['linked_action'] = action
-                        model['linked_source_expr'] = ctx.get('source_expr')
-                        model['unlinked_action'] = None
-                        model['auto_linked_once'] = True
-                        model['last_linked_expr'] = expr
-                        if mode == 'takeover':
-                            # The front-end already linked an existing assignment
-                            # line; replace its RHS, keeping the user's var name.
-                            model['linked_has_assignment'] = True
-                            commands.append(ChangeSelectedText(expression=expr,
-                                                                suggested_var_name=None))
-                        else:
-                            # Insert a fresh linked line.
-                            model['linked_has_assignment'] = bool(suggest_name)
-                            commands.append(result)
+            handle_relink(_LINK_CONFIG, mode, text, var_and_exp, model, commands,
+                          eval_in_scope=eval_in_scope)
 
         case SegmentToggle(segment_id=seg_id):
             # Toggle the segment in the selection list (preserving canonical
@@ -5697,6 +5677,11 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     # Auto-open the Replace box so the user sees the expression
                     # they're building as they click chips.
                     model['replace_visible'] = True
+                    # Pick composes a map expression via segment chips; Map
+                    # Matches (find_or_map with replace open) is the only
+                    # action that consumes that expression. Mirror Enter.
+                    if model.get('linked_action'):
+                        model['linked_action'] = 'find_or_map'
                     # Auto-turn-on capture groups when the regex has more than
                     # one segment so each group gets its own clickable chip.
                     selection_regex = model.get('search')
@@ -5738,7 +5723,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     result = generate_action(action, ctx)
                     if result:
                         if copy:
-                            commands.append(CopyToClipboard(text=result[1]))
+                            commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
                             commands.append(result)
                             # Link the freshly inserted LOC to this action so
@@ -5750,7 +5735,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             model['last_linked_expr'] = result[1]
                             model['auto_linked_once'] = True
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink, ToolSelect)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -5771,41 +5756,23 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     return (model, commands)
 
 
-# Default action used when auto-linking on the first interaction. Mirrors the
-# Enter-key behavior (find or map).
+# Default actions used when auto-linking on the first interaction (mirroring
+# the Enter-key behavior, find or map), or when relinking to a line whose shape
+# rules out the previously stashed action.
 _AUTO_LINK_ACTION = 'find_or_map'
+_AUTO_LINK_STATEMENT_ACTION = 'loop'
 
-
-def _adopt_linked_line(text, var_and_exp, model: dict, *, eval_in_scope=None) -> bool:
-    """Parse an existing linked line and adopt it into the model in place.
-
-    Used when a fresh model is asked to take over a line that already contains
-    a previously-generated linked expression (relink-takeover after a file
-    reopen). Leaves the line's text untouched; only the model is updated.
-    Returns True on success.
-    """
-    parsed, prefix = parse_generated_code_or_assignment(text)
-    if not (parsed and parsed.get('action') and parsed.get('source_expr')):
-        return False
-    if var_and_exp:
-        line_var = var_and_exp[0]
-        if line_var and parsed['source_expr'] != line_var:
-            return False
-    _ctx_to_model(parsed, model)
-    model['linked_action'] = parsed['action']
-    model['linked_source_expr'] = parsed['source_expr']
-    model['linked_has_assignment'] = bool(prefix)
-    model['auto_linked_once'] = True
-    # Snapshot the expression already in the editor so the next no-op event
-    # (hover, etc.) does not rewrite it identically.
-    ctx = _get_search_context(model, var_and_exp,
-                              source_expr=model['linked_source_expr'],
-                              eval_in_scope=eval_in_scope)
-    if ctx:
-        result = generate_action(parsed['action'], ctx)
-        if result:
-            model['last_linked_expr'] = result[1]
-    return True
+# This visualizer's wiring for the shared relink logic in visualizer_utils.
+_LINK_CONFIG = LinkConfig(
+    parse_line=parse_generated_code_or_assignment,
+    get_context=_get_search_context,
+    generate_action=generate_action,
+    ctx_to_model=_ctx_to_model,
+    change_selected_text=ChangeSelectedText,
+    default_action=_AUTO_LINK_ACTION,
+    default_statement_action=_AUTO_LINK_STATEMENT_ACTION,
+    statement_actions=_STATEMENT_ACTIONS,
+)
 
 
 def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_scope=None) -> None:
@@ -5823,7 +5790,7 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     suggest_name, expr = result
     prefix = f'{suggest_name} = ' if suggest_name else ''
     try:
-        ast.parse(prefix + expr)
+        ast.parse(with_pass_body(prefix + expr))
     except SyntaxError:
         return
     # Mirror how _get_search_context derives source_expr so the linked-update
@@ -5849,7 +5816,7 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
         return
     text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
     try:
-        ast.parse(text)
+        ast.parse(with_pass_body(text))
     except SyntaxError:
         return
     model['last_linked_expr'] = expr

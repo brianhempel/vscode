@@ -211,6 +211,20 @@ class TestParse:
         g = make_grammar(BASE_RULES)
         assert parse(g, g['Var'], "a1 !!") is None
 
+    def test_subrule_must_consume_the_whole_gap_before_a_literal(self):
+        """A sub-rule that matches only a prefix of the text before the next
+        literal is not a match: the skipped text would vanish from the parse and
+        make two different strings look identical."""
+        g = make_grammar(BASE_RULES + [BiTemplate("Call", "f({arg:VarOrExpr})", {})])
+        assert parse(g, g['Call'], "f(a)") is not None
+        assert parse(g, g['Call'], "f(a for a in b)") is None
+
+    def test_subrule_must_consume_the_whole_gap_between_literals(self):
+        g = make_grammar(BASE_RULES + [BiTemplate("Pair", "[{a:Var}, {b:Var}]", {})])
+        assert parse(g, g['Pair'], "[x, y]") is not None
+        assert parse(g, g['Pair'], "[x!, y]") is None
+        assert parse(g, g['Pair'], "[x, y!]") is None
+
     def test_parse_callable_branch(self):
         g = make_grammar(BASE_RULES)
         ctx = parse(g, g['AnyPython'], "x + 1")

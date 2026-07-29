@@ -5,16 +5,26 @@ Run:
     python3 -m pytest src/vs/platform/snc/node/python_runner_tests.py -v
 """
 
+import io
+import json
+import os
+import tempfile
 import unittest
+import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+import io_cache
+import python_runner
 from python_runner import (
     GenericVisualizer,
     VisualizerOfStaticVisualizer,
     _build_new_code_edits,
     _commands_to_dicts,
+    install_io_cache,
+    log_value,
     split_leading_imports,
+    transform_code_to_ast,
 )
 
 
@@ -26,7 +36,7 @@ class TestSplitLeadingImports(unittest.TestCase):
         logged = []
         globals_dict = {
             "__name__": "__main__",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None: logged.append((line, value)),
+            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: logged.append((line, value)),
         }
 
         exec(import_code, globals_dict)
@@ -41,7 +51,7 @@ class TestSplitLeadingImports(unittest.TestCase):
         logged = []
         globals_dict = {
             "__name__": "__main__",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None: logged.append((line, value)),
+            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: logged.append((line, value)),
         }
 
         exec(import_code, globals_dict)
@@ -135,6 +145,104 @@ class TestBuildNewCodeEdits(unittest.TestCase):
         self.assertEqual(edits[0]['text'], "    s.upper()")
 
 
+class TestBuildNewCodeEditsAddsBody(unittest.TestCase):
+    """Visualizers generate bare headers; insertion supplies the `pass` body
+    that makes the statement runnable, at the right depth for its position."""
+
+    def _insert_text(self, source_code, line, expr):
+        return _build_new_code_edits(source_code, line, None, expr)[0]['text']
+
+    def test_top_level_header_gets_pass(self):
+        source = "xs = [1, 2]\ny = 2\n"
+        self.assertEqual(self._insert_text(source, 1, "for item in xs:"),
+                         "for item in xs:\n    pass")
+
+    def test_pass_indented_with_surrounding_block(self):
+        source = "def f():\n    xs = [1, 2]\n    y = 2\n"
+        self.assertEqual(self._insert_text(source, 2, "for item in xs:"),
+                         "    for item in xs:\n        pass")
+
+    def test_nested_header_gets_deeper_pass(self):
+        source = "xs = [1, 2]\ny = 2\n"
+        self.assertEqual(
+            self._insert_text(source, 1, "for i, item in enumerate(xs):\n    if item > 1:"),
+            "for i, item in enumerate(xs):\n    if item > 1:\n        pass")
+
+    def test_expression_gets_no_body(self):
+        source = "xs = [1, 2]\ny = 2\n"
+        self.assertEqual(self._insert_text(source, 1, "[x for x in xs]"),
+                         "[x for x in xs]")
+
+
+class TestBuildNewCodeEditsReportsHeaderLines(unittest.TestCase):
+    """The editor links the header and leaves the body to the user, so the
+    insertion edit says how many of its lines are header."""
+
+    def _edit(self, expr, name=None):
+        return _build_new_code_edits("xs = [1, 2]\ny = 2\n", 1, name, expr)[0]
+
+    def test_expression_is_one_line(self):
+        self.assertEqual(self._edit("[x for x in xs]", "picked")['headerLines'], 1)
+
+    def test_single_line_header(self):
+        self.assertEqual(self._edit("for item in xs:")['headerLines'], 1)
+
+    def test_nested_header_counts_both_lines(self):
+        edit = self._edit("for i, item in enumerate(xs):\n    if item > 1:")
+        self.assertEqual(edit['headerLines'], 2)
+        self.assertEqual(len(edit['text'].split('\n')), 3)
+
+    def test_import_edit_has_no_header_lines(self):
+        edits = _build_new_code_edits("xs = [1, 2]\n", 1, "found", "re.findall(r'a', s)")
+        imports = [e for e in edits if e['text'].strip() == 'import re']
+        self.assertEqual(len(imports), 1)
+        self.assertNotIn('headerLines', imports[0])
+
+
+class TestAutoImportPlacement(unittest.TestCase):
+    """An auto-added import lands after the file's prologue: the module docstring
+    plus the leading imports, the same span split_leading_imports pre-executes.
+    Inserted above the docstring it would stop being one, dropping it into the
+    body where the runner visualizes it as a plain expression."""
+
+    def _edits(self, source):
+        return _build_new_code_edits(source, 1, 'found', "re.findall(r'a', s)")
+
+    def _import_edit(self, source):
+        return next(e for e in self._edits(source) if e['text'].strip() == 'import re')
+
+    def _blank_line_edits(self, source):
+        return [e for e in self._edits(source) if e['text'] == '']
+
+    def test_lands_after_one_line_docstring(self):
+        self.assertEqual(self._import_edit('"""Doc."""\ns = "a"\n')['afterLine'], 1)
+
+    def test_lands_after_multi_line_docstring(self):
+        self.assertEqual(self._import_edit('"""\nDoc.\n"""\ns = "a"\n')['afterLine'], 3)
+
+    def test_lands_after_docstring_and_imports(self):
+        self.assertEqual(self._import_edit('"""Doc."""\nimport os\ns = "a"\n')['afterLine'], 2)
+
+    def test_lands_after_a_parenthesized_import(self):
+        # Anchoring to its first line would insert into the middle of the import.
+        self.assertEqual(self._import_edit('from os import (\n    sep,\n)\ns = "a"\n')['afterLine'], 3)
+
+    def test_string_expression_is_not_a_docstring(self):
+        self.assertEqual(self._import_edit("'a' + 'b'\ns = 'x'\n")['afterLine'], 0)
+
+    def test_string_after_imports_is_not_a_docstring(self):
+        self.assertEqual(self._import_edit('import os\n"hello"\ns = "a"\n')['afterLine'], 1)
+
+    def test_blank_line_separates_the_import_from_the_code(self):
+        self.assertEqual(len(self._blank_line_edits('"""Doc."""\ns = "a"\n')), 1)
+
+    def test_no_blank_line_when_one_is_already_there(self):
+        self.assertEqual(self._blank_line_edits('"""Doc."""\n\ns = "a"\n'), [])
+
+    def test_unparseable_source_still_lands_after_the_imports(self):
+        self.assertEqual(self._import_edit('import os\ns = "a"\ndef f(:\n')['afterLine'], 1)
+
+
 @dataclass
 class _FakeChangeCmd:
     """Stand-in for a dataclass command (e.g. ChangeSelectedText)."""
@@ -208,6 +316,52 @@ class _StaticVisStub:
         return f'<b>{value}</b>'
 
 
+class TestLogValueForwardsVarAndExp(unittest.TestCase):
+    """log_value must pass var_and_exp into visualize so top-level generic
+    values (e.g. stop_idx = 33) get an snc-py-exp drag handle. A generic
+    visualizer has no interactions in either size, so its whole area is the
+    handle; the interactive visualizers self-wrap only when small."""
+
+    def _log_html(self, value, var_and_exp=None, focused_line=None):
+        buf = io.StringIO()
+        old_out = python_runner._stream_out
+        old_counter = python_runner.line_emit_counter
+        old_models = python_runner.models_and_events
+        old_focused = python_runner._focused_line
+        try:
+            python_runner._stream_out = buf
+            python_runner.line_emit_counter = {}
+            python_runner.models_and_events = []
+            python_runner._focused_line = focused_line
+            log_value(1, value, var_and_exp=var_and_exp)
+        finally:
+            python_runner._stream_out = old_out
+            python_runner.line_emit_counter = old_counter
+            python_runner.models_and_events = old_models
+            python_runner._focused_line = old_focused
+
+        msgs = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+        return next(m['item'] for m in msgs if m.get('type') == 'item')['html']
+
+    def test_log_value_generic_int_emits_snc_py_exp(self):
+        html_out = self._log_html(33, var_and_exp=('stop_idx', 'stop_idx'))
+        self.assertIn('snc-py-exp="stop_idx"', html_out)
+        self.assertIn('draggable="true"', html_out)
+        self.assertIn('class="py-exp-grab"', html_out)
+        self.assertIn('33', html_out)
+
+    def test_log_value_generic_int_emits_snc_py_exp_when_small(self):
+        # Another line is focused, so line 1 renders small.
+        html_out = self._log_html(33, var_and_exp=('stop_idx', 'stop_idx'), focused_line=2)
+        self.assertIn('snc-py-exp="stop_idx"', html_out)
+        self.assertIn('class="py-exp-grab"', html_out)
+
+    def test_log_value_without_var_and_exp_has_no_snc_py_exp(self):
+        html_out = self._log_html(33)
+        self.assertNotIn('snc-py-exp', html_out)
+        self.assertIn('33', html_out)
+
+
 class TestGenericVisualizerDrag(unittest.TestCase):
     """The generic/static visualizers should wrap their output in a draggable
     snc-py-exp grab span when given an access-path expression via var_and_exp,
@@ -225,7 +379,7 @@ class TestGenericVisualizerDrag(unittest.TestCase):
         out = GenericVisualizer.visualize(42, None, None, None)
         self.assertNotIn('snc-py-exp', out)
         self.assertNotIn('py-exp-grab', out)
-        self.assertEqual(out, '42')
+        self.assertEqual(out, '<span class="snc-generic-visualizer">42</span>')
 
     def test_generic_wraps_in_small_mode_too(self):
         out = GenericVisualizer.visualize(
@@ -256,5 +410,68 @@ class TestGenericVisualizerDrag(unittest.TestCase):
         out = vis.visualize(7, None, None, None)
         self.assertNotIn('snc-py-exp', out)
         self.assertEqual(out, '<b>7</b>')
+
+
+class TestIoCacheAcrossRuns(unittest.TestCase):
+    """The network read cache has to see through the source transform: the
+    logging wrappers must not hide the user's line from the cache key."""
+
+    def setUp(self):
+        self.fetches = []
+
+        def fake_urlopen(url, *args, **kwargs):
+            self.fetches.append(url)
+            return io.BytesIO(b'weather report')
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        self.addCleanup(lambda: setattr(urllib.request, 'urlopen', original))
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        python_runner._file_path = os.path.join(tmp.name, 'weather.py')
+        self.addCleanup(lambda: setattr(python_runner, '_file_path', ''))
+        self.addCleanup(lambda: setattr(python_runner, '_source_code', ''))
+
+        self.addCleanup(install_io_cache())
+        self.assertIsNot(urllib.request.urlopen, fake_urlopen, 'cache did not install')
+
+    def _run(self, source_code):
+        """Transform and execute source_code the way a worker run does."""
+        python_runner._source_code = source_code
+        code_object = compile(transform_code_to_ast(source_code), filename='<string>', mode='exec')
+        globals_dict = {
+            '__name__': '__main__',
+            '__file__': '<string>',
+            '_log_value': lambda *a, **k: None,
+            '_log_and_return': lambda line, value, *a, **k: value,
+        }
+        exec(code_object, globals_dict)
+        return globals_dict
+
+    def test_rerunning_unchanged_code_does_not_refetch(self):
+        source = (
+            'import urllib.request\n'
+            'str1 = urllib.request.urlopen("https://example.com/report.txt").read().decode()\n'
+        )
+        self.assertEqual(self._run(source)['str1'], 'weather report')
+        self.assertEqual(self._run(source)['str1'], 'weather report')
+        self.assertEqual(len(self.fetches), 1)
+
+    def test_editing_the_line_refetches(self):
+        source = (
+            'import urllib.request\n'
+            'str1 = urllib.request.urlopen("https://example.com/report.txt").read().decode()\n'
+        )
+        self._run(source)
+        edited = source.replace('str1', 'text')
+        self.assertEqual(self._run(edited)['text'], 'weather report')
+        self.assertEqual(len(self.fetches), 2)
+
+    def test_the_cache_lands_beside_the_edited_file(self):
+        self._run('import urllib.request\n'
+                  'str1 = urllib.request.urlopen("https://example.com/report.txt").read()\n')
+        cache_dir = os.path.join(os.path.dirname(python_runner._file_path), io_cache.CACHE_DIR_NAME)
+        self.assertTrue(any(f.endswith('.body') for f in os.listdir(cache_dir)))
 
 

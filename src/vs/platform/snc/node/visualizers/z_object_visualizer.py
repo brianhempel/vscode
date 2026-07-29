@@ -49,7 +49,7 @@ from typing import List, Tuple, Any
 
 from visualizer_utils import (
     ChildEvent, Unlink,
-    wrap_child_html, wrap_drag_grab, route_child_event, aggregate_handled_keys,
+    wrap_child_html, route_child_event, aggregate_handled_keys,
     strip_leading_caret, eval_caret_expr, replace_caret_in_py_exp,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
@@ -633,20 +633,18 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     Objects render as a table of accessor → value with interactive controls.
     """
 
+    if obj is None or isinstance(obj, (int, float)):
+        return repr(obj)
+
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
-        inner = f'<span class="small">{html.escape(truncate_str(repr(obj), 200))}</span>'
-        return wrap_drag_grab(inner, var_and_exp) if var_and_exp else inner
+        return f'<span class="small">{html.escape(truncate_str(repr(obj), 200))}</span>'
 
     if small:
-        small_html = _visualize_small(obj, model, eval_in_scope, max_width, max_height)
-        # Small mode is non-interactive, so the whole object becomes a
-        # drag-to-extract handle for the object expression (the "dead space"
-        # between field chips). Field chips inside still extract their own
-        # fields. Full mode keeps its mouse events and stays undraggable.
-        if var_and_exp:
-            return wrap_drag_grab(small_html, var_and_exp)
-        return small_html
+        # No whole-area drag handle for the object expression: the field chips
+        # carry their own snc-py-exp, and a handle around them would claim every
+        # hover over them. Only the generic visualizers self-wrap.
+        return _visualize_small(obj, model, eval_in_scope, max_width, max_height)
 
     full_class_name = get_full_class_name(obj)
     source_expr = model.get('_source_expr')
@@ -683,10 +681,9 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                                                        eval_in_scope=eval_in_scope, **extra)
                 child_small = (accessor_code != focused_child)
 
-                # The parent no longer wraps children for drag. Each child is
-                # handed its access-path expression and self-wraps when it's
-                # small (non-interactive); the focused child renders full and
-                # keeps its mouse events, so it stays undraggable.
+                # The parent doesn't wrap children for drag: each is handed its
+                # access-path expression and decides for itself, so a child with
+                # its own handles keeps them instead of being covered by one.
                 child_expr = field_expr if can_extract else None
                 child_var_and_exp = (None, child_expr) if child_expr else None
                 child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small, var_and_exp=child_var_and_exp)

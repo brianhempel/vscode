@@ -1,5 +1,6 @@
 import re
 from bidirectional_dsl import BiTemplate, Alt, BASE_RULES, make_grammar, generate, parse
+from visualizer_utils import without_pass_body
 
 
 STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
@@ -105,10 +106,10 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("LoopAction", [
         BiTemplate("LoopReplace",
-                   "for i, val in enumerate({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
+                   "for i, val in enumerate({replace_expr:AnyPython} for mtch in {:FinditerExpr}):",
                    {'has_replace': True}),
         BiTemplate("LoopNonReplace",
-                   "for i, mtch in enumerate({:FinditerExpr}):\n    pass",
+                   "for i, mtch in enumerate({:FinditerExpr}):",
                    {'has_replace': False}),
     ], {}),
 
@@ -122,7 +123,7 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {'has_replace': False}),
 
     BiTemplate("LoopMatchStringsAction",
-               "for i, s in enumerate({:FindallExpr}):\n    pass",
+               "for i, s in enumerate({:FindallExpr}):",
                {}),
 
     Alt("AnyAction", [
@@ -140,15 +141,15 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("IfAnyAction", [
         BiTemplate("IfAnyReplace",
-                   "if any({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
+                   "if any({replace_expr:AnyPython} for mtch in {:FinditerExpr}):",
                    {'has_replace': True}),
         BiTemplate("IfAnyNonReplace",
-                   "if {:SearchExpr}:\n    pass",
+                   "if {:SearchExpr}:",
                    {'has_replace': False}),
     ], {}),
 
     BiTemplate("IfAllAction",
-               "if all({replace_expr:AnyPython} for mtch in {:FinditerExpr}):\n    pass",
+               "if all({replace_expr:AnyPython} for mtch in {:FinditerExpr}):",
                {}),
 
     Alt("CountAction", [
@@ -246,10 +247,10 @@ STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     Alt("MultiLoopAction", [
         BiTemplate("MultiLoopReplace",
-                   "for i, val in enumerate((lambda mtch: {replace_expr:AnyPython})({:MultiIter})):\n    pass",
+                   "for i, val in enumerate((lambda mtch: {replace_expr:AnyPython})({:MultiIter})):",
                    {'has_replace': True}),
         BiTemplate("MultiLoopNonReplace",
-                   "for i, mtch in enumerate([{:MultiIter}]):\n    pass",
+                   "for i, mtch in enumerate([{:MultiIter}]):",
                    {'has_replace': False}),
     ], {}),
 
@@ -469,7 +470,10 @@ def parse_generated_code(code_line: str) -> dict | None:
 
     Returns a dict including the 'action' key, or None.
     """
-    return parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Action'], code_line)
+    # Statements are generated as bare headers, but text coming back from the
+    # editor may still carry the placeholder body that was inserted with it.
+    return parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Action'],
+                 without_pass_body(code_line))
 
 
 def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str]:
@@ -482,6 +486,7 @@ def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str
     # Try the assignment form first: the bare-expression Action grammar has a
     # catch-all (find_indices) that would otherwise greedily match a whole
     # ``var = expr`` line and hide the assignment.
+    code_line = without_pass_body(code_line)
     ctx = parse(STRING_VIZ_GRAMMAR, STRING_VIZ_GRAMMAR['Assignment'], code_line)
     if ctx is not None and 'assign_var_name' in ctx:
         return (ctx, f"{ctx['assign_var_name']} = ")

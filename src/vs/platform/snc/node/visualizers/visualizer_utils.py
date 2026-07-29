@@ -368,15 +368,211 @@ class Relink:
     mode: str = 'insert'
     text: str = ''
 
-def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
-    """Wrap a non-interactive (small-mode) visualizer's output in a draggable
-    snc-py-exp grab span.
 
-    Small-mode visualizers have no interactions, so their whole area can be a
-    drag-to-extract handle. When the parent supplies the access-path expression
-    via var_and_exp, the visualizer self-wraps; otherwise (top-level, no source
-    expression, or interactive/full mode) it renders bare so it keeps its mouse
-    events.
+# Visualizers generate statements as bare headers (`for item in xs:`), because
+# the header is what an editor link owns and rewrites; the body below it belongs
+# to the user. These two helpers re-attach a placeholder body wherever the code
+# has to stand on its own: insertion, clipboard, and syntax validation.
+
+BLOCK_INDENT = '    '
+
+def opens_block(code: str) -> bool:
+    """Whether generated *code* ends with a `:` header and so needs a body."""
+    return code.rstrip().endswith(':')
+
+
+def with_pass_body(code: str) -> str:
+    """Append a `pass` body to *code* when it opens a block, else return it as is.
+
+    The body is indented one level past the last (deepest) header line, so a
+    nested header like `for ...:\\n    if ...:` gets its `pass` at two levels.
+    """
+    if not opens_block(code):
+        return code
+    last_line = code.rstrip().split('\n')[-1]
+    last_indent = last_line[:len(last_line) - len(last_line.lstrip())]
+    return f'{code}\n{last_indent}{BLOCK_INDENT}pass'
+
+
+def without_pass_body(code: str) -> str:
+    """Drop a trailing placeholder `pass` body, leaving the bare header.
+
+    Inverse of with_pass_body, for text coming back from the editor. A body the
+    user has actually written is not scaffolding and is left alone.
+    """
+    lines = code.rstrip().split('\n')
+    if len(lines) < 2 or lines[-1].strip() != 'pass':
+        return code
+    header = '\n'.join(lines[:-1])
+    return header if opens_block(header) else code
+
+
+# =============================================================================
+# Relinking a visualizer to a line of code
+# =============================================================================
+#
+# Re-establishing a link via the chain icon works the same way for every
+# visualizer that generates code; only the grammar it parses/generates with and
+# the actions it defaults to differ. Those differences travel in a LinkConfig
+# built once per visualizer module, so the logic below exists once.
+
+@dataclass(frozen=True, slots=True)
+class LinkConfig:
+    """One visualizer's wiring for the shared relink logic.
+
+    parse_line, get_context, generate_action and ctx_to_model are the
+    visualizer's own grammar/model plumbing; change_selected_text is its
+    command dataclass. default_action / default_statement_action are what a
+    relink falls back to when nothing is stashed (or when the stash generates
+    the wrong shape), and statement_actions is the set of actions that generate
+    a block header rather than an assignable expression.
+
+    whole_value_context is an optional second context source, used when the
+    model has no search: a list can still generate over the whole list, a
+    string has nothing to generate without a search.
+    """
+    parse_line: Callable[[str], Tuple[Any, str]]
+    get_context: Callable[..., 'dict | None']
+    generate_action: Callable[[str, dict], 'Tuple[str | None, str] | None']
+    ctx_to_model: Callable[[dict, dict], None]
+    change_selected_text: Callable[..., Any]
+    default_action: str
+    default_statement_action: str
+    statement_actions: 'frozenset[str]'
+    whole_value_context: 'Callable[..., dict | None] | None' = None
+
+
+def link_source_expr(var_and_exp) -> 'str | None':
+    """The expression a link generates from, even with no search yet."""
+    if not var_and_exp:
+        return None
+    var_name, expr = var_and_exp
+    return var_name if var_name else f"({expr})"
+
+
+def parse_owned_line(cfg: LinkConfig, text: str, var_and_exp) -> 'tuple[dict, str] | None':
+    """Parse *text* if it is code this visualizer could have written for this
+    value, i.e. one of its actions over its own source expression.
+
+    Returns ``(ctx, prefix)`` as the visualizer's parse_line does, or None when
+    the line belongs to something else (or to nothing we recognize).
+    """
+    parsed, prefix = cfg.parse_line(text)
+    if not (parsed and parsed.get('action') and parsed.get('source_expr')):
+        return None
+    if var_and_exp:
+        line_var = var_and_exp[0]
+        if line_var and parsed['source_expr'] != line_var:
+            return None
+    return (parsed, prefix)
+
+
+def relink_action(cfg: LinkConfig, model: dict, mode: str, text: str) -> str:
+    """The action a relink should resume.
+
+    The action stashed by the matching Unlink wins, but only when it generates
+    the same shape as the line being linked: writing an expression over a block
+    header (or a header into an assignment) would break the code around it.
+    """
+    stashed = model.get('unlinked_action')
+    if mode != 'takeover':
+        return stashed or cfg.default_action
+    wants_statement = opens_block(text)
+    if stashed and (stashed in cfg.statement_actions) == wants_statement:
+        return stashed
+    return cfg.default_statement_action if wants_statement else cfg.default_action
+
+
+def adopt_linked_line(cfg: LinkConfig, owned: 'tuple[dict, str]', var_and_exp,
+                      model: dict, *, eval_in_scope=None) -> bool:
+    """Adopt an already-parsed line (see parse_owned_line) into the model.
+
+    Used when a fresh model is asked to take over a line that already contains
+    a previously-generated linked expression (relink-takeover after a file
+    reopen). Leaves the line's text untouched; only the model is updated.
+    Returns True on success.
+    """
+    parsed, prefix = owned
+    cfg.ctx_to_model(parsed, model)
+    model['linked_action'] = parsed['action']
+    model['linked_source_expr'] = parsed['source_expr']
+    model['linked_has_assignment'] = bool(prefix)
+    model['auto_linked_once'] = True
+    # Snapshot the expression already in the editor so the next no-op event
+    # (hover, etc.) does not rewrite it identically. Only the search context is
+    # consulted: the line just parsed into the model is what defines it, so a
+    # whole-value fallback would be describing a different line.
+    ctx = cfg.get_context(model, var_and_exp,
+                          source_expr=model['linked_source_expr'],
+                          eval_in_scope=eval_in_scope)
+    if ctx:
+        result = cfg.generate_action(parsed['action'], ctx)
+        if result:
+            model['last_linked_expr'] = result[1]
+    return True
+
+
+def _relink_context(cfg: LinkConfig, model: dict, var_and_exp, *, eval_in_scope=None):
+    """The context a relink generates from: the model's search, falling back to
+    the whole value for visualizers that can generate without one."""
+    ctx = cfg.get_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+    if ctx is None and cfg.whole_value_context is not None:
+        ctx = cfg.whole_value_context(model, var_and_exp)
+    return ctx
+
+
+def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
+                  model: dict, commands: list, *, eval_in_scope=None) -> None:
+    """Handle a Relink event: record the link in *model* and, where the link
+    implies code, append the command that writes it to *commands*."""
+    owned = parse_owned_line(cfg, text, var_and_exp) if mode == 'takeover' else None
+    if owned and not model.get('unlinked_action'):
+        # Fresh model over an existing generated line: adopt the line as-is
+        # (parse it into the model) instead of clobbering it.
+        if adopt_linked_line(cfg, owned, var_and_exp, model, eval_in_scope=eval_in_scope):
+            return
+
+    action = relink_action(cfg, model, mode, text)
+    ctx = _relink_context(cfg, model, var_and_exp, eval_in_scope=eval_in_scope)
+    result = cfg.generate_action(action, ctx) if ctx else None
+    source_expr = link_source_expr(var_and_exp)
+
+    # Taking over a line we didn't write inserts and rewrites nothing: the link
+    # alone is what the user asked for, and the next interaction is what edits
+    # the line. So only an expression actually written below may be remembered
+    # as last_linked_expr - remembering one we never wrote would make the next
+    # interaction that regenerates it a no-op, stranding the user's text on a
+    # line the chain icon claims is linked.
+    written = None
+    if result and owned:
+        # Resuming a link on a line we wrote: bring it up to date with the
+        # visualizer's current state, keeping the var name.
+        written = result[1]
+        commands.append(cfg.change_selected_text(expression=written,
+                                                 suggested_var_name=None))
+    elif result and mode == 'insert':
+        written = result[1]
+        commands.append(result)
+
+    if source_expr and (result or mode == 'takeover'):
+        model['linked_action'] = action
+        model['linked_source_expr'] = source_expr
+        model['unlinked_action'] = None
+        model['auto_linked_once'] = True
+        # Statement actions have no name to assign to.
+        model['linked_has_assignment'] = action not in cfg.statement_actions
+        model['last_linked_expr'] = written
+
+
+def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
+    """Wrap a visualizer's whole output in a draggable snc-py-exp grab span.
+
+    Only for visualizers with no content of their own to hover - the generic
+    and static ones. A visualizer that renders its own handles (list cells,
+    field chips, characters) must not do this: the outer handle would claim
+    every hover inside it and show the whole value's expression instead of the
+    more specific one under the cursor. Renders bare when the parent supplies
+    no access-path expression via var_and_exp.
     """
     expr = var_and_exp[1] if var_and_exp else None
     if not expr:

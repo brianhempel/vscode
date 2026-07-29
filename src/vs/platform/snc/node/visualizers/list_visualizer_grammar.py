@@ -1,6 +1,7 @@
 import re
 import ast
 from bidirectional_dsl import BiTemplate, Alt, BASE_RULES, make_grammar, generate, parse
+from visualizer_utils import without_pass_body
 
 
 LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
@@ -107,6 +108,10 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     # --- Any ---
 
+    # Each action's whole-list form (what the visualizer generates before the
+    # user types a search) comes last: the predicate and index forms are more
+    # specific, and a whole-list source_expr would otherwise swallow them.
+
     Alt("AnyAction", [
         BiTemplate("AnyPredicate",
                    "any({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr})",
@@ -114,6 +119,9 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         BiTemplate("AnyMultiIndex",
                    "len({indices_expr:AnyPython}) > 0",
                    {'is_multi_index': True}),
+        BiTemplate("AnyWholeList",
+                   "any({source_expr:VarOrExpr})",
+                   {'is_whole_list': True}),
     ], {}),
 
     # --- All ---
@@ -125,45 +133,69 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         BiTemplate("AllMultiIndex",
                    "len({indices_expr:AnyPython}) == len({source_expr:VarOrExpr})",
                    {'is_multi_index': True}),
+        BiTemplate("AllWholeList",
+                   "all({source_expr:VarOrExpr})",
+                   {'is_whole_list': True}),
     ], {}),
 
     # --- If Any / If All ---
 
-    BiTemplate("IfAnyAction",
-               "if any({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr}):\n    pass",
-               {'is_predicate': True}),
+    Alt("IfAnyAction", [
+        BiTemplate("IfAnyPredicate",
+                   "if any({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr}):",
+                   {'is_predicate': True}),
+        BiTemplate("IfAnyWholeList",
+                   "if any({source_expr:VarOrExpr}):",
+                   {'is_whole_list': True}),
+    ], {}),
 
-    BiTemplate("IfAllAction",
-               "if all({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr}):\n    pass",
-               {'is_predicate': True}),
+    Alt("IfAllAction", [
+        BiTemplate("IfAllPredicate",
+                   "if all({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr}):",
+                   {'is_predicate': True}),
+        BiTemplate("IfAllWholeList",
+                   "if all({source_expr:VarOrExpr}):",
+                   {'is_whole_list': True}),
+    ], {}),
 
     # --- Loop ---
 
     Alt("LoopNoIdxAction", [
         BiTemplate("LoopNoIdxPredicate",
-                   "for item in (item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}):\n    pass",
+                   "for item in (item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}):",
                    {'is_predicate': True}),
         BiTemplate("LoopNoIdxMultiIndex",
-                   "for item in [{source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}]:\n    pass",
+                   "for item in [{source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}]:",
                    {'is_multi_index': True}),
+        BiTemplate("LoopNoIdxWholeList",
+                   "for item in {source_expr:VarOrExpr}:",
+                   {'is_whole_list': True}),
     ], {}),
 
     Alt("LoopOrigIdxAction", [
         BiTemplate("LoopOrigIdxPredicate",
-                   "for i, item in enumerate({source_expr:VarOrExpr}):\n    if {predicate_expr:AnyPython}:\n        pass",
+                   "for i, item in enumerate({source_expr:VarOrExpr}):\n    if {predicate_expr:AnyPython}:",
                    {'is_predicate': True}),
         BiTemplate("LoopOrigIdxMultiIndex",
-                   "for i in {indices_expr:AnyPython}:\n    pass",
+                   "for i in {indices_expr:AnyPython}:",
                    {'is_multi_index': True}),
+        BiTemplate("LoopOrigIdxWholeList",
+                   "for i, item in enumerate({source_expr:VarOrExpr}):",
+                   {'is_whole_list': True}),
     ], {}),
 
     Alt("LoopNewIdxAction", [
         BiTemplate("LoopNewIdxPredicate",
-                   "for i, item in enumerate(item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}):\n    pass",
+                   "for i, item in enumerate(item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}):",
                    {'is_predicate': True}),
         BiTemplate("LoopNewIdxMultiIndex",
-                   "for i, item in enumerate({source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}):\n    pass",
+                   "for i, item in enumerate({source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}):",
                    {'is_multi_index': True}),
+        # Identical to the loop_orig_idx whole-list form; parse resolves the
+        # ambiguity in favour of loop_orig_idx, which is listed first.
+        BiTemplate("LoopNewIdxWholeList",
+                   "for i, item in enumerate({source_expr:VarOrExpr}):",
+                   {'is_whole_list': True}),
     ], {}),
 
     # --- Top-level Action: gates on 'action' key ---
@@ -346,6 +378,9 @@ def _parse_generated_join(code_line: str) -> dict | None:
 
 
 def parse_generated_code(code_line: str) -> dict | None:
+    # Statements are generated as bare headers, but text coming back from the
+    # editor may still carry the placeholder body that was inserted with it.
+    code_line = without_pass_body(code_line)
     ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Action'], code_line)
     if ctx is not None:
         return ctx
@@ -353,6 +388,7 @@ def parse_generated_code(code_line: str) -> dict | None:
 
 
 def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str]:
+    code_line = without_pass_body(code_line)
     ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Assignment'], code_line)
     if ctx is not None and 'assign_var_name' in ctx:
         return (ctx, f"{ctx['assign_var_name']} = ")
