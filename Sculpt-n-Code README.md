@@ -23,11 +23,13 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.vscode-oss-dev\extensions" -Target
 # Python stuff
 pip install pytest
 
-# Build (first build takes 66sec)
-npm run watch # first build, and if you are working on extensions
-npm run watch-client # faster
+# If you want to write Python that downloads URLs, you'll need SSL certs
+/Applications/Python\ 3.14/Install\ Certificates.command
 
-# Launch app. Run in separate terminal from watch-client
+# Build
+npm run watch-snc
+
+# Launch app. Run in separate terminal from watch-snc
 ./scripts/code.sh
 .\scripts\code.bat # Windows
 ```

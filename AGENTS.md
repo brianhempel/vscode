@@ -8,6 +8,10 @@ When working on a *_visualizer.py file, first write failing tests in *_visulizer
 
 If you git stash (e.g. to check for pre-existing test failures), don't forget to pop the stash afterward.
 
+## Cursor
+
+If you are an agent in Cursor, know that I've turned off automatic Typescript language server diagnostics etc. Was eating too much resident memory. Have to rely on the build process to surface errors.
+
 ## UI Testing
 
 In general, ask the human to test UI features. If specifically asked by the user to test a UI feature yourself, follow the directions in UI_TESTING.md.
