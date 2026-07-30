@@ -1373,9 +1373,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const targetRect = matchTarget.getBoundingClientRect();
 		const containerRect = container.getBoundingClientRect();
 
-		// Vertical: if not fully visible, align to top of container
-		if (targetRect.top < containerRect.top || targetRect.bottom > containerRect.bottom) {
-			container.scrollTop += targetRect.top - containerRect.top - 2;
+		// Pinned table headers (position: sticky) visually cover the top of
+		// the scroll container, so a row aligned to containerRect.top can
+		// still end up hidden underneath the header.
+		const headerEl = container.querySelector('th') as HTMLElement | null;
+		const headerHeight = headerEl && dom.getWindow(headerEl).getComputedStyle(headerEl).position === 'sticky'
+			? headerEl.getBoundingClientRect().height
+			: 0;
+		const visibleTop = containerRect.top + headerHeight;
+
+		// Vertical: if not fully visible, align to top of container (below any pinned header)
+		if (targetRect.top < visibleTop || targetRect.bottom > containerRect.bottom) {
+			container.scrollTop += targetRect.top - visibleTop - 2;
 		}
 
 		// Horizontal: if not fully visible
