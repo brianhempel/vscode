@@ -385,61 +385,9 @@ span.overlay-content {
   margin: 6px 0px;
 }
 
-.tool-toolbar {
-	position: absolute;
-	top: 1px;
-	right: 1px;
-	display: flex;
-	flex-direction: column;
-	/* padding: 2px; */
-	gap: 2px;
-	z-index: 50;
-	user-select: none;
-	/* Opaque background so the toolbar doesn't visually merge with characters
-	   that scroll under it (relevant in both vertical and compact modes since
-	   the toolbar sits on top of the string content). */
-	background: var(--snc-bg);
-	border-radius: 4px;
-	outline: 1px solid var(--snc-bg); /* in case it's over the string itself */
-}
-
-.tool-button {
-	font-family: var(--snc-code-font-family);
-	font-size: 11px;
-	line-height: 1;
-	width: 18px;
-	height: 18px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	border-radius: 3px;
-	cursor: pointer;
-	color: var(--snc-text-color);
-}
-
-/* Match .action-button hover/active styling so the toolbar feels like part of
-   the action button area at the bottom of the visualizer. */
-.tool-button:hover {
-	background: var(--snc-hover-bg);
-	color: black;
-}
-
-.tool-button.active {
-	background: var(--snc-hover-bg);
-	color: var(--snc-accent);
-}
-
-/* Dimmed tool buttons (e.g. pick tool with no current search) - visibly
-   inactive and click-inert. */
-.tool-button.dimmed {
-	opacity: 0.35;
-	cursor: default;
-}
-
-.tool-button.dimmed:hover {
-	background: transparent;
-	color: var(--snc-text-color);
-}
+/* The base .tool-toolbar / .tool-button rules live in snc.css -- the list
+   visualizer uses the same toolbar. What follows is string-only: the
+   modifier-key overrides and the compact dropdown variant. */
 
 /* Transient tool overrides driven by held modifier keys (set on body by snc.ts).
    Resolver priority (mirrors _resolve_selection_type): shift > alt > ctrl > tool.

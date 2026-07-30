@@ -86,6 +86,47 @@ def span(text, color):
     return f'<span style="color: {color};">{text}</span>'
 
 
+def nerd_font_icon(glyph: str, size: int = 12) -> str:
+    """Wrap a Pragmasevka nerd-font glyph so it renders in the icon font."""
+    return f'<span style="font-family:Pragmasevka;font-size:{size}px">{glyph}</span>'
+
+
+def render_tool_toolbar(tools, current: str, make_event, *, disabled=()) -> str:
+    """Render the upper-right tool toolbar shared by the visualizers.
+
+    The string visualizer offers literal/fuzzy/index/pick; the list visualizer
+    offers normal/pick. Only the tool list differs, so the markup lives here.
+
+    Args:
+      tools: sequence of (tool_id, icon_html, display_name). icon_html is
+        emitted verbatim -- callers escape their own labels, because some are
+        plain text ('ab') and some are pre-rendered icon spans.
+      current: the active tool id, which gets the .active class.
+      make_event: tool_id -> the repr'd event string for snc-mouse-down. Taken
+        as a callback because each visualizer defines its own ToolSelect type,
+        and the string is eval'd in that module's namespace.
+      disabled: tool ids to render dimmed and click-inert (no handler at all).
+    """
+    btns = []
+    for tool, icon_html, name in tools:
+        cls = 'tool-button'
+        if tool == current:
+            cls += ' active'
+        is_disabled = tool in disabled
+        if is_disabled:
+            cls += ' dimmed'
+        # Right-aligned tooltip: the toolbar sits in the upper-right corner,
+        # where there is empty editor space to the right.
+        attrs = (f'class="{cls}" data-tool="{tool}" '
+                 f'data-tooltip="{html.escape(name)}" data-tooltip-align="right"')
+        if is_disabled:
+            btns.append(f'<span {attrs}>{icon_html}</span>')
+        else:
+            event = html.escape(make_event(tool))
+            btns.append(f'<span {attrs} snc-mouse-down="{event}">{icon_html}</span>')
+    return f'<div class="tool-toolbar">{"".join(btns)}</div>'
+
+
 # =============================================================================
 # Dotfile persistence (generic JSON key→list storage)
 # =============================================================================

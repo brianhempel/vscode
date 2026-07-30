@@ -11,22 +11,46 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     # --- Filter ---
 
+    # The plain forms come first: `next((item for item in xs if p), None)` also
+    # matches the pick template with pick_expr='item', and parsing should read
+    # it as an ordinary first-match filter rather than a degenerate pick.
     Alt("FilterAction", [
-        BiTemplate("FilterPredicateFirst",
-                   "next((item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}), None)",
-                   {'is_predicate': True, 'is_first': True}),
-        BiTemplate("FilterPredicateAll",
-                   "[item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}]",
-                   {'is_predicate': True, 'is_first': False}),
-        BiTemplate("FilterSlice",
-                   "{source_expr:VarOrExpr}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}]",
-                   {'is_slice': True}),
-        BiTemplate("FilterIndex",
-                   "{source_expr:VarOrExpr}[{index_expr:IndexExpr}]",
-                   {'is_index': True}),
-        BiTemplate("FilterMultiIndex",
-                   "[{source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}]",
-                   {'is_multi_index': True}),
+        Alt("FilterPlainAction", [
+            BiTemplate("FilterPredicateFirst",
+                       "next((item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}), None)",
+                       {'is_predicate': True, 'is_first': True}),
+            BiTemplate("FilterPredicateAll",
+                       "[item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}]",
+                       {'is_predicate': True, 'is_first': False}),
+            BiTemplate("FilterSlice",
+                       "{source_expr:VarOrExpr}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}]",
+                       {'is_slice': True}),
+            BiTemplate("FilterIndex",
+                       "{source_expr:VarOrExpr}[{index_expr:IndexExpr}]",
+                       {'is_index': True}),
+            BiTemplate("FilterMultiIndex",
+                       "[{source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}]",
+                       {'is_multi_index': True}),
+        ], {'has_pick': False}),
+
+        # Pick tool: the picked expression replaces the bare `item`. Pick is
+        # first-match-only, so there is no all-matches counterpart.
+        Alt("FilterPickAction", ["PickFirstMatch"], {'has_pick': True}),
+    ], {}),
+
+    # --- Pick wrapper ---
+    #
+    # One next(...) binds the matched row -- and its index, when the picked
+    # regions need one -- for the picked expression to evaluate against. Shared
+    # by Filter and by the Loop forms that run over an array pick.
+
+    Alt("PickFirstMatch", [
+        BiTemplate("PickFirstMatchPlain",
+                   "next(({pick_expr:AnyPython} for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}), None)",
+                   {'is_predicate': True, 'is_first': True, 'needs_index': False}),
+        BiTemplate("PickFirstMatchIndexed",
+                   "next(({pick_expr:AnyPython} for i, item in enumerate({source_expr:VarOrExpr}) if {predicate_expr:AnyPython}), None)",
+                   {'is_predicate': True, 'is_first': True, 'needs_index': True}),
     ], {}),
 
     # --- Delete ---
@@ -161,6 +185,10 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # --- Loop ---
 
     Alt("LoopNoIdxAction", [
+        # An array pick is already a list, so the loop runs straight over it.
+        BiTemplate("LoopNoIdxPick",
+                   "for item in {:PickFirstMatch}:",
+                   {'has_pick': True, 'pick_is_array': True}),
         BiTemplate("LoopNoIdxPredicate",
                    "for item in (item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}):",
                    {'is_predicate': True}),
@@ -185,6 +213,9 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("LoopNewIdxAction", [
+        BiTemplate("LoopNewIdxPick",
+                   "for i, item in enumerate({:PickFirstMatch}):",
+                   {'has_pick': True, 'pick_is_array': True}),
         BiTemplate("LoopNewIdxPredicate",
                    "for i, item in enumerate(item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}):",
                    {'is_predicate': True}),
@@ -211,8 +242,14 @@ LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         Alt("ActionAll", ["AllAction"], {'action': 'all'}),
         Alt("ActionAny", ["AnyAction"], {'action': 'any'}),
         Alt("ActionCount", ["CountAction"], {'action': 'count'}),
-        Alt("ActionFilter", ["FilterAction"], {'action': 'filter'}),
+        # Find Indices before Filter: the pick templates below FilterAction take
+        # an arbitrary picked expression, so they also match find_indices' own
+        # `next((i for i, item in enumerate(xs) if p), None)`. Both readings
+        # evaluate identically; find_indices is the canonical one for that line,
+        # so it gets first refusal. (Consequence: picking only the index column
+        # relinks as Find Indices rather than as a pick. Same value either way.)
         Alt("ActionFindIndices", ["FindIndicesAction"], {'action': 'find_indices'}),
+        Alt("ActionFilter", ["FilterAction"], {'action': 'filter'}),
     ], {}),
 ])
 
@@ -254,6 +291,8 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
 def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     gen_ctx = {k: v for k, v in ctx.items() if v is not None}
     gen_ctx['action'] = action
+    gen_ctx['has_pick'] = bool(ctx.get('pick_expr'))
+    gen_ctx['pick_is_array'] = bool(ctx.get('pick_expr')) and bool(ctx.get('pick_is_array'))
     if ctx.get('is_slice'):
         gen_ctx['has_slice_start'] = bool(ctx.get('slice_start'))
         gen_ctx['has_slice_stop'] = bool(ctx.get('slice_stop'))
@@ -343,6 +382,12 @@ def _parse_generated_join(code_line: str) -> dict | None:
                 'is_first': False,
             }
         if not comp.ifs:
+            # A join over an array pick iterates the pick's next(...) wrapper,
+            # not a plain list. Reading that as a whole-list source would make
+            # the wrapper the "source expression" and quietly strip the pick, so
+            # leave it unparsed and let relink fall back.
+            if isinstance(comp.iter, ast.Call):
+                return None
             return {
                 'action': 'join',
                 'source_expr': _source_text(code_line, comp.iter),

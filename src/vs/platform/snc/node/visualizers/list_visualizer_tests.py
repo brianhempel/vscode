@@ -3988,6 +3988,7 @@ class _ListActionTestBase(unittest.TestCase):
     def _gen(self, action, ctx):
         gen_ctx = {k: v for k, v in ctx.items() if v is not None}
         gen_ctx['action'] = action
+        gen_ctx['has_pick'] = bool(ctx.get('pick_expr'))
         if ctx.get('is_slice'):
             gen_ctx['has_slice_start'] = bool(ctx.get('slice_start'))
             gen_ctx['has_slice_stop'] = bool(ctx.get('slice_stop'))
@@ -3998,6 +3999,7 @@ class _ListActionTestBase(unittest.TestCase):
         'is_first', 'source_expr', 'predicate_expr', 'index_expr',
         'slice_start', 'slice_stop', 'indices_expr',
         'has_slice_start', 'has_slice_stop',
+        'pick_expr', 'needs_index',
     })
 
     def _roundtrip(self, action, ctx):
@@ -4893,6 +4895,642 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         values = [eval_in_scope(replace_carets_in_py_exp(col, [f'rows[{i}]']))
                   for i in range(len(rows))]
         self.assertEqual(values, [[''], ['baz ']])
+
+
+# === Pick tool ===
+
+from list_visualizer import (
+    ToolSelect, PickToggle,
+    _pick_region_ids, _pick_region_expr, _build_pick_expr, _pick_needs_index,
+    _pick_edge_class, _pick_is_array, pick_filter_expr, PICK_IDX_COLUMN,
+)
+
+
+def make_tool_select_event(tool):
+    """Create a ToolSelect event."""
+    return {
+        'pythonEventStr': repr(ToolSelect(tool=tool)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+def make_pick_toggle_event(region_id):
+    """Create a PickToggle event."""
+    return {
+        'pythonEventStr': repr(PickToggle(region_id=region_id)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+# The worked example from the plan: a match on row 2 of 5, two columns.
+PICK_STRS = ['abc', 'efg', 'Asdfasdz', 'sdfd', '']
+PICK_COLUMNS = ['^', 'len(^)']
+PICK_SEARCH = 'len(^) > 4'
+
+
+def pick_eval(code):
+    return eval(code, {'strs': list(PICK_STRS)})
+
+
+def make_pick_model(picked=None, columns=None, search=PICK_SEARCH, tool='pick'):
+    """A table model parked in pick mode over PICK_STRS."""
+    model = init_model(PICK_STRS, mock_get_visualizer, eval_in_scope=pick_eval,
+                       var_and_exp=('strs', 'strs'))
+    model['columns'] = list(PICK_COLUMNS if columns is None else columns)
+    model['search'] = search
+    model['tool'] = tool
+    model['first_match'] = True
+    model['picked'] = list(picked) if picked else None
+    model['pick_expr'] = _build_pick_expr(model, 'strs')
+    return model
+
+
+class TestPickToolToolbar(unittest.TestCase):
+    """The Normal/Pick toolbar in the upper-right corner."""
+
+    def test_renders_both_tools(self):
+        model = make_pick_model(tool='normal')
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        self.assertEqual(re.findall(r'data-tool="(\w+)"', output),
+                         ['normal', 'pick'])
+
+    def test_active_tool_marked(self):
+        model = make_pick_model()
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        self.assertIn('class="tool-button active" data-tool="pick"', output)
+
+    def test_hidden_when_small(self):
+        model = make_pick_model()
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval,
+                           small=True)
+        self.assertNotIn('tool-toolbar', output)
+
+    def test_pick_dimmed_without_search(self):
+        model = make_pick_model(search=None, tool='normal')
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        pick_btn = re.search(r'<span class="([^"]*)" data-tool="pick"', output)
+        self.assertIn('dimmed', pick_btn.group(1))
+        # Dimmed means click-inert, so no handler at all.
+        self.assertNotIn('ToolSelect(tool=\'pick\')', html.unescape(output))
+
+    def test_container_carries_tool_class(self):
+        model = make_pick_model()
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        self.assertIn('pick-tool-selected', output)
+
+    def test_selecting_pick_forces_first_match(self):
+        model = make_pick_model(tool='normal')
+        model['first_match'] = False
+        new_model, _ = update(make_tool_select_event('pick'), ('strs', 'strs'),
+                              model, PICK_STRS, mock_get_visualizer, pick_eval)
+        self.assertEqual(new_model['tool'], 'pick')
+        self.assertTrue(new_model['first_match'])
+
+    def test_leaving_pick_clears_selection(self):
+        model = make_pick_model(picked=['match_col_1'])
+        self.assertIsNotNone(model['pick_expr'])
+        new_model, _ = update(make_tool_select_event('normal'), ('strs', 'strs'),
+                              model, PICK_STRS, mock_get_visualizer, pick_eval)
+        self.assertEqual(new_model['tool'], 'normal')
+        self.assertIsNone(new_model['picked'])
+        self.assertIsNone(new_model['pick_expr'])
+
+    def test_escape_leaves_pick_mode(self):
+        model = make_pick_model(picked=['match_col_1'])
+        new_model, _ = update(make_search_key_event('Escape'), ('strs', 'strs'),
+                              model, PICK_STRS, mock_get_visualizer, pick_eval)
+        self.assertEqual(new_model['tool'], 'normal')
+        self.assertIsNone(new_model['pick_expr'])
+
+    def test_first_match_toggle_inert_in_pick_mode(self):
+        model = make_pick_model()
+        new_model, _ = update(make_first_match_toggle_event(), ('strs', 'strs'),
+                              model, PICK_STRS, mock_get_visualizer, pick_eval)
+        self.assertTrue(new_model['first_match'])
+
+    def test_delete_disabled_in_pick_mode(self):
+        output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
+                           pick_eval)
+        delete_btn = re.search(
+            r'<span class="([^"]*)" snc-mouse-down="ActionButtonClick\(action=&#x27;delete',
+            output)
+        self.assertIn('dimmed', delete_btn.group(1))
+
+
+class TestPickRegions(unittest.TestCase):
+    """The 3 x (1 + columns) grid of pickable regions."""
+
+    def test_region_ids_for_worked_example(self):
+        self.assertEqual(
+            _pick_region_ids(PICK_COLUMNS, 2, 5),
+            ['pre_idx', 'match_idx', 'post_idx',
+             'pre_col_0', 'match_col_0', 'post_col_0',
+             'pre_col_1', 'match_col_1', 'post_col_1'])
+
+    def test_no_pre_band_when_match_is_first_row(self):
+        ids = _pick_region_ids(PICK_COLUMNS, 0, 5)
+        self.assertEqual([i for i in ids if i.startswith('pre_')], [])
+        self.assertEqual(len(ids), 6)
+
+    def test_no_post_band_when_match_is_last_row(self):
+        ids = _pick_region_ids(PICK_COLUMNS, 4, 5)
+        self.assertEqual([i for i in ids if i.startswith('post_')], [])
+        self.assertEqual(len(ids), 6)
+
+    def test_single_row_list_has_only_match_band(self):
+        self.assertEqual(_pick_region_ids(['^'], 0, 1),
+                         ['match_idx', 'match_col_0'])
+
+    def test_region_expressions(self):
+        got = {rid: _pick_region_expr(rid, PICK_COLUMNS, 'strs')
+               for rid in _pick_region_ids(PICK_COLUMNS, 2, 5)}
+        self.assertEqual(got, {
+            'pre_idx': 'list(range(i))',
+            'match_idx': 'i',
+            'post_idx': 'list(range(i + 1, len(strs)))',
+            # The identity column is the sublist itself -- no comprehension.
+            'pre_col_0': 'strs[:i]',
+            'match_col_0': '^',
+            'post_col_0': 'strs[i + 1:]',
+            'pre_col_1': '[len(x) for x in strs[:i]]',
+            'match_col_1': 'len(^)',
+            'post_col_1': '[len(x) for x in strs[i + 1:]]',
+        })
+
+    def test_edge_classes_across_a_multi_row_band(self):
+        # Match on row 3 of 6: the pre band spans rows 0-2.
+        got = [_pick_edge_class(row, 3, 6) for row in range(6)]
+        self.assertEqual(got, [
+            'pick-region-first', 'pick-region-mid', 'pick-region-last',
+            'pick-region-only',
+            'pick-region-first', 'pick-region-last',
+        ])
+
+    def test_overlay_rendered_in_every_cell(self):
+        output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
+                           pick_eval)
+        # 5 rows x (row index + 2 columns).
+        self.assertEqual(output.count('class="pick-region'), 15)
+
+    def test_row_striping_replaced_by_bands(self):
+        output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
+                           pick_eval)
+        # Matched on the full attribute: 'pick-row-match' contains 'row-match'.
+        self.assertNotIn('class="row-match"', output)
+        self.assertNotIn('class="row-dim"', output)
+        self.assertIn('pick-row-pre', output)
+        self.assertIn('pick-row-match', output)
+        self.assertIn('pick-row-post', output)
+
+    def test_selected_region_marked(self):
+        output = visualize(PICK_STRS, make_pick_model(picked=['match_col_1']),
+                           mock_get_visualizer, pick_eval)
+        selected = re.findall(r'class="(pick-region[^"]*selected[^"]*)"', output)
+        self.assertEqual(len(selected), 1)
+
+    def test_regions_carry_self_contained_expressions(self):
+        output = html.unescape(
+            visualize(PICK_STRS, make_pick_model(), mock_get_visualizer, pick_eval))
+        exprs = re.findall(r'snc-py-exp="([^"]*)"', output)
+        # Every region offers a draggable expression that stands on its own.
+        pre_col1 = ('next(([len(x) for x in strs[:i]] for i, item in '
+                    'enumerate(strs) if len(item) > 4), None)')
+        self.assertIn(pre_col1, exprs)
+        self.assertEqual(pick_eval(pre_col1), [3, 3])
+
+    def test_no_regions_in_small_mode(self):
+        output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
+                           pick_eval, small=True)
+        self.assertNotIn('pick-region', output)
+
+    def test_no_regions_without_a_search(self):
+        model = make_pick_model(search=None)
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        self.assertNotIn('pick-region', output)
+
+    def test_stale_region_ids_are_dropped(self):
+        # col_5 doesn't exist; the surviving pick still assembles.
+        model = make_pick_model(picked=['match_col_5', 'match_col_1'])
+        self.assertEqual(model['pick_expr'], 'len(^)')
+
+
+class TestPickExpr(unittest.TestCase):
+    """Assembling picked regions into one expression."""
+
+    def _expr(self, picked):
+        return make_pick_model(picked=picked)['pick_expr']
+
+    def test_nothing_picked(self):
+        self.assertIsNone(self._expr([]))
+
+    def test_single_region_is_bare(self):
+        self.assertEqual(self._expr(['match_col_1']), 'len(^)')
+
+    def test_multiple_regions_become_a_tuple(self):
+        self.assertEqual(self._expr(['match_idx', 'match_col_1']), '(i, len(^))')
+
+    def test_canonical_order_regardless_of_click_order(self):
+        self.assertEqual(self._expr(['match_col_1', 'match_idx']),
+                         self._expr(['match_idx', 'match_col_1']))
+
+    def test_all_three_bands_collapse_to_whole_column(self):
+        self.assertEqual(
+            self._expr(['pre_col_1', 'match_col_1', 'post_col_1']),
+            '[len(x) for x in strs]')
+
+    def test_pre_plus_match_collapses_to_head(self):
+        self.assertEqual(self._expr(['pre_col_1', 'match_col_1']),
+                         '[len(x) for x in strs[:i + 1]]')
+
+    def test_match_plus_post_collapses_to_tail(self):
+        self.assertEqual(self._expr(['match_col_1', 'post_col_1']),
+                         '[len(x) for x in strs[i:]]')
+
+    def test_pre_plus_post_has_a_hole_so_does_not_collapse(self):
+        self.assertEqual(self._expr(['pre_col_1', 'post_col_1']),
+                         '([len(x) for x in strs[:i]], '
+                         '[len(x) for x in strs[i + 1:]])')
+
+    def test_index_column_collapses_too(self):
+        self.assertEqual(self._expr(['pre_idx', 'match_idx', 'post_idx']),
+                         'list(range(len(strs)))')
+        self.assertEqual(self._expr(['pre_idx', 'match_idx']),
+                         'list(range(i + 1))')
+        self.assertEqual(self._expr(['match_idx', 'post_idx']),
+                         'list(range(i, len(strs)))')
+
+    def test_identity_column_collapses_without_a_comprehension(self):
+        self.assertEqual(self._expr(['pre_col_0', 'match_col_0', 'post_col_0']),
+                         'strs')
+
+    def test_collapses_are_per_column(self):
+        self.assertEqual(
+            self._expr(['pre_col_0', 'match_col_0', 'post_col_0', 'match_idx']),
+            '(i, strs)')
+
+    def test_needs_index(self):
+        self.assertFalse(_pick_needs_index('len(^)'))
+        self.assertFalse(_pick_needs_index('^'))
+        self.assertTrue(_pick_needs_index('i'))
+        self.assertTrue(_pick_needs_index('strs[:i]'))
+        self.assertTrue(_pick_needs_index('(i, len(^))'))
+
+
+class TestPickGeneratedCode(unittest.TestCase):
+    """The line of code a pick produces, and what it evaluates to."""
+
+    def _generate(self, picked):
+        model = make_pick_model(picked=picked)
+        ctx = _get_search_context(model, ('strs', 'strs'), eval_in_scope=pick_eval)
+        return generate_action('filter', ctx)[1]
+
+    def test_scalar_pick_needs_no_enumerate(self):
+        code = self._generate(['match_col_1'])
+        self.assertEqual(
+            code, 'next((len(item) for item in strs if len(item) > 4), None)')
+        self.assertEqual(pick_eval(code), 8)
+
+    def test_index_pick_enumerates(self):
+        code = self._generate(['match_idx'])
+        self.assertEqual(
+            code,
+            'next((i for i, item in enumerate(strs) if len(item) > 4), None)')
+        self.assertEqual(pick_eval(code), 2)
+
+    def test_tuple_pick(self):
+        code = self._generate(['match_idx', 'match_col_1'])
+        self.assertEqual(pick_eval(code), (2, 8))
+
+    def test_band_pick(self):
+        code = self._generate(['pre_col_0', 'match_col_0'])
+        self.assertEqual(
+            code,
+            'next((strs[:i + 1] for i, item in enumerate(strs) '
+            'if len(item) > 4), None)')
+        self.assertEqual(pick_eval(code), ['abc', 'efg', 'Asdfasdz'])
+
+    def test_no_pick_generates_the_plain_filter(self):
+        self.assertEqual(
+            self._generate([]),
+            'next((item for item in strs if len(item) > 4), None)')
+
+    def test_picking_the_whole_row_degenerates_to_the_plain_filter(self):
+        # ^ IS the item, so this is the ordinary first-match filter.
+        self.assertEqual(
+            self._generate(['match_col_0']),
+            'next((item for item in strs if len(item) > 4), None)')
+
+    def test_hand_written_and_grammar_generation_agree(self):
+        from list_visualizer_grammar import generate_action as grammar_generate
+        for picked in [['match_col_1'], ['match_idx'], ['pre_col_0', 'match_col_0'],
+                       ['match_idx', 'match_col_1'], ['pre_col_1', 'post_col_1']]:
+            with self.subTest(picked=picked):
+                model = make_pick_model(picked=picked)
+                ctx = _get_search_context(model, ('strs', 'strs'),
+                                          eval_in_scope=pick_eval)
+                self.assertEqual(grammar_generate('filter', ctx)[1],
+                                 generate_action('filter', ctx)[1])
+
+
+class TestPickPreview(unittest.TestCase):
+    """The preview line under the search box."""
+
+    def _preview(self, model):
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        m = re.search(r'pick-preview-value">([^<]*)<', output)
+        return m.group(1) if m else None
+
+    def test_shows_the_picked_value(self):
+        self.assertEqual(self._preview(make_pick_model(picked=['match_col_1'])),
+                         '8')
+
+    def test_shows_a_list_for_a_band_pick(self):
+        self.assertEqual(
+            self._preview(make_pick_model(picked=['pre_col_1'])), '[3, 3]')
+
+    def test_absent_when_nothing_picked(self):
+        self.assertIsNone(self._preview(make_pick_model()))
+
+    def test_absent_outside_pick_mode(self):
+        model = make_pick_model(picked=['match_col_1'])
+        model['tool'] = 'normal'
+        self.assertIsNone(self._preview(model))
+
+    def test_reports_the_error_for_a_broken_column(self):
+        model = make_pick_model(picked=['match_col_1'],
+                                columns=['^', '^.nope'])
+        self.assertIn('attribute', (self._preview(model) or '').lower())
+
+
+class TestPickUpdateFlow(unittest.TestCase):
+    """PickToggle through update(), and the code it links."""
+
+    def _send(self, model, event):
+        return update(event, ('strs', 'strs'), model, PICK_STRS,
+                      mock_get_visualizer, pick_eval)
+
+    def test_toggle_on_and_off(self):
+        model = make_pick_model()
+        model, _ = self._send(model, make_pick_toggle_event('match_col_1'))
+        self.assertEqual(model['picked'], ['match_col_1'])
+        self.assertEqual(model['pick_expr'], 'len(^)')
+        model, _ = self._send(model, make_pick_toggle_event('match_col_1'))
+        self.assertIsNone(model['picked'])
+        self.assertIsNone(model['pick_expr'])
+
+    def test_toggle_emits_linked_code(self):
+        model = make_pick_model()
+        model, cmds = self._send(model, make_pick_toggle_event('match_col_1'))
+        exprs = [c.expression for c in cmds if isinstance(c, ChangeSelectedText)]
+        exprs += [c[1] for c in cmds if isinstance(c, tuple)]
+        self.assertEqual(
+            exprs, ['next((len(item) for item in strs if len(item) > 4), None)'])
+
+    def test_toggle_ignored_outside_pick_mode(self):
+        model = make_pick_model(tool='normal')
+        model, _ = self._send(model, make_pick_toggle_event('match_col_1'))
+        self.assertIsNone(model['picked'])
+
+    def test_clearing_the_search_leaves_pick_mode(self):
+        model = make_pick_model(picked=['match_col_1'])
+        model, _ = self._send(model, make_search_input_event(''))
+        self.assertEqual(model['tool'], 'normal')
+        self.assertIsNone(model['pick_expr'])
+
+    def test_table_keeps_its_borders_when_pick_cannot_apply(self):
+        # tool='pick' with no search must not strip the cell borders.
+        model = make_pick_model(search=None)
+        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
+        self.assertIn('normal-tool-selected', output)
+        self.assertNotIn('pick-tool-selected', output)
+
+
+class TestPickIsArray(unittest.TestCase):
+    """A pick is an array when it covers one contiguous run of rows in one column."""
+
+    def _is_array(self, picked, columns=None):
+        return _pick_is_array(make_pick_model(picked=picked, columns=columns))
+
+    def test_contiguous_runs_of_one_column_are_arrays(self):
+        for picked in [['pre_col_1'], ['post_col_1'],
+                       ['pre_col_1', 'match_col_1'],
+                       ['match_col_1', 'post_col_1'],
+                       ['pre_col_1', 'match_col_1', 'post_col_1'],
+                       ['pre_idx'], ['pre_idx', 'match_idx']]:
+            with self.subTest(picked=picked):
+                self.assertTrue(self._is_array(picked))
+
+    def test_lone_match_row_is_a_scalar(self):
+        self.assertFalse(self._is_array(['match_col_1']))
+        self.assertFalse(self._is_array(['match_idx']))
+
+    def test_pre_plus_post_has_a_hole(self):
+        self.assertFalse(self._is_array(['pre_col_1', 'post_col_1']))
+
+    def test_two_columns_make_a_tuple(self):
+        self.assertFalse(self._is_array(['match_idx', 'match_col_1']))
+        self.assertFalse(self._is_array(['pre_col_0', 'pre_col_1']))
+
+    def test_nothing_picked(self):
+        self.assertFalse(self._is_array([]))
+
+    def test_false_outside_pick_mode(self):
+        model = make_pick_model(picked=['pre_col_1', 'match_col_1'], tool='normal')
+        self.assertFalse(_pick_is_array(model))
+
+    def test_stale_column_ids_do_not_count_as_a_second_column(self):
+        # col_9 is gone, so this is still a single-column contiguous run.
+        self.assertTrue(self._is_array(['pre_col_1', 'match_col_1', 'match_col_9']))
+
+
+class TestPickArrayActions(unittest.TestCase):
+    """Loop and Join apply to an array pick; Any/All and Find Indices do not."""
+
+    def _trigger_class(self, output, label):
+        pos = output.find(f'>{label}<')
+        start = output.rfind('<span class="snc-dropdown-trigger', 0, pos)
+        end = output.find('"', start + len('<span class="'))
+        return output[start + len('<span class="'):end]
+
+    def _button_class(self, output, action):
+        pat = (r'<span class="([^"]*)" snc-mouse-down="ActionButtonClick\(action='
+               r'&#x27;' + action + r'&#x27;')
+        return re.search(pat, output).group(1)
+
+    def _render(self, picked, tool='pick'):
+        return visualize(PICK_STRS, make_pick_model(picked=picked, tool=tool),
+                         mock_get_visualizer, pick_eval)
+
+    def test_loop_and_join_enabled_for_an_array_pick(self):
+        out = self._render(['pre_col_1', 'match_col_1'])
+        self.assertNotIn('dimmed', self._trigger_class(out, 'Loop'))
+        self.assertNotIn('dimmed', self._trigger_class(out, 'Join'))
+
+    def test_loop_and_join_disabled_for_a_scalar_pick(self):
+        out = self._render(['match_col_1'])
+        self.assertIn('dimmed', self._trigger_class(out, 'Loop'))
+        self.assertIn('dimmed', self._trigger_class(out, 'Join'))
+
+    def test_loop_and_join_disabled_for_a_tuple_pick(self):
+        out = self._render(['pre_col_1', 'post_col_1'])
+        self.assertIn('dimmed', self._trigger_class(out, 'Loop'))
+        self.assertIn('dimmed', self._trigger_class(out, 'Join'))
+
+    def test_original_indices_row_disabled_for_an_array_pick(self):
+        # A projection of a row range has no meaningful original index.
+        out = self._render(['pre_col_1', 'match_col_1'])
+        row = re.search(r'<div class="([^"]*)"[^>]*>'
+                        r'<span[^>]*>Original indices<', out)
+        self.assertIn('dimmed', row.group(1))
+
+    def test_any_all_disabled_in_pick_mode(self):
+        out = self._render(['pre_col_1', 'match_col_1'])
+        self.assertIn('dimmed', self._trigger_class(out, 'Any/All'))
+
+    def test_find_indices_disabled_in_pick_mode(self):
+        out = self._render(['pre_col_1', 'match_col_1'])
+        self.assertIn('dimmed', self._button_class(out, 'find_indices'))
+
+    def test_any_all_and_find_indices_available_outside_pick_mode(self):
+        out = self._render(None, tool='normal')
+        self.assertNotIn('dimmed', self._trigger_class(out, 'Any/All'))
+        self.assertNotIn('dimmed', self._button_class(out, 'find_indices'))
+
+
+class TestPickArrayGeneratedCode(unittest.TestCase):
+    """Loop and Join run over the picked array itself."""
+
+    def _ctx(self, picked, **extra):
+        model = make_pick_model(picked=picked)
+        ctx = _get_search_context(model, ('strs', 'strs'), eval_in_scope=pick_eval)
+        ctx.update(extra)
+        return ctx
+
+    def test_loop_no_idx_iterates_the_picked_array(self):
+        code = generate_action('loop_no_idx', self._ctx(['pre_col_1', 'match_col_1']))[1]
+        self.assertEqual(
+            code,
+            'for item in next(([len(x) for x in strs[:i + 1]] '
+            'for i, item in enumerate(strs) if len(item) > 4), None):')
+        seen = []
+        exec(code + '\n    seen.append(item)',
+             {'strs': list(PICK_STRS), 'seen': seen})
+        self.assertEqual(seen, [3, 3, 8])
+
+    def test_loop_new_idx_enumerates_the_picked_array(self):
+        code = generate_action('loop_new_idx', self._ctx(['post_col_0']))[1]
+        seen = []
+        exec(code + '\n    seen.append((i, item))',
+             {'strs': list(PICK_STRS), 'seen': seen})
+        self.assertEqual(seen, [(0, 'sdfd'), (1, '')])
+
+    def test_join_joins_the_picked_array(self):
+        code = generate_action(
+            'join', self._ctx(['pre_col_1', 'match_col_1'], join_separator="'|'"))[1]
+        self.assertEqual(eval(code, {'strs': list(PICK_STRS)}), '3|3|8')
+
+    def test_loop_orig_idx_refused_for_an_array_pick(self):
+        self.assertIsNone(
+            generate_action('loop_orig_idx', self._ctx(['pre_col_1', 'match_col_1'])))
+
+    def test_scalar_pick_falls_back_to_the_match_set(self):
+        # Loop is dimmed for a scalar pick, so it keeps the plain predicate form
+        # rather than trying to iterate a scalar.
+        code = generate_action('loop_no_idx', self._ctx(['match_col_1']))[1]
+        self.assertEqual(code, 'for item in (item for item in strs if len(item) > 4):')
+
+    def test_tuple_pick_falls_back_to_the_match_set(self):
+        code = generate_action('join', self._ctx(['pre_col_1', 'post_col_1'],
+                                                 join_separator="'|'"))[1]
+        self.assertEqual(code, "'|'.join(str(item) for item in strs if len(item) > 4)")
+
+    def test_filter_and_the_loop_wrapper_agree(self):
+        ctx = self._ctx(['pre_col_1', 'match_col_1'])
+        self.assertEqual(generate_action('filter', ctx)[1], pick_filter_expr(ctx))
+
+
+class TestListGrammarPick(_ListActionTestBase):
+    """Roundtrip tests for picked filter lines."""
+
+    def test_roundtrip_pick_no_index(self):
+        self._roundtrip('filter', {
+            'is_predicate': True, 'is_first': True,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'len(item) > 4', 'source_expr': 'strs',
+            'pick_expr': 'len(item)', 'needs_index': False,
+        })
+
+    def test_roundtrip_pick_with_index(self):
+        self._roundtrip('filter', {
+            'is_predicate': True, 'is_first': True,
+            'is_index': False, 'is_slice': False, 'is_multi_index': False,
+            'predicate_expr': 'len(item) > 4', 'source_expr': 'strs',
+            'pick_expr': 'strs[:i + 1]', 'needs_index': True,
+        })
+
+    def test_plain_filter_still_parses_as_a_plain_filter(self):
+        # This also matches the pick template with pick_expr='item'; the plain
+        # form is listed first so it wins.
+        parsed = self.parse_generated_code(
+            'next((item for item in strs if len(item) > 4), None)')
+        self.assertEqual(parsed.get('action'), 'filter')
+        self.assertIsNone(parsed.get('pick_expr'))
+
+    def test_ctx_to_model_restores_the_picked_expression(self):
+        from list_visualizer import _ctx_to_model
+        code = 'next((len(item) for item in strs if len(item) > 4), None)'
+        parsed = self.parse_generated_code(code)
+        model = {}
+        _ctx_to_model(parsed, model)
+        self.assertEqual(model['pick_expr'], 'len(^)')
+        self.assertEqual(model['tool'], 'pick')
+        self.assertTrue(model['first_match'])
+        # Region ids aren't recoverable from the expression, so nothing is
+        # highlighted until the user picks again.
+        self.assertIsNone(model['picked'])
+
+    def test_roundtrip_loop_over_an_array_pick(self):
+        for action in ['loop_no_idx', 'loop_new_idx']:
+            with self.subTest(action=action):
+                self._roundtrip(action, {
+                    'is_predicate': True, 'is_first': True,
+                    'is_index': False, 'is_slice': False, 'is_multi_index': False,
+                    'predicate_expr': 'len(item) > 4', 'source_expr': 'strs',
+                    'pick_expr': 'strs[:i + 1]', 'needs_index': True,
+                    'pick_is_array': True,
+                })
+
+    def test_grammar_matches_generation_for_array_pick_loops(self):
+        from list_visualizer_grammar import generate_action as grammar_generate
+        model = make_pick_model(picked=['pre_col_1', 'match_col_1'])
+        ctx = _get_search_context(model, ('strs', 'strs'), eval_in_scope=pick_eval)
+        for action in ['loop_no_idx', 'loop_new_idx']:
+            with self.subTest(action=action):
+                self.assertEqual(grammar_generate(action, ctx)[1],
+                                 generate_action(action, ctx)[1])
+
+    def test_picked_join_is_not_misread_as_a_whole_list_join(self):
+        # The iterable is the pick's next(...) wrapper, not a list. Reading it as
+        # a whole-list source would make the wrapper the "source expression" and
+        # quietly strip the pick, so it must not parse at all.
+        model = make_pick_model(picked=['pre_col_1', 'match_col_1'])
+        ctx = _get_search_context(model, ('strs', 'strs'), eval_in_scope=pick_eval)
+        ctx['join_separator'] = "'|'"
+        code = generate_action('join', ctx)[1]
+        self.assertIsNone(self.parse_generated_code(code))
+
+    def test_plain_whole_list_join_still_parses(self):
+        parsed = self.parse_generated_code("''.join(str(item) for item in data)")
+        self.assertEqual(parsed['action'], 'join')
+        self.assertEqual(parsed['source_expr'], 'data')
+
+    def test_ctx_to_model_clears_pick_for_an_unpicked_line(self):
+        from list_visualizer import _ctx_to_model
+        parsed = self.parse_generated_code('[item for item in strs if len(item) > 4]')
+        model = {'tool': 'pick', 'pick_expr': 'len(^)', 'picked': ['match_col_1']}
+        _ctx_to_model(parsed, model)
+        self.assertIsNone(model['pick_expr'])
+        self.assertEqual(model['tool'], 'normal')
 
 
 if __name__ == '__main__':

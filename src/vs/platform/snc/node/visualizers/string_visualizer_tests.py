@@ -12944,7 +12944,7 @@ class TestSegmentSelection(unittest.TestCase):
         html_str = visualize(value, model, None, None)
         self.assertIn('data-tool="pick"', html_str)
         # Pragmasevka cursor-default glyph U+F01C0 is rendered inside the chip.
-        self.assertIn('\U000F01C0', html_str)
+        self.assertIn('\U000F01BD', html_str)
 
     def test_pick_tool_button_dimmed_when_no_search(self):
         """The pick tool button is meaningless without a search, so dim it."""

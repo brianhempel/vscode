@@ -131,7 +131,8 @@ from typing import List, Tuple, Any, Optional
 from visualizer_utils import (replace_carets_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
                               LinkConfig, handle_relink,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
-                              caret_expr_parses, is_nested)
+                              caret_expr_parses, is_nested,
+                              nerd_font_icon, render_tool_toolbar)
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -3260,7 +3261,7 @@ _TOOL_TOOLBAR_TOOLS = [
     ('literal', 'ab', 'Literal'),
     ('fuzzy', '.*', 'Fuzzy'),
     ('index', '01', 'Index'),
-    ('pick', '<span style="font-family:Pragmasevka;font-size:12px">\U000F01C0</span>', 'Pick'),
+    ('pick', nerd_font_icon('\U000F01BD'), 'Pick'),
 ]
 
 
@@ -3307,32 +3308,14 @@ def _tool_icon_html(tool: str, label: str) -> str:
 
 
 def _render_tool_toolbar_vertical(current: str, has_search: bool) -> str:
-    btns = []
-    for tool, label, name in _TOOL_TOOLBAR_TOOLS:
-        cls = 'tool-button'
-        if tool == current:
-            cls += ' active'
-        disabled = (tool == 'pick' and not has_search)
-        if disabled:
-            cls += ' dimmed'
-        label_html = _tool_icon_html(tool, label)
-        # snc-tooltip on hover with the tool's display name. Right-aligned
-        # because the toolbar lives in the upper-right corner of the
-        # visualizer where there's empty editor space to the right.
-        tooltip_attrs = (
-            f'data-tooltip="{html.escape(name)}" data-tooltip-align="right"'
-        )
-        if disabled:
-            btns.append(
-                f'<span class="{cls}" data-tool="{tool}" {tooltip_attrs}>{label_html}</span>'
-            )
-        else:
-            event = repr(ToolSelect(tool=tool))
-            btns.append(
-                f'<span class="{cls}" data-tool="{tool}" {tooltip_attrs} '
-                f'snc-mouse-down="{html.escape(event)}">{label_html}</span>'
-            )
-    return f'<div class="tool-toolbar">{"".join(btns)}</div>'
+    # Shared with the list visualizer's Normal/Pick toolbar; only the tool list
+    # differs. Labels are escaped here because most are plain text.
+    tools = [(tool, _tool_icon_html(tool, label), name)
+             for tool, label, name in _TOOL_TOOLBAR_TOOLS]
+    return render_tool_toolbar(
+        tools, current,
+        lambda tool: repr(ToolSelect(tool=tool)),
+        disabled=() if has_search else ('pick',))
 
 
 def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:

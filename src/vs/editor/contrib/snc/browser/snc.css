@@ -41,6 +41,11 @@
 	--snc-hl-selected-strong: #4caf5099;
 	--snc-hl-selected-alt: #34c75966;
 	--snc-hl-selected-alt-hover: #34c75988;
+
+	/* Outline for the list visualizer's pick regions. Darker than the table's
+	   own cell border, which pick mode hides -- the regions carry the structure
+	   there, so their edges have to read on their own. */
+	--snc-pick-region-border: #c8c8c8;
 }
 
 /* Visualizers don't look good when flush against a colored gutter */
@@ -134,6 +139,65 @@
 	&:focus {
 		outline: none !important;
 	}
+}
+
+/* === Tool toolbar (upper-right corner) ===
+   Shared by the string visualizer (literal/fuzzy/index/pick) and the list
+   visualizer (normal/pick). The string-only pieces -- modifier-key overrides
+   and the compact dropdown variant -- stay in string-visualizer.css. */
+
+.tool-toolbar {
+	position: absolute;
+	top: 1px;
+	right: 1px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	z-index: 50;
+	user-select: none;
+	/* Opaque background so the toolbar doesn't visually merge with content that
+	   scrolls under it. */
+	background: var(--snc-bg);
+	border-radius: 4px;
+	outline: 1px solid var(--snc-bg); /* in case it's over the content itself */
+}
+
+.tool-button {
+	font-family: var(--snc-code-font-family);
+	font-size: 11px;
+	line-height: 1;
+	width: 18px;
+	height: 18px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 3px;
+	cursor: pointer;
+	color: var(--snc-text-color);
+}
+
+/* Match .action-button hover/active styling so the toolbar feels like part of
+   the action button area at the bottom of the visualizer. */
+.tool-button:hover {
+	background: var(--snc-hover-bg);
+	color: black;
+}
+
+.tool-button.active {
+	background: var(--snc-hover-bg);
+	color: var(--snc-accent);
+}
+
+/* Dimmed tool buttons (e.g. pick tool with no current search) - visibly
+   inactive and click-inert. */
+.tool-button.dimmed {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.tool-button.dimmed:hover {
+	background: transparent;
+	color: var(--snc-text-color);
 }
 
 .search-toggles-container {
@@ -523,15 +587,15 @@
 /* === Link chain icon (lower-left chrome of a linkable visualizer) === */
 .snc-link-chain {
 	position: absolute;
-	left: -8px;
-	bottom: 6px;
+	left: -7px;
+	bottom: 7px;
 	z-index: 1001;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 15px;
-	height: 15px;
-	font-size: 15px;
+	width: 13px;
+	height: 13px;
+	font-size: 13px;
 	line-height: 1;
 	cursor: pointer;
 	user-select: none;
@@ -552,7 +616,7 @@
 .snc-link-chain-icon svg {
 	display: block;
 	width: auto;
-	height: 16px;
+	height: 14px;
 	transform: rotate(45deg);
 }
 
@@ -562,7 +626,6 @@
 
 .snc-link-chain .snc-link-chain-x {
 	display: none;
-	font-size: 15px;
 }
 
 /* Linked: accent-colored chain; hovering it (or the arrow) swaps to an ✕. */
@@ -867,6 +930,151 @@
 .list-visualizer .join-sep-input {
 	width: 60px;
 	font-family: var(--snc-code-font-family);
+}
+
+/* Reserve room for the .tool-toolbar so a wide table can't scroll under it.
+   Padding, not margin: the scrollbar belongs on the scrollport's outer edge, and
+   a margin would pull the whole scrollport (scrollbar included) inward and leave
+   the toolbar stranded outside it. Same approach as .string-visualizer. */
+.list-visualizer:not(.small) > .list-table-scroll {
+	padding-right: 22px;
+}
+
+/* =============================================================================
+   Pick Tool
+   =============================================================================
+
+   In pick mode the table is first-match-only and splits into three row bands --
+   before the match, the match, after -- crossed with the row-index column and
+   every configured column. Each cell of that grid is a pickable region carrying
+   the Python expression that extracts it.
+
+   The cell borders come off so the regions supply all the structure. A region
+   spans every row of its band, which is several <td>s in different <tr>s, so it
+   can't be one element: each cell draws its own slice and the edge classes
+   (only/first/mid/last) round off the ends so the stack reads as one rect. */
+
+.list-visualizer.pick-tool-selected th,
+.list-visualizer.pick-tool-selected td {
+	border-color: transparent;
+}
+
+.list-visualizer.pick-tool-selected > .list-table-scroll > table tr:first-child > th {
+	box-shadow: none;
+}
+
+/* Anchors the absolutely-positioned region overlays. */
+.list-visualizer.pick-tool-selected td {
+	position: relative;
+}
+
+/* Rows outside the match recede via the band fills below, NOT via opacity on
+   the row: opacity creates a stacking context that children can't opt out of,
+   so it would crush the region overlays' own fills and borders along with the
+   text. Only the row index -- whose text this file owns -- is de-emphasised. */
+.list-visualizer.pick-tool-selected tr.pick-row-pre > td.row-index,
+.list-visualizer.pick-tool-selected tr.pick-row-post > td.row-index {
+	color: var(--snc-text-dimmed);
+}
+
+/* The overlay sits ON TOP of the cell's contents, so it -- not the nested child
+   visualizer underneath -- receives the click. Fills are semi-transparent, so
+   the cell still reads through. */
+.pick-region {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 1px;
+	right: 1px;
+	border: 0 solid var(--snc-pick-region-border);
+	border-left-width: 1px;
+	border-right-width: 1px;
+	cursor: pointer;
+	z-index: 2;
+}
+
+.pick-region-only,
+.pick-region-first {
+	top: 1px;
+	border-top-width: 1px;
+}
+
+.pick-region-only,
+.pick-region-last {
+	bottom: 1px;
+	border-bottom-width: 1px;
+}
+
+.pick-region-only {
+	border-radius: 4px;
+}
+
+.pick-region-first {
+	border-radius: 4px 4px 0 0;
+}
+
+.pick-region-last {
+	border-radius: 0 0 4px 4px;
+}
+
+.pick-band-pre,
+.pick-band-post {
+	background: var(--snc-hl-fuzzy-soft);
+}
+
+/* The match is the subject of the pick, so it gets the stronger fill and an
+   accent outline that reads clearly through the fill. */
+.pick-band-match {
+	background: var(--snc-hl-literal-strong);
+	border-color: var(--snc-hl-literal-hover-strong);
+}
+
+.pick-band-pre:hover,
+.pick-band-post:hover {
+	background: var(--snc-hl-fuzzy-soft-hover);
+}
+
+.pick-band-match:hover {
+	background: var(--snc-hl-literal-hover-strong);
+}
+
+/* Selected wins over the band fill and its hover (listed after, same or higher
+   specificity), so it's always obvious what is in the picked expression. */
+.pick-region.selected {
+	background: var(--snc-hl-selected-alt);
+	border-color: var(--snc-hl-selected-strong);
+}
+
+.pick-region.selected:hover {
+	background: var(--snc-hl-selected-alt-hover);
+}
+
+/* Preview line under the search box: what the picked expression produces. In
+   flow (unlike .transform-preview, which overlays the string visualizer's
+   replace input), so it reads as a line rather than floating to the edge. */
+.list-visualizer .pick-preview {
+	display: flex;
+	align-items: baseline;
+	gap: 4px;
+	min-width: 0;
+	padding: 1px 4px 2px;
+	font-family: var(--snc-code-font-family);
+	font-size: 11px;
+	color: var(--snc-text-color);
+}
+
+.list-visualizer .pick-preview-arrow {
+	color: var(--snc-text-dimmed);
+	flex: none;
+}
+
+.list-visualizer .pick-preview-value {
+	background: var(--snc-hover-bg);
+	border-radius: 4px;
+	padding: 0 4px;
+	white-space: pre;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 /* snc-py-exp drag-to-extract patterns */
