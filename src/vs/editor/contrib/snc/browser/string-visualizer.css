@@ -31,14 +31,12 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	height: 13px;
+	height: 8px;
 	cursor: pointer;
 	user-select: none;
 	color: var(--snc-text-color);
-	background: var(--snc-bg);
 	border-top: 1px solid var(--snc-border-color);
-	font-size: 10px;
-	line-height: 1;
+	line-height: 8px;
 }
 
 .expand-toggle:hover {
@@ -47,7 +45,10 @@
 }
 
 .expand-toggle .chevron {
+	font-size: 10px;
 	display: inline-block;
+	position: absolute;
+	pointer-events: none;
 	transition: transform 0.1s ease;
 	transform: translateY(-2.5px);
 }
