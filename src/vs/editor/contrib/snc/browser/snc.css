@@ -411,6 +411,16 @@
     letter-spacing: normal;
   }
 
+  /* Hangs off the trigger's top-right corner instead of dropping below it.
+     TypeScript positions the hoisted copy; these values place a panel that
+     never got hoisted. The base margin-top would break the corner-to-corner
+     alignment, so it goes. */
+  &.flyout {
+  	top: 0;
+  	left: 100%;
+  	margin-top: 0;
+  }
+
   &.categorized {
   	padding: 0px;
   }
@@ -854,15 +864,50 @@
 	cursor: grab;
 	opacity: 0.5;
 	user-select: none;
-	font-size: 8px;
-	font-style: normal;
+	font-size: 10px;
+	/* Give it a bit more clickable area */
+	line-height: 16px;
+	padding: 0 1px;
+	margin-left: -1px;
 }
 
-.list-visualizer .col-remove {
+/* Flex lives on an inner wrapper, never on the <th> itself: display:flex on a
+   table cell drops it out of table layout and unsyncs the header's width from
+   the body rows'. The wrapper is what pins the ▾ to the cell's right edge. */
+.list-visualizer .col-header-inner {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	width: 100%;
+}
+
+.list-visualizer .col-menu-trigger {
+	margin-left: auto;
+}
+
+.list-visualizer .col-menu {
 	color: var(--snc-text-muted);
 	cursor: pointer;
 	opacity: 0.5;
 	user-select: none;
+	font-size: 18px;
+	padding: 0 1px;
+	margin-right: -1px;
+}
+
+/* An open menu's panel is hoisted out of the <th>, so the header stops being
+   hovered the moment the pointer reaches the panel. Pin the trigger visible —
+   and since .snc-hover-hidden toggles visibility, answer in kind. */
+.monaco-editor .snc-hover-hidden-parent .snc-hover-hidden.col-menu.open {
+	visibility: visible;
+}
+
+.list-visualizer .col-menu.open {
+	opacity: 1;
+}
+
+.list-visualizer .col-menu-panel {
+	min-width: 120px;
 }
 
 .list-visualizer .col-name {
@@ -910,8 +955,11 @@
 .list-visualizer .col-add-icon {
 	color: var(--snc-text-muted);
 	opacity: 0.5;
-	font-size: 8px;
+	font-size: 17px;
 	font-style: normal;
+	padding: 0 4px;
+	font-weight: 100;
+	margin: 0 2px;
 }
 
 .list-visualizer td.row-index {

@@ -1307,10 +1307,32 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     }
 
 
-def _render_column_header(col, index, model):
-    """Render a normal column header with drag handle, remove button, and column name."""
-    click_event = repr(ColumnClick(index=index))
+def _render_column_menu(col, index, model):
+    """Render the rows of the per-column ▾ menu.
+
+    State-driven (no data-hover-menu), so the TypeScript side hoists the panel out
+    of the table's overflow container instead of cloning it on hover. Flyout-aligned:
+    the panel's top-left corner sits at the ▾'s top-right, so the menu reads as
+    belonging to the trigger rather than to the table row beneath it. The hoisting
+    code mirrors it to the ▾'s left when there isn't room on the right.
+    """
     remove_event = repr(RemoveColumnClick(index=index))
+    rows = [
+        f'<div class="snc-dropdown-option">'
+        f'<span snc-mouse-down="{html.escape(remove_event)}" '
+        f'class="snc-dropdown-option-label">Remove Column</span>'
+        f'</div>'
+    ]
+    return (
+        f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout">'
+        + ''.join(rows)
+        + '</div>'
+    )
+
+
+def _render_column_header(col, index, model):
+    """Render a normal column header with drag handle, column name, and ▾ menu."""
+    click_event = repr(ColumnClick(index=index))
     drag_start_event = repr(ColumnDragStart(index=index))
     drag_over_event = repr(ColumnDragOver(index=index))
     drag_end_event = repr(ColumnDragEnd(index=index))
@@ -1334,20 +1356,40 @@ def _render_column_header(col, index, model):
     else:
         py_exp_attr = ''
 
+    # The ▾ trigger is pinned to the cell's right edge by .col-header-inner's flex
+    # layout (which lives on an inner span, never on the <th>: display:flex on a
+    # table cell drops it out of table layout and unsyncs header and body widths).
+    menu_id = f'col-menu-{index}'
+    open_dropdown = model.get('openDropdown') or {}
+    menu_open = open_dropdown.get('id') == menu_id
+    toggle_event = repr(DropdownToggle(dropdown_id=menu_id))
+    menu_classes = ['col-menu', 'snc-hover-hidden', 'full-opacity-on-hover']
+    if menu_open:
+        # The open panel is hoisted out of the <th>, so the header stops being
+        # hovered as soon as the pointer reaches it; pin the trigger visible.
+        menu_classes.append('open')
+    menu_html = (
+        f'<span class="snc-dropdown-trigger col-menu-trigger">'
+        f'<span snc-mouse-down="{html.escape(toggle_event)}" '
+        f'class="{" ".join(menu_classes)}">▾</span>'
+        f'{_render_column_menu(col, index, model) if menu_open else ""}'
+        f'</span>'
+    )
+
     return (
         f'<th class="{" ".join(th_classes)}" '
         f'snc-mouse-move="{html.escape(drag_over_event)}" '
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
+        f'<span class="col-header-inner">'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
-        f'class="col-handle snc-hover-hidden full-opacity-on-hover">⠿</span>'
-        f'<span snc-mouse-down="{html.escape(remove_event)}" '
-        f'data-tooltip="Remove column" '
-        f'class="col-remove snc-hover-hidden full-opacity-on-hover">×</span>'
+        f'class="col-handle snc-hover-hidden full-opacity-on-hover">⣿</span>'
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
         f'{html.escape(strip_leading_caret(col) or col)}</span>'
+        f'{menu_html}'
+        f'</span>'
         f'</th>'
     )
 
@@ -2215,6 +2257,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
     match msg:
         case AddColumnClick():
+            # Column-menu ids are index-based, so any add/remove/reorder/rename
+            # invalidates an open menu. Each of those handlers closes it.
+            model['openDropdown'] = None
             model['adding_column'] = True
             model['column_input_value'] = ''
             model['editing_column_index'] = None
@@ -2247,6 +2292,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_slots(model)
 
         case ColumnClick(index=idx):
+            model['openDropdown'] = None
             detail = event_json.get('detail', 1)
             if detail >= 2:
                 if 0 <= idx < len(model['columns']):
@@ -2255,6 +2301,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['adding_column'] = False
 
         case RemoveColumnClick(index=idx):
+            model['openDropdown'] = None
             if 0 <= idx < len(model['columns']):
                 removed_col = model['columns'].pop(idx)
                 _remove_column_children(model, removed_col)
@@ -2268,6 +2315,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_slots(model)
 
         case ColumnDragStart(index=idx):
+            model['openDropdown'] = None
             if 0 <= idx < len(model['columns']):
                 model['column_drag_from'] = idx
                 model['column_drag_over'] = idx

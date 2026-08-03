@@ -987,6 +987,94 @@ class TestColumnRemove(unittest.TestCase):
         self.assertEqual(new_model['editing_column_index'], 1)
 
 
+def _first_column_header(output):
+    """Return the markup of the first non-index column header cell."""
+    m = re.search(r'<th class="[^"]*col-header[^"]*".*?</th>', output, re.DOTALL)
+    assert m is not None, 'no column header found'
+    return m.group(0)
+
+
+class TestColumnMenu(unittest.TestCase):
+    """The per-column ▾ menu: a click-toggled, state-driven dropdown pinned to the
+    right edge of each header. Remove Column lives here rather than as a bare × in
+    the header itself."""
+
+    def test_header_renders_menu_trigger_after_the_name(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        # Flex ordering is what puts the ▾ at the right edge, so DOM order and the
+        # inner wrapper are the parts a string assertion can hold onto.
+        self.assertEqual(
+            [c for c in ('col-header-inner', 'col-handle', 'col-name', 'col-menu-trigger')
+             if c in th],
+            ['col-header-inner', 'col-handle', 'col-name', 'col-menu-trigger'])
+        self.assertLess(th.index('col-name'), th.index('col-menu-trigger'))
+
+    def test_closed_header_has_no_remove_button_and_no_panel(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn('RemoveColumnClick', output)
+        self.assertNotIn('col-menu-panel', output)
+
+    def test_toggle_opens_then_closes(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        opened, _ = update(make_dropdown_toggle_event('col-menu-0'), None, model,
+                           lst, mock_get_visualizer)
+        self.assertEqual(opened['openDropdown'], {'id': 'col-menu-0'})
+        closed, _ = update(make_dropdown_toggle_event('col-menu-0'), None, opened,
+                           lst, mock_get_visualizer)
+        self.assertIsNone(closed['openDropdown'])
+
+    def test_toggle_switches_between_columns(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        new_model, _ = update(make_dropdown_toggle_event('col-menu-1'), None, model,
+                              lst, mock_get_visualizer)
+        self.assertEqual(new_model['openDropdown'], {'id': 'col-menu-1'})
+
+    def test_open_menu_renders_flyout_aligned_state_driven_panel(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        self.assertIn('snc-dropdown-panel flyout col-menu-panel', th)
+        self.assertIn('snc-dropdown-align="flyout"', th)
+        # data-hover-menu would route this to the clone-on-hover path instead of
+        # the hoisting path, and the menu would vanish when the pointer left it.
+        self.assertNotIn('data-hover-menu', th)
+        self.assertIn('Remove Column', th)
+        # Trigger stays visible while its panel is hoisted out of the header.
+        self.assertIn('col-menu snc-hover-hidden full-opacity-on-hover open', th)
+
+    def test_menu_removes_column_and_closes(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        name_idx = model['columns'].index("^['name']")
+        model['openDropdown'] = {'id': f'col-menu-{name_idx}'}
+        event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
+        with patch('list_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, None, model, lst, mock_get_visualizer)
+        self.assertNotIn("^['name']", new_model['columns'])
+        self.assertIsNone(new_model['openDropdown'])
+
+    def test_column_edits_close_an_open_menu(self):
+        # Menu ids are index-based, so anything that shifts or renames columns
+        # leaves an open menu pointing at the wrong one.
+        lst = [{'name': 'Alice', 'age': 30}]
+        for event in (make_column_mouse_event(repr(ColumnClick(index=0)), detail=2),
+                      make_column_mouse_event(repr(AddColumnClick())),
+                      make_column_mouse_event(repr(ColumnDragStart(index=0)))):
+            with self.subTest(event=event['pythonEventStr']):
+                model = init_model(lst, mock_get_visualizer)
+                model['openDropdown'] = {'id': 'col-menu-0'}
+                new_model, _ = update(event, None, model, lst, mock_get_visualizer)
+                self.assertIsNone(new_model['openDropdown'])
+
+
 class TestColumnReorder(unittest.TestCase):
     """Test drag-and-drop column reordering."""
 
@@ -1284,11 +1372,12 @@ class TestColumnVisualize(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('AddColumnClick', output)
 
-    def test_table_headers_have_remove_button(self):
+    def test_table_headers_have_menu_button(self):
+        # Remove lives in this menu now, not as a bare × in the header.
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('RemoveColumnClick(index=0)', output)
+        self.assertIn("DropdownToggle(dropdown_id=&#x27;col-menu-0&#x27;)", output)
 
     def test_table_headers_have_drag_handle(self):
         lst = [{'name': 'Alice'}]
@@ -4613,18 +4702,18 @@ class TestColumnHeaderTooltips(unittest.TestCase):
     use the snc-tooltip system (data-tooltip) instead of the native title
     attribute, matching the string visualizer's tool toolbar pattern."""
 
-    def test_remove_column_button_has_data_tooltip(self):
+    def test_column_menu_button_has_data_tooltip(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
         m = re.search(
-            r'<span snc-mouse-down="RemoveColumnClick[^"]*"([^>]*?)>',
+            r'<span snc-mouse-down="DropdownToggle\(dropdown_id=&#x27;col-menu-0&#x27;\)"([^>]*?)>',
             output,
         )
-        self.assertIsNotNone(m, "RemoveColumnClick button not found")
+        self.assertIsNotNone(m, "column menu trigger not found")
         attrs = m.group(1)
-        self.assertIn('data-tooltip="Remove column"', attrs)
-        self.assertNotIn('title="Remove column"', attrs,
+        self.assertIn('data-tooltip="Column actions"', attrs)
+        self.assertNotIn('title="Column actions"', attrs,
                          "Should use data-tooltip instead of native title")
 
     def test_drag_handle_has_data_tooltip(self):

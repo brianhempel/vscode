@@ -74,6 +74,26 @@ loadChainSvg();
 
 
 /**
+ * A dropdown panel reparented out of the widget so it can be a fixed overlay.
+ */
+interface IHoistedDropdown {
+	readonly panel: HTMLElement;
+	/** The `.snc-dropdown-trigger` the panel was nested in. */
+	readonly trigger: HTMLElement;
+	/** The box the panel is placed against; see `resolveMeasureTarget`. */
+	readonly measureTarget: HTMLElement;
+	readonly align: string;
+	/** Scroll containers whose movement invalidates the panel's position. */
+	readonly scrollers: HTMLElement[];
+	/**
+	 * An ancestor that already hides itself when the trigger scrolls out of
+	 * view (a hoisted segment-label anchor). When set, the panel follows its
+	 * visibility instead of running its own scrollport test.
+	 */
+	readonly visibilityHost: HTMLElement | null;
+}
+
+/**
  * Widget that displays visualization data for a specific line of code.
  */
 class VisualizationWidget extends Disposable implements IOverlayWidget {
@@ -106,7 +126,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly moveThrottleDelay = 16;
 	private lastRenderedHtml: string | null = null;
 	private focusRestoreVersion = 0;
-	private hoistedDropdown: HTMLElement | null = null;
+	// Dropdown panels reparented to the editor container so they escape the
+	// widget's overflow. More than one can be open at once (e.g. a column's ▾
+	// menu alongside the column-name input's suggestion list).
+	private hoistedDropdowns: IHoistedDropdown[] = [];
 	private hoistedDropdownListeners: IDisposable[] = [];
 	// Segment-label anchors reparented to the widget root (out of the
 	// scrollable .string-visualizer that would otherwise clip them). Each entry
@@ -1184,11 +1207,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 * Update the widget's HTML content
 	 */
 	private static readonly FOCUSABLE_SELECTOR = '[tabindex], input, textarea, select';
+	private static readonly SCROLLABLE_OVERFLOW = /^(auto|scroll|overlay|hidden)$/;
 	private static isScrollableElement(el: HTMLElement): boolean {
-		return el.scrollTop !== 0
-			|| el.scrollLeft !== 0
-			|| el.scrollHeight > el.clientHeight
-			|| el.scrollWidth > el.clientWidth;
+		if (el.scrollTop === 0 && el.scrollLeft === 0
+			&& el.scrollHeight <= el.clientHeight
+			&& el.scrollWidth <= el.clientWidth) {
+			return false;
+		}
+		// visible overflow is not a scroller
+		const style = dom.getWindow(el).getComputedStyle(el);
+		return VisualizationWidget.SCROLLABLE_OVERFLOW.test(style.overflowY)
+			|| VisualizationWidget.SCROLLABLE_OVERFLOW.test(style.overflowX);
 	}
 
 	updateContent(html: string): boolean {
@@ -1222,12 +1251,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			left: el.scrollLeft
 		}));
 
-		// Build the combined list of focusable elements across widget + hoisted dropdown
+		// Build the combined list of focusable elements across widget + hoisted dropdowns
 		const widgetFocusable = Array.from(this.domNode.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR));
-		const oldHoistedFocusable = this.hoistedDropdown
-			? Array.from(this.hoistedDropdown.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR))
-			: [];
-		const allOldFocusable = [...widgetFocusable, ...oldHoistedFocusable];
+		const allOldFocusable = [...widgetFocusable, ...this.hoistedFocusable()];
 
 		// Track whether an [autofocus] element existed in the OLD render. If
 		// one is in the NEW render but wasn't in the old one, it's "newly
@@ -1235,9 +1261,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// focused (e.g. user clicked a label trigger to open an edit popup
 		// while the search box still held focus).
 		const hadAutoFocusEl = !!(this.domNode.querySelector('[autofocus]')
-			|| (this.hoistedDropdown && this.hoistedDropdown.querySelector('[autofocus]')));
+			|| this.queryHoistedDropdowns('[autofocus]'));
 
-		if (activeElement && (this.domNode.contains(activeElement) || (this.hoistedDropdown && this.hoistedDropdown.contains(activeElement)))) {
+		if (activeElement && (this.domNode.contains(activeElement) || this.hoistedDropdownsContain(activeElement))) {
 			for (let i = 0; i < allOldFocusable.length; i++) {
 				if (allOldFocusable[i] === activeElement) {
 					focusedIndex = i;
@@ -1251,8 +1277,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 		}
 
-		// Now safe to clean up the old hoisted dropdown
-		this.cleanupHoistedDropdown();
+		// Now safe to clean up the old hoisted dropdowns
+		this.cleanupHoistedDropdowns();
 		this.cleanupHoistedSegmentLabels();
 
 		const trustedHtml = ttPolicy?.createHTML(html) ?? html;
@@ -1265,15 +1291,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.domNode.appendChild(this.linkChainEl);
 		}
 
-		// Hoist any dropdown panel outside the overflow container
-		this.hoistDropdownPanel();
+		// Hoist any dropdown panels outside the overflow container
+		this.hoistDropdownPanels();
 		// Hoist segment labels out of the scrollable string container so they
 		// aren't clipped by its overflow.
 		this.hoistSegmentLabels();
 		this.updateLayoutMode();
 
 		// Scroll any element marked for scroll-into-view (e.g. selected autocomplete item)
-		const scrollTarget = (this.hoistedDropdown ?? this.domNode).querySelector('[snc-scroll-into-view]') as HTMLElement | null;
+		const scrollTarget = (this.queryHoistedDropdowns('[snc-scroll-into-view]')
+			?? this.domNode.querySelector('[snc-scroll-into-view]')
+		) as HTMLElement | null;
 		if (scrollTarget) {
 			scrollTarget.scrollIntoView({ block: 'nearest' });
 		}
@@ -1283,11 +1311,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const shouldRestoreScroll = savedWidgetScrollTop !== 0
 			|| savedWidgetScrollLeft !== 0
 			|| savedScrollOffsets.some((offset) => offset.top !== 0 || offset.left !== 0);
-		// [autofocus] elements may live inside the hoisted dropdown panel
+		// [autofocus] elements may live inside a hoisted dropdown panel
 		// (which is taken out of this.domNode so it can be position:fixed).
 		// Look in both places.
 		const autoFocusEl = (this.domNode.querySelector('[autofocus]')
-			|| (this.hoistedDropdown ? this.hoistedDropdown.querySelector('[autofocus]') : null)
+			|| this.queryHoistedDropdowns('[autofocus]')
 		) as HTMLElement | null;
 		const hasScrollToMatch = this.domNode.querySelector('[snc-scroll-to-match]') !== null;
 		if (shouldRestoreScroll || focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
@@ -1336,12 +1364,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					}
 				} else if (focusedIndex >= 0) {
 					// Restore focus to the same nth focusable element
-					// Look in both the widget and any hoisted dropdown
+					// Look in both the widget and any hoisted dropdowns
 					const widgetFocusable = Array.from(this.domNode.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR));
-					const hoistedFocusable = this.hoistedDropdown
-						? Array.from(this.hoistedDropdown.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR))
-						: [];
-					const allFocusable = [...widgetFocusable, ...hoistedFocusable];
+					const allFocusable = [...widgetFocusable, ...this.hoistedFocusable()];
 					if (focusedIndex < allFocusable.length) {
 						const el = allFocusable[focusedIndex] as HTMLElement;
 						el.focus({ preventScroll: true });
@@ -1408,19 +1433,62 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.domNode.classList.toggle('snc-visualization-widget-block-layout', this.useBlockLayout);
 	}
 
+	/** Every currently hoisted panel's focusable descendants, in panel order. */
+	private hoistedFocusable(): Element[] {
+		return this.hoistedDropdowns.flatMap((entry) =>
+			Array.from(entry.panel.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR)));
+	}
+
+	/** First match for `selector` across the hoisted panels, or null. */
+	private queryHoistedDropdowns(selector: string): Element | null {
+		for (const entry of this.hoistedDropdowns) {
+			const found = entry.panel.querySelector(selector);
+			if (found) { return found; }
+		}
+		return null;
+	}
+
+	private hoistedDropdownsContain(node: Node): boolean {
+		return this.hoistedDropdowns.some((entry) => entry.panel.contains(node));
+	}
+
 	/**
-	 * Hoist a dropdown panel out of this widget's overflow container and
-	 * position it as a fixed overlay in the editor container.
+	 * Hoist every state-driven dropdown panel out of this widget's overflow
+	 * container and position each as a fixed overlay in the editor container.
+	 * Hover menus are excluded - they are cloned out separately by showHoverMenu.
 	 */
-	private hoistDropdownPanel(): void {
-		const panel = this.domNode.querySelector('.snc-dropdown-panel:not([data-hover-menu])') as HTMLElement;
-		if (!panel) { return; }
+	private hoistDropdownPanels(): void {
+		const panels = Array.from(this.domNode.querySelectorAll('.snc-dropdown-panel:not([data-hover-menu])'))
+			.filter(dom.isHTMLElement);
 
-		const trigger = panel.closest('.snc-dropdown-trigger') as HTMLElement;
-		if (!trigger) { return; }
+		for (const panel of panels) {
+			const trigger = panel.closest('.snc-dropdown-trigger') as HTMLElement;
+			if (!trigger) { continue; }
+			this.hoistDropdownPanel(panel, trigger);
+		}
 
-		// Get trigger's viewport position before moving anything
-		const triggerRect = trigger.getBoundingClientRect();
+		if (this.hoistedDropdowns.length === 0) { return; }
+
+		// A hoisted panel is position:fixed but its trigger is not: scrolling any
+		// container between them (e.g. .list-table-scroll under a column's ▾ menu,
+		// which scrolls horizontally) slides the trigger out from under it.
+		const scrollers = new Set(this.hoistedDropdowns.flatMap((entry) => entry.scrollers));
+		for (const scroller of scrollers) {
+			this.hoistedDropdownListeners.push(
+				dom.addDisposableListener(scroller, 'scroll', () => this.repositionHoistedDropdowns())
+			);
+		}
+		this.hoistedDropdownListeners.push(
+			this.editor.onDidScrollChange(() => this.repositionHoistedDropdowns())
+		);
+	}
+
+	/**
+	 * Reparent one panel to the editor container, preserving the child-key chain
+	 * its lost ancestors carried, and wire up the events that no longer bubble
+	 * to this widget.
+	 */
+	private hoistDropdownPanel(panel: HTMLElement, trigger: HTMLElement): void {
 		const align = panel.getAttribute('snc-dropdown-align') || 'left';
 
 		// Capture child-key chain before removing from DOM (ancestors will be lost)
@@ -1435,24 +1503,33 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			panel.setAttribute('snc-child-key-chain', JSON.stringify(childKeyChain));
 		}
 
+		// Collect the scroll containers between trigger and widget root before the
+		// panel leaves the DOM; they drive repositionHoistedDropdowns.
+		const scrollers: HTMLElement[] = [];
+		let scrollAncestor: HTMLElement | null = trigger.parentElement;
+		while (scrollAncestor && scrollAncestor !== this.domNode.parentElement) {
+			if (VisualizationWidget.isScrollableElement(scrollAncestor)) {
+				scrollers.push(scrollAncestor);
+			}
+			scrollAncestor = scrollAncestor.parentElement;
+		}
+		const visibilityHost = trigger.closest('.segment-label-anchor') as HTMLElement | null;
+
 		// Remove from the widget DOM
 		panel.remove();
 
-		// Position as fixed overlay
+		// Measured after the panel leaves so it can't be mistaken for the
+		// visible control.
+		const measureTarget = VisualizationWidget.resolveMeasureTarget(trigger);
+
 		panel.style.position = 'fixed';
-		panel.style.top = `${triggerRect.bottom}px`;
-		if (align === 'right') {
-			panel.style.left = '';
-			panel.style.right = `${dom.getWindow(this.editor.getContainerDomNode()).innerWidth - triggerRect.right}px`;
-		} else {
-			panel.style.left = `${triggerRect.left}px`;
-			panel.style.right = '';
-		}
 		panel.style.zIndex = '10000';
 
 		// Append to the editor's container so it escapes widget overflow
 		this.editor.getContainerDomNode().appendChild(panel);
-		this.hoistedDropdown = panel;
+		const entry: IHoistedDropdown = { panel, trigger, measureTarget, align, scrollers, visibilityHost };
+		this.hoistedDropdowns.push(entry);
+		this.positionHoistedDropdown(entry);
 
 		// Apply saved child-key chain from before hoisting
 		const wrapHoistedEvent = (raw: string, attrEl: Element): string => {
@@ -1477,6 +1554,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					if (el.hasAttribute('snc-mouse-down')) {
 						const pythonEventStr = wrapHoistedEvent(el.getAttribute('snc-mouse-down') ?? '', el);
 						this.onPointerEvent(pythonEventStr, ev);
+						// Innermost handler wins; walking on would double-fire when
+						// a panel row nests snc-mouse-down inside another (matches
+						// the hover-menu walker).
+						break;
 					}
 					el = el.parentElement;
 				}
@@ -1532,13 +1613,107 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Remove any hoisted dropdown panel and dispose its event listeners.
+	 * The box a hoisted panel should be placed against.
+	 *
+	 * Usually the trigger itself, but a trigger whose only in-flow content was
+	 * the panel has a degenerate box: the segment-label trigger is an
+	 * inline-flex holding nothing but an absolutely positioned `.segment-label`,
+	 * so it measures 0x0 at its anchor's inline origin rather than where the
+	 * label paints. Fall back to the first child that occupies space.
 	 */
-	private cleanupHoistedDropdown(): void {
-		if (this.hoistedDropdown) {
-			this.hoistedDropdown.remove();
-			this.hoistedDropdown = null;
+	private static resolveMeasureTarget(trigger: HTMLElement): HTMLElement {
+		const rect = trigger.getBoundingClientRect();
+		if (rect.width > 0 || rect.height > 0) { return trigger; }
+		for (const child of Array.from(trigger.children).filter(dom.isHTMLElement)) {
+			const childRect = child.getBoundingClientRect();
+			if (childRect.width > 0 || childRect.height > 0) { return child; }
 		}
+		return trigger;
+	}
+
+	/**
+	 * Place one hoisted panel under (or above) its trigger, clamped into the
+	 * viewport. A panel's position follows whatever it hangs off - for a column
+	 * menu that is wherever that column happens to sit - so it can't be assumed
+	 * to fit in the direction its `snc-dropdown-align` asks for.
+	 */
+	private positionHoistedDropdown(entry: IHoistedDropdown): void {
+		const { panel, measureTarget, align, scrollers, visibilityHost } = entry;
+
+		// A trigger scrolled out of one of its scrollports is clipped away in the
+		// widget, so its menu should go too rather than float over unrelated
+		// content. A zero-area port clips nothing, so it constrains nothing.
+		const triggerRect = measureTarget.getBoundingClientRect();
+		const clippedAway = visibilityHost
+			? visibilityHost.style.visibility === 'hidden'
+			: scrollers.some((scroller) => {
+				const port = scroller.getBoundingClientRect();
+				if (port.width === 0 || port.height === 0) { return false; }
+				return triggerRect.right <= port.left
+					|| triggerRect.left >= port.right
+					|| triggerRect.bottom <= port.top
+					|| triggerRect.top >= port.bottom;
+			});
+		panel.style.visibility = clippedAway ? 'hidden' : '';
+
+		const targetWindow = dom.getWindow(this.editor.getContainerDomNode());
+		const viewportWidth = targetWindow.innerWidth;
+		const viewportHeight = targetWindow.innerHeight;
+
+		// Lay out at the requested alignment first, then measure: the panel sizes
+		// itself to its content, so its width isn't known before it is placed.
+		// 'flyout' hangs the panel's top-left off the trigger's top-right rather
+		// than dropping it below - it reads as belonging to the control it came
+		// from instead of to the row beneath it.
+		const isFlyout = align === 'flyout';
+		panel.style.top = `${isFlyout ? triggerRect.top : triggerRect.bottom}px`;
+		if (isFlyout) {
+			panel.style.left = `${triggerRect.right}px`;
+			panel.style.right = '';
+		} else if (align === 'right') {
+			panel.style.left = '';
+			panel.style.right = `${viewportWidth - triggerRect.right}px`;
+		} else {
+			panel.style.left = `${triggerRect.left}px`;
+			panel.style.right = '';
+		}
+
+		const panelRect = panel.getBoundingClientRect();
+		if (panelRect.right > viewportWidth) {
+			// A flyout mirrors to the trigger's other side, keeping the tops
+			// aligned; the drop-down alignments just slide back into view.
+			const mirroredLeft = triggerRect.left - panelRect.width;
+			const fallbackLeft = Math.max(0, viewportWidth - panelRect.width);
+			panel.style.right = '';
+			panel.style.left = `${isFlyout && mirroredLeft >= 0 ? mirroredLeft : fallbackLeft}px`;
+		} else if (panelRect.left < 0) {
+			panel.style.right = '';
+			panel.style.left = '0px';
+		}
+		if (panelRect.bottom > viewportHeight) {
+			// A flyout slides up to fit - flipping it across the trigger would
+			// leave it pointing at nothing. A drop-down flips above its trigger,
+			// unless there's even less room up there.
+			const flippedTop = triggerRect.top - panelRect.height;
+			const slidTop = Math.max(0, viewportHeight - panelRect.height);
+			panel.style.top = `${!isFlyout && flippedTop >= 0 ? flippedTop : slidTop}px`;
+		}
+	}
+
+	private repositionHoistedDropdowns(): void {
+		for (const entry of this.hoistedDropdowns) {
+			this.positionHoistedDropdown(entry);
+		}
+	}
+
+	/**
+	 * Remove all hoisted dropdown panels and dispose their event listeners.
+	 */
+	private cleanupHoistedDropdowns(): void {
+		for (const entry of this.hoistedDropdowns) {
+			entry.panel.remove();
+		}
+		this.hoistedDropdowns = [];
 		for (const d of this.hoistedDropdownListeners) {
 			d.dispose();
 		}
@@ -1644,6 +1819,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				|| anchorViewportTop > scrollerRect.bottom + 1;
 			anchor.style.visibility = outOfView ? 'hidden' : '';
 		}
+
+		// A hoisted anchor is absolutely positioned at the widget root, so it
+		// only moves when the loop above writes its offsets. Any panel hanging
+		// off one has to be re-placed afterwards, not from its own scroll
+		// listener, which would read the pre-scroll position.
+		this.repositionHoistedDropdowns();
 	}
 
 	/**
@@ -1751,7 +1932,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hideActionTooltip();
 		this.hideSimpleTooltip();
 		this.hideHoverMenu();
-		this.cleanupHoistedDropdown();
+		this.cleanupHoistedDropdowns();
 		this.cleanupHoistedSegmentLabels();
 		this.editor.removeOverlayWidget(this);
 		super.dispose();

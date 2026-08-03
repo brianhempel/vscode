@@ -11,7 +11,7 @@
 - [x] misaligned single-line generic visualizer
 - [x] only turn it on  for Python files
 - [x] find the correct python interpreter using the official Python extension's machinery
-- [ ] cleaner handling of many visualizers (b)
+- [x] cleaner handling of many visualizers (b)
     - [x] small mode for less relevant visualizers. current/next/previous line of code, unused variables (b)
     - [x] don't show string tools menu in small mode (b)
     - [x] exit small mode on click instead of on hover (b)
@@ -30,14 +30,14 @@
 - [x] first new object after a for loop needs correct indentation (j)
 - [x] list join should work on a slice
 - [x] Restore true/false preview to any/all (like in the string visualizer)
-- [ ] add new var action in tooltip:
-    - [ ] better var names
+- [x] add new var action in tooltip:
+    - [x] better var names
     - [x] shouldn't assign a for-loop expression (or similar) to a var
-- [ ] nicer move/remove/add buttons for table columns (at one point they were just like braille six dots for move and an X and a plus)
+- [x] nicer move/remove/add buttons for table columns (at one point they were just like braille six dots for move and an X and a plus)
 - [ ] errors shouldn't use string visualizer
-- [ ] tooltips (and maybe dropdowns too) shouldn't disappear before the mouse enters them
+- [x] tooltips (and maybe dropdowns too) shouldn't disappear before the mouse enters them
 - [x] expression tooltips: add + button that makes a new var with the expression
-- [ ] make a pick segment mode for lists: can pick indices, whole rows, or just selected columns
+- [x] make a pick segment mode for lists: can pick indices, whole rows, or just selected columns
 - [ ] figure out what table widgets should be per column
 - [ ] dictionary visualizer
 - [ ] group by (i.e. dictionaries of lists)
