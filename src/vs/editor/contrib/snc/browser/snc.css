@@ -985,6 +985,122 @@
 	.search-box-wrapper:has(*[data-charlen="2"]) .col-search-input {
 		padding-left: calc(3.5ch);
 	}
+
+	/* --- The tally: each of the column's values and how many rows have it ---
+	   Another way of writing the search row above, so it's separated from it the
+	   same way that row is separated from the actions above it. */
+	.col-tally {
+		padding: 4px 0 0;
+		margin-top: 3px;
+		border-top: 1px solid var(--snc-border-color);
+	}
+
+	/* The hoisted panel is slid up to fit the viewport but never shortened, so
+	   the value list is what has to agree to be scrolled. */
+	.col-tally-list {
+		max-height: 240px;
+		overflow-y: auto;
+	}
+
+	.col-tally-header {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+		padding: 0 4px 3px;
+		color: var(--snc-text-muted);
+	}
+
+	.col-tally-link {
+		cursor: pointer;
+		user-select: none;
+
+		&:hover {
+			color: var(--snc-text-color);
+			text-decoration: underline;
+		}
+	}
+
+	/* Sits at the far end of the header, away from the two select buttons: it
+	   acts on the selection rather than making one. */
+	.col-tally-exclude {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		margin-left: auto;
+		border-radius: 3px;
+		padding: 0 2px;
+		cursor: pointer;
+		user-select: none;
+
+		&:hover {
+			color: var(--snc-text-color);
+			background: var(--snc-hover-bg);
+		}
+	}
+
+	.col-tally-row {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		padding: 0 4px;
+		border-radius: 3px;
+		cursor: pointer;
+		user-select: none;
+
+		&:hover {
+			background: var(--snc-hover-bg);
+		}
+
+		&:active {
+			background: var(--snc-active-bg);
+		}
+
+		/* A value whose repr isn't a literal has nothing to compare against, so
+		   the row is a count and not a control. */
+		&.unselectable {
+			cursor: default;
+			color: var(--snc-text-muted);
+
+			&:hover,
+			&:active {
+				background: none;
+			}
+		}
+	}
+
+	/* The row owns the click (see _render_tally_check), so the box itself takes
+	   none: letting it toggle on its own would flip it out from under the model
+	   until the next render put it back. */
+	.col-tally-check {
+		pointer-events: none;
+		flex: none;
+		width: 12px;
+		height: 12px;
+		margin: 0;
+	}
+
+	.col-tally-item {
+		flex: 1;
+		/* Long values are already elided in the middle by the visualizer; this
+		   only catches what's still too wide for the menu. */
+		max-width: 200px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--snc-string-color);
+	}
+
+	.col-tally-count {
+		flex: none;
+		padding-left: 6px;
+		color: var(--snc-text-muted);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.col-tally-note {
+		padding: 0 4px;
+		color: var(--snc-text-muted);
+	}
 }
 
 /* One short token per option, so this one shouldn't hold the shared 100px floor

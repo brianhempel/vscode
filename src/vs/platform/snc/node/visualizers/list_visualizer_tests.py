@@ -5628,7 +5628,7 @@ from list_visualizer import (
     ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
     ColumnSearchDropdownToggle, COLUMN_SEARCH_OPS, COLUMN_SEARCH_COMPOSE,
     column_search_predicate, lift_column_predicate, compose_column_searches,
-    _column_search_row,
+    _column_search_row, _column_search_active, _set_column_search,
 )
 
 
@@ -6256,6 +6256,547 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
         self.assertEqual([c.expression for c in commands
                           if isinstance(c, ChangeSelectedText)],
                          ['[item for item in data if len(item["name"]) >= 3]'])
+
+
+# === Column tally tests ===
+
+from list_visualizer import (
+    TallyItemToggle, TallySelectAll, TallySelectNone, TallyExcludeToggle,
+    TALLY_MAX_CARDINALITY, TALLY_TOO_MANY, TALLY_UNHASHABLE,
+    _column_values, _tally, _tally_literal, _tally_selection,
+    _write_tally_selection, _tally_literals,
+)
+
+
+# The list from the tally sketch in the TODO: 'c' 5, 'aa' 2, 'b' 3, first seen
+# in that order.
+TALLY_LIST = ['c', 'aa', 'b', 'c', 'b', 'c', 'c', 'c', 'aa', 'b']
+
+
+def tally_model(lst=None):
+    """A one-column ('^') table model over *lst*."""
+    lst = TALLY_LIST if lst is None else lst
+    model = init_model(lst, mock_get_visualizer)
+    model['columns'] = ['^']
+    return lst, model
+
+
+class TestColumnValues(unittest.TestCase):
+    """A column's values for every row, which is what there is to tally. The
+    table itself only ever evaluates one cell at a time."""
+
+    def test_the_item_column_needs_no_eval_at_all(self):
+        lst, model = tally_model()
+        self.assertEqual(_column_values('^', lst, model), lst)
+
+    def test_a_computed_column_is_gathered_in_one_eval(self):
+        # One comprehension over the whole list, not one eval per row: the same
+        # expression the header already builds for its drag payload.
+        lst = [{'name': 'Alice'}, {'name': 'Bo'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        calls = []
+
+        def counting_eval(code):
+            calls.append(code)
+            return eval(code, {}, {'data': lst})
+
+        self.assertEqual(_column_values("^['name']", lst, model, counting_eval),
+                         ['Alice', 'Bo'])
+        self.assertEqual(len(calls), 1)
+        self.assertIn('for item in data', calls[0])
+
+    def test_falls_back_to_one_eval_per_row_without_a_scope(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bo'}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIsNone(model.get('_source_expr'))
+        self.assertEqual(_column_values("^['name']", lst, model),
+                         ['Alice', 'Bo'])
+
+    def test_a_row_the_column_cannot_be_read_from_is_dropped(self):
+        # A summary shouldn't cost the other n-1 rows.
+        lst = [{'name': 'Alice'}, {}, {'name': 'Bo'}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertEqual(_column_values("^['name']", lst, model),
+                         ['Alice', 'Bo'])
+
+    def test_one_bad_row_falls_the_whole_comprehension_back_to_per_row(self):
+        lst = [{'name': 'Alice'}, {}, {'name': 'Bo'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        eval_in_scope = lambda code: eval(code, {}, {'data': lst})
+        self.assertEqual(_column_values("^['name']", lst, model, eval_in_scope),
+                         ['Alice', 'Bo'])
+
+
+class TestTally(unittest.TestCase):
+    """Distinct values and their counts, or a reason there's no tally to show."""
+
+    def test_counts_in_first_seen_order(self):
+        self.assertEqual(list(_tally(TALLY_LIST).items()),
+                         [('c', 5), ('aa', 2), ('b', 3)])
+
+    def test_no_rows_is_no_tally(self):
+        self.assertIsNone(_tally([]))
+
+    def test_a_column_at_the_cardinality_limit_still_tallies(self):
+        tally = _tally(list(range(TALLY_MAX_CARDINALITY)))
+        self.assertEqual(len(tally), TALLY_MAX_CARDINALITY)
+
+    def test_too_many_distinct_values_gives_up(self):
+        self.assertEqual(_tally(list(range(TALLY_MAX_CARDINALITY + 1))),
+                         TALLY_TOO_MANY)
+
+    def test_unhashable_values_cannot_be_counted(self):
+        self.assertEqual(_tally([{'a': 1}, {'a': 2}]), TALLY_UNHASHABLE)
+        self.assertEqual(_tally([[1], [2]]), TALLY_UNHASHABLE)
+
+    def test_none_is_a_value_like_any_other(self):
+        self.assertEqual(_tally([None, 1, None]), {None: 2, 1: 1})
+
+
+class TestTallyLiteral(unittest.TestCase):
+    """A tally row is only clickable when its value can be written back into the
+    search box as Python that means the same thing."""
+
+    def test_values_whose_repr_round_trips(self):
+        cases = [('c', "'c'"), (5, '5'), (3.5, '3.5'), (None, 'None'),
+                 (True, 'True'), ((1, 'a'), "(1, 'a')"), ("it's", '"it\'s"')]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_tally_literal(value), expected)
+
+    def test_an_object_repr_is_not_a_literal(self):
+        class Thing:
+            pass
+        self.assertIsNone(_tally_literal(Thing()))
+
+    def test_a_value_that_does_not_compare_equal_to_itself_is_not_offered(self):
+        # `^ == nan` matches nothing, so there is no filter to offer.
+        self.assertIsNone(_tally_literal(float('nan')))
+
+    def test_the_literal_evaluates_back_to_the_value(self):
+        for value in ('c', 5, None, True, (1, 'a')):
+            with self.subTest(value=value):
+                self.assertEqual(ast.literal_eval(_tally_literal(value)), value)
+
+
+class TestTallySelection(unittest.TestCase):
+    """Which rows are checked is read back out of the column search, so the
+    search box stays the only place the filter lives."""
+
+    def test_a_comparison_checks_one_value(self):
+        self.assertEqual(_tally_selection({'op': '==', 'text': "'c'"}),
+                         (["'c'"], False))
+
+    def test_membership_checks_several(self):
+        self.assertEqual(_tally_selection({'op': 'in', 'text': "['c', 'b']"}),
+                         (["'c'", "'b'"], False))
+
+    def test_the_negative_operators_read_as_excluding(self):
+        self.assertEqual(_tally_selection({'op': '!=', 'text': "'c'"}),
+                         (["'c'"], True))
+        self.assertEqual(_tally_selection({'op': 'not in', 'text': "['c', 'b']"}),
+                         (["'c'", "'b'"], True))
+
+    def test_a_hand_typed_literal_is_normalized_to_match_its_row(self):
+        # The tally renders 'c'; a search typed as "c" means the same value and
+        # should show up as the same checked row.
+        self.assertEqual(_tally_selection({'op': '==', 'text': '"c"'}),
+                         (["'c'"], False))
+        self.assertEqual(_tally_selection({'op': 'in', 'text': '("c",)'}),
+                         (["'c'"], False))
+
+    def test_a_search_the_tally_did_not_write_checks_nothing(self):
+        for row in [{'op': '>=', 'text': '3'},
+                    {'op': '', 'text': 'isOdd'},
+                    {'op': '==', 'text': '^^ + 1'},
+                    {'op': '==', 'text': ''},
+                    {'op': 'in', 'text': '[]'},
+                    {'op': 'in', 'text': 'threshold'}]:
+            with self.subTest(row=row):
+                self.assertEqual(_tally_selection(row)[0], [])
+
+    def test_an_operator_the_tally_cannot_read_leaves_exclude_to_the_stored_bit(self):
+        self.assertEqual(_tally_selection({'op': '>=', 'text': '3',
+                                           'exclude': True}), ([], True))
+        self.assertEqual(_tally_selection({'op': '>=', 'text': '3',
+                                           'exclude': False}), ([], False))
+
+    def test_the_operator_wins_over_a_stale_stored_bit(self):
+        self.assertEqual(_tally_selection({'op': '!=', 'text': "'c'",
+                                           'exclude': False}), (["'c'"], True))
+        self.assertEqual(_tally_selection({'op': '==', 'text': "'c'",
+                                           'exclude': True}), (["'c'"], False))
+
+
+class TestWriteTallySelection(unittest.TestCase):
+    """The 0/1/many choice of operator lives in one place, so every tally
+    control agrees on it."""
+
+    def write(self, literals, exclude=False):
+        lst, model = tally_model()
+        _write_tally_selection(model, '^', literals, exclude)
+        return model
+
+    def test_nothing_selected_is_no_filter(self):
+        model = self.write([])
+        self.assertIsNone(model['column_searches'])
+        self.assertFalse(_column_search_active(model, '^'))
+
+    def test_one_value_compares(self):
+        row = self.write(["'c'"])['column_searches']['^']
+        self.assertEqual((row['op'], row['text']), ('==', "'c'"))
+
+    def test_several_values_use_membership(self):
+        row = self.write(["'c'", "'b'"])['column_searches']['^']
+        self.assertEqual((row['op'], row['text']), ('in', "['c', 'b']"))
+
+    def test_excluding_negates_the_operator(self):
+        row = self.write(["'c'"], exclude=True)['column_searches']['^']
+        self.assertEqual((row['op'], row['text']), ('!=', "'c'"))
+        row = self.write(["'c'", "'b'"], exclude=True)['column_searches']['^']
+        self.assertEqual((row['op'], row['text']), ('not in', "['c', 'b']"))
+
+    def test_excluding_nothing_keeps_the_bit_without_filtering(self):
+        # Exclude can be ticked before any value is picked, and there is no
+        # operator or text that says so.
+        model = self.write([], exclude=True)
+        self.assertTrue(model['column_searches']['^']['exclude'])
+        self.assertFalse(_column_search_active(model, '^'))
+
+    def test_the_written_search_round_trips_through_the_selection(self):
+        for literals, exclude in [([], False), (["'c'"], False),
+                                  (["'c'", "'b'"], False), (["'c'"], True),
+                                  (["'c'", "'b'"], True), ([], True)]:
+            with self.subTest(literals=literals, exclude=exclude):
+                model = self.write(literals, exclude)
+                self.assertEqual(_tally_selection(_column_search_row(model, '^')),
+                                 (literals, exclude))
+
+
+class TestTallyLiterals(unittest.TestCase):
+    """The selectable literals of a column, in the order the tally shows them."""
+
+    def test_in_first_seen_order(self):
+        lst, model = tally_model()
+        self.assertEqual(_tally_literals('^', model, lst),
+                         ["'c'", "'aa'", "'b'"])
+
+    def test_values_with_no_literal_are_left_out(self):
+        class Thing:
+            def __repr__(self):
+                return '<thing>'
+        lst = ['c', Thing()]
+        _, model = tally_model(lst)
+        self.assertEqual(_tally_literals('^', model, lst), ["'c'"])
+
+    def test_a_column_with_no_tally_offers_nothing(self):
+        lst = list(range(TALLY_MAX_CARDINALITY + 1))
+        _, model = tally_model(lst)
+        self.assertEqual(_tally_literals('^', model, lst), [])
+
+
+class TestTallyEvents(unittest.TestCase):
+    """Clicking a tally row writes the column search, which is what filters."""
+
+    def click(self, model, lst, event):
+        return update(make_column_mouse_event(repr(event)), None, model, lst,
+                      mock_get_visualizer, eval_in_scope=eval)
+
+    def row(self, model):
+        return _column_search_row(model, '^')
+
+    def test_checking_one_value_compares_against_it(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        self.assertEqual((self.row(model)['op'], self.row(model)['text']),
+                         ('==', "'c'"))
+        self.assertEqual(model['search'], "^ == 'c'")
+
+    def test_checking_a_second_value_switches_to_membership(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        self.assertEqual(self.row(model)['text'], "['c', 'b']")
+        self.assertEqual(model['search'], "^ in ['c', 'b']")
+
+    def test_the_membership_list_follows_the_tally_order_not_the_click_order(self):
+        # So the generated search is the same however the user got there.
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        self.assertEqual(self.row(model)['text'], "['c', 'b']")
+
+    def test_unchecking_back_down_to_one_compares_again(self):
+        lst, model = tally_model()
+        for literal in ("'c'", "'aa'", "'b'"):
+            model, _ = self.click(model, lst,
+                                  TallyItemToggle(index=0, literal=literal))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        self.assertEqual(self.row(model)['text'], "['c', 'b']")
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        self.assertEqual((self.row(model)['op'], self.row(model)['text']),
+                         ('==', "'c'"))
+
+    def test_unchecking_the_last_value_clears_the_filter(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        self.assertIsNone(model['column_searches'])
+        self.assertIsNone(model['search'])
+
+    def test_the_menu_stays_open_across_a_click(self):
+        # The whole point is picking several values in a row.
+        lst, model = tally_model()
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+
+    def test_select_all_checks_every_value(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.row(model)['text'], "['c', 'aa', 'b']")
+
+    def test_select_all_then_unchecking_a_few_is_the_quick_way_to_most_of_them(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        self.assertEqual(self.row(model)['text'], "['c', 'b']")
+
+    def test_select_all_under_exclude_rejects_every_value(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual((self.row(model)['op'], self.row(model)['text']),
+                         ('not in', "['c', 'aa', 'b']"))
+
+    def test_select_none_clears_the_filter(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        model, _ = self.click(model, lst, TallySelectNone(index=0))
+        self.assertIsNone(model['search'])
+
+    def test_select_none_keeps_exclude_and_compose(self):
+        lst, model = tally_model()
+        _set_column_search(model, '^', compose='or')
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        model, _ = self.click(model, lst, TallySelectNone(index=0))
+        self.assertTrue(self.row(model)['exclude'])
+        self.assertEqual(self.row(model)['compose'], 'or')
+
+    def test_excluding_a_selection_negates_the_operator_and_keeps_the_values(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        self.assertEqual((self.row(model)['op'], self.row(model)['text']),
+                         ('!=', "'c'"))
+        self.assertEqual(model['search'], "^ != 'c'")
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        self.assertEqual((self.row(model)['op'], self.row(model)['text']),
+                         ('not in', "['c', 'b']"))
+
+    def test_unexcluding_puts_the_operator_back(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        self.assertEqual((self.row(model)['op'], self.row(model)['text']),
+                         ('==', "'c'"))
+
+    def test_excluding_before_picking_anything_filters_nothing_yet(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        self.assertTrue(self.row(model)['exclude'])
+        self.assertIsNone(model['search'])
+        self.assertFalse(_column_search_active(model, '^'))
+
+    def test_exclude_ticked_first_is_honored_by_the_next_click(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        self.assertEqual(model['search'], "^ != 'c'")
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model()
+        for event in [TallyItemToggle(index=7, literal="'c'"),
+                      TallySelectAll(index=7), TallySelectNone(index=7),
+                      TallyExcludeToggle(index=7)]:
+            with self.subTest(event=event):
+                model, _ = self.click(model, lst, event)
+                self.assertIsNone(model['column_searches'])
+
+    def test_a_tally_click_auto_links_a_filter_like_any_other_search(self):
+        # The tally writes the column search and stops there: filtering and code
+        # generation are the search box's job, unchanged.
+        lst, model = tally_model()
+        eval_in_scope = lambda code: eval(code, {}, {'data': lst})
+        model, commands = update(
+            make_column_mouse_event(repr(TallyItemToggle(index=0, literal="'c'"))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=eval_in_scope)
+        self.assertEqual([c[1] for c in commands if isinstance(c, tuple)],
+                         ["[item for item in data if item == 'c']"])
+        self.assertEqual(model['linked_action'], 'filter')
+
+    def test_the_tally_filters_the_rows_it_counted(self):
+        lst, model = tally_model()
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        self.assertEqual(_get_matching_indices(model['search'], lst, eval),
+                         [0, 1, 3, 5, 6, 7, 8])
+
+
+class TestTallyRendering(unittest.TestCase):
+    """The tally sits at the bottom of the column ▾ menu, below the search row
+    it writes into."""
+
+    def open_menu_html(self, model, lst, column=0):
+        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        return _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                              None))
+
+    def tally(self, th):
+        self.assertIn('<div class="col-tally">', th)
+        return th[th.index('<div class="col-tally">'):]
+
+    def rows(self, tally):
+        return re.findall(r'<div class="col-tally-row[^"]*".*?</div>', tally,
+                          re.DOTALL)
+
+    def checkboxes(self, markup):
+        return re.findall(r'<input[^>]*col-tally-check[^>]*>', markup)
+
+    def test_a_closed_menu_counts_nothing(self):
+        lst, model = tally_model()
+        self.assertNotIn('col-tally', visualize(lst, model, mock_get_visualizer,
+                                                None))
+
+    def test_items_and_counts_in_first_seen_order(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', tally),
+                         [html.escape(repr(v)) for v in ('c', 'aa', 'b')])
+        self.assertEqual(re.findall(r'col-tally-count[^>]*>([^<]*)<', tally),
+                         ['5', '2', '3'])
+
+    def test_the_tally_comes_after_the_search_row_it_writes_into(self):
+        lst, model = tally_model()
+        th = self.open_menu_html(model, lst)
+        self.assertLess(th.index('col-search-row'), th.index('col-tally'))
+
+    def test_each_row_carries_its_own_literal(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn(html.escape(repr(TallyItemToggle(index=0, literal="'c'"))),
+                      tally)
+
+    def test_every_row_carries_a_real_checkbox(self):
+        # Not a glyph: it should look and read like any other checkbox. The row
+        # owns the click, so the box only ever reports what the search says.
+        lst, model = tally_model()
+        boxes = self.checkboxes(self.tally(self.open_menu_html(model, lst)))
+        self.assertEqual(len(boxes), 4)  # one per value, plus Exclude
+        for box in boxes:
+            self.assertIn('type="checkbox"', box)
+
+    def test_the_checked_row_is_the_one_the_search_names(self):
+        lst, model = tally_model()
+        _set_column_search(model, '^', op='==', text="'aa'")
+        rows = self.rows(self.tally(self.open_menu_html(model, lst)))
+        self.assertEqual([' checked' in row for row in rows],
+                         [False, True, False])
+        self.assertEqual([' checked' in self.checkboxes(row)[0] for row in rows],
+                         [False, True, False])
+
+    def test_a_hand_written_search_checks_nothing(self):
+        lst, model = tally_model()
+        _set_column_search(model, '^', op='', text='isOdd')
+        rows = self.rows(self.tally(self.open_menu_html(model, lst)))
+        self.assertEqual([' checked' in row for row in rows], [False] * 3)
+
+    def test_a_value_with_no_literal_cannot_be_checked(self):
+        class Thing:
+            def __repr__(self):
+                return '<thing>'
+        lst = ['c', Thing()]
+        _, model = tally_model(lst)
+        rows = self.rows(self.tally(self.open_menu_html(model, lst)))
+        self.assertEqual(len(rows), 2)
+        self.assertIn('TallyItemToggle', rows[0])
+        self.assertNotIn('TallyItemToggle', rows[1])
+        self.assertIn('unselectable', rows[1])
+        # Its box says as much, rather than looking clickable and doing nothing.
+        self.assertNotIn('disabled', self.checkboxes(rows[0])[0])
+        self.assertIn('disabled', self.checkboxes(rows[1])[0])
+
+    def test_the_header_offers_select_all_select_none_and_exclude(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn(html.escape(repr(TallySelectAll(index=0))), tally)
+        self.assertIn(html.escape(repr(TallySelectNone(index=0))), tally)
+        self.assertIn(html.escape(repr(TallyExcludeToggle(index=0))), tally)
+        self.assertIn('Exclude', tally)
+        # The header reads before the values it acts on.
+        self.assertLess(tally.index('col-tally-header'),
+                        tally.index('col-tally-row'))
+
+    def test_exclude_shows_whether_it_is_ticked(self):
+        # It heads the tally, so its box is the first one.
+        lst, model = tally_model()
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertNotIn(' checked', self.checkboxes(tally)[0])
+        _set_column_search(model, '^', op='!=', text="'c'")
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn(' checked', self.checkboxes(tally)[0])
+
+    def test_too_many_distinct_values_says_so_instead(self):
+        lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
+        _, model = tally_model(lst)
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn('col-tally-note', tally)
+        self.assertIn(str(TALLY_MAX_CARDINALITY), tally)
+        self.assertEqual(self.rows(tally), [])
+        self.assertNotIn('TallySelectAll', tally)
+
+    def test_values_that_cannot_be_counted_say_so_instead(self):
+        lst = [{'a': 1}, {'a': 2}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['^']
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn('col-tally-note', tally)
+        self.assertEqual(self.rows(tally), [])
+
+    def test_an_empty_table_has_no_tally_at_all(self):
+        lst = []
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['^']
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        self.assertNotIn('col-tally',
+                         visualize(lst, model, mock_get_visualizer, None))
+
+    def test_a_computed_column_tallies_its_own_values(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bo'}, {'name': 'Cy'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['len(^["name"])']
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        eval_in_scope = lambda code: eval(code, {'len': len}, {'data': lst})
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            eval_in_scope))
+        tally = self.tally(th)
+        self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', tally),
+                         ['5', '2'])
+        self.assertEqual(re.findall(r'col-tally-count[^>]*>([^<]*)<', tally),
+                         ['1', '2'])
+
+    def test_a_long_value_is_truncated_for_display_but_not_for_the_filter(self):
+        lst = ['x' * 200, 'y']
+        _, model = tally_model(lst)
+        tally = self.tally(self.open_menu_html(model, lst))
+        shown = re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)[0]
+        self.assertIn('…', shown)
+        self.assertIn(html.escape(repr('x' * 200)), tally)
 
 
 if __name__ == '__main__':

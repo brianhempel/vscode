@@ -149,6 +149,32 @@ class ColumnSearchDropdownToggle:
     dropdown_id: str
 
 @dataclass(frozen=True, slots=True)
+class TallyItemToggle:
+    """User clicked one of a column's tally rows.
+
+    Identified by the value's literal rather than its position, so a click can't
+    land on a different value than the one it was aimed at.
+    """
+    index: int
+    literal: str
+
+@dataclass(frozen=True, slots=True)
+class TallySelectAll:
+    """User clicked Select All on a column's tally."""
+    index: int
+
+@dataclass(frozen=True, slots=True)
+class TallySelectNone:
+    """User clicked Select None on a column's tally."""
+    index: int
+
+@dataclass(frozen=True, slots=True)
+class TallyExcludeToggle:
+    """User toggled Exclude on a column's tally, turning the values it has
+    selected into the ones to leave out."""
+    index: int
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -368,7 +394,11 @@ COLUMN_SEARCH_COMPOSE = ['and', 'or']
 COLUMN_SEARCH_MEMBERSHIP_OPS = ('in', 'not in')
 COLUMN_SEARCH_COLLECTION_HINT = '[]'
 
-_COLUMN_SEARCH_DEFAULT = {'compose': 'and', 'op': '==', 'text': ''}
+# `exclude` belongs to the tally rather than the search row proper: which values
+# are selected is read back out of `op` and `text`, but Exclude can be ticked
+# before any value is picked, and then there is no operator to hold it.
+_COLUMN_SEARCH_DEFAULT = {'compose': 'and', 'op': '==', 'text': '',
+                          'exclude': False}
 
 # An empty collection is the shape of a search, not a search: it's what's left
 # when the brackets have been handed over but not filled in.
@@ -582,6 +612,182 @@ def _recompose_search(model: dict, eval_in_scope=None) -> None:
     model['search_from_columns'] = composed
     if model['search'] != previous:
         model['_scroll_to_match'] = True
+
+
+# =============================================================================
+# Column tally
+# =============================================================================
+#
+# A column of few enough distinct values gets a tally in its ▾ menu: each value
+# and how many rows have it, checkable to filter down to them (Apple Numbers
+# calls this a Quick Filter).
+#
+# The tally holds no state of its own. Which rows are checked is read back out
+# of the column search below it, and clicking one writes it -- so the search box
+# stays the one place the filter lives, and one typed by hand simply leaves the
+# boxes with nothing to say about it.
+
+# Past this many distinct values a tally has stopped being a summary, and the
+# menu says so instead of listing them.
+TALLY_MAX_CARDINALITY = 100
+
+TALLY_TOO_MANY = 'too_many'
+TALLY_UNHASHABLE = 'unhashable'
+
+# The operator pairs the tally speaks: one value compares, several use
+# membership, and Exclude picks the negative of each.
+_TALLY_SINGLE_OPS = ('==', '!=')
+_TALLY_MEMBERSHIP_OPS = ('in', 'not in')
+_TALLY_EXCLUDE_OPS = ('!=', 'not in')
+
+
+def _column_values(col, lst, model, eval_in_scope=None) -> list:
+    """Every row's value for one column, in row order.
+
+    The table evaluates a cell at a time, but a tally wants the whole column, so
+    ask for it in one comprehension -- the same expression the header hands to a
+    drag. Rows the column can't be read from are dropped: a summary shouldn't
+    cost the other n-1 rows.
+    """
+    if col.strip() == '^':
+        return list(lst)
+
+    source_expr = model.get('_source_expr')
+    if source_expr is not None and eval_in_scope is not None:
+        item_expr = replace_carets_in_py_exp(col, ['item'])
+        try:
+            return list(eval_in_scope(f'[{item_expr} for item in {source_expr}]'))
+        except Exception:
+            # A comprehension is all or nothing, so one unreadable row lands
+            # here too; the loop below gets the rest.
+            pass
+
+    values = []
+    for item in lst:
+        try:
+            values.append(eval_caret_expr(col, item, eval_in_scope))
+        except Exception:
+            pass
+    return values
+
+
+def _tally(values):
+    """Distinct values and their counts, in first-seen order.
+
+    None when there is nothing to count, or one of TALLY_TOO_MANY /
+    TALLY_UNHASHABLE when there is a reason not to.
+    """
+    counts = {}
+    try:
+        for value in values:
+            if value in counts:
+                counts[value] += 1
+            else:
+                counts[value] = 1
+                if len(counts) > TALLY_MAX_CARDINALITY:
+                    return TALLY_TOO_MANY
+    except TypeError:
+        return TALLY_UNHASHABLE
+    return counts or None
+
+
+def _tally_literal(value) -> str | None:
+    """A value as Python source the column search can compare against, or None
+    when there's none to write.
+
+    Most objects have none: their repr describes them rather than spelling them
+    out. Nor does a value that isn't equal to itself, since a comparison against
+    it would match nothing anyway.
+    """
+    text = repr(value)
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        return None
+    if type(parsed) is not type(value):
+        return None
+    try:
+        return text if parsed == value else None
+    except Exception:
+        return None
+
+
+def _as_literal(text: str) -> str | None:
+    """Search text as the canonical literal for the value it names, so `"c"`
+    typed by hand checks the row the tally rendered as `'c'`."""
+    try:
+        return repr(ast.literal_eval(text))
+    except Exception:
+        return None
+
+
+def _as_literals(text: str) -> List[str]:
+    """The same, for the collection on the right of `in` / `not in`."""
+    try:
+        values = ast.literal_eval(text)
+    except Exception:
+        return []
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return []
+    return [repr(value) for value in values]
+
+
+def _tally_selection(row) -> Tuple[List[str], bool]:
+    """The values a column search row has picked out, and whether it keeps them
+    or leaves them out.
+
+    Only the shapes the tally itself writes are read back; a search that says
+    anything else selects nothing.
+
+    The operator settles Exclude whenever there are values for it to apply to,
+    which keeps a search edited by hand authoritative. With nothing selected it
+    has nothing to say, and the stored bit stands.
+    """
+    op = row.get('op', '')
+    text = (row.get('text') or '').strip()
+    if op in _TALLY_SINGLE_OPS:
+        literal = _as_literal(text)
+        literals = [literal] if literal is not None else []
+    elif op in _TALLY_MEMBERSHIP_OPS:
+        literals = _as_literals(text)
+    else:
+        literals = []
+    if not literals:
+        return ([], bool(row.get('exclude')))
+    return (literals, op in _TALLY_EXCLUDE_OPS)
+
+
+def _write_tally_selection(model: dict, col: str, literals, exclude: bool) -> None:
+    """Write a selection back as the column's search: nothing selected is no
+    filter, one value compares, several use membership.
+
+    Every tally control writes through here, so none of them can disagree about
+    that choice.
+    """
+    if not literals:
+        _set_column_search(model, col, op='==', text='', exclude=exclude)
+    elif len(literals) == 1:
+        _set_column_search(model, col, op='!=' if exclude else '==',
+                           text=literals[0], exclude=exclude)
+    else:
+        _set_column_search(model, col, op='not in' if exclude else 'in',
+                           text=f'[{", ".join(literals)}]', exclude=exclude)
+
+
+def _tally_literals(col, model, lst, eval_in_scope=None) -> List[str]:
+    """Every value a column's tally can filter on, in the order it shows them."""
+    tally = _tally(_column_values(col, lst, model, eval_in_scope))
+    if not isinstance(tally, dict):
+        return []
+    return [literal for literal in map(_tally_literal, tally)
+            if literal is not None]
+
+
+def _in_tally_order(literals, order) -> List[str]:
+    """Sort a selection into the order the tally displays, so the search reads
+    the same however the user clicked their way to it."""
+    rank = {literal: i for i, literal in enumerate(order)}
+    return sorted(literals, key=lambda literal: rank.get(literal, len(rank)))
 
 
 def _is_list_of_ints(val) -> bool:
@@ -1691,7 +1897,82 @@ def _render_column_search_row(col, index, model) -> str:
     )
 
 
-def _render_column_menu(col, index, model):
+_TALLY_NOTES = {
+    TALLY_TOO_MANY: f'More than {TALLY_MAX_CARDINALITY} distinct values',
+    TALLY_UNHASHABLE: "These values can't be counted",
+}
+
+def _render_tally_check(checked: bool, disabled: bool = False) -> str:
+    """A tally checkbox, which reports the search rather than holding a state of
+    its own: CSS has it ignore the pointer, so the click that ticks it is the
+    surrounding row's, and `checked` only ever comes from the model.
+    """
+    return (f'<input type="checkbox" class="col-tally-check"'
+            f'{" checked" if checked else ""}'
+            f'{" disabled" if disabled else ""} />')
+
+
+def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
+    """Render one column's tally: each distinct value and how many rows have it.
+
+    Only computed while the menu is open, which is the one time the whole column
+    is worth evaluating.
+    """
+    tally = _tally(_column_values(col, lst, model, eval_in_scope))
+    if tally is None:
+        return ''
+    if not isinstance(tally, dict):
+        return (f'<div class="col-tally">'
+                f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
+                f'</div>')
+
+    selected, exclude = _tally_selection(_column_search_row(model, col))
+    selected = set(selected)
+
+    rows = []
+    for value, count in tally.items():
+        literal = _tally_literal(value)
+        label = html.escape(truncate_str(repr(value), 60))
+        if literal is None:
+            # Nothing to compare against, so the count is all this row has to
+            # offer, and a disabled box says so rather than looking clickable.
+            rows.append(
+                f'<div class="col-tally-row unselectable">'
+                f'{_render_tally_check(False, disabled=True)}'
+                f'<span class="col-tally-item snc-code">{label}</span>'
+                f'<span class="col-tally-count">{count}</span>'
+                f'</div>')
+            continue
+        checked = literal in selected
+        toggle_event = repr(TallyItemToggle(index=index, literal=literal))
+        rows.append(
+            f'<div class="col-tally-row{" checked" if checked else ""}" '
+            f'snc-mouse-down="{html.escape(toggle_event)}">'
+            f'{_render_tally_check(checked)}'
+            f'<span class="col-tally-item snc-code">{label}</span>'
+            f'<span class="col-tally-count">{count}</span>'
+            f'</div>')
+
+    header = (
+        f'<div class="col-tally-header">'
+        f'<span class="col-tally-link" data-tooltip="Select every value" '
+        f'snc-mouse-down="{html.escape(repr(TallySelectAll(index=index)))}">'
+        f'All</span>'
+        f'<span class="col-tally-link" data-tooltip="Select no values" '
+        f'snc-mouse-down="{html.escape(repr(TallySelectNone(index=index)))}">'
+        f'None</span>'
+        f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
+        f'data-tooltip="Filter to everything but the selected values" '
+        f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(index=index)))}">'
+        f'{_render_tally_check(exclude)}Exclude</span>'
+        f'</div>'
+    )
+    return (f'<div class="col-tally">{header}'
+            f'<div class="col-tally-list">{"".join(rows)}</div>'
+            f'</div>')
+
+
+def _render_column_menu(col, index, model, lst, eval_in_scope=None):
     """Render the rows of the per-column ▾ menu.
 
     State-driven (no data-hover-menu), so the TypeScript side hoists the panel out
@@ -1707,6 +1988,7 @@ def _render_column_menu(col, index, model):
         f'class="snc-dropdown-option-label">Remove Column</span>'
         f'</div>',
         _render_column_search_row(col, index, model),
+        _render_column_tally(col, index, model, lst, eval_in_scope),
     ]
     return (
         f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout">'
@@ -1715,7 +1997,7 @@ def _render_column_menu(col, index, model):
     )
 
 
-def _render_column_header(col, index, model):
+def _render_column_header(col, index, model, lst, eval_in_scope=None):
     """Render a normal column header with drag handle, column name, and ▾ menu."""
     click_event = repr(ColumnClick(index=index))
     drag_start_event = repr(ColumnDragStart(index=index))
@@ -1765,7 +2047,7 @@ def _render_column_header(col, index, model):
         f'<span snc-mouse-down="{html.escape(toggle_event)}" '
         f'data-tooltip="Column actions" '
         f'class="{" ".join(menu_classes)}">▾</span>'
-        f'{_render_column_menu(col, index, model) if menu_open else ""}'
+        f'{_render_column_menu(col, index, model, lst, eval_in_scope) if menu_open else ""}'
         f'</span>'
     )
 
@@ -2457,7 +2739,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         if model.get('editing_column_index') == ci:
             strs.append(_render_column_input(lst, model, get_visualizer, is_editing=True, editing_index=ci))
         else:
-            strs.append(_render_column_header(col, ci, model))
+            strs.append(_render_column_header(col, ci, model, lst, eval_in_scope))
 
     if model.get('adding_column'):
         strs.append(_render_column_input(lst, model, get_visualizer, is_editing=False))
@@ -2879,6 +3161,48 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if col is not None and compose in COLUMN_SEARCH_COMPOSE:
                 _set_column_search(model, col, compose=compose)
                 model['col_search_dropdown'] = None
+                _recompose_search(model, eval_in_scope)
+
+        # The tally leaves the column menu open: picking several values in a row
+        # is the whole point of it.
+        case TallyItemToggle(index=idx, literal=literal):
+            col = _column_at(model, idx)
+            if col is not None:
+                selected, exclude = _tally_selection(_column_search_row(model, col))
+                if literal in selected:
+                    selected = [lit for lit in selected if lit != literal]
+                else:
+                    selected = selected + [literal]
+                _write_tally_selection(
+                    model, col,
+                    _in_tally_order(selected,
+                                    _tally_literals(col, model, value, eval_in_scope)),
+                    exclude)
+                _recompose_search(model, eval_in_scope)
+
+        case TallySelectAll(index=idx):
+            col = _column_at(model, idx)
+            if col is not None:
+                _, exclude = _tally_selection(_column_search_row(model, col))
+                _write_tally_selection(
+                    model, col,
+                    _tally_literals(col, model, value, eval_in_scope), exclude)
+                _recompose_search(model, eval_in_scope)
+
+        case TallySelectNone(index=idx):
+            col = _column_at(model, idx)
+            if col is not None:
+                _, exclude = _tally_selection(_column_search_row(model, col))
+                _write_tally_selection(model, col, [], exclude)
+                _recompose_search(model, eval_in_scope)
+
+        case TallyExcludeToggle(index=idx):
+            col = _column_at(model, idx)
+            if col is not None:
+                selected, exclude = _tally_selection(_column_search_row(model, col))
+                # Rewriting the same selection the other way round flips the
+                # operator and leaves the values alone.
+                _write_tally_selection(model, col, selected, not exclude)
                 _recompose_search(model, eval_in_scope)
 
         case ColumnSearchDropdownToggle(dropdown_id=did):
