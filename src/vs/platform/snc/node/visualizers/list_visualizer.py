@@ -55,6 +55,7 @@ from visualizer_utils import (
     with_pass_body,
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix,
+    CARETS_RE,
     strip_leading_caret, eval_caret_expr, replace_carets_in_py_exp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
     caret_expr_parses, is_nested,
@@ -118,6 +119,34 @@ class ColumnDragEnd:
 class ColumnKeyDown:
     """Keyboard event in column management (Enter to commit, Escape to cancel)."""
     pass
+
+@dataclass(frozen=True, slots=True)
+class ColumnSearchInput:
+    """User typed in a column's search box (inside that column's ▾ menu)."""
+    index: int
+    value: str
+
+@dataclass(frozen=True, slots=True)
+class ColumnSearchOpSelect:
+    """User picked a comparison operator for a column's search."""
+    index: int
+    op: str
+
+@dataclass(frozen=True, slots=True)
+class ColumnSearchComposeSelect:
+    """User picked how a column's search composes with the other columns'."""
+    index: int
+    compose: str
+
+@dataclass(frozen=True, slots=True)
+class ColumnSearchDropdownToggle:
+    """User toggled one of the two small chip menus on a column search row.
+
+    Separate from DropdownToggle because these panels are nested INSIDE the open
+    column menu: routing them through the single `openDropdown` slot would close
+    the very menu they live in.
+    """
+    dropdown_id: str
 
 @dataclass(frozen=True, slots=True)
 class SearchBoxInput:
@@ -314,6 +343,247 @@ def parse_search_term(search: str | None) -> tuple | None:
     return ('expr', search)
 
 
+# =============================================================================
+# Per-column search
+# =============================================================================
+#
+# Each column can carry its own search, edited in that column's ▾ menu as
+#
+#     [and|or] [>= > == != < <= in "not in" (none)] (text)
+#
+# The text is written in COLUMN scope, one level deeper than the main search
+# box: ^ is the column value (not necessarily the row, since a column can be
+# computed), ^^ is the row item, ^^^ is the array.
+#
+# Nothing here filters rows or generates code. Every active column search is
+# lifted into the main search box's scope and folded into one search string,
+# which the existing matching and code generation then handle unchanged. That
+# also makes the composition visible and editable as text.
+
+COLUMN_SEARCH_OPS = ['>=', '>', '==', '!=', '<', '<=', 'in', 'not in', '']
+COLUMN_SEARCH_COMPOSE = ['and', 'or']
+
+# These two want a collection on the right, so choosing one hands the user the
+# brackets rather than making them type both halves (see the op event handler).
+COLUMN_SEARCH_MEMBERSHIP_OPS = ('in', 'not in')
+COLUMN_SEARCH_COLLECTION_HINT = '[]'
+
+_COLUMN_SEARCH_DEFAULT = {'compose': 'and', 'op': '==', 'text': ''}
+
+# An empty collection is the shape of a search, not a search: it's what's left
+# when the brackets have been handed over but not filled in.
+_EMPTY_COLLECTION_RE = re.compile(r'^(?:\[\s*\]|\(\s*\)|\{\s*\})$')
+
+# Nodes that bind tighter than any operator, so a column expression built from
+# one needs no parentheses when it is substituted into a predicate. Notably NOT
+# ast.Tuple: `1, 2` parses as one but doesn't survive being nested.
+_ATOMIC_NODES = (ast.Name, ast.Constant, ast.Call, ast.Subscript, ast.Attribute,
+                 ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp,
+                 ast.SetComp, ast.JoinedStr)
+
+
+def _parse_caret_expr(expr: str):
+    """Parse a caret-bearing expression, or None if it doesn't parse.
+
+    Caret runs stand in for values, so they're collapsed to a placeholder name
+    (the same trick caret_expr_parses uses) before parsing.
+    """
+    try:
+        return ast.parse(CARETS_RE.sub('_crt_', expr), mode='eval').body
+    except SyntaxError:
+        return None
+
+
+def _atomize(expr: str) -> str:
+    """Parenthesize an expression unless it already binds tighter than any
+    operator, so `len(^)` composes as-is while `^ + 1` gets wrapped.
+
+    An expression that doesn't parse is left alone: parens can't rescue it, and
+    the user still has to recognize their own text in the main search box.
+    """
+    node = _parse_caret_expr(expr)
+    if node is None or isinstance(node, _ATOMIC_NODES):
+        return expr
+    return f'({expr})'
+
+
+def _is_predicate_function(text: str, eval_in_scope=None) -> bool:
+    """Whether a caret-free column search names a function to call on ^.
+
+    A bare name or dotted name is the only shape that qualifies. When there's a
+    scope to ask, it settles whether the name is a function (`isOdd`) or a value
+    that stands on its own (`threshold`); without one, the shape decides.
+    """
+    node = _parse_caret_expr(text)
+    if not isinstance(node, (ast.Name, ast.Attribute)):
+        return False
+    if eval_in_scope is None:
+        return True
+    try:
+        return callable(eval_in_scope(text))
+    except Exception:
+        # An unresolvable name is more useful read as a predicate: the error
+        # surfaces as "no matches" instead of "matches everything".
+        return True
+
+
+def column_search_predicate(op: str, text: str, eval_in_scope=None) -> str | None:
+    """One column search row as a predicate in column scope (^ = the column
+    value), or None when the row is inactive.
+
+    An operator alone is not a search: with no text there is nothing to compare
+    against, whatever the dropdown says.
+    """
+    text = (text or '').strip()
+    if not text or _EMPTY_COLLECTION_RE.match(text):
+        return None
+    if op:
+        return f'^ {op} {text}'
+    # Blank operator: the text is the whole predicate.
+    if CARETS_RE.search(text):
+        return text
+    if needs_implicit_caret(text):
+        return f'^{text.lstrip()}' if text.lstrip().startswith('.') else f'^ {text}'
+    if _is_predicate_function(text, eval_in_scope):
+        return f'{text}(^)'
+    return text
+
+
+def lift_column_predicate(pred: str, col_expr: str) -> str:
+    """Rewrite a column-scope predicate into item scope (what the main search
+    box speaks): ^ becomes the column expression, and every longer caret run
+    loses a level, so ^^ (the item) becomes ^ and ^^^ (the array) becomes ^^.
+    """
+    depth = max((len(m[0]) for m in CARETS_RE.finditer(pred)), default=1)
+    # Substituted in two passes via caret-free placeholders:
+    # replace_carets_in_py_exp tells code carets from string-literal carets by
+    # re-parsing with the run restored, and a replacement that itself contains
+    # carets never parses -- which would make every run after the first look
+    # like code even inside a string.
+    holders = [f'_snc_lift{n}_' for n in range(1, depth + 1)]
+    out = replace_carets_in_py_exp(pred, holders)
+    for n, holder in enumerate(holders, start=1):
+        out = out.replace(holder, _atomize(col_expr) if n == 1 else '^' * (n - 1))
+    return out
+
+
+def _paren_if_loose(term: str) -> str:
+    """Parenthesize a term whose top level would swallow a surrounding `and`."""
+    node = _parse_caret_expr(term)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return f'({term})'
+    if isinstance(node, (ast.IfExp, ast.Lambda, ast.NamedExpr)):
+        return f'({term})'
+    return term
+
+
+def compose_column_searches(columns, column_searches, eval_in_scope=None) -> str | None:
+    """Fold every active column search into one main-search string.
+
+    The `and` columns form a group in column order; the `or` columns are then
+    or'd against it. Parentheses appear only where Python's precedence would
+    otherwise read the result differently, so a lone column search comes out as
+    exactly what the user typed.
+    """
+    searches = column_searches or {}
+    and_terms, or_terms = [], []
+    for col in columns:
+        row = searches.get(col)
+        if not row:
+            continue
+        pred = column_search_predicate(row.get('op', ''), row.get('text', ''),
+                                       eval_in_scope)
+        if not pred:
+            continue
+        term = lift_column_predicate(pred, col)
+        (or_terms if row.get('compose') == 'or' else and_terms).append(term)
+
+    if not and_terms and not or_terms:
+        return None
+    group = ' and '.join(_paren_if_loose(t) for t in and_terms)
+    if not or_terms:
+        return group
+    # `and` binds tighter than `or`, so a single-term group needs no parens.
+    if len(and_terms) > 1:
+        group = f'({group})'
+    return ' or '.join(([group] if and_terms else []) + or_terms)
+
+
+# The rows are keyed by column EXPRESSION, like _slot_children and the cell
+# children, so reordering columns can't scramble which search belongs to which.
+
+def _column_at(model: dict, index: int) -> str | None:
+    columns = model.get('columns', [])
+    return columns[index] if 0 <= index < len(columns) else None
+
+
+def _column_search_row(model: dict, col: str) -> dict:
+    """A column's search row, defaulted for display."""
+    return {**_COLUMN_SEARCH_DEFAULT, **((model.get('column_searches') or {}).get(col) or {})}
+
+
+def _column_search_active(model: dict, col: str, eval_in_scope=None) -> bool:
+    """Whether a column is actually filtering (a row with no text is not)."""
+    row = (model.get('column_searches') or {}).get(col)
+    if not row:
+        return False
+    return column_search_predicate(row.get('op', ''), row.get('text', ''),
+                                   eval_in_scope) is not None
+
+
+def _set_column_search(model: dict, col: str, **fields) -> None:
+    searches = dict(model.get('column_searches') or {})
+    row = {**_COLUMN_SEARCH_DEFAULT, **(searches.get(col) or {}), **fields}
+    if row == _COLUMN_SEARCH_DEFAULT:
+        searches.pop(col, None)
+    else:
+        searches[col] = row
+    model['column_searches'] = searches or None
+
+
+def _remove_column_search(model: dict, col: str) -> None:
+    searches = dict(model.get('column_searches') or {})
+    searches.pop(col, None)
+    model['column_searches'] = searches or None
+
+
+def _rename_column_search(model: dict, old_name: str, new_name: str) -> None:
+    searches = dict(model.get('column_searches') or {})
+    if old_name in searches:
+        searches[new_name] = searches.pop(old_name)
+        model['column_searches'] = searches or None
+
+
+def _close_column_menus(model: dict) -> None:
+    """Close the column ▾ menu along with any chip menu nested inside it.
+
+    Menu ids are index-based, so adding, removing, reordering or renaming a
+    column leaves an open menu pointing at the wrong one.
+    """
+    model['openDropdown'] = None
+    model['col_search_dropdown'] = None
+
+
+def _recompose_search(model: dict, eval_in_scope=None) -> None:
+    """Push the column searches into the main search box.
+
+    One-directional for now: the main box is free to hold anything the user
+    types, so when the columns have nothing to say we leave a hand-written
+    search alone rather than clearing it. `search_from_columns` records what the
+    columns last wrote, which is what tells the two apart.
+    """
+    composed = compose_column_searches(model.get('columns', []),
+                                       model.get('column_searches') or {},
+                                       eval_in_scope)
+    if composed is None and model.get('search') != model.get('search_from_columns'):
+        return
+    previous = model.get('search')
+    model['search'] = composed or None
+    model['search_from_columns'] = composed
+    if model['search'] != previous:
+        model['_scroll_to_match'] = True
+
+
 def _is_list_of_ints(val) -> bool:
     return isinstance(val, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in val)
 
@@ -445,7 +715,10 @@ def _get_search_context(model: dict, var_and_exp=None,
     else:
         predicate_with_caret = search
 
-    predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['item'])
+    # ^ is the item and ^^ the array, which is the level a column search's ^^^
+    # lands on once it is lifted into this scope.
+    predicate_expr = replace_carets_in_py_exp(predicate_with_caret,
+                                              ['item', _atomize(source_expr)])
 
     ctx = {
         'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
@@ -902,9 +1175,10 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
         else:
             predicate_with_caret = '^ ' + search.lstrip()
 
-    predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['_item'])
+    predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['_item', '_lst'])
 
     matched = []
+    _lst = lst  # bound for a predicate that names the array as ^^
     for i, _item in enumerate(lst):
         try:
             if eval(predicate_expr):
@@ -1196,10 +1470,21 @@ _COLUMN_MGMT_DEFAULTS = {
     'selected_suggestion_index': None,
     'column_drag_from': None,
     'column_drag_over': None,
+    # Per-column searches, keyed by column expression. Stored as None rather
+    # than {} so this shared defaults dict never hands the same dict to two
+    # models; always read it as `model.get('column_searches') or {}`.
+    'column_searches': None,
+    # Which chip menu is open on the visible column search row ('op-3' /
+    # 'compose-3'). Deliberately not `openDropdown`: those panels are nested
+    # inside the column menu, which that single slot is already holding open.
+    'col_search_dropdown': None,
 }
 
 _SEARCH_DEFAULTS = {
     'search': None,
+    # What the column searches last composed, so a search the user typed by hand
+    # can be told from one the columns wrote (see _recompose_search).
+    'search_from_columns': None,
     'first_match': False,
     'openDropdown': None,
     'linked_action': None,
@@ -1307,6 +1592,105 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     }
 
 
+def _column_search_value_label(value: str) -> str:
+    """A chip's or option's current value, as menu text.
+
+    The values are Python (`and`, `>=`, `in`), so they render in the code font;
+    the empty operator has no code to show and reads as a word instead.
+    """
+    if value == '':
+        return '<span class="col-search-blank" data-charlen="6">(none)</span>'
+    return f'<span class="snc-code" data-charlen="{len(value)}">{html.escape(value)}</span>'
+
+
+def _render_column_search_chip(dropdown_id, current, options, make_event,
+                               open_dropdown, chip_class, tooltip='') -> str:
+    """One of the two small dropdowns prefixing a column's search box.
+
+    State-driven like the column menu it sits inside, and for the same reason:
+    a hover menu is opened by a listener bound to the widget root, which this
+    panel's trigger has already been hoisted out of.
+    """
+    toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
+    is_open = (open_dropdown == dropdown_id)
+
+    panel_html = ''
+    if is_open:
+        rows = ''.join(
+            f'<div class="snc-dropdown-option'
+            f'{" selected" if option == current else ""}" '
+            f'snc-mouse-down="{html.escape(make_event(option))}">'
+            f'{_column_search_value_label(option)}</div>'
+            for option in options
+        )
+        panel_html = (
+            f'<div class="snc-dropdown-panel flyout col-search-chip-panel" '
+            f'snc-dropdown-align="flyout">{rows}</div>'
+        )
+
+    chip_classes = f'col-search-chip {chip_class}' + (' open' if is_open else '')
+    tooltip_attr = f'data-tooltip="{html.escape(tooltip)}" ' if tooltip else ''
+    return (
+        f'<span class="snc-dropdown-trigger">'
+        f'<span class="{chip_classes}" {tooltip_attr}'
+        f'snc-mouse-down="{html.escape(toggle_event)}">'
+        f'{_column_search_value_label(current)}'
+        f'<span class="col-search-chip-arrow">▾</span></span>'
+        f'{panel_html}'
+        f'</span>'
+    )
+
+
+def _render_column_search_row(col, index, model) -> str:
+    """Render one column's search: [and|or] [comparison] (text).
+
+    The text is written in column scope, where ^ is the column value, ^^ the row
+    item and ^^^ the array. Whatever the user types here is lifted and folded
+    into the main search box, which does the actual filtering.
+    """
+    row = _column_search_row(model, col)
+    open_dropdown = model.get('col_search_dropdown')
+
+    compose_html = _render_column_search_chip(
+        f'compose-{index}', row['compose'], COLUMN_SEARCH_COMPOSE,
+        lambda v: repr(ColumnSearchComposeSelect(index=index, compose=v)),
+        open_dropdown, 'col-search-compose',
+        "How this composes with other columns' filters")
+    # No tooltip on the operator: it shows the operator, and the box beside it
+    # shows what it compares against.
+    op_html = _render_column_search_chip(
+        f'op-{index}', row['op'], COLUMN_SEARCH_OPS,
+        lambda v: repr(ColumnSearchOpSelect(index=index, op=v)),
+        open_dropdown, 'col-search-op')
+
+    input_event = (f"lambda e: ColumnSearchInput(index={index}, "
+                   f"value=e.get('value', ''))")
+    # Focus is only ever taken right after the brackets were handed over, and
+    # then the cursor belongs between them - never on merely opening the menu.
+    focus_attrs = ''
+    if model.get('_col_search_focus'):
+        focus_attrs = f'autofocus snc-cursor-pos="{len("[")}" '
+    # The chips sit on top of the search box, the way the string visualizer's
+    # toggles sit on top of its Find box - mirrored to the left, since these read
+    # before the value rather than after it. They come after the input so they
+    # paint over it, and the input reserves room for them with its left padding.
+    return (
+        f'<div class="col-search-row">'
+        f'Filter ({compose_html})'
+        f'<div class="search-box-wrapper">'
+        f'<input type="text" snc-input="{html.escape(input_event)}" '
+        f'value="{html.escape(row["text"])}" '
+        f'{focus_attrs}'
+        f'placeholder="Column Search" '
+        f'data-tooltip="^ is this column, ^^ the item, ^^^ the list" '
+        f'spellcheck="false" '
+        f'class="col-search-input search-box" />'
+        f'<span class="col-search-chips">{op_html}</span>'
+        f'</div>'
+        f'</div>'
+    )
+
+
 def _render_column_menu(col, index, model):
     """Render the rows of the per-column ▾ menu.
 
@@ -1321,7 +1705,8 @@ def _render_column_menu(col, index, model):
         f'<div class="snc-dropdown-option">'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove Column</span>'
-        f'</div>'
+        f'</div>',
+        _render_column_search_row(col, index, model),
     ]
     return (
         f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout">'
@@ -1347,6 +1732,9 @@ def _render_column_header(col, index, model):
         th_classes.append('col-drag-source')
     if is_drag_target:
         th_classes.append('col-drag-before' if drag_from > drag_over else 'col-drag-after')
+    is_filtered = _column_search_active(model, col)
+    if is_filtered:
+        th_classes.append('col-filtered')
 
     source_expr = model.get('_source_expr')
     if source_expr is not None:
@@ -1368,9 +1756,14 @@ def _render_column_header(col, index, model):
         # The open panel is hoisted out of the <th>, so the header stops being
         # hovered as soon as the pointer reaches it; pin the trigger visible.
         menu_classes.append('open')
+    if is_filtered:
+        # A search set here keeps filtering with the menu closed, so the way in
+        # to it stays visible rather than waiting for a hover to reveal it.
+        menu_classes.append('active')
     menu_html = (
         f'<span class="snc-dropdown-trigger col-menu-trigger">'
         f'<span snc-mouse-down="{html.escape(toggle_event)}" '
+        f'data-tooltip="Column actions" '
         f'class="{" ".join(menu_classes)}">▾</span>'
         f'{_render_column_menu(col, index, model) if menu_open else ""}'
         f'</span>'
@@ -2254,12 +2647,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     commands: List[Any] = []
     type_key = _get_item_type_key(value) if value else None
     model['_scroll_to_match'] = False
+    # A one-shot request, cleared here so it can't pull focus into a column
+    # search box on some later, unrelated render.
+    model['_col_search_focus'] = False
 
     match msg:
         case AddColumnClick():
-            # Column-menu ids are index-based, so any add/remove/reorder/rename
-            # invalidates an open menu. Each of those handlers closes it.
-            model['openDropdown'] = None
+            _close_column_menus(model)
             model['adding_column'] = True
             model['column_input_value'] = ''
             model['editing_column_index'] = None
@@ -2286,13 +2680,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['columns'][idx] = name
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
+                        _rename_column_search(model, old_name, name)
+                        _recompose_search(model, eval_in_scope)
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
                 if type_key:
                     _save_slots(model)
 
         case ColumnClick(index=idx):
-            model['openDropdown'] = None
+            _close_column_menus(model)
             detail = event_json.get('detail', 1)
             if detail >= 2:
                 if 0 <= idx < len(model['columns']):
@@ -2301,10 +2697,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['adding_column'] = False
 
         case RemoveColumnClick(index=idx):
-            model['openDropdown'] = None
+            _close_column_menus(model)
             if 0 <= idx < len(model['columns']):
                 removed_col = model['columns'].pop(idx)
                 _remove_column_children(model, removed_col)
+                _remove_column_search(model, removed_col)
+                _recompose_search(model, eval_in_scope)
                 if model.get('editing_column_index') is not None:
                     if model['editing_column_index'] == idx:
                         model['editing_column_index'] = None
@@ -2315,7 +2713,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_slots(model)
 
         case ColumnDragStart(index=idx):
-            model['openDropdown'] = None
+            _close_column_menus(model)
             if 0 <= idx < len(model['columns']):
                 model['column_drag_from'] = idx
                 model['column_drag_over'] = idx
@@ -2335,6 +2733,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 if drag_from != target:
                     col = model['columns'].pop(drag_from)
                     model['columns'].insert(target, col)
+                    # Column order is term order in the composed search.
+                    _recompose_search(model, eval_in_scope)
                     if type_key:
                         _save_slots(model)
             model['column_drag_from'] = None
@@ -2390,6 +2790,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         model['columns'][idx] = commit_val
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
+                            _rename_column_search(model, old_name, commit_val)
+                            _recompose_search(model, eval_in_scope)
                         if type_key:
                             _save_slots(model)
                     model['editing_column_index'] = None
@@ -2430,7 +2832,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             commands.append(result)
 
             elif key == 'Escape':
-                if model.get('openDropdown'):
+                if model.get('col_search_dropdown'):
+                    # Innermost first: a chip menu sits inside the column menu.
+                    model['col_search_dropdown'] = None
+                elif model.get('openDropdown'):
                     model['openDropdown'] = None
                 elif model.get('tool') == 'pick':
                     model['tool'] = 'normal'
@@ -2441,6 +2846,44 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['editing_column_index'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
+
+        case ColumnSearchInput(index=idx, value=val):
+            col = _column_at(model, idx)
+            if col is not None:
+                _set_column_search(model, col, text=val)
+                _recompose_search(model, eval_in_scope)
+
+        case ColumnSearchOpSelect(index=idx, op=op):
+            col = _column_at(model, idx)
+            if col is not None and op in COLUMN_SEARCH_OPS:
+                text = _column_search_row(model, col)['text'].strip()
+                if op in COLUMN_SEARCH_MEMBERSHIP_OPS and not text:
+                    # Hand over the brackets and put the cursor between them, so
+                    # the user only types the contents. They're free to delete
+                    # them and compare against a string or a range instead.
+                    _set_column_search(model, col, op=op,
+                                       text=COLUMN_SEARCH_COLLECTION_HINT)
+                    model['_col_search_focus'] = True
+                elif (op not in COLUMN_SEARCH_MEMBERSHIP_OPS
+                        and text == COLUMN_SEARCH_COLLECTION_HINT):
+                    # Brackets nothing ever went into: take them back rather than
+                    # leave `^ == []` behind.
+                    _set_column_search(model, col, op=op, text='')
+                else:
+                    _set_column_search(model, col, op=op)
+                model['col_search_dropdown'] = None
+                _recompose_search(model, eval_in_scope)
+
+        case ColumnSearchComposeSelect(index=idx, compose=compose):
+            col = _column_at(model, idx)
+            if col is not None and compose in COLUMN_SEARCH_COMPOSE:
+                _set_column_search(model, col, compose=compose)
+                model['col_search_dropdown'] = None
+                _recompose_search(model, eval_in_scope)
+
+        case ColumnSearchDropdownToggle(dropdown_id=did):
+            current = model.get('col_search_dropdown')
+            model['col_search_dropdown'] = None if current == did else did
 
         case SearchBoxInput(value=val):
             model['search'] = val if val else None
@@ -2488,6 +2931,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case DropdownToggle(dropdown_id=did):
             current = model.get('openDropdown')
+            # A chip menu belongs to the row of the menu that was open.
+            model['col_search_dropdown'] = None
             if current is not None and current.get('id') == did:
                 model['openDropdown'] = None
             else:

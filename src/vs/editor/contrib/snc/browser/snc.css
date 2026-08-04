@@ -46,6 +46,9 @@
 	   own cell border, which pick mode hides -- the regions carry the structure
 	   there, so their edges have to read on their own. */
 	--snc-pick-region-border: #c8c8c8;
+
+	--snc-default-font-size: 14px;
+	--snc-menu-font-size: 11px;
 }
 
 /* Visualizers don't look good when flush against a colored gutter */
@@ -54,9 +57,6 @@
 }
 
 .monaco-editor .snc-visualization-widget {
-	--snc-default-font-size: 14px;
-	--snc-menu-font-size: 11px;
-
 	position: absolute;
 	display: inline-block;
 	margin: 2px 0 5px 0px;
@@ -87,29 +87,29 @@
 
 /* hide .snc-hover-hidden until .snc-hover-hidden-parent is hovered */
 /* used to show/hide property rows on the generic object visualizer */
-.monaco-editor .snc-hover-hidden-parent .snc-hover-hidden {
+.editor-instance .snc-hover-hidden-parent .snc-hover-hidden {
 	visibility: hidden;
 }
-.monaco-editor .snc-hover-hidden-parent:not(:hover) .snc-hover-hide-border {
+.editor-instance .snc-hover-hidden-parent:not(:hover) .snc-hover-hide-border {
 	border-color: transparent !important;
 }
-.monaco-editor .snc-hover-hidden-parent:hover .snc-hover-hidden {
+.editor-instance .snc-hover-hidden-parent:hover .snc-hover-hidden {
 	visibility: visible;
 }
-.monaco-editor .snc-hover-hidden:hover {
+.editor-instance .snc-hover-hidden:hover {
 	visibility: visible;
 }
 
-.monaco-editor .full-opacity-on-hover:hover {
+.editor-instance .full-opacity-on-hover:hover {
 	opacity: 1 !important;
 }
 
-.search-box {
+.editor-instance .search-box {
+	font-family: var(--snc-code-font-family);
 	color: var(--snc-string-color) !important;
 	border: 1px solid var(--snc-border-color);
 	border-radius: 5px;
-	padding: 5px;
-	padding-bottom: 4px;
+	padding: 4px;
 	font-size: var(--snc-menu-font-size) !important;
 	outline: none;
 	width: -webkit-fill-available;
@@ -898,7 +898,7 @@
 /* An open menu's panel is hoisted out of the <th>, so the header stops being
    hovered the moment the pointer reaches the panel. Pin the trigger visible —
    and since .snc-hover-hidden toggles visibility, answer in kind. */
-.monaco-editor .snc-hover-hidden-parent .snc-hover-hidden.col-menu.open {
+.editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.open {
 	visibility: visible;
 }
 
@@ -906,13 +906,97 @@
 	opacity: 1;
 }
 
-.list-visualizer .col-menu-panel {
-	min-width: 120px;
-}
-
 .list-visualizer .col-name {
 	color: var(--snc-string-color);
 	cursor: pointer;
+}
+
+/* A column whose search is filtering rows. Its ▾ is pinned visible (below), so
+   the name is only nudged rather than shouted at. */
+.list-visualizer th.col-filtered .col-name {
+	text-decoration: underline;
+	text-decoration-style: dotted;
+	text-underline-offset: 2px;
+}
+
+.editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.active {
+	visibility: visible;
+}
+
+.list-visualizer .col-menu.active {
+	opacity: 0.8;
+}
+
+/* --- The column ▾ menu and its per-column search row ---
+   [and|or] [comparison] (text), below the menu's action rows.
+
+   These hang off the panel, NOT off .list-visualizer: an open panel is hoisted
+   to the editor container so it can be position:fixed, which takes it out of the
+   widget entirely and leaves `.list-visualizer <anything>` matching nothing. The
+   chip menus are hoisted a second time, out of the panel. */
+
+.col-menu-panel {
+	/* Separates the search from the action rows above it. */
+	.col-search-row {
+		padding: 4px;
+		margin-top: 3px;
+		border-top: 1px solid var(--snc-border-color);
+	}
+
+	.col-search-chips {
+		display: flex;
+		position: absolute;
+		left: 4px;
+		height: 100%;
+		align-items: center;
+	}
+
+	.col-search-chip {
+		padding: 0 1px;
+		border-radius: 3px;
+		color: var(--snc-text-muted);
+		cursor: pointer;
+		user-select: none;
+		white-space: nowrap;
+
+		&:hover,
+		&.open {
+			color: var(--snc-text-color);
+			background: var(--snc-hover-bg);
+		}
+	}
+
+	.col-search-chip-arrow {
+		display: none;
+		font-size: 17px;
+		line-height: 0; /* don't make parent taller */
+	}
+
+	.col-search-input {
+		box-sizing: border-box;
+		width: 200px;
+		padding-left: calc(7.5ch); /* for "(none)" and "not in" */
+	}
+
+	/* look at the comparator dropdown to know how much left padding we need */
+	.search-box-wrapper:has(*[data-charlen="1"]) .col-search-input {
+		padding-left: calc(2.5ch);
+	}
+	.search-box-wrapper:has(*[data-charlen="2"]) .col-search-input {
+		padding-left: calc(3.5ch);
+	}
+}
+
+/* One short token per option, so this one shouldn't hold the shared 100px floor
+   open the way a menu of labels does. */
+.col-search-chip-panel {
+	min-width: 0;
+}
+
+/* The (none) operator. Muted only in the option list, where the other options
+   are full-strength code */
+.col-search-chip-panel .col-search-blank {
+	color: var(--snc-text-muted);
 }
 
 .list-visualizer th.col-drag-source {
@@ -943,7 +1027,9 @@
 	white-space: nowrap;
 }
 
-.list-visualizer .col-suggest-panel {
+/* Unscoped for the same reason as .col-menu-panel above: an open panel has been
+   hoisted out of the widget. */
+.col-suggest-panel {
 	min-width: 150px;
 }
 

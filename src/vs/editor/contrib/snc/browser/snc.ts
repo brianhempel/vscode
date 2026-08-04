@@ -424,34 +424,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.scheduleActionTooltipHide();
 		}));
 
-		// Simple tooltip on hover for elements with data-tooltip="<text>"
-		// (lighter weight than the action/py-exp tooltips: just text, no copy
-		// button, no draggable expression).
-		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
-			const target = this.findAncestorWithAttr(ev.target as Node, 'data-tooltip');
-			if (target && target.getAttribute('data-tooltip')) {
-				clearTimeout(this.simpleTooltipHideTimer);
-				if (target !== this.simpleTooltipTarget) {
-					this.hideSimpleTooltip();
-					this.simpleTooltipTarget = target;
-					this.simpleTooltipTimer = setTimeout(() => {
-						this.showSimpleTooltip(target);
-					}, 200);
-				}
-			} else if (this.simpleTooltipTarget) {
-				this.scheduleSimpleTooltipHide();
-			}
-		}));
-		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
-			const relatedTarget = ev.relatedTarget as Node | null;
-			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'data-tooltip')) {
-				return;
-			}
-			if (this.simpleTooltipTarget) {
-				this.simpleTooltipTarget = null;
-			}
-			this.scheduleSimpleTooltipHide();
-		}));
+		for (const d of this.simpleTooltipListeners(this.domNode, this.domNode)) {
+			this._register(d);
+		}
 
 		// Hover-to-open dropdown menus (data-hover-menu panels inside .snc-dropdown-trigger)
 		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
@@ -478,11 +453,50 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
+	 * Simple tooltip on hover for elements with data-tooltip="<text>" (lighter
+	 * weight than the action/py-exp tooltips: just text, no copy button, no
+	 * draggable expression).
+	 *
+	 * The widget root gets these once at construction. A hoisted dropdown panel
+	 * needs its own set: it no longer sits under the root, so nothing from there
+	 * reaches it.
+	 */
+	private simpleTooltipListeners(root: HTMLElement, stopAt: Element): IDisposable[] {
+		return [
+			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
+				const target = this.findAncestorWithAttr(ev.target as Node, 'data-tooltip', stopAt);
+				if (target && target.getAttribute('data-tooltip')) {
+					clearTimeout(this.simpleTooltipHideTimer);
+					if (target !== this.simpleTooltipTarget) {
+						this.hideSimpleTooltip();
+						this.simpleTooltipTarget = target;
+						this.simpleTooltipTimer = setTimeout(() => {
+							this.showSimpleTooltip(target);
+						}, 200);
+					}
+				} else if (this.simpleTooltipTarget) {
+					this.scheduleSimpleTooltipHide();
+				}
+			}),
+			dom.addDisposableListener(root, 'mouseout', (ev: MouseEvent) => {
+				const relatedTarget = ev.relatedTarget as Node | null;
+				if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'data-tooltip', stopAt)) {
+					return;
+				}
+				if (this.simpleTooltipTarget) {
+					this.simpleTooltipTarget = null;
+				}
+				this.scheduleSimpleTooltipHide();
+			}),
+		];
+	}
+
+	/**
 	 * Walk up from a node to find the nearest ancestor (or itself) with the given attribute.
 	 */
-	private findAncestorWithAttr(node: Node | null, attr: string): Element | null {
+	private findAncestorWithAttr(node: Node | null, attr: string, stopAt: Element = this.domNode): Element | null {
 		let el: Element | null = node?.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node?.parentElement ?? null);
-		while (el && el !== this.domNode) {
+		while (el && el !== stopAt) {
 			if (el.hasAttribute(attr)) {
 				return el;
 			}
@@ -1358,9 +1372,20 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				const autoFocusIsNew = !!autoFocusEl && !hadAutoFocusEl;
 				if (autoFocusEl && (savedSelectionStart === null || autoFocusIsNew)) {
 					autoFocusEl.focus({ preventScroll: true });
-					// Select all text if requested (e.g. editing an existing field)
-					if (autoFocusEl.hasAttribute('snc-select-all') && autoFocusEl instanceof HTMLInputElement) {
-						autoFocusEl.select();
+					if (autoFocusEl instanceof HTMLInputElement) {
+						// Select all text if requested (e.g. editing an existing field)
+						if (autoFocusEl.hasAttribute('snc-select-all')) {
+							autoFocusEl.select();
+						} else {
+							// Or drop the cursor at a given offset, for a value the
+							// visualizer pre-filled around it (e.g. inside the `[]`
+							// a column search's `in` hands the user).
+							const cursorPos = autoFocusEl.getAttribute('snc-cursor-pos');
+							if (cursorPos !== null) {
+								const pos = Math.min(Number(cursorPos), autoFocusEl.value.length);
+								autoFocusEl.setSelectionRange(pos, pos);
+							}
+						}
 					}
 				} else if (focusedIndex >= 0) {
 					// Restore focus to the same nth focusable element
@@ -1491,12 +1516,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoistDropdownPanel(panel: HTMLElement, trigger: HTMLElement): void {
 		const align = panel.getAttribute('snc-dropdown-align') || 'left';
 
-		// Capture child-key chain before removing from DOM (ancestors will be lost)
+		// Capture child-key chain before removing from DOM (ancestors will be lost).
+		// A panel nested inside an already-hoisted one (a chip menu on a column
+		// search row) has no `snc-child-key` ancestors left to walk - they went
+		// with the outer panel, which carries what it found as a chain - so
+		// inherit that instead of starting over with an empty one.
 		const childKeyChain: string[] = [];
 		let ancestor = panel.parentElement;
 		while (ancestor && ancestor !== this.domNode) {
 			const ck = ancestor.getAttribute('snc-child-key');
 			if (ck) { childKeyChain.push(ck); }
+			const inherited = ancestor.getAttribute('snc-child-key-chain');
+			if (inherited) { childKeyChain.push(...JSON.parse(inherited) as string[]); }
 			ancestor = ancestor.parentElement;
 		}
 		if (childKeyChain.length > 0) {
@@ -1504,10 +1535,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 
 		// Collect the scroll containers between trigger and widget root before the
-		// panel leaves the DOM; they drive repositionHoistedDropdowns.
+		// panel leaves the DOM; they drive repositionHoistedDropdowns. A nested
+		// panel's trigger sits in an already-hoisted panel, so the walk stops at
+		// the editor container rather than passing through the widget root.
 		const scrollers: HTMLElement[] = [];
+		const container = this.editor.getContainerDomNode();
 		let scrollAncestor: HTMLElement | null = trigger.parentElement;
-		while (scrollAncestor && scrollAncestor !== this.domNode.parentElement) {
+		while (scrollAncestor
+			&& scrollAncestor !== this.domNode.parentElement
+			&& scrollAncestor !== container) {
 			if (VisualizationWidget.isScrollableElement(scrollAncestor)) {
 				scrollers.push(scrollAncestor);
 			}
@@ -1526,7 +1562,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		panel.style.zIndex = '10000';
 
 		// Append to the editor's container so it escapes widget overflow
-		this.editor.getContainerDomNode().appendChild(panel);
+		container.appendChild(panel);
 		const entry: IHoistedDropdown = { panel, trigger, measureTarget, align, scrollers, visibilityHost };
 		this.hoistedDropdowns.push(entry);
 		this.positionHoistedDropdown(entry);
@@ -1594,6 +1630,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}
 			})
 		);
+		this.hoistedDropdownListeners.push(...this.simpleTooltipListeners(panel, container));
 		this.hoistedDropdownListeners.push(
 			dom.addDisposableListener(panel, 'input', (ev: Event) => {
 				const target = ev.target as HTMLElement;

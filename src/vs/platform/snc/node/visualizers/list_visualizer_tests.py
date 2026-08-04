@@ -5622,5 +5622,641 @@ class TestListGrammarPick(_ListActionTestBase):
         self.assertEqual(model['tool'], 'normal')
 
 
+# === Per-column search tests ===
+
+from list_visualizer import (
+    ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
+    ColumnSearchDropdownToggle, COLUMN_SEARCH_OPS, COLUMN_SEARCH_COMPOSE,
+    column_search_predicate, lift_column_predicate, compose_column_searches,
+    _column_search_row,
+)
+
+
+def make_column_search_input_event(index, value):
+    """Create a ColumnSearchInput event for the column at *index*."""
+    return {
+        'pythonEventStr': (f"lambda e: ColumnSearchInput(index={index}, "
+                           f"value=e.get('value', ''))"),
+        'eventJSON': {'type': 'input', 'value': value},
+    }
+
+
+def make_column_search_op_event(index, op):
+    return {
+        'pythonEventStr': repr(ColumnSearchOpSelect(index=index, op=op)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+def make_column_search_compose_event(index, compose):
+    return {
+        'pythonEventStr': repr(ColumnSearchComposeSelect(index=index, compose=compose)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+def make_column_search_toggle_event(dropdown_id):
+    return {
+        'pythonEventStr': repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id)),
+        'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
+    }
+
+
+class TestColumnSearchPredicate(unittest.TestCase):
+    """One column's [op] + text becomes a predicate in COLUMN scope, where ^ is
+    the column value."""
+
+    def test_operator_prepends_the_column_value(self):
+        cases = [
+            ('>=', '3', '^ >= 3'),
+            ('>', '3', '^ > 3'),
+            ('==', "'ATG'", "^ == 'ATG'"),
+            ('!=', "'ATG'", "^ != 'ATG'"),
+            ('<', '3', '^ < 3'),
+            ('<=', '3', '^ <= 3'),
+            ('in', "['a', 'b']", "^ in ['a', 'b']"),
+            ('not in', "['a', 'b']", "^ not in ['a', 'b']"),
+        ]
+        for op, text, expected in cases:
+            with self.subTest(op=op):
+                self.assertEqual(column_search_predicate(op, text), expected)
+
+    def test_every_offered_operator_is_handled(self):
+        for op in COLUMN_SEARCH_OPS:
+            with self.subTest(op=op):
+                pred = column_search_predicate(op, '3')
+                self.assertIsNotNone(pred)
+                self.assertTrue(caret_expr_parses_helper(pred), pred)
+
+    def test_empty_text_is_inactive_whatever_the_operator(self):
+        for op in COLUMN_SEARCH_OPS:
+            with self.subTest(op=op):
+                self.assertIsNone(column_search_predicate(op, ''))
+                self.assertIsNone(column_search_predicate(op, '   '))
+                self.assertIsNone(column_search_predicate(op, None))
+
+    def test_blank_operator_keeps_an_expression_that_names_the_column(self):
+        self.assertEqual(column_search_predicate('', 'isOdd(^) and ^ > 5'),
+                         'isOdd(^) and ^ > 5')
+
+    def test_blank_operator_calls_a_bare_predicate_function(self):
+        self.assertEqual(column_search_predicate('', 'isOdd'), 'isOdd(^)')
+
+    def test_blank_operator_calls_a_dotted_predicate_function(self):
+        self.assertEqual(column_search_predicate('', 'str.isdigit'),
+                         'str.isdigit(^)')
+
+    def test_blank_operator_asks_the_scope_whether_a_name_is_callable(self):
+        scope = {'isOdd': lambda n: n % 2 == 1, 'threshold': 5}
+        eval_in_scope = lambda code: eval(code, {}, scope)
+        self.assertEqual(column_search_predicate('', 'isOdd', eval_in_scope),
+                         'isOdd(^)')
+        # A name bound to a value isn't a predicate to call - it stands on its
+        # own, exactly as it would in the main search box.
+        self.assertEqual(column_search_predicate('', 'threshold', eval_in_scope),
+                         'threshold')
+
+    def test_blank_operator_still_honors_a_leading_operator(self):
+        self.assertEqual(column_search_predicate('', '>= 3'), '^ >= 3')
+        self.assertEqual(column_search_predicate('', '.isdigit()'),
+                         '^.isdigit()')
+
+    def test_blank_operator_leaves_a_plain_value_verbatim(self):
+        # Same as typing it into the main box: a truthy literal matches
+        # everything rather than silently becoming an equality test.
+        self.assertEqual(column_search_predicate('', "'ATG'"), "'ATG'")
+
+
+def caret_expr_parses_helper(s):
+    """Whether a column-scope predicate is syntactically usable."""
+    from visualizer_utils import caret_expr_parses
+    return caret_expr_parses(s)
+
+
+class TestLiftColumnPredicate(unittest.TestCase):
+    """A column-scope predicate lifts into ITEM scope (what the main search box
+    speaks): ^ becomes the column expression, and every longer caret run loses
+    one level -- ^^ (the item) becomes ^, ^^^ (the array) becomes ^^."""
+
+    def test_column_expression_replaces_the_single_caret(self):
+        self.assertEqual(lift_column_predicate("^ == 'ATG'", 'len(^)'),
+                         "len(^) == 'ATG'")
+
+    def test_identity_column_lifts_to_itself(self):
+        self.assertEqual(lift_column_predicate('^ >= 3', '^'), '^ >= 3')
+
+    def test_subscript_column_needs_no_parens(self):
+        self.assertEqual(lift_column_predicate("^ == 'a'", "^['name']"),
+                         "^['name'] == 'a'")
+
+    def test_non_atomic_column_is_parenthesized(self):
+        self.assertEqual(lift_column_predicate('^ * 2 > 5', '^ + 1'),
+                         '(^ + 1) * 2 > 5')
+
+    def test_item_level_loses_a_caret(self):
+        self.assertEqual(lift_column_predicate('^ == ^^', 'len(^)'),
+                         'len(^) == ^')
+
+    def test_array_level_loses_a_caret(self):
+        self.assertEqual(lift_column_predicate('^ == max(^^^)', 'len(^)'),
+                         'len(^) == max(^^)')
+
+    def test_carets_inside_string_literals_are_left_alone(self):
+        self.assertEqual(lift_column_predicate("^ == '^^'", 'len(^)'),
+                         "len(^) == '^^'")
+
+    def test_every_occurrence_is_lifted(self):
+        self.assertEqual(lift_column_predicate('isOdd(^) and ^ > 5', 'len(^)'),
+                         'isOdd(len(^)) and len(^) > 5')
+
+
+class TestComposeColumnSearches(unittest.TestCase):
+    """Active column searches fold into one main-search string: the `and` terms
+    form a group, then the `or` terms are or'd against it."""
+
+    @staticmethod
+    def row(text, op='==', compose='and'):
+        return {'compose': compose, 'op': op, 'text': text}
+
+    def test_nothing_active_is_none(self):
+        self.assertIsNone(compose_column_searches(['^'], {}))
+        self.assertIsNone(compose_column_searches(['^'], None))
+
+    def test_empty_text_is_skipped(self):
+        self.assertIsNone(compose_column_searches(['^'], {'^': self.row('')}))
+
+    def test_single_column(self):
+        self.assertEqual(
+            compose_column_searches(['len(^)'], {'len(^)': self.row("'ATG'")}),
+            "len(^) == 'ATG'")
+
+    def test_two_and_columns_join_in_column_order(self):
+        columns = ['len(^)', "^['name']"]
+        searches = {"^['name']": self.row("'a'"), 'len(^)': self.row('3', op='>=')}
+        self.assertEqual(compose_column_searches(columns, searches),
+                         "len(^) >= 3 and ^['name'] == 'a'")
+
+    def test_or_column_is_ord_against_the_and_group(self):
+        columns = ['a(^)', 'b(^)', 'c(^)']
+        searches = {
+            'a(^)': self.row('1'),
+            'b(^)': self.row('2'),
+            'c(^)': self.row('3', compose='or'),
+        }
+        self.assertEqual(compose_column_searches(columns, searches),
+                         '(a(^) == 1 and b(^) == 2) or c(^) == 3')
+
+    def test_a_single_and_term_needs_no_group_parens(self):
+        # `and` already binds tighter than `or`.
+        columns = ['a(^)', 'c(^)']
+        searches = {'a(^)': self.row('1'), 'c(^)': self.row('3', compose='or')}
+        self.assertEqual(compose_column_searches(columns, searches),
+                         'a(^) == 1 or c(^) == 3')
+
+    def test_only_or_columns(self):
+        columns = ['a(^)', 'c(^)']
+        searches = {'a(^)': self.row('1', compose='or'),
+                    'c(^)': self.row('3', compose='or')}
+        self.assertEqual(compose_column_searches(columns, searches),
+                         'a(^) == 1 or c(^) == 3')
+
+    def test_the_and_group_leads_regardless_of_column_order(self):
+        # The dropdown marks each term as part of the group or or'd against it,
+        # so the group comes first even when its column sits later.
+        columns = ['a(^)', 'b(^)']
+        searches = {'a(^)': self.row('1', compose='or'), 'b(^)': self.row('2')}
+        self.assertEqual(compose_column_searches(columns, searches),
+                         'b(^) == 2 or a(^) == 1')
+
+    def test_an_or_inside_the_group_is_parenthesized(self):
+        columns = ['^', "^['x']"]
+        searches = {
+            '^': self.row('^ == 1 or ^ == 2', op=''),
+            "^['x']": self.row('0', op='>'),
+        }
+        self.assertEqual(compose_column_searches(columns, searches),
+                         "(^ == 1 or ^ == 2) and ^['x'] > 0")
+
+    def test_column_order_drives_term_order(self):
+        columns = ["^['b']", "^['a']"]
+        searches = {"^['a']": self.row('1'), "^['b']": self.row('2')}
+        self.assertEqual(compose_column_searches(columns, searches),
+                         "^['b'] == 2 and ^['a'] == 1")
+
+
+class TestColumnSearchEvents(unittest.TestCase):
+    """The column search rows live in the model keyed by column expression, and
+    every edit rewrites the main search box."""
+
+    def make_model(self):
+        lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bo', 'age': 20}]
+        model = init_model(lst, mock_get_visualizer)
+        return lst, model
+
+    def test_typing_stores_the_text_and_recomposes_the_main_search(self):
+        lst, model = self.make_model()
+        col = model['columns'][0]
+        new_model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                              None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(new_model['column_searches'][col]['text'], "'Alice'")
+        self.assertEqual(new_model['search'], f"{col} == 'Alice'")
+        self.assertTrue(new_model['_scroll_to_match'])
+
+    def test_default_operator_is_equality_and_default_compose_is_and(self):
+        lst, model = self.make_model()
+        col = model['columns'][0]
+        new_model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                              None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        row = new_model['column_searches'][col]
+        self.assertEqual(row['op'], '==')
+        self.assertEqual(row['compose'], 'and')
+
+    def test_choosing_an_operator_recomposes_and_closes_the_chip_menu(self):
+        lst, model = self.make_model()
+        col = model['columns'][1]
+        model, _ = update(make_column_search_input_event(1, '25'),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model['col_search_dropdown'] = 'op-1'
+        new_model, _ = update(make_column_search_op_event(1, '>='),
+                              None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(new_model['column_searches'][col]['op'], '>=')
+        self.assertEqual(new_model['search'], f'{col} >= 25')
+        self.assertIsNone(new_model['col_search_dropdown'])
+
+    def test_choosing_a_compose_operator(self):
+        lst, model = self.make_model()
+        col = model['columns'][0]
+        model['col_search_dropdown'] = 'compose-0'
+        new_model, _ = update(make_column_search_compose_event(0, 'or'),
+                              None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(new_model['column_searches'][col]['compose'], 'or')
+        self.assertIsNone(new_model['col_search_dropdown'])
+
+    def test_only_offered_values_are_accepted(self):
+        lst, model = self.make_model()
+        model, _ = update(make_column_search_op_event(0, 'DROP TABLE'),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertFalse(model.get('column_searches'))
+        model, _ = update(make_column_search_compose_event(0, 'xor'),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertFalse(model.get('column_searches'))
+
+    def test_chip_dropdown_toggles_without_closing_the_column_menu(self):
+        lst, model = self.make_model()
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        opened, _ = update(make_column_search_toggle_event('op-0'), None, model,
+                           lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(opened['col_search_dropdown'], 'op-0')
+        self.assertEqual(opened['openDropdown'], {'id': 'col-menu-0'})
+        closed, _ = update(make_column_search_toggle_event('op-0'), None, opened,
+                           lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(closed['col_search_dropdown'])
+
+    def test_clearing_the_text_clears_the_main_search(self):
+        lst, model = self.make_model()
+        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_search_input_event(0, ''),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model['search'])
+
+    def test_removing_a_column_drops_its_search_and_recomposes(self):
+        lst, model = self.make_model()
+        first, second = model['columns'][0], model['columns'][1]
+        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_search_input_event(1, '30'),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertNotIn(first, model['column_searches'])
+        self.assertEqual(model['search'], f'{second} == 30')
+
+    def test_removing_the_last_searched_column_clears_the_main_search(self):
+        lst, model = self.make_model()
+        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model['search'])
+
+    def test_renaming_a_column_carries_its_search_over(self):
+        lst, model = self.make_model()
+        old = model['columns'][0]
+        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model['editing_column_index'] = 0
+        model['column_input_value'] = 'len(^)'
+        model, _ = update(make_column_key_event('Enter'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertNotIn(old, model['column_searches'])
+        self.assertEqual(model['column_searches']['len(^)']['text'], "'Alice'")
+        self.assertEqual(model['search'], "len(^) == 'Alice'")
+
+    def test_reordering_columns_recomposes_in_the_new_order(self):
+        lst, model = self.make_model()
+        first, second = model['columns'][0], model['columns'][1]
+        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_search_input_event(1, '30'),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model['column_drag_from'] = 1
+        model, _ = update(make_column_mouse_event(repr(ColumnDragEnd(index=0))),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['search'], f"{second} == 30 and {first} == 'Alice'")
+
+    def test_a_hand_written_main_search_survives_a_column_removal(self):
+        # Nothing was pushed from a column, so there is nothing to push -- the
+        # main box is the user's.
+        lst, model = self.make_model()
+        model, _ = update(make_search_input_event('^ == 3'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['search'], '^ == 3')
+
+    def test_column_searches_default_to_none_not_a_shared_dict(self):
+        lst, _ = self.make_model()
+        a = init_model(lst, mock_get_visualizer)
+        b = init_model(lst, mock_get_visualizer)
+        self.assertIsNone(a['column_searches'])
+        a, _ = update(make_column_search_input_event(0, "'Alice'"), None, a, lst,
+                      mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(b['column_searches'])
+
+
+class TestColumnSearchMembershipBrackets(unittest.TestCase):
+    """`in` and `not in` want a collection on the right, so picking one hands the
+    user the brackets and drops the cursor inside them."""
+
+    def make_model(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bo'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        return lst, model, model['columns'][0]
+
+    def pick_op(self, model, lst, op, index=0):
+        return update(make_column_search_op_event(index, op), None, model, lst,
+                      mock_get_visualizer, eval_in_scope=eval)[0]
+
+    def test_picking_a_membership_operator_inserts_the_brackets(self):
+        for op in ['in', 'not in']:
+            with self.subTest(op=op):
+                lst, model, col = self.make_model()
+                model = self.pick_op(model, lst, op)
+                self.assertEqual(model['column_searches'][col]['text'], '[]')
+
+    def test_the_brackets_do_not_overwrite_what_the_user_typed(self):
+        lst, model, col = self.make_model()
+        model, _ = update(make_column_search_input_event(0, "'ATG'"), None,
+                          model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model = self.pick_op(model, lst, 'in')
+        self.assertEqual(model['column_searches'][col]['text'], "'ATG'")
+
+    def test_the_other_operators_insert_nothing(self):
+        for op in COLUMN_SEARCH_OPS:
+            if op in ('in', 'not in'):
+                continue
+            with self.subTest(op=op):
+                lst, model, col = self.make_model()
+                model = self.pick_op(model, lst, op)
+                self.assertEqual(_column_search_row(model, col)['text'], '')
+
+    def test_empty_brackets_are_not_a_search_yet(self):
+        # Otherwise picking `in` would empty the table before the user has said
+        # what to look for.
+        for text in ['[]', '[ ]', '()', '{}']:
+            with self.subTest(text=text):
+                self.assertIsNone(column_search_predicate('in', text))
+                self.assertIsNone(column_search_predicate('', text))
+
+    def test_picking_in_leaves_the_main_search_alone(self):
+        lst, model, col = self.make_model()
+        model = self.pick_op(model, lst, 'in')
+        self.assertIsNone(model['search'])
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        self.assertNotIn('col-filtered', th)
+
+    def test_filling_in_the_brackets_searches(self):
+        lst, model, col = self.make_model()
+        model = self.pick_op(model, lst, 'in')
+        model, _ = update(make_column_search_input_event(0, "['Alice', 'Bo']"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['search'], f"{col} in ['Alice', 'Bo']")
+
+    def test_leaving_membership_takes_the_untouched_brackets_back(self):
+        lst, model, col = self.make_model()
+        model = self.pick_op(model, lst, 'in')
+        model = self.pick_op(model, lst, '==')
+        self.assertEqual(_column_search_row(model, col)['text'], '')
+
+    def test_leaving_membership_keeps_a_filled_in_collection(self):
+        lst, model, col = self.make_model()
+        model = self.pick_op(model, lst, 'in')
+        model, _ = update(make_column_search_input_event(0, "['Alice']"), None,
+                          model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model = self.pick_op(model, lst, '==')
+        self.assertEqual(model['column_searches'][col]['text'], "['Alice']")
+
+    def test_the_cursor_lands_between_the_brackets(self):
+        lst, model, col = self.make_model()
+        model = self.pick_op(model, lst, 'in')
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        m = re.search(r'<input[^>]*col-search-input[^>]*>', th)
+        self.assertIsNotNone(m)
+        self.assertIn('autofocus', m.group(0))
+        self.assertIn('snc-cursor-pos="1"', m.group(0))
+
+    def test_the_column_menu_does_not_grab_focus_on_its_own(self):
+        # Only the bracket insertion asks for focus; opening a menu or typing
+        # must leave it wherever the user put it.
+        lst, model, col = self.make_model()
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        self.assertNotIn('autofocus', th)
+
+        model = self.pick_op(model, lst, 'in')
+        model, _ = update(make_column_search_input_event(0, "['a']"), None,
+                          model, lst, mock_get_visualizer, eval_in_scope=eval)
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        self.assertNotIn('autofocus', th)
+
+
+class TestColumnSearchRendering(unittest.TestCase):
+    """The search row lives in the per-column ▾ menu, below the action rows."""
+
+    def open_menu_html(self, model, lst, column=0):
+        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        return visualize(lst, model, mock_get_visualizer, None)
+
+    def search_row(self, th):
+        """The search row's markup: the last thing in the column menu."""
+        return th[th.index('<div class="col-search-row">'):]
+
+    def test_closed_menu_renders_no_search_row(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertNotIn('col-search-row',
+                         visualize(lst, model, mock_get_visualizer, None))
+
+    def test_open_menu_renders_both_chips_and_the_input(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        th = _first_column_header(self.open_menu_html(model, lst))
+        self.assertIn('col-search-row', th)
+        self.assertIn('col-search-compose', th)
+        self.assertIn('col-search-op', th)
+        self.assertIn('col-search-input', th)
+        self.assertIn('ColumnSearchInput(index=0', th)
+        # The search row comes after the action rows, per the menu's TODO order.
+        self.assertLess(th.index('Remove Column'), th.index('col-search-row'))
+
+    def test_chips_show_the_current_choice(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        col = model['columns'][0]
+        model['column_searches'] = {col: {'compose': 'or', 'op': '>=',
+                                          'text': '3'}}
+        row = self.search_row(_first_column_header(self.open_menu_html(model, lst)))
+        self.assertIn('or', row)
+        self.assertIn('&gt;=', row)
+        self.assertIn('value="3"', row)
+
+    def test_the_chips_ride_on_top_of_the_search_box(self):
+        # Same construction as the string visualizer's toggles over its Find box
+        # (see .search-box-wrapper): the input is the whole control, so it keeps
+        # the search box look, and the chips are positioned over its padding.
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        row = self.search_row(_first_column_header(self.open_menu_html(model, lst)))
+        self.assertIn('search-box-wrapper', row)
+        input_html = re.search(r'<input[^>]*col-search-input[^>]*>', row).group(0)
+        self.assertIn('search-box', input_html)
+        # The chips paint over the input, so they come after it.
+        self.assertLess(row.index('col-search-input'), row.index('col-search-chips'))
+        self.assertLess(row.index('col-search-compose'), row.index('col-search-op'))
+
+    def test_chip_options_render_only_while_that_chip_is_open(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        th = _first_column_header(self.open_menu_html(model, lst))
+        self.assertNotIn('ColumnSearchOpSelect', th)
+
+        model['col_search_dropdown'] = 'op-0'
+        th = _first_column_header(self.open_menu_html(model, lst))
+        self.assertIn('ColumnSearchOpSelect', th)
+        self.assertIn('(none)', th)
+        for op in COLUMN_SEARCH_OPS:
+            if op:
+                self.assertIn(html.escape(op), th)
+        # A nested panel, hoisted and flyout-aligned like the menu itself.
+        self.assertIn('col-search-chip-panel', th)
+        self.assertIn('snc-dropdown-align="flyout"', th)
+        self.assertNotIn('ColumnSearchComposeSelect', th)
+
+    def test_compose_chip_offers_and_or(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['col_search_dropdown'] = 'compose-0'
+        th = _first_column_header(self.open_menu_html(model, lst))
+        for compose in COLUMN_SEARCH_COMPOSE:
+            self.assertIn(html.escape(f'compose={compose!r}'), th)
+
+    def test_an_active_search_marks_the_header(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        col = model['columns'][0]
+        model['column_searches'] = {col: {'compose': 'and', 'op': '==',
+                                          'text': "'Alice'"}}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        # Pinned visible so a filtered column is legible with the menu closed.
+        self.assertIn('col-filtered', th)
+        self.assertIn('col-menu snc-hover-hidden full-opacity-on-hover active', th)
+
+    def test_an_inactive_row_does_not_mark_the_header(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        col = model['columns'][0]
+        model['column_searches'] = {col: {'compose': 'and', 'op': '>=', 'text': ''}}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
+        self.assertNotIn('col-filtered', th)
+
+    def test_escape_closes_the_chip_menu_before_the_column_menu(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = 'op-0'
+        model, _ = update(make_column_key_event('Escape'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model['col_search_dropdown'])
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        model, _ = update(make_column_key_event('Escape'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model['openDropdown'])
+
+    def test_reopening_a_column_menu_closes_a_stale_chip_menu(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = 'op-0'
+        model, _ = update(make_dropdown_toggle_event('col-menu-1'), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model['col_search_dropdown'])
+
+
+class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
+    """A column search filters and generates code through the main search box,
+    so it needs no matching or code-generation path of its own."""
+
+    def test_composed_search_matches_rows(self):
+        lst = ['a', 'abcd', 'ab', 'abcde']
+        self.assertEqual(_get_matching_indices('len(^) >= 3', lst, eval),
+                         [1, 3])
+
+    def test_main_search_can_name_the_array_with_two_carets(self):
+        lst = [1, 5, 3, 5]
+        self.assertEqual(_get_matching_indices('^ == max(^^)', lst, eval),
+                         [1, 3])
+
+    def test_generated_code_inlines_the_array_for_two_carets(self):
+        model = {'search': '^ == max(^^)', 'first_match': False}
+        ctx = _get_search_context(model, var_and_exp=('data', 'data'),
+                                  eval_in_scope=eval)
+        self.assertEqual(ctx['predicate_expr'], 'item == max(data)')
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         '[item for item in data if item == max(data)]')
+
+    def column_search_model(self):
+        lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bo', 'age': 20}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['len(^["name"])']
+        eval_in_scope = lambda code: eval(code, {'len': len, 'max': max},
+                                          {'data': lst})
+        return lst, model, eval_in_scope
+
+    def test_a_column_search_auto_links_a_filter_over_the_column(self):
+        # Same as typing into the main box: the first meaningful edit inserts a
+        # line of code and links it.
+        lst, model, eval_in_scope = self.column_search_model()
+        model, commands = update(make_column_search_input_event(0, '3'),
+                                 ('data', 'data'), model, lst,
+                                 mock_get_visualizer, eval_in_scope=eval_in_scope)
+        self.assertEqual(model['search'], 'len(^["name"]) == 3')
+        self.assertEqual([c[1] for c in commands if isinstance(c, tuple)],
+                         ['[item for item in data if len(item["name"]) == 3]'])
+        self.assertEqual(model['linked_action'], 'filter')
+
+    def test_editing_a_column_search_rewrites_the_linked_line(self):
+        lst, model, eval_in_scope = self.column_search_model()
+        model, _ = update(make_column_search_input_event(0, '3'),
+                          ('data', 'data'), model, lst, mock_get_visualizer,
+                          eval_in_scope=eval_in_scope)
+        model, commands = update(make_column_search_op_event(0, '>='),
+                                 ('data', 'data'), model, lst,
+                                 mock_get_visualizer, eval_in_scope=eval_in_scope)
+        self.assertEqual([c.expression for c in commands
+                          if isinstance(c, ChangeSelectedText)],
+                         ['[item for item in data if len(item["name"]) >= 3]'])
+
+
 if __name__ == '__main__':
     unittest.main()
