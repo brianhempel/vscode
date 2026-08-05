@@ -1000,7 +1000,7 @@
 		font-size: 9px;
 		box-sizing: border-box;
 		border-color: transparent;
-		margin: 0 2px;
+		margin: 0 2px 2px;
 		padding: 2px;
 		border-radius: 3px;
 	}
@@ -1009,19 +1009,26 @@
 		border-color: var(--snc-border-color);
 	}
 
+	.col-tally-sort-row,
+	.col-tally-header {
+		display: flex;
+		align-items: center;
+		padding: 0 2px;
+		color: var(--snc-text-muted);
+	}
+	.col-tally-sort-row {
+		gap: 3px;
+	}
+	.col-tally-header { /* All None link-buttons */
+		gap: 6px;
+		margin-bottom: 2px;
+	}
+
 	/* The hoisted panel is slid up to fit the viewport but never shortened, so
 	   the value list is what has to agree to be scrolled. */
 	.col-tally-list {
 		max-height: 222px;
 		overflow-y: auto;
-	}
-
-	.col-tally-header {
-		display: flex;
-		gap: 6px;
-		align-items: center;
-		padding: 1px 2px;
-		color: var(--snc-text-muted);
 	}
 
 	.col-tally-link {

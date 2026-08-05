@@ -182,6 +182,12 @@ class TallyFilterInput:
     value: str
 
 @dataclass(frozen=True, slots=True)
+class TallySortSelect:
+    """User picked the order a column tally lists its values in."""
+    index: int
+    sort: str
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -591,6 +597,17 @@ def _rename_column_search(model: dict, old_name: str, new_name: str) -> None:
         model['column_searches'] = searches or None
 
 
+def _reset_tally_view(model: dict) -> None:
+    """Put the open tally's display controls back to how a menu opens.
+
+    They belong to the menu that was open rather than to the next one, and
+    every way of leaving a menu goes through here so none of them can forget
+    one of them.
+    """
+    model['tally_filter'] = ''
+    model['tally_sort'] = TALLY_SORT_DEFAULT
+
+
 def _close_column_menus(model: dict) -> None:
     """Close the column ▾ menu along with any chip menu nested inside it.
 
@@ -599,7 +616,7 @@ def _close_column_menus(model: dict) -> None:
     """
     model['openDropdown'] = None
     model['col_search_dropdown'] = None
-    model['tally_filter'] = ''
+    _reset_tally_view(model)
 
 
 def _recompose_search(model: dict, eval_in_scope=None) -> None:
@@ -647,6 +664,11 @@ TALLY_UNHASHABLE = 'unhashable'
 _TALLY_SINGLE_OPS = ('==', '!=')
 _TALLY_MEMBERSHIP_OPS = ('in', 'not in')
 _TALLY_EXCLUDE_OPS = ('!=', 'not in')
+
+# The orders the Sort by chip offers, in the order it offers them. Counting
+# produces the first of them, so it costs nothing and leads.
+TALLY_SORTS = ('first', 'common', 'rare', 'item asc', 'item desc')
+TALLY_SORT_DEFAULT = 'first'
 
 
 def _column_values(col, lst, model, eval_in_scope=None) -> list:
@@ -782,12 +804,43 @@ def _write_tally_selection(model: dict, col: str, literals, exclude: bool) -> No
                            text=f'[{", ".join(literals)}]', exclude=exclude)
 
 
+def _tally_sort(model: dict) -> str:
+    """The order the open tally is listing its values in."""
+    sort = model.get('tally_sort')
+    return sort if sort in TALLY_SORTS else TALLY_SORT_DEFAULT
+
+
+def _sorted_tally(tally: dict, sort: str) -> List[Tuple[Any, int]]:
+    """A tally's values and counts in one of the orders the Sort by chip offers.
+
+    Counting already produced first-seen order, and every other order is one
+    stable sort away from it -- so values an order can't tell apart, like two
+    equally common ones, stay in the order the column first showed them.
+    """
+    items = list(tally.items())
+    if sort == 'common':
+        return sorted(items, key=lambda item: -item[1])
+    if sort == 'rare':
+        return sorted(items, key=lambda item: item[1])
+    if sort in ('item asc', 'item desc'):
+        reverse = (sort == 'item desc')
+        try:
+            return sorted(items, key=lambda item: item[0], reverse=reverse)
+        except TypeError:
+            # A column of mixed types has no order of its own, but its rows
+            # still read in some order: sorting how they read is at least an
+            # order the user can see on screen.
+            return sorted(items, key=lambda item: repr(item[0]), reverse=reverse)
+    return items
+
+
 def _tally_literals(col, model, lst, eval_in_scope=None) -> List[str]:
     """Every value a column's tally can filter on, in the order it shows them."""
     tally = _tally(_column_values(col, lst, model, eval_in_scope))
     if not isinstance(tally, dict):
         return []
-    return [literal for literal in map(_tally_literal, tally)
+    ordered = (value for value, _ in _sorted_tally(tally, _tally_sort(model)))
+    return [literal for literal in map(_tally_literal, ordered)
             if literal is not None]
 
 
@@ -1712,10 +1765,12 @@ _COLUMN_MGMT_DEFAULTS = {
     # 'compose-3'). Deliberately not `openDropdown`: those panels are nested
     # inside the column menu, which that single slot is already holding open.
     'col_search_dropdown': None,
-    # What the open tally's filter box says. One slot rather than one per
-    # column, like the chip menus above: only the open menu has a tally, and
-    # narrowing its list is a way of reaching a value, not a setting to keep.
+    # What the open tally's filter box says, and the order it lists values in.
+    # One slot each rather than one per column, like the chip menus above: only
+    # the open menu has a tally, and narrowing or reordering its list is a way
+    # of reaching a value, not a setting to keep.
     'tally_filter': '',
+    'tally_sort': TALLY_SORT_DEFAULT,
 }
 
 _SEARCH_DEFAULTS = {
@@ -1842,12 +1897,18 @@ def _column_search_value_label(value: str) -> str:
 
 
 def _render_column_search_chip(dropdown_id, current, options, make_event,
-                               open_dropdown, chip_class, tooltip='') -> str:
-    """One of the two small dropdowns prefixing a column's search box.
+                               open_dropdown, chip_class, tooltip='',
+                               label=_column_search_value_label) -> str:
+    """One of the small dropdowns inside a column's ▾ menu: the two prefixing
+    its search box, and the tally's Sort by.
 
     State-driven like the column menu it sits inside, and for the same reason:
     a hover menu is opened by a listener bound to the widget root, which this
     panel's trigger has already been hoisted out of.
+
+    They share the one `col_search_dropdown` slot, so opening any of them puts
+    the others away -- two panels overlapping inside an already-hoisted menu
+    would be nowhere to read either of them.
     """
     toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
     is_open = (open_dropdown == dropdown_id)
@@ -1858,7 +1919,7 @@ def _render_column_search_chip(dropdown_id, current, options, make_event,
             f'<div class="snc-dropdown-option'
             f'{" selected" if option == current else ""}" '
             f'snc-mouse-down="{html.escape(make_event(option))}">'
-            f'{_column_search_value_label(option)}</div>'
+            f'{label(option)}</div>'
             for option in options
         )
         panel_html = (
@@ -1872,7 +1933,7 @@ def _render_column_search_chip(dropdown_id, current, options, make_event,
         f'<span class="snc-dropdown-trigger">'
         f'<span class="{chip_classes}" {tooltip_attr}'
         f'snc-mouse-down="{html.escape(toggle_event)}">'
-        f'{_column_search_value_label(current)}'
+        f'{label(current)}'
         f'<span class="col-search-chip-arrow">▾</span></span>'
         f'{panel_html}'
         f'</span>'
@@ -1944,6 +2005,17 @@ def _render_tally_check(checked: bool, disabled: bool = False) -> str:
             f'{" disabled" if disabled else ""} />')
 
 
+def _tally_sort_label(value: str) -> str:
+    """A sort order as menu text: capitalized words, unlike the operator chips
+    this shares its shape with, which show the Python they write.
+
+    Capitalized here rather than stored that way, so the model keeps the plain
+    vocabulary the code compares against.
+    """
+    return (f'<span class="col-tally-sort-value">'
+            f'{html.escape(value.title())}</span>')
+
+
 def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     """Render one column's tally: each distinct value and how many rows have it.
 
@@ -1961,9 +2033,10 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     selected, exclude = _tally_selection(_column_search_row(model, col))
     selected = set(selected)
     filter_text = model.get('tally_filter') or ''
+    sort = _tally_sort(model)
 
     rows = []
-    for value, count in tally.items():
+    for value, count in _sorted_tally(tally, sort):
         text = repr(value)
         if not _tally_shows(filter_text, text):
             continue
@@ -2001,6 +2074,18 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         f'data-tooltip="Show only values containing this text" '
         f'spellcheck="false" />'
     )
+    # Beside the filter box rather than among All / None / Exclude below it:
+    # those say what the search filters on, while these two only say which
+    # values the menu puts in front of the user, and in what order.
+    sort_html = (
+        f'<div class="col-tally-sort-row">Sort by:'
+        + _render_column_search_chip(
+            f'tally-sort-{index}', sort, TALLY_SORTS,
+            lambda v: repr(TallySortSelect(index=index, sort=v)),
+            model.get('col_search_dropdown'), 'col-tally-sort',
+            'Order the values are listed in', _tally_sort_label)
+        + '</div>'
+    )
     header = (
         f'<div class="col-tally-header">'
         f'<span class="col-tally-link" '
@@ -2023,7 +2108,8 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         body = f'<div class="col-tally-list">{"".join(rows)}</div>'
     else:
         body = '<div class="col-tally-note">No values match</div>'
-    return f'<div class="col-tally">{filter_html}{header}{body}</div>'
+    return (f'<div class="col-tally">{filter_html}{sort_html}{header}{body}'
+            f'</div>')
 
 
 def _render_column_menu(col, index, model, lst, eval_in_scope=None):
@@ -3173,7 +3259,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['col_search_dropdown'] = None
                 elif model.get('openDropdown'):
                     model['openDropdown'] = None
-                    model['tally_filter'] = ''
+                    _reset_tally_view(model)
                 elif model.get('tool') == 'pick':
                     model['tool'] = 'normal'
                     model['picked'] = None
@@ -3274,6 +3360,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if _column_at(model, idx) is not None:
                 model['tally_filter'] = val
 
+        case TallySortSelect(index=idx, sort=sort):
+            # Display only too, though the order does reach the search: a
+            # selection is written in the order it was listed in, so it reads
+            # the way the list the user clicked through read.
+            if _column_at(model, idx) is not None and sort in TALLY_SORTS:
+                model['tally_sort'] = sort
+                model['col_search_dropdown'] = None
+
         case ColumnSearchDropdownToggle(dropdown_id=did):
             current = model.get('col_search_dropdown')
             model['col_search_dropdown'] = None if current == did else did
@@ -3324,10 +3418,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case DropdownToggle(dropdown_id=did):
             current = model.get('openDropdown')
-            # A chip menu, and a narrowed-down tally, belong to the menu that
-            # was open rather than to the one being opened.
+            # A chip menu, and a tally narrowed down or reordered, belong to the
+            # menu that was open rather than to the one being opened.
             model['col_search_dropdown'] = None
-            model['tally_filter'] = ''
+            _reset_tally_view(model)
             if current is not None and current.get('id') == did:
                 model['openDropdown'] = None
             else:

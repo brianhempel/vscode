@@ -6262,10 +6262,11 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
 
 from list_visualizer import (
     TallyItemToggle, TallySelectAll, TallySelectNone, TallyExcludeToggle,
-    TallyFilterInput,
+    TallyFilterInput, TallySortSelect,
     TALLY_MAX_CARDINALITY, TALLY_TOO_MANY, TALLY_UNHASHABLE,
+    TALLY_SORTS, TALLY_SORT_DEFAULT,
     _column_values, _tally, _tally_literal, _tally_selection,
-    _write_tally_selection, _tally_literals, _tally_shows,
+    _write_tally_selection, _tally_literals, _tally_shows, _sorted_tally,
 )
 
 
@@ -7005,6 +7006,251 @@ class TestTallyFilterBox(unittest.TestCase):
         lst, model = tally_model()
         model = self.type(model, lst, 'a', index=7)
         self.assertEqual(model['tally_filter'], '')
+
+
+class TestSortedTally(unittest.TestCase):
+    """The order the tally lists a column's values in."""
+
+    def sorted(self, tally, sort):
+        return [value for value, _count in _sorted_tally(tally, sort)]
+
+    def test_first_is_the_order_the_values_were_counted_in(self):
+        self.assertEqual(self.sorted(_tally(TALLY_LIST), 'first'),
+                         ['c', 'aa', 'b'])
+
+    def test_common_puts_the_most_frequent_first(self):
+        self.assertEqual(self.sorted(_tally(TALLY_LIST), 'common'),
+                         ['c', 'b', 'aa'])
+
+    def test_rare_puts_the_least_frequent_first(self):
+        self.assertEqual(self.sorted(_tally(TALLY_LIST), 'rare'),
+                         ['aa', 'b', 'c'])
+
+    def test_the_item_orders_sort_by_the_value_itself(self):
+        self.assertEqual(self.sorted(_tally(TALLY_LIST), 'item asc'),
+                         ['aa', 'b', 'c'])
+        self.assertEqual(self.sorted(_tally(TALLY_LIST), 'item desc'),
+                         ['c', 'b', 'aa'])
+
+    def test_numbers_sort_as_numbers_and_not_as_text(self):
+        self.assertEqual(self.sorted(_tally([2, 10, 9]), 'item asc'),
+                         [2, 9, 10])
+
+    def test_counts_travel_with_their_values(self):
+        self.assertEqual(_sorted_tally(_tally(TALLY_LIST), 'common'),
+                         [('c', 5), ('b', 3), ('aa', 2)])
+
+    def test_values_an_order_cannot_tell_apart_keep_first_seen_order(self):
+        self.assertEqual(self.sorted({'b': 2, 'a': 2, 'c': 1}, 'common'),
+                         ['b', 'a', 'c'])
+        self.assertEqual(self.sorted({'b': 1, 'a': 1, 'c': 2}, 'rare'),
+                         ['b', 'a', 'c'])
+
+    def test_values_that_cannot_be_compared_fall_back_to_how_they_read(self):
+        # A mixed column has no order of its own, but its rows still read in
+        # some order: sorting the reprs is at least the order shown on screen.
+        self.assertEqual(self.sorted({1: 1, 'a': 1, 2: 1}, 'item asc'),
+                         ['a', 1, 2])
+        self.assertEqual(self.sorted({1: 1, 'a': 1, 2: 1}, 'item desc'),
+                         [2, 1, 'a'])
+
+    def test_an_order_it_does_not_know_is_first_seen_order(self):
+        self.assertEqual(self.sorted(_tally(TALLY_LIST), 'sideways'),
+                         ['c', 'aa', 'b'])
+
+
+class TestTallySortMenu(unittest.TestCase):
+    """The Sort by chip above the tally sets the order its values are listed
+    in. Display only, like the filter box beside it: it decides what the menu
+    shows, never what the column search says."""
+
+    def click(self, model, lst, event):
+        model, _ = update(make_column_mouse_event(repr(event)), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def tally(self, model, lst, column=0):
+        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        self.assertIn('<div class="col-tally">', th)
+        return th[th.index('<div class="col-tally">'):]
+
+    def chip(self, tally):
+        """The chip itself, cut off before the panel of options below it."""
+        start = tally.index('col-tally-sort')
+        end = tally.find('snc-dropdown-panel', start)
+        return tally[start:end if end != -1 else len(tally)]
+
+    def items(self, tally):
+        return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
+
+    def counts(self, tally):
+        return re.findall(r'col-tally-count[^>]*>([^<]*)<', tally)
+
+    def text(self, model):
+        return _column_search_row(model, '^')['text']
+
+    def open_chip(self, model, index=0):
+        model['col_search_dropdown'] = f'tally-sort-{index}'
+        return model
+
+    def test_a_column_starts_in_first_seen_order(self):
+        _, model = tally_model()
+        self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
+        self.assertEqual(TALLY_SORT_DEFAULT, 'first')
+
+    def test_the_chip_sits_above_the_values_it_orders(self):
+        lst, model = tally_model()
+        tally = self.tally(model, lst)
+        self.assertIn('col-tally-sort', tally)
+        self.assertIn('Sort by', tally)
+        self.assertLess(tally.index('col-tally-sort'),
+                        tally.index('col-tally-row'))
+
+    def test_the_chip_shows_the_order_in_force(self):
+        lst, model = tally_model()
+        self.assertIn('First', self.chip(self.tally(model, lst)))
+        model['tally_sort'] = 'item desc'
+        self.assertIn('Item Desc', self.chip(self.tally(model, lst)))
+
+    def test_the_orders_read_as_menu_items_rather_than_as_model_values(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_chip(model), lst)
+        self.assertEqual(re.findall(r'col-tally-sort-value[^>]*>([^<]*)<',
+                                    tally),
+                         ['First', 'First', 'Common', 'Rare', 'Item Asc',
+                          'Item Desc'])  # the chip, then its five options
+
+    def test_the_open_chip_offers_every_order(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_chip(model), lst)
+        for sort in TALLY_SORTS:
+            with self.subTest(sort=sort):
+                self.assertIn(
+                    html.escape(repr(TallySortSelect(index=0, sort=sort))),
+                    tally)
+        self.assertEqual(TALLY_SORTS,
+                         ('first', 'common', 'rare', 'item asc', 'item desc'))
+
+    def test_the_order_in_force_is_the_marked_option(self):
+        lst, model = tally_model()
+        model['tally_sort'] = 'rare'
+        tally = self.tally(self.open_chip(model), lst)
+        marked = re.findall(r'snc-dropdown-option selected.*?>([^<]*)</span>',
+                            tally)
+        self.assertEqual(marked, ['Rare'])
+
+    def test_picking_an_order_records_it_and_closes_the_chip(self):
+        lst, model = tally_model()
+        model = self.open_chip(model)
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        self.assertEqual(model['tally_sort'], 'common')
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_the_column_menu_stays_open_across_a_pick(self):
+        # Reordering is a step on the way to picking values, not a way out.
+        lst, model = tally_model()
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+
+    def test_an_order_it_does_not_know_is_ignored(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='sideways'))
+        self.assertEqual(model['tally_sort'], 'first')
+
+    def test_picking_on_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=7, sort='common'))
+        self.assertEqual(model['tally_sort'], 'first')
+
+    def test_reordering_is_not_a_filter_on_the_table(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        self.assertIsNone(model['column_searches'])
+        self.assertIsNone(model['search'])
+
+    def test_the_rows_are_listed_in_the_chosen_order(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally),
+                         [html.escape(repr(v)) for v in ('c', 'b', 'aa')])
+        self.assertEqual(self.counts(tally), ['5', '3', '2'])
+
+    def test_reordering_leaves_the_checked_rows_checked(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        rows = re.findall(r'<div class="col-tally-row[^"]*".*?</div>',
+                          self.tally(model, lst), re.DOTALL)
+        self.assertEqual([' checked' in row for row in rows],
+                         [False, False, True])
+        self.assertEqual(model['search'], "^ == 'aa'")
+
+    def test_the_selectable_literals_follow_the_chosen_order(self):
+        lst, model = tally_model()
+        model['tally_sort'] = 'item asc'
+        self.assertEqual(_tally_literals('^', model, lst),
+                         ["'aa'", "'b'", "'c'"])
+
+    def test_the_membership_list_follows_the_chosen_order(self):
+        # The search reads the way the list the user clicked through read.
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='rare'))
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        self.assertEqual(self.text(model), "['aa', 'c']")
+
+    def test_select_all_follows_the_chosen_order(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), "['c', 'b', 'aa']")
+
+    def test_the_filter_box_narrows_whatever_order_is_in_force(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='item asc'))
+        model, _ = update(make_tally_filter_event(0, 'a'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr('aa'))])
+
+    def test_a_tally_that_is_only_a_note_has_nothing_to_order(self):
+        lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
+        _, model = tally_model(lst)
+        self.assertNotIn('col-tally-sort', self.tally(model, lst))
+
+    def test_closing_the_menu_forgets_the_order(self):
+        # Like the filter box: a way of reaching a value, not a setting to keep.
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
+        self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
+
+    def test_another_column_starts_in_first_seen_order(self):
+        lst, model = tally_model()
+        model['columns'] = ['^', 'len(^)']
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
+        self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
+
+    def test_escape_forgets_the_order(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model, _ = update(make_column_key_event('Escape'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
+
+    def test_a_menu_the_columns_moved_out_from_under_forgets_it_too(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, AddColumnClick())
+        self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
 
 
 if __name__ == '__main__':
