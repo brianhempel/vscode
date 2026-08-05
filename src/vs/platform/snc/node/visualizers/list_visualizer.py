@@ -188,6 +188,19 @@ class TallySortSelect:
     sort: str
 
 @dataclass(frozen=True, slots=True)
+class TallyCountFilterInput:
+    """User typed in a column tally's count box, narrowing the menu to the
+    values of that frequency."""
+    index: int
+    value: str
+
+@dataclass(frozen=True, slots=True)
+class TallyCountOpSelect:
+    """User picked how a column tally's count box compares."""
+    index: int
+    op: str
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -606,6 +619,8 @@ def _reset_tally_view(model: dict) -> None:
     """
     model['tally_filter'] = ''
     model['tally_sort'] = TALLY_SORT_DEFAULT
+    model['tally_count_filter'] = ''
+    model['tally_count_op'] = TALLY_COUNT_OP_DEFAULT
 
 
 def _close_column_menus(model: dict) -> None:
@@ -669,6 +684,12 @@ _TALLY_EXCLUDE_OPS = ('!=', 'not in')
 # produces the first of them, so it costs nothing and leads.
 TALLY_SORTS = ('first', 'common', 'rare', 'item asc', 'item desc')
 TALLY_SORT_DEFAULT = 'first'
+
+# The comparisons the count box offers. Fewer than the column search's, because
+# a count is a whole number: `> 2` and `>= 3` are the same list, so offering
+# both would only be two ways of saying it.
+TALLY_COUNT_OPS = ('>=', '==', '<=')
+TALLY_COUNT_OP_DEFAULT = '>='
 
 
 def _column_values(col, lst, model, eval_in_scope=None) -> list:
@@ -834,14 +855,24 @@ def _sorted_tally(tally: dict, sort: str) -> List[Tuple[Any, int]]:
     return items
 
 
-def _tally_literals(col, model, lst, eval_in_scope=None) -> List[str]:
-    """Every value a column's tally can filter on, in the order it shows them."""
+def _tally_counted(col, model, lst, eval_in_scope=None) -> List[Tuple[str, int]]:
+    """Every value a column's tally can filter on, with how many rows have it,
+    in the order the tally shows them."""
     tally = _tally(_column_values(col, lst, model, eval_in_scope))
     if not isinstance(tally, dict):
         return []
-    ordered = (value for value, _ in _sorted_tally(tally, _tally_sort(model)))
-    return [literal for literal in map(_tally_literal, ordered)
-            if literal is not None]
+    counted = []
+    for value, count in _sorted_tally(tally, _tally_sort(model)):
+        literal = _tally_literal(value)
+        if literal is not None:
+            counted.append((literal, count))
+    return counted
+
+
+def _tally_literals(col, model, lst, eval_in_scope=None) -> List[str]:
+    """Every value a column's tally can filter on, in the order it shows them."""
+    return [literal
+            for literal, _count in _tally_counted(col, model, lst, eval_in_scope)]
 
 
 def _tally_shows(text: str, shown: str) -> bool:
@@ -857,11 +888,48 @@ def _tally_shows(text: str, shown: str) -> bool:
     return text.strip().lower() in shown.lower()
 
 
-def _tally_shown(model: dict, literals) -> List[str]:
-    """The literals the filter box is leaving on show, which is what All and
-    None act on: what the user can't see, they didn't mean to change."""
-    text = model.get('tally_filter') or ''
-    return [literal for literal in literals if _tally_shows(text, literal)]
+def _tally_count_op(model: dict) -> str:
+    """The comparison the open tally's count box is making."""
+    op = model.get('tally_count_op')
+    return op if op in TALLY_COUNT_OPS else TALLY_COUNT_OP_DEFAULT
+
+
+def _tally_count_shows(op: str, text: str, count: int) -> bool:
+    """Whether the tally's count box leaves a value that many rows have on show.
+
+    Anything that isn't a whole number filters nothing, which covers both a
+    number still being typed (`-`, `1.`) and one that never arrives: an empty
+    list is a poor answer to text the box can't compare against.
+    """
+    try:
+        threshold = int(text.strip())
+    except ValueError:
+        return True
+    if op == '>=':
+        return count >= threshold
+    if op == '==':
+        return count == threshold
+    if op == '<=':
+        return count <= threshold
+    return True
+
+
+def _tally_lists(model: dict, shown: str, count: int) -> bool:
+    """Whether the tally's two display filters both leave a row on show.
+
+    The one place they meet, so the rows the menu lists and the ones All and
+    None act on can't come apart.
+    """
+    return (_tally_shows(model.get('tally_filter') or '', shown)
+            and _tally_count_shows(_tally_count_op(model),
+                                   model.get('tally_count_filter') or '', count))
+
+
+def _tally_shown(model: dict, counted) -> List[str]:
+    """The literals the display filters are leaving on show, which is what All
+    and None act on: what the user can't see, they didn't mean to change."""
+    return [literal for literal, count in counted
+            if _tally_lists(model, literal, count)]
 
 
 def _in_tally_order(literals, order) -> List[str]:
@@ -1765,12 +1833,14 @@ _COLUMN_MGMT_DEFAULTS = {
     # 'compose-3'). Deliberately not `openDropdown`: those panels are nested
     # inside the column menu, which that single slot is already holding open.
     'col_search_dropdown': None,
-    # What the open tally's filter box says, and the order it lists values in.
-    # One slot each rather than one per column, like the chip menus above: only
-    # the open menu has a tally, and narrowing or reordering its list is a way
-    # of reaching a value, not a setting to keep.
+    # What the open tally's two filter boxes say, and the order it lists values
+    # in. One slot each rather than one per column, like the chip menus above:
+    # only the open menu has a tally, and narrowing or reordering its list is a
+    # way of reaching a value, not a setting to keep.
     'tally_filter': '',
     'tally_sort': TALLY_SORT_DEFAULT,
+    'tally_count_filter': '',
+    'tally_count_op': TALLY_COUNT_OP_DEFAULT,
 }
 
 _SEARCH_DEFAULTS = {
@@ -2033,12 +2103,13 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     selected, exclude = _tally_selection(_column_search_row(model, col))
     selected = set(selected)
     filter_text = model.get('tally_filter') or ''
+    count_text = model.get('tally_count_filter') or ''
     sort = _tally_sort(model)
 
     rows = []
     for value, count in _sorted_tally(tally, sort):
         text = repr(value)
-        if not _tally_shows(filter_text, text):
+        if not _tally_lists(model, text, count):
             continue
         literal = _tally_literal(value)
         label = html.escape(truncate_str(text, 60))
@@ -2074,9 +2145,29 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         f'data-tooltip="Show only values containing this text" '
         f'spellcheck="false" />'
     )
+    # A second way of reaching a value: how often it occurs rather than how it
+    # reads. The chip sits on top of the box the way the column search's
+    # operator does, since it reads before the number the same way.
+    count_event = (f"lambda e: TallyCountFilterInput(index={index}, "
+                   f"value=e.get('value', ''))")
+    count_html = (
+        f'<div class="search-box-wrapper col-tally-count-box">'
+        f'<input type="text" class="col-tally-count-filter search-box" '
+        f'snc-input="{html.escape(count_event)}" '
+        f'value="{html.escape(count_text)}" '
+        f'placeholder="Count" '
+        f'data-tooltip="Show only values with this many rows" '
+        f'spellcheck="false" />'
+        f'<span class="col-search-chips">'
+        + _render_column_search_chip(
+            f'tally-count-op-{index}', _tally_count_op(model), TALLY_COUNT_OPS,
+            lambda v: repr(TallyCountOpSelect(index=index, op=v)),
+            model.get('col_search_dropdown'), 'col-tally-count-op')
+        + '</span></div>'
+    )
     # Beside the filter box rather than among All / None / Exclude below it:
-    # those say what the search filters on, while these two only say which
-    # values the menu puts in front of the user, and in what order.
+    # those say what the search filters on, while these only say which values
+    # the menu puts in front of the user, and in what order.
     sort_html = (
         f'<div class="col-tally-sort-row">Sort by:'
         + _render_column_search_chip(
@@ -2084,6 +2175,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             lambda v: repr(TallySortSelect(index=index, sort=v)),
             model.get('col_search_dropdown'), 'col-tally-sort',
             'Order the values are listed in', _tally_sort_label)
+        + count_html
         + '</div>'
     )
     header = (
@@ -2108,7 +2200,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         body = f'<div class="col-tally-list">{"".join(rows)}</div>'
     else:
         body = '<div class="col-tally-note">No values match</div>'
-    return (f'<div class="col-tally">{filter_html}{sort_html}{header}{body}'
+    return (f'<div class="col-tally">{filter_html}{sort_html}START HERE make it pretty{header}{body}'
             f'</div>')
 
 
@@ -3327,8 +3419,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             col = _column_at(model, idx)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
-                order = _tally_literals(col, model, value, eval_in_scope)
-                shown = _tally_shown(model, order)
+                counted = _tally_counted(col, model, value, eval_in_scope)
+                order = [lit for lit, _count in counted]
+                shown = _tally_shown(model, counted)
                 kept = [lit for lit in selected if lit not in set(shown)]
                 _write_tally_selection(
                     model, col, _in_tally_order(kept + shown, order), exclude)
@@ -3339,7 +3432,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 shown = set(_tally_shown(
-                    model, _tally_literals(col, model, value, eval_in_scope)))
+                    model, _tally_counted(col, model, value, eval_in_scope)))
                 _write_tally_selection(
                     model, col, [lit for lit in selected if lit not in shown],
                     exclude)
@@ -3366,6 +3459,17 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # the way the list the user clicked through read.
             if _column_at(model, idx) is not None and sort in TALLY_SORTS:
                 model['tally_sort'] = sort
+                model['col_search_dropdown'] = None
+
+        case TallyCountFilterInput(index=idx, value=val):
+            # Display only, like the box beside it: which rows the menu lists,
+            # never what the column search says.
+            if _column_at(model, idx) is not None:
+                model['tally_count_filter'] = val
+
+        case TallyCountOpSelect(index=idx, op=op):
+            if _column_at(model, idx) is not None and op in TALLY_COUNT_OPS:
+                model['tally_count_op'] = op
                 model['col_search_dropdown'] = None
 
         case ColumnSearchDropdownToggle(dropdown_id=did):

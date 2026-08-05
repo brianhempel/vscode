@@ -1019,9 +1019,31 @@
 	.col-tally-sort-row {
 		gap: 3px;
 	}
+
 	.col-tally-header { /* All None link-buttons */
 		gap: 6px;
 		margin-bottom: 2px;
+	}
+
+	/* The count box, at the far end of the Sort by row: how often a value
+	   occurs, as another way of narrowing to it. Its comparison chip sits on top
+	   of it the way the column search's operator does, so the input reserves
+	   room for the two characters with its left padding. */
+	.col-tally-count-box {
+		margin-left: auto;
+	}
+
+	.col-tally-count-filter {
+		font-size: 9px;
+		box-sizing: border-box;
+		width: 10ch;
+		border-color: transparent;
+		padding: 2px 2px 2px 3.5ch;
+		border-radius: 3px;
+	}
+	.col-tally-count-filter:focus,
+	.col-tally-count-filter:hover {
+		border-color: var(--snc-border-color);
 	}
 
 	/* The hoisted panel is slid up to fit the viewport but never shortened, so

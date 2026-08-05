@@ -6262,11 +6262,12 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
 
 from list_visualizer import (
     TallyItemToggle, TallySelectAll, TallySelectNone, TallyExcludeToggle,
-    TallyFilterInput, TallySortSelect,
+    TallyFilterInput, TallySortSelect, TallyCountFilterInput, TallyCountOpSelect,
     TALLY_MAX_CARDINALITY, TALLY_TOO_MANY, TALLY_UNHASHABLE,
-    TALLY_SORTS, TALLY_SORT_DEFAULT,
+    TALLY_SORTS, TALLY_SORT_DEFAULT, TALLY_COUNT_OPS, TALLY_COUNT_OP_DEFAULT,
     _column_values, _tally, _tally_literal, _tally_selection,
     _write_tally_selection, _tally_literals, _tally_shows, _sorted_tally,
+    _tally_count_shows,
 )
 
 
@@ -6680,7 +6681,7 @@ class TestTallyRendering(unittest.TestCase):
         tally = self.tally(self.open_menu_html(model, lst))
         self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', tally),
                          [html.escape(repr(v)) for v in ('c', 'aa', 'b')])
-        self.assertEqual(re.findall(r'col-tally-count[^>]*>([^<]*)<', tally),
+        self.assertEqual(re.findall(r'col-tally-count">([^<]*)<', tally),
                          ['5', '2', '3'])
 
     def test_the_tally_comes_after_the_search_row_it_writes_into(self):
@@ -6789,7 +6790,7 @@ class TestTallyRendering(unittest.TestCase):
         tally = self.tally(th)
         self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', tally),
                          ['5', '2'])
-        self.assertEqual(re.findall(r'col-tally-count[^>]*>([^<]*)<', tally),
+        self.assertEqual(re.findall(r'col-tally-count">([^<]*)<', tally),
                          ['1', '2'])
 
     def test_a_long_value_is_truncated_for_display_but_not_for_the_filter(self):
@@ -6864,7 +6865,7 @@ class TestTallyFilterBox(unittest.TestCase):
         return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
 
     def counts(self, tally):
-        return re.findall(r'col-tally-count[^>]*>([^<]*)<', tally)
+        return re.findall(r'col-tally-count">([^<]*)<', tally)
 
     def text(self, model):
         return _column_search_row(model, '^')['text']
@@ -7086,7 +7087,7 @@ class TestTallySortMenu(unittest.TestCase):
         return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
 
     def counts(self, tally):
-        return re.findall(r'col-tally-count[^>]*>([^<]*)<', tally)
+        return re.findall(r'col-tally-count">([^<]*)<', tally)
 
     def text(self, model):
         return _column_search_row(model, '^')['text']
@@ -7251,6 +7252,280 @@ class TestTallySortMenu(unittest.TestCase):
         model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
         model = self.click(model, lst, AddColumnClick())
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
+
+
+def make_tally_count_filter_event(index, value):
+    """Create a TallyCountFilterInput event for the column at *index*."""
+    return {
+        'pythonEventStr': (f"lambda e: TallyCountFilterInput(index={index}, "
+                           f"value=e.get('value', ''))"),
+        'eventJSON': {'type': 'input', 'value': value},
+    }
+
+
+class TestTallyCountShows(unittest.TestCase):
+    """What the tally's count box keeps on show: a comparison against how many
+    rows a value has."""
+
+    def test_no_number_shows_everything(self):
+        for op in TALLY_COUNT_OPS:
+            with self.subTest(op=op):
+                self.assertTrue(_tally_count_shows(op, '', 3))
+
+    def test_at_least_keeps_the_counts_that_reach_it(self):
+        self.assertTrue(_tally_count_shows('>=', '3', 5))
+        self.assertTrue(_tally_count_shows('>=', '3', 3))
+        self.assertFalse(_tally_count_shows('>=', '3', 2))
+
+    def test_exactly_keeps_only_that_count(self):
+        self.assertTrue(_tally_count_shows('==', '3', 3))
+        self.assertFalse(_tally_count_shows('==', '3', 2))
+        self.assertFalse(_tally_count_shows('==', '3', 4))
+
+    def test_at_most_keeps_the_counts_under_it(self):
+        self.assertTrue(_tally_count_shows('<=', '3', 2))
+        self.assertTrue(_tally_count_shows('<=', '3', 3))
+        self.assertFalse(_tally_count_shows('<=', '3', 5))
+
+    def test_surrounding_space_is_not_part_of_the_number(self):
+        self.assertTrue(_tally_count_shows('==', ' 3 ', 3))
+
+    def test_text_that_is_not_yet_a_count_filters_nothing(self):
+        # A half-typed number shouldn't empty the list out from under the user,
+        # and neither should one that never becomes a count.
+        for text in ('-', '1.5', 'abc', '3a'):
+            with self.subTest(text=text):
+                self.assertTrue(_tally_count_shows('>=', text, 1))
+
+    def test_an_operator_it_does_not_know_filters_nothing(self):
+        self.assertTrue(_tally_count_shows('in', '3', 5))
+
+
+class TestTallyCountFilterBox(unittest.TestCase):
+    """The count box beside the Sort by chip narrows the tally to the values of
+    a given frequency. Display only, like the boxes around it: it decides which
+    values the menu lists, never what the column search says."""
+
+    def type(self, model, lst, text, index=0):
+        model, _ = update(make_tally_count_filter_event(index, text), None,
+                          model, lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def type_value(self, model, lst, text, index=0):
+        model, _ = update(make_tally_filter_event(index, text), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def click(self, model, lst, event):
+        model, _ = update(make_column_mouse_event(repr(event)), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def tally(self, model, lst, column=0):
+        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        self.assertIn('<div class="col-tally">', th)
+        return th[th.index('<div class="col-tally">'):]
+
+    def chip(self, tally):
+        """The chip itself, cut off before the panel of options below it."""
+        start = tally.index('col-tally-count-op')
+        end = tally.find('snc-dropdown-panel', start)
+        return tally[start:end if end != -1 else len(tally)]
+
+    def items(self, tally):
+        return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
+
+    def counts(self, tally):
+        return re.findall(r'col-tally-count">([^<]*)<', tally)
+
+    def text(self, model):
+        return _column_search_row(model, '^')['text']
+
+    def open_chip(self, model, index=0):
+        model['col_search_dropdown'] = f'tally-count-op-{index}'
+        return model
+
+    def test_a_column_starts_out_comparing_with_at_least(self):
+        _, model = tally_model()
+        self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
+        self.assertEqual(model['tally_count_filter'], '')
+        self.assertEqual(TALLY_COUNT_OP_DEFAULT, '>=')
+
+    def test_the_box_sits_above_the_values_it_narrows(self):
+        lst, model = tally_model()
+        tally = self.tally(model, lst)
+        self.assertIn('col-tally-count-filter', tally)
+        self.assertIn('TallyCountFilterInput(index=0', tally)
+        self.assertLess(tally.index('col-tally-count-filter'),
+                        tally.index('col-tally-row'))
+
+    def test_typing_a_count_narrows_the_values_shown(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally),
+                         [html.escape(repr(v)) for v in ('c', 'b')])
+        # And the counts are still of the whole column.
+        self.assertEqual(self.counts(tally), ['5', '3'])
+
+    def test_the_box_shows_what_was_typed(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        self.assertIn('value="3"', self.tally(model, lst))
+
+    def test_the_chip_shows_the_comparison_in_force(self):
+        lst, model = tally_model()
+        self.assertIn('&gt;=', self.chip(self.tally(model, lst)))
+        model['tally_count_op'] = '<='
+        self.assertIn('&lt;=', self.chip(self.tally(model, lst)))
+
+    def test_the_open_chip_offers_the_three_comparisons_and_no_others(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_chip(model), lst)
+        for op in TALLY_COUNT_OPS:
+            with self.subTest(op=op):
+                self.assertIn(
+                    html.escape(repr(TallyCountOpSelect(index=0, op=op))), tally)
+        self.assertEqual(TALLY_COUNT_OPS, ('>=', '==', '<='))
+        for op in ('>', '<', '!=', 'in', 'not in'):
+            with self.subTest(op=op):
+                self.assertNotIn(
+                    html.escape(repr(TallyCountOpSelect(index=0, op=op))), tally)
+
+    def test_the_comparison_in_force_is_the_marked_option(self):
+        lst, model = tally_model()
+        model['tally_count_op'] = '<='
+        tally = self.tally(self.open_chip(model), lst)
+        marked = re.findall(r'snc-dropdown-option selected.*?>([^<]*)</span>',
+                            tally)
+        self.assertEqual(marked, ['&lt;='])
+
+    def test_picking_a_comparison_records_it_and_closes_the_chip(self):
+        lst, model = tally_model()
+        model = self.open_chip(model)
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='=='))
+        self.assertEqual(model['tally_count_op'], '==')
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_picking_a_comparison_narrows_what_was_already_typed(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='=='))
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr('b'))])
+
+    def test_the_column_menu_stays_open_across_a_pick(self):
+        # Narrowing is a step on the way to picking values, not a way out.
+        lst, model = tally_model()
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+
+    def test_a_comparison_it_does_not_know_is_ignored(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='>'))
+        self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
+
+    def test_acting_on_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3', index=7)
+        self.assertEqual(model['tally_count_filter'], '')
+        model = self.click(model, lst, TallyCountOpSelect(index=7, op='=='))
+        self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
+
+    def test_narrowing_by_count_is_not_a_filter_on_the_table(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
+        self.assertIsNone(model['column_searches'])
+        self.assertIsNone(model['search'])
+
+    def test_the_two_boxes_narrow_together(self):
+        lst, model = tally_model()
+        model = self.type_value(model, lst, 'a')
+        model = self.type(model, lst, '2')
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr('aa'))])
+        model = self.type(model, lst, '3')
+        self.assertEqual(self.items(self.tally(model, lst)), [])
+
+    def test_a_value_with_no_literal_is_narrowed_like_any_other(self):
+        class Thing:
+            def __repr__(self):
+                return '<thing>'
+        lst = ['c', 'c', Thing()]
+        _, model = tally_model(lst)
+        model = self.type(model, lst, '2')
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [html.escape(repr('c'))])
+        self.assertNotIn('unselectable', tally)
+
+    def test_nothing_matching_says_so_rather_than_showing_a_blank(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '9')
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [])
+        self.assertIn('col-tally-note', tally)
+        # And the box stays, since it's the only way back to the values.
+        self.assertIn('col-tally-count-filter', tally)
+
+    def test_a_tally_that_is_only_a_note_has_nothing_to_narrow(self):
+        lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
+        _, model = tally_model(lst)
+        self.assertNotIn('col-tally-count-filter', self.tally(model, lst))
+
+    def test_a_checked_value_stays_checked_while_it_is_hidden(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model = self.type(model, lst, '3')
+        self.assertEqual(model['search'], "^ == 'aa'")
+
+    def test_select_all_takes_only_the_values_on_show(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), "['c', 'b']")
+
+    def test_select_none_only_unchecks_what_is_on_show(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, TallySelectNone(index=0))
+        self.assertEqual(self.text(model), "'aa'")
+
+    def test_closing_the_menu_forgets_the_count_filter(self):
+        # Like the boxes around it: a way of reaching a value, not a setting.
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
+        self.assertEqual(model['tally_count_filter'], '')
+        self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
+
+    def test_another_column_starts_with_an_empty_box(self):
+        lst, model = tally_model()
+        model['columns'] = ['^', 'len(^)']
+        model = self.type(model, lst, '3')
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
+        self.assertEqual(model['tally_count_filter'], '')
+
+    def test_escape_forgets_the_count_filter(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model, _ = update(make_column_key_event('Escape'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['tally_count_filter'], '')
+
+    def test_a_menu_the_columns_moved_out_from_under_forgets_it_too(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, AddColumnClick())
+        self.assertEqual(model['tally_count_filter'], '')
 
 
 if __name__ == '__main__':
