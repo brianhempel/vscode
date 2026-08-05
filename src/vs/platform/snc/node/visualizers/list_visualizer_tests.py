@@ -6262,9 +6262,10 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
 
 from list_visualizer import (
     TallyItemToggle, TallySelectAll, TallySelectNone, TallyExcludeToggle,
+    TallyFilterInput,
     TALLY_MAX_CARDINALITY, TALLY_TOO_MANY, TALLY_UNHASHABLE,
     _column_values, _tally, _tally_literal, _tally_selection,
-    _write_tally_selection, _tally_literals,
+    _write_tally_selection, _tally_literals, _tally_shows,
 )
 
 
@@ -6797,6 +6798,213 @@ class TestTallyRendering(unittest.TestCase):
         shown = re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)[0]
         self.assertIn('…', shown)
         self.assertIn(html.escape(repr('x' * 200)), tally)
+
+
+def make_tally_filter_event(index, value):
+    """Create a TallyFilterInput event for the column at *index*."""
+    return {
+        'pythonEventStr': (f"lambda e: TallyFilterInput(index={index}, "
+                           f"value=e.get('value', ''))"),
+        'eventJSON': {'type': 'input', 'value': value},
+    }
+
+
+class TestTallyShows(unittest.TestCase):
+    """What the tally's filter box keeps on show: a plain substring of the row,
+    read the way the row reads."""
+
+    def test_a_substring_of_the_row_shows_it(self):
+        self.assertTrue(_tally_shows('a', "'aa'"))
+        self.assertFalse(_tally_shows('z', "'aa'"))
+
+    def test_no_text_shows_everything(self):
+        self.assertTrue(_tally_shows('', "'aa'"))
+
+    def test_surrounding_space_is_not_part_of_the_search(self):
+        # A trailing space shouldn't empty the list out from under the user.
+        self.assertTrue(_tally_shows('  ', "'aa'"))
+        self.assertTrue(_tally_shows(' a ', "'aa'"))
+
+    def test_case_does_not_matter(self):
+        self.assertTrue(_tally_shows('ALI', "'Alice'"))
+        self.assertTrue(_tally_shows('ali', "'ALICE'"))
+
+    def test_the_row_is_matched_as_it_reads(self):
+        # Which is the repr, quotes and all -- the same string the row's
+        # literal is, so the search box and the display agree on what showed.
+        self.assertTrue(_tally_shows("'a", "'aa'"))
+        self.assertTrue(_tally_shows('1', '10'))
+        self.assertFalse(_tally_shows('1', '20'))
+
+
+class TestTallyFilterBox(unittest.TestCase):
+    """The box above the tally narrows which values the menu lists. It's a way
+    of finding a value to click, not a filter on the table: nothing it does
+    reaches the column search."""
+
+    def type(self, model, lst, text, index=0):
+        model, _ = update(make_tally_filter_event(index, text), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def click(self, model, lst, event):
+        model, _ = update(make_column_mouse_event(repr(event)), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def tally(self, model, lst, column=0):
+        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        self.assertIn('<div class="col-tally">', th)
+        return th[th.index('<div class="col-tally">'):]
+
+    def items(self, tally):
+        return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
+
+    def counts(self, tally):
+        return re.findall(r'col-tally-count[^>]*>([^<]*)<', tally)
+
+    def text(self, model):
+        return _column_search_row(model, '^')['text']
+
+    def test_the_box_sits_above_the_values_it_narrows(self):
+        lst, model = tally_model()
+        tally = self.tally(model, lst)
+        self.assertIn('col-tally-filter', tally)
+        self.assertIn('TallyFilterInput(index=0', tally)
+        self.assertLess(tally.index('col-tally-filter'),
+                        tally.index('col-tally-row'))
+
+    def test_typing_narrows_the_values_shown(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a')
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr('aa'))])
+
+    def test_the_counts_are_still_of_the_whole_column(self):
+        # Hiding a row doesn't change how many rows the ones left have.
+        lst, model = tally_model()
+        model = self.type(model, lst, 'b')
+        self.assertEqual(self.counts(self.tally(model, lst)), ['3'])
+
+    def test_the_box_shows_what_was_typed(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'aa')
+        self.assertIn('value="aa"', self.tally(model, lst))
+
+    def test_a_value_is_matched_past_where_it_is_elided(self):
+        # The row shows a middle-elided repr; the filter reads the whole one.
+        lst = ['x' * 200 + 'zed', 'y']
+        _, model = tally_model(lst)
+        model = self.type(model, lst, 'zed')
+        self.assertEqual(len(self.items(self.tally(model, lst))), 1)
+
+    def test_a_value_with_no_literal_is_narrowed_like_any_other(self):
+        class Thing:
+            def __repr__(self):
+                return '<thing>'
+        lst = ['c', Thing()]
+        _, model = tally_model(lst)
+        model = self.type(model, lst, 'thing')
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [html.escape('<thing>')])
+        self.assertIn('unselectable', tally)
+
+    def test_nothing_matching_says_so_rather_than_showing_a_blank(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'zzz')
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [])
+        self.assertIn('col-tally-note', tally)
+        # And the box stays, since it's the only way back to the values.
+        self.assertIn('col-tally-filter', tally)
+
+    def test_a_tally_that_is_only_a_note_has_nothing_to_narrow(self):
+        lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
+        _, model = tally_model(lst)
+        self.assertNotIn('col-tally-filter', self.tally(model, lst))
+
+    def test_narrowing_the_list_is_not_a_filter_on_the_table(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'aa')
+        self.assertIsNone(model['column_searches'])
+        self.assertIsNone(model['search'])
+
+    def test_a_checked_value_stays_checked_while_it_is_hidden(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model = self.type(model, lst, 'aa')
+        self.assertEqual(model['search'], "^ == 'c'")
+
+    def test_the_box_survives_picking_values(self):
+        # Narrowing down and then ticking a few is the whole point of it.
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a')
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        self.assertEqual(model['tally_filter'], 'a')
+        self.assertEqual(model['search'], "^ == 'aa'")
+
+    def test_select_all_takes_only_the_values_on_show(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a')
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), "'aa'")
+
+    def test_select_all_leaves_a_hidden_selection_alone(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model = self.type(model, lst, 'b')
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), "['c', 'b']")
+
+    def test_select_none_only_unchecks_what_is_on_show(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.type(model, lst, 'b')
+        model = self.click(model, lst, TallySelectNone(index=0))
+        self.assertEqual(self.text(model), "['c', 'aa']")
+
+    def test_an_empty_box_still_reaches_every_value(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'b')
+        model = self.type(model, lst, '')
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), "['c', 'aa', 'b']")
+
+    def test_closing_the_menu_forgets_what_was_typed(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a')
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
+        self.assertEqual(model['tally_filter'], '')
+
+    def test_another_column_starts_with_an_empty_box(self):
+        lst, model = tally_model()
+        model['columns'] = ['^', 'len(^)']
+        model = self.type(model, lst, 'a')
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
+        self.assertEqual(model['tally_filter'], '')
+
+    def test_escape_forgets_what_was_typed(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a')
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model, _ = update(make_column_key_event('Escape'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['tally_filter'], '')
+
+    def test_a_menu_the_columns_moved_out_from_under_forgets_it_too(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a')
+        model = self.click(model, lst, AddColumnClick())
+        self.assertEqual(model['tally_filter'], '')
+
+    def test_typing_into_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, 'a', index=7)
+        self.assertEqual(model['tally_filter'], '')
 
 
 if __name__ == '__main__':

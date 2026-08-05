@@ -175,6 +175,13 @@ class TallyExcludeToggle:
     index: int
 
 @dataclass(frozen=True, slots=True)
+class TallyFilterInput:
+    """User typed in a column tally's filter box, narrowing which of the
+    column's values the menu lists."""
+    index: int
+    value: str
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -592,6 +599,7 @@ def _close_column_menus(model: dict) -> None:
     """
     model['openDropdown'] = None
     model['col_search_dropdown'] = None
+    model['tally_filter'] = ''
 
 
 def _recompose_search(model: dict, eval_in_scope=None) -> None:
@@ -781,6 +789,26 @@ def _tally_literals(col, model, lst, eval_in_scope=None) -> List[str]:
         return []
     return [literal for literal in map(_tally_literal, tally)
             if literal is not None]
+
+
+def _tally_shows(text: str, shown: str) -> bool:
+    """Whether the tally's filter box leaves a row on show.
+
+    A plain case-insensitive substring of how the row reads -- which is its
+    untruncated repr, and so also its literal, so the rows the display keeps and
+    the ones All and None act on can't come apart.
+
+    Surrounding space is not part of the search: a trailing space shouldn't
+    empty the list out from under someone still typing.
+    """
+    return text.strip().lower() in shown.lower()
+
+
+def _tally_shown(model: dict, literals) -> List[str]:
+    """The literals the filter box is leaving on show, which is what All and
+    None act on: what the user can't see, they didn't mean to change."""
+    text = model.get('tally_filter') or ''
+    return [literal for literal in literals if _tally_shows(text, literal)]
 
 
 def _in_tally_order(literals, order) -> List[str]:
@@ -1684,6 +1712,10 @@ _COLUMN_MGMT_DEFAULTS = {
     # 'compose-3'). Deliberately not `openDropdown`: those panels are nested
     # inside the column menu, which that single slot is already holding open.
     'col_search_dropdown': None,
+    # What the open tally's filter box says. One slot rather than one per
+    # column, like the chip menus above: only the open menu has a tally, and
+    # narrowing its list is a way of reaching a value, not a setting to keep.
+    'tally_filter': '',
 }
 
 _SEARCH_DEFAULTS = {
@@ -1928,11 +1960,15 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
 
     selected, exclude = _tally_selection(_column_search_row(model, col))
     selected = set(selected)
+    filter_text = model.get('tally_filter') or ''
 
     rows = []
     for value, count in tally.items():
+        text = repr(value)
+        if not _tally_shows(filter_text, text):
+            continue
         literal = _tally_literal(value)
-        label = html.escape(truncate_str(repr(value), 60))
+        label = html.escape(truncate_str(text, 60))
         if literal is None:
             # Nothing to compare against, so the count is all this row has to
             # offer, and a disabled box says so rather than looking clickable.
@@ -1953,12 +1989,26 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             f'<span class="col-tally-count">{count}</span>'
             f'</div>')
 
+    # A way of reaching a value in a long list, so it reads before them -- and
+    # before All and None, which it decides the reach of.
+    filter_event = (f"lambda e: TallyFilterInput(index={index}, "
+                    f"value=e.get('value', ''))")
+    filter_html = (
+        f'<input type="text" class="col-tally-filter search-box" '
+        f'snc-input="{html.escape(filter_event)}" '
+        f'value="{html.escape(filter_text)}" '
+        f'placeholder="Find a value below" '
+        f'data-tooltip="Show only values containing this text" '
+        f'spellcheck="false" />'
+    )
     header = (
         f'<div class="col-tally-header">'
-        f'<span class="col-tally-link" data-tooltip="Select every value" '
+        f'<span class="col-tally-link" '
+        f'data-tooltip="Select every value shown" '
         f'snc-mouse-down="{html.escape(repr(TallySelectAll(index=index)))}">'
         f'All</span>'
-        f'<span class="col-tally-link" data-tooltip="Select no values" '
+        f'<span class="col-tally-link" '
+        f'data-tooltip="Select none of the values shown" '
         f'snc-mouse-down="{html.escape(repr(TallySelectNone(index=index)))}">'
         f'None</span>'
         f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
@@ -1967,9 +2017,13 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         f'{_render_tally_check(exclude)}Exclude</span>'
         f'</div>'
     )
-    return (f'<div class="col-tally">{header}'
-            f'<div class="col-tally-list">{"".join(rows)}</div>'
-            f'</div>')
+    # The filter box stays even when it has hidden everything: it's the way
+    # back to the values.
+    if rows:
+        body = f'<div class="col-tally-list">{"".join(rows)}</div>'
+    else:
+        body = '<div class="col-tally-note">No values match</div>'
+    return f'<div class="col-tally">{filter_html}{header}{body}</div>'
 
 
 def _render_column_menu(col, index, model, lst, eval_in_scope=None):
@@ -3119,6 +3173,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['col_search_dropdown'] = None
                 elif model.get('openDropdown'):
                     model['openDropdown'] = None
+                    model['tally_filter'] = ''
                 elif model.get('tool') == 'pick':
                     model['tool'] = 'normal'
                     model['picked'] = None
@@ -3180,20 +3235,28 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     exclude)
                 _recompose_search(model, eval_in_scope)
 
+        # All and None reach only as far as the filter box has left on show, so
+        # with an empty box they mean every value and none of them.
         case TallySelectAll(index=idx):
             col = _column_at(model, idx)
             if col is not None:
-                _, exclude = _tally_selection(_column_search_row(model, col))
+                selected, exclude = _tally_selection(_column_search_row(model, col))
+                order = _tally_literals(col, model, value, eval_in_scope)
+                shown = _tally_shown(model, order)
+                kept = [lit for lit in selected if lit not in set(shown)]
                 _write_tally_selection(
-                    model, col,
-                    _tally_literals(col, model, value, eval_in_scope), exclude)
+                    model, col, _in_tally_order(kept + shown, order), exclude)
                 _recompose_search(model, eval_in_scope)
 
         case TallySelectNone(index=idx):
             col = _column_at(model, idx)
             if col is not None:
-                _, exclude = _tally_selection(_column_search_row(model, col))
-                _write_tally_selection(model, col, [], exclude)
+                selected, exclude = _tally_selection(_column_search_row(model, col))
+                shown = set(_tally_shown(
+                    model, _tally_literals(col, model, value, eval_in_scope)))
+                _write_tally_selection(
+                    model, col, [lit for lit in selected if lit not in shown],
+                    exclude)
                 _recompose_search(model, eval_in_scope)
 
         case TallyExcludeToggle(index=idx):
@@ -3204,6 +3267,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # operator and leaves the values alone.
                 _write_tally_selection(model, col, selected, not exclude)
                 _recompose_search(model, eval_in_scope)
+
+        case TallyFilterInput(index=idx, value=val):
+            # Display only: it decides which rows the menu lists, and never
+            # what the column search says.
+            if _column_at(model, idx) is not None:
+                model['tally_filter'] = val
 
         case ColumnSearchDropdownToggle(dropdown_id=did):
             current = model.get('col_search_dropdown')
@@ -3255,8 +3324,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case DropdownToggle(dropdown_id=did):
             current = model.get('openDropdown')
-            # A chip menu belongs to the row of the menu that was open.
+            # A chip menu, and a narrowed-down tally, belong to the menu that
+            # was open rather than to the one being opened.
             model['col_search_dropdown'] = None
+            model['tally_filter'] = ''
             if current is not None and current.get('id') == did:
                 model['openDropdown'] = None
             else:
