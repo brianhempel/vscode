@@ -6265,9 +6265,10 @@ from list_visualizer import (
     TallyFilterInput, TallySortSelect, TallyCountFilterInput, TallyCountOpSelect,
     TALLY_MAX_CARDINALITY, TALLY_TOO_MANY, TALLY_UNHASHABLE,
     TALLY_SORTS, TALLY_SORT_DEFAULT, TALLY_COUNT_OPS, TALLY_COUNT_OP_DEFAULT,
+    TALLY_COUNT_EXTREME_OPS,
     _column_values, _tally, _tally_literal, _tally_selection,
     _write_tally_selection, _tally_literals, _tally_shows, _sorted_tally,
-    _tally_count_shows,
+    _tally_count_shows, _tally_extreme,
 )
 
 
@@ -7265,10 +7266,13 @@ def make_tally_count_filter_event(index, value):
 
 class TestTallyCountShows(unittest.TestCase):
     """What the tally's count box keeps on show: a comparison against how many
-    rows a value has."""
+    rows a value has, or -- for Min and Max -- against the extreme count the
+    list itself has."""
 
     def test_no_number_shows_everything(self):
         for op in TALLY_COUNT_OPS:
+            if op in TALLY_COUNT_EXTREME_OPS:
+                continue
             with self.subTest(op=op):
                 self.assertTrue(_tally_count_shows(op, '', 3))
 
@@ -7299,6 +7303,59 @@ class TestTallyCountShows(unittest.TestCase):
 
     def test_an_operator_it_does_not_know_filters_nothing(self):
         self.assertTrue(_tally_count_shows('in', '3', 5))
+
+    def test_min_and_max_keep_only_the_extreme_count(self):
+        for op in TALLY_COUNT_EXTREME_OPS:
+            with self.subTest(op=op):
+                self.assertTrue(_tally_count_shows(op, '', 2, 2))
+                self.assertFalse(_tally_count_shows(op, '', 3, 2))
+
+    def test_the_typed_number_has_nothing_to_say_to_min_and_max(self):
+        # They disable the box, so whatever it was left holding is not a filter.
+        self.assertTrue(_tally_count_shows('min', '9', 2, 2))
+        self.assertFalse(_tally_count_shows('min', '3', 3, 2))
+
+    def test_min_and_max_with_no_extreme_to_speak_of_show_nothing(self):
+        for op in TALLY_COUNT_EXTREME_OPS:
+            with self.subTest(op=op):
+                self.assertFalse(_tally_count_shows(op, '', 2, None))
+
+
+class TestTallyExtreme(unittest.TestCase):
+    """The count Min and Max are looking for: how many rows the least or most
+    common value on show has."""
+
+    ROWS = [("'c'", 5, "'c'"), ("'aa'", 2, "'aa'"), ("'b'", 3, "'b'")]
+
+    def model(self, op, filter_text=''):
+        return {'tally_count_op': op, 'tally_filter': filter_text}
+
+    def test_a_comparison_is_not_looking_for_one(self):
+        for op in ('>=', '==', '<='):
+            with self.subTest(op=op):
+                self.assertIsNone(_tally_extreme(self.model(op), self.ROWS))
+
+    def test_min_is_the_count_of_the_least_common_value(self):
+        self.assertEqual(_tally_extreme(self.model('min'), self.ROWS), 2)
+
+    def test_max_is_the_count_of_the_most_common_value(self):
+        self.assertEqual(_tally_extreme(self.model('max'), self.ROWS), 5)
+
+    def test_the_filter_box_narrows_first(self):
+        # Min and Max answer about the list in front of the user, not one it's
+        # hiding -- so the two boxes together can't argue their way to nothing.
+        self.assertEqual(_tally_extreme(self.model('max', 'a'), self.ROWS), 2)
+        self.assertEqual(_tally_extreme(self.model('min', 'b'), self.ROWS), 3)
+
+    def test_nothing_left_to_be_extreme_is_no_count_at_all(self):
+        self.assertIsNone(_tally_extreme(self.model('min', 'zz'), self.ROWS))
+        self.assertIsNone(_tally_extreme(self.model('min'), []))
+
+    def test_a_value_with_no_literal_still_counts_towards_it(self):
+        # It's a row of the list the user is reading, so it's part of what the
+        # least and most common are measured against.
+        rows = [("'c'", 5, "'c'"), ('<thing>', 1, None)]
+        self.assertEqual(_tally_extreme(self.model('min'), rows), 1)
 
 
 class TestTallyCountFilterBox(unittest.TestCase):
@@ -7381,14 +7438,14 @@ class TestTallyCountFilterBox(unittest.TestCase):
         model['tally_count_op'] = '<='
         self.assertIn('&lt;=', self.chip(self.tally(model, lst)))
 
-    def test_the_open_chip_offers_the_three_comparisons_and_no_others(self):
+    def test_the_open_chip_offers_the_five_choices_and_no_others(self):
         lst, model = tally_model()
         tally = self.tally(self.open_chip(model), lst)
         for op in TALLY_COUNT_OPS:
             with self.subTest(op=op):
                 self.assertIn(
                     html.escape(repr(TallyCountOpSelect(index=0, op=op))), tally)
-        self.assertEqual(TALLY_COUNT_OPS, ('>=', '==', '<='))
+        self.assertEqual(TALLY_COUNT_OPS, ('>=', '==', '<=', 'min', 'max'))
         for op in ('>', '<', '!=', 'in', 'not in'):
             with self.subTest(op=op):
                 self.assertNotIn(
@@ -7494,6 +7551,116 @@ class TestTallyCountFilterBox(unittest.TestCase):
         model = self.type(model, lst, '3')
         model = self.click(model, lst, TallySelectNone(index=0))
         self.assertEqual(self.text(model), "'aa'")
+
+    def box(self, tally):
+        """The count input itself."""
+        return re.search(r'<input[^>]*col-tally-count-filter[^>]*/>',
+                         tally).group(0)
+
+    def test_min_shows_the_least_common_values(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [html.escape(repr('aa'))])
+        self.assertEqual(self.counts(tally), ['2'])
+
+    def test_max_shows_the_most_common_values(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [html.escape(repr('c'))])
+        self.assertEqual(self.counts(tally), ['5'])
+
+    def test_values_that_tie_for_extreme_all_show(self):
+        lst = ['a', 'a', 'b', 'b', 'c']
+        _, model = tally_model(lst)
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr(v)) for v in ('a', 'b')])
+
+    def test_min_and_max_disable_the_count_box(self):
+        # They compare against the list rather than against a number, so the
+        # box has nothing left to hold.
+        lst, model = tally_model()
+        self.assertNotIn('disabled', self.box(self.tally(model, lst)))
+        for op in TALLY_COUNT_EXTREME_OPS:
+            with self.subTest(op=op):
+                picked = self.click(model, lst,
+                                    TallyCountOpSelect(index=0, op=op))
+                self.assertIn('disabled', self.box(self.tally(picked, lst)))
+
+    def test_the_disabled_box_shows_nothing_but_remembers(self):
+        lst, model = tally_model()
+        model = self.type(model, lst, '3')
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        self.assertIn('value=""', self.box(self.tally(model, lst)))
+        self.assertEqual(model['tally_count_filter'], '3')
+        # And the number comes back with the next comparison.
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='>='))
+        self.assertIn('value="3"', self.box(self.tally(model, lst)))
+
+    def test_the_chip_reads_min_and_max_as_words(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        self.assertIn('Min', self.chip(self.tally(model, lst)))
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        self.assertIn('Max', self.chip(self.tally(model, lst)))
+
+    def test_the_find_box_narrows_before_min_and_max(self):
+        lst, model = tally_model()
+        model = self.type_value(model, lst, 'a')
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr('aa'))])
+
+    def test_the_order_in_force_does_not_change_which_values_are_extreme(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySortSelect(index=0, sort='rare'))
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        self.assertEqual(self.items(self.tally(model, lst)),
+                         [html.escape(repr('c'))])
+
+    def test_a_value_with_no_literal_can_be_the_extreme_one(self):
+        class Thing:
+            def __repr__(self):
+                return '<thing>'
+        lst = ['c', 'c', Thing()]
+        _, model = tally_model(lst)
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), ['&lt;thing&gt;'])
+        self.assertIn('unselectable', tally)
+        # And what All acts on can't come apart from what the menu lists: the
+        # one row on show has nothing to select.
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), '')
+
+    def test_select_all_takes_only_the_extreme_values(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallySelectAll(index=0))
+        self.assertEqual(self.text(model), "'c'")
+
+    def test_select_none_only_unchecks_the_extreme_values(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallySelectNone(index=0))
+        self.assertEqual(self.text(model), "['aa', 'b']")
+
+    def test_narrowing_to_the_extreme_is_not_a_filter_on_the_table(self):
+        lst, model = tally_model()
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        self.assertIsNone(model['column_searches'])
+        self.assertIsNone(model['search'])
+
+    def test_nothing_left_to_be_extreme_says_so(self):
+        lst, model = tally_model()
+        model = self.type_value(model, lst, 'zz')
+        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        tally = self.tally(model, lst)
+        self.assertEqual(self.items(tally), [])
+        self.assertIn('col-tally-note', tally)
 
     def test_closing_the_menu_forgets_the_count_filter(self):
         # Like the boxes around it: a way of reaching a value, not a setting.

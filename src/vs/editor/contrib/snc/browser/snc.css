@@ -1009,15 +1009,15 @@
 		border-color: var(--snc-border-color);
 	}
 
-	.col-tally-sort-row,
+	.col-tally-sort,
 	.col-tally-header {
 		display: flex;
 		align-items: center;
 		padding: 0 2px;
 		color: var(--snc-text-muted);
 	}
-	.col-tally-sort-row {
-		gap: 3px;
+	.col-tally-sort {
+		gap: 1px;
 	}
 
 	.col-tally-header { /* All None link-buttons */
@@ -1044,6 +1044,13 @@
 	.col-tally-count-filter:focus,
 	.col-tally-count-filter:hover {
 		border-color: var(--snc-border-color);
+	}
+	/* Min and Max have nothing for the box to hold, so it stays on as the
+	   chip's backing but stops offering itself: no hover border, no text
+	   cursor. */
+	.col-tally-count-filter:disabled {
+		border-color: transparent;
+		cursor: default;
 	}
 
 	/* The hoisted panel is slid up to fit the viewport but never shortened, so
