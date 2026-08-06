@@ -7,6 +7,7 @@
 
 .editor-instance {
 	--snc-bg: #fcfcfc;
+	--snc-table-header-bg: #eee;
 	--snc-border-color: #c0c0c0;
 	--snc-table-cell-border-color: #dedede;
 	--snc-text-color: #4A4A4A;
@@ -842,9 +843,18 @@
 	position: sticky;
 	top: 0;
 	z-index: 1;
-	background: var(--snc-bg);
+	background: var(--snc-table-header-bg);
 	border-bottom-width: 0;
 	box-shadow: inset 0 -1px 0 var(--snc-table-cell-border-color);
+
+	&:first-child {
+		border-radius: 4px 0 0 0; /* don't overlap the rounded upper-left border corner of .snc-visualization-widget */
+	}
+
+	/* a column actively filtering rows */
+	&.col-filtered {
+		background-color: var(--snc-hl-selected);
+	}
 }
 
 .list-visualizer .list-visualizer > .list-table-scroll > table tr:first-child > th {
@@ -880,10 +890,6 @@
 	width: 100%;
 }
 
-.list-visualizer .col-menu-trigger {
-	margin-left: auto;
-}
-
 .snc-dropdown-trigger > .open { /* hmmm, only some list col buttons have the .open class */
 	background-color: var(--snc-active-bg) !important;
 }
@@ -917,14 +923,8 @@
 .list-visualizer .col-name {
 	color: var(--snc-string-color);
 	cursor: pointer;
-}
-
-/* A column whose search is filtering rows. Its ▾ is pinned visible (below), so
-   the name is only nudged rather than shouted at. */
-.list-visualizer th.col-filtered .col-name {
-	text-decoration: underline;
-	text-decoration-style: dotted;
-	text-underline-offset: 2px;
+	flex-grow: 1;
+	text-align: center;
 }
 
 .editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.active {
