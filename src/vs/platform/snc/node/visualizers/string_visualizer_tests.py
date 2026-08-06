@@ -7455,7 +7455,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
     """Test Enter in replace mode generates Transform code (list comprehension).
 
     Enter in replace mode now produces a list comprehension that maps
-    the replace expression over matches. The ^ character translates to mtch.
+    the replace expression over matches. The $ character translates to mtch.
     The old re.sub behavior is accessed via Cmd-R or the Replace button.
     """
 
@@ -7542,10 +7542,10 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("re.escape(s)", expr)
 
-    def test_caret_translates_to_match_var(self):
-        """^ in replace expression translates to mtch in list comprehension."""
+    def test_dollar_translates_to_match_var(self):
+        """$ in replace expression translates to mtch in list comprehension."""
         self.model['search'] = r"r'hello'"
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7553,19 +7553,19 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         self.assertIn("mtch[0].upper() for mtch in", expr)
 
     def test_backtick_wrapped_expression(self):
-        """Backtick-wrapped replace expression is unwrapped and ^ translated."""
+        """Backtick-wrapped replace expression is unwrapped and $ translated."""
         self.model['search'] = r"r'hello'"
-        self.model['replace_text'] = "`^[0].upper()`"
+        self.model['replace_text'] = "`$[0].upper()`"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
         _, expr = commands[0]
         self.assertIn("mtch[0].upper() for mtch in", expr)
 
-    def test_caret_method_call(self):
-        """^ with method call: ^.group(1) -> mtch.group(1) in comprehension."""
+    def test_dollar_method_call(self):
+        """$ with method call: $.group(1) -> mtch.group(1) in comprehension."""
         self.model['search'] = r"r'hello'"
-        self.model['replace_text'] = "^.group(1)"
+        self.model['replace_text'] = "$.group(1)"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7575,7 +7575,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
     def test_arbitrary_code_accepted(self):
         """Any non-empty replace text is accepted as Python code."""
         self.model['search'] = r"r'hello'"
-        self.model['replace_text'] = 'some_func(^[0])'
+        self.model['replace_text'] = 'some_func($[0])'
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7752,7 +7752,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
     def test_transform_button_replace_mode(self):
         """With replace_visible, find_or_map produces list comprehension."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7764,7 +7764,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         """With 1st mode + replace, produces next(..., None)."""
         self.model['search'] = r"r'hello'1"
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -7784,7 +7784,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
     def test_enter_key_replace_mode_now_transforms(self):
         """Enter in replace mode now produces Transform (not re.sub)."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8041,7 +8041,7 @@ class TestActionButtonLoop(unittest.TestCase):
     def test_loop_replace_mode(self):
         """Loop in replace mode iterates over transformed values."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('loop'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8112,7 +8112,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         (has_replace=True prevents generation; any command is the find fallback.)
         """
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         model, commands = update(make_action_button_event('match_strings'),
                             self.var_and_exp, self.model, self.value)
         self.assertNotEqual(model.get('linked_action'), 'match_strings')
@@ -8207,7 +8207,7 @@ class TestActionButtonAny(unittest.TestCase):
     def test_any_replace_mode(self):
         """Any in replace mode produces any(EXPR for mtch in ...)."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8249,7 +8249,7 @@ class TestActionButtonAll(unittest.TestCase):
     def test_all_replace_mode(self):
         """All in replace mode produces all(EXPR for mtch in ...)."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('all'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8270,7 +8270,7 @@ class TestActionButtonAll(unittest.TestCase):
     def test_copy_all(self):
         """copy=True produces CopyToClipboard."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('all', copy=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8303,7 +8303,7 @@ class TestActionButtonIfAny(unittest.TestCase):
     def test_if_any_replace_mode(self):
         """If Any in replace mode produces the header if any(...):."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('if_any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8340,7 +8340,7 @@ class TestActionButtonIfAll(unittest.TestCase):
     def test_if_all_replace_mode(self):
         """If All in replace mode produces the header if all(...):."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('if_all'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8362,7 +8362,7 @@ class TestActionButtonIfAll(unittest.TestCase):
     def test_copy_if_all(self):
         """Copy If All copies just the all(...) expression."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('if_all', copy=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8397,7 +8397,7 @@ class TestActionButtonCount(unittest.TestCase):
     def test_count_replace_mode(self):
         """Count in replace mode filters by replace expr truthiness."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         _, commands = update(make_action_button_event('count'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8434,7 +8434,7 @@ class TestActionButtonFilter(unittest.TestCase):
         self.model = init_model(self.value)
         self.model['search'] = r"r'\w+'"
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "len(^[0]) > 4"
+        self.model['replace_text'] = "len($[0]) > 4"
         self.var_and_exp = ('x', 'x')
 
     def test_filter_generates_list_comprehension_with_predicate(self):
@@ -8521,7 +8521,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
     def test_find_indices_with_replace_generates_filtered_start_list(self):
         """Find Indices with replace produces [mtch.start() for mtch in ... if EXPR]."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "len(^[0]) > 4"
+        self.model['replace_text'] = "len($[0]) > 4"
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8543,7 +8543,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         """Find Indices with first-match and replace uses next(..., None) with if."""
         self.model['search'] = r"r'\w+'1"
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "len(^[0]) > 4"
+        self.model['replace_text'] = "len($[0]) > 4"
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
@@ -8673,7 +8673,7 @@ class TestCountViaGrammar(unittest.TestCase):
 
     def test_regex_with_predicate(self):
         """Predicate filters: only count matches where predicate is truthy."""
-        model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
+        model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len($[0]) > 3'}
         # "hi" (len 2, False), "world" (len 5, True), "hello" (len 5, True)
         self.assertEqual(_eval_count_via_grammar(r"r'\w+'", "hi world hello", model, self.eis), 2)
 
@@ -8684,28 +8684,28 @@ class TestCountViaGrammar(unittest.TestCase):
 
     def test_string_search_with_predicate(self):
         """String search with predicate filters by truthy results."""
-        model = {'search': "'l'", 'replace_visible': True, 'replace_text': '^.start() < 5'}
+        model = {'search': "'l'", 'replace_visible': True, 'replace_text': '$.start() < 5'}
         # 'l' at positions 2, 3, 9 in "hello world"; start < 5: True, True, False
         self.assertEqual(_eval_count_via_grammar("'l'", "hello world", model, self.eis), 2)
 
     def test_case_insensitive_with_predicate(self):
         """Case-insensitive search + predicate."""
-        model = {'search': r"r'hello'i", 'replace_visible': True, 'replace_text': '^.start() == 0'}
+        model = {'search': r"r'hello'i", 'replace_visible': True, 'replace_text': '$.start() == 0'}
         # "Hello hello HELLO" → matches at 0, 6, 12; start==0 is only first
         self.assertEqual(_eval_count_via_grammar(r"r'hello'i", "Hello hello HELLO", model, self.eis), 1)
 
     def test_generates_same_code_as_button(self):
         """The count expression should be identical to what generate_action('count') produces."""
         from string_visualizer_grammar import generate_action
-        from string_visualizer import replace_carets_in_py_exp
-        model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len(^[0]) > 3'}
+        from string_visualizer import replace_dollars_in_py_exp
+        model = {'search': r"r'\w+'", 'replace_visible': True, 'replace_text': 'len($[0]) > 3'}
         ctx = {
             'source_expr': '_snc_v',
             'is_first': False, 'is_ci': False, 'is_expr': False,
             'is_index': False, 'is_slice': False,
             'regex_pattern': '\\w+',
-            'replace_visible': True, 'replace_text': 'len(^[0]) > 3',
-            'replace_expr': replace_carets_in_py_exp('len(^[0]) > 3', ['mtch']),
+            'replace_visible': True, 'replace_text': 'len($[0]) > 3',
+            'replace_expr': replace_dollars_in_py_exp('len($[0]) > 3', ['mtch']),
         }
         result = generate_action('count', ctx)
         self.assertIsNotNone(result)
@@ -8855,7 +8855,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "len(^[0]) > 3"
+        model['replace_text'] = "len($[0]) > 3"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self._assert_not_dimmed(html_output, 'filter')
 
@@ -8909,7 +8909,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model("hello world hello")
         model['search'] = r"r'\w+'"
         model['replace_visible'] = True
-        model['replace_text'] = "len(^[0]) > 4"
+        model['replace_text'] = "len($[0]) > 4"
         html_output = visualize("hello world hello", model, None, eval, max_width=400)
         self.assertIn('Count: 3', html_output)
 
@@ -8918,7 +8918,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model("hi world hello")
         model['search'] = r"r'\w+'"
         model['replace_visible'] = True
-        model['replace_text'] = "len(^[0]) > 3"
+        model['replace_text'] = "len($[0]) > 3"
         html_output = visualize("hi world hello", model, None, eval, max_width=400)
         self.assertIn('Count: 2', html_output)
 
@@ -8984,7 +8984,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         cls = self._dropdown_option_class(html_output, 'loop_match_strings')
         self.assertIsNotNone(cls, "Over matched strings dropdown row should be present")
@@ -9015,7 +9015,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         cls = self._dropdown_option_class(html_output, 'loop')
         self.assertIsNotNone(cls, "loop dropdown row should be present")
@@ -9048,7 +9048,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Over mapped', html_output)
         self.assertNotIn('Over match objects', html_output)
@@ -9107,7 +9107,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('All (<span class="snc-code">True</span>)', html_output)
 
@@ -9115,7 +9115,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('If All (<span class="snc-code">True</span>)', html_output)
 
@@ -9132,7 +9132,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'1"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         cls = self._dropdown_option_class(html_output, 'all')
         self.assertIsNotNone(cls, "All dropdown row should be present")
@@ -9143,7 +9143,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'1"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, model, None, None, max_width=400)
         cls = self._dropdown_option_class(html_output, 'if_all')
         self.assertIsNotNone(cls, "If All dropdown row should be present")
@@ -9205,7 +9205,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         model['replace_visible'] = True
-        model['replace_text'] = "^[0].upper()"
+        model['replace_text'] = "$[0].upper()"
         model['openDropdown'] = {'id': 'action-predicate'}
         event = make_action_button_event('any')
         new_model, _ = update(event, ('x', 'x'), model, self.value)
@@ -9230,27 +9230,27 @@ class TestTransformPreview(unittest.TestCase):
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
-        self.assertNotIn('^[0]', html_output)
-        self.assertNotIn('^.start()', html_output)
+        self.assertNotIn('$[0]', html_output)
+        self.assertNotIn('$.start()', html_output)
 
     def test_no_preview_when_no_search(self):
         """No preview when there is no search pattern."""
         self.model['search'] = None
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertNotIn('^[0]', html_output)
+        self.assertNotIn('$[0]', html_output)
 
     def test_no_preview_when_no_matches(self):
         """No preview when search matches nothing."""
         self.model['search'] = r"r'zzzzz'"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertNotIn('^[0]', html_output)
+        self.assertNotIn('$[0]', html_output)
 
     def test_row1_shows_match_labels(self):
-        """Row 1 displays ^[0], ^.start(), ^.end() labels."""
+        """Row 1 displays $[0], $.start(), $.end() labels."""
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertIn('^[0]', html_output)
-        self.assertIn('^.start()', html_output)
-        self.assertIn('^.end()', html_output)
+        self.assertIn('$[0]', html_output)
+        self.assertIn('$.start()', html_output)
+        self.assertIn('$.end()', html_output)
 
     def test_row1_shows_first_match_values(self):
         """Row 1 shows repr values from the first match of /hello/ in 'hello world hello'."""
@@ -9262,12 +9262,12 @@ class TestTransformPreview(unittest.TestCase):
     def test_no_row2_without_replace_text(self):
         """No transform-result content when replace_text is empty."""
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertIn('^[0]', html_output)
+        self.assertIn('$[0]', html_output)
         self.assertNotIn('transform-preview-content', html_output)
 
     def test_row2_shows_transform_result(self):
         """The transform-preview shows the evaluated result for a valid transform expression."""
-        self.model['replace_text'] = "^[0].upper()"
+        self.model['replace_text'] = "$[0].upper()"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
         self.assertIn('transform-preview-content', html_output)
         import html as html_mod
@@ -9282,7 +9282,7 @@ class TestTransformPreview(unittest.TestCase):
 
     def test_row2_shows_syntax_error(self):
         """The transform-preview shows an error for an unparseable expression."""
-        self.model['replace_text'] = "^[0] +"
+        self.model['replace_text'] = "$[0] +"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
         self.assertIn('transform-preview-content', html_output)
 
@@ -9303,7 +9303,7 @@ class TestTransformPreview(unittest.TestCase):
     def test_no_preview_in_small_mode(self):
         """Preview is not rendered in small mode."""
         html_output = visualize(self.value, self.model, None, None, max_width=400, small=True)
-        self.assertNotIn('^[0]', html_output)
+        self.assertNotIn('$[0]', html_output)
 
     def test_helper_returns_empty_when_no_conditions(self):
         """_render_transform_preview returns '' when replace not visible."""
@@ -9333,9 +9333,9 @@ class TestTransformPreview(unittest.TestCase):
         """_render_match_object_preview returns the chip row when there are matches."""
         eis = lambda _c: eval(_c)
         result = _render_match_object_preview(self.model, self.value, eis)
-        self.assertIn('^[0]', result)
-        self.assertIn('^.start()', result)
-        self.assertIn('^.end()', result)
+        self.assertIn('$[0]', result)
+        self.assertIn('$.start()', result)
+        self.assertIn('$.end()', result)
 
     def test_row2_resolves_user_scope_variables(self):
         """Transform preview can reference variables from the user's scope."""
@@ -9348,40 +9348,40 @@ class TestTransformPreview(unittest.TestCase):
 
 
 class TestTransformPreviewCaptureGroups(unittest.TestCase):
-    """Test that capture groups show ^[1], ^[2] etc. in the match-object preview."""
+    """Test that capture groups show $[1], $[2] etc. in the match-object preview."""
 
     def setUp(self):
         self.value = "hello world"
         self.eis = lambda _c: eval(_c)
 
     def test_groups_shown_when_regex_has_groups(self):
-        """Match-object preview shows ^[1], ^[2] etc. when the regex has capture groups."""
+        """Match-object preview shows $[1], $[2] etc. when the regex has capture groups."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = r"r'(hello)(.*)(world)'"
         result = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('^[1]', result)
-        self.assertIn('^[2]', result)
-        self.assertIn('^[3]', result)
+        self.assertIn('$[1]', result)
+        self.assertIn('$[2]', result)
+        self.assertIn('$[3]', result)
 
     def test_groups_shown_with_c_flag(self):
-        """Match-object preview shows ^[1] etc. when 'c' flag makes groups explicit."""
+        """Match-object preview shows $[1] etc. when 'c' flag makes groups explicit."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = r"r'(hello)(.*)(world)'c"
         result = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('^[1]', result)
-        self.assertIn('^[2]', result)
-        self.assertIn('^[3]', result)
+        self.assertIn('$[1]', result)
+        self.assertIn('$[2]', result)
+        self.assertIn('$[3]', result)
 
     def test_no_groups_for_ungrouped_regex(self):
-        """Match-object preview does not show ^[1] when regex has no capture groups."""
+        """Match-object preview does not show $[1] when regex has no capture groups."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = r"r'hello'"
         result = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('^[0]', result)
-        self.assertNotIn('^[1]', result)
+        self.assertIn('$[0]', result)
+        self.assertNotIn('$[1]', result)
 
     def test_group_values_are_correct(self):
         """The group preview values should match actual captured text."""
@@ -9400,10 +9400,10 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         model['replace_visible'] = True
         model['search'] = r"r'(hello)(.*)(world)'"
         result = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('snc-add-at-cursor="^[0]"', result)
-        self.assertIn('snc-add-at-cursor="^[1]"', result)
-        self.assertIn('snc-add-at-cursor="^.start()"', result)
-        self.assertIn('snc-add-at-cursor="^.end()"', result)
+        self.assertIn('snc-add-at-cursor="$[0]"', result)
+        self.assertIn('snc-add-at-cursor="$[1]"', result)
+        self.assertIn('snc-add-at-cursor="$.start()"', result)
+        self.assertIn('snc-add-at-cursor="$.end()"', result)
         self.assertIn('snc-add-target=".search-box-replace"', result)
 
     def test_no_groups_still_has_add_at_cursor(self):
@@ -9412,34 +9412,34 @@ class TestTransformPreviewCaptureGroups(unittest.TestCase):
         model['replace_visible'] = True
         model['search'] = r"r'hello'"
         result = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('snc-add-at-cursor="^[0]"', result)
-        self.assertIn('snc-add-at-cursor="^.start()"', result)
+        self.assertIn('snc-add-at-cursor="$[0]"', result)
+        self.assertIn('snc-add-at-cursor="$.start()"', result)
 
     def test_index_slice_preview_has_add_at_cursor(self):
-        """Index/slice preview ^ span has snc-add-at-cursor."""
+        """Index/slice preview $ span has snc-add-at-cursor."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = '0'
         result = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('snc-add-at-cursor="^"', result)
+        self.assertIn('snc-add-at-cursor="$"', result)
 
     def test_transform_preview_uses_capture_groups(self):
-        """Transform ^[2] should resolve correctly when groups exist."""
+        """Transform $[2] should resolve correctly when groups exist."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = r"r'(hello)( )(world)'"
-        model['replace_text'] = '^[2]'
+        model['replace_text'] = '$[2]'
         result = _render_transform_preview(model, self.value, self.eis)
         import html as html_mod
         self.assertIn(html_mod.escape(repr(' ')), result)
         self.assertNotIn('no such group', result)
 
     def test_transform_preview_group_expr_no_error(self):
-        """Transform using ^[1].upper() should not error when groups exist."""
+        """Transform using $[1].upper() should not error when groups exist."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = r"r'(hello)( )(world)'"
-        model['replace_text'] = '^[1].upper()'
+        model['replace_text'] = '$[1].upper()'
         result = _render_transform_preview(model, self.value, self.eis)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('HELLO')), result)
@@ -9661,58 +9661,58 @@ class TestSliceSearchHighlighting(unittest.TestCase):
 
 
 class TestIndexSliceTransformPreview(unittest.TestCase):
-    """Test transform preview for index/slice: ^ is the matched string, not a match object."""
+    """Test transform preview for index/slice: $ is the matched string, not a match object."""
 
     def setUp(self):
         self.value = "hello world"
         self.eis = lambda c: eval(c)
 
     def test_index_preview_no_start_end(self):
-        """Index search preview should NOT show ^.start() or ^.end()."""
+        """Index search preview should NOT show $.start() or $.end()."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = '0'
         html_output = _render_transform_preview(model, self.value, self.eis)
-        self.assertNotIn('^.start()', html_output)
-        self.assertNotIn('^.end()', html_output)
-        self.assertNotIn('^[0]', html_output)
+        self.assertNotIn('$.start()', html_output)
+        self.assertNotIn('$.end()', html_output)
+        self.assertNotIn('$[0]', html_output)
 
-    def test_index_preview_shows_caret(self):
-        """Index search match-object preview should show ^ => the matched character."""
+    def test_index_preview_shows_dollar(self):
+        """Index search match-object preview should show $ => the matched character."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = '0'
         html_output = _render_match_object_preview(model, self.value, self.eis)
-        self.assertIn('^', html_output)
+        self.assertIn('$', html_output)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('h')), html_output)
 
     def test_index_transform_works_on_string(self):
-        """^.upper() should work because ^ is a string, not a match object."""
+        """$.upper() should work because $ is a string, not a match object."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = '0'
-        model['replace_text'] = '^.upper()'
+        model['replace_text'] = '$.upper()'
         html_output = _render_transform_preview(model, self.value, self.eis)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('H')), html_output)
 
     def test_slice_preview_no_start_end(self):
-        """Slice search preview should NOT show ^.start() or ^.end()."""
+        """Slice search preview should NOT show $.start() or $.end()."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = ':5'
         html_output = _render_transform_preview(model, self.value, self.eis)
-        self.assertNotIn('^.start()', html_output)
-        self.assertNotIn('^.end()', html_output)
-        self.assertNotIn('^[0]', html_output)
+        self.assertNotIn('$.start()', html_output)
+        self.assertNotIn('$.end()', html_output)
+        self.assertNotIn('$[0]', html_output)
 
     def test_slice_transform_works_on_string(self):
-        """^.upper() on slice ':5' should yield 'HELLO'."""
+        """$.upper() on slice ':5' should yield 'HELLO'."""
         model = init_model(self.value)
         model['replace_visible'] = True
         model['search'] = ':5'
-        model['replace_text'] = '^.upper()'
+        model['replace_text'] = '$.upper()'
         html_output = _render_transform_preview(model, self.value, self.eis)
         import html as html_mod
         self.assertIn(html_mod.escape(repr('HELLO')), html_output)
@@ -11219,7 +11219,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
     def test_find_or_map_multi_index_with_replace(self):
         """Map button produces [(lambda mtch: EXPR)(x[i]) for i in INDICES]."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^.upper()"
+        self.model['replace_text'] = "$.upper()"
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
@@ -11256,7 +11256,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
     def test_filter_multi_index(self):
         """Filter with replace produces [mtch for mtch in [...] if EXPR]."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "^ != 'h'"
+        self.model['replace_text'] = "$ != 'h'"
         _, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
@@ -11343,7 +11343,7 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
     def test_find_or_map_multi_pair_with_replace(self):
         """Map produces [(lambda mtch: EXPR)(x[i:j]) for ...]."""
         self.model['replace_visible'] = True
-        self.model['replace_text'] = "len(^)"
+        self.model['replace_text'] = "len($)"
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
@@ -12793,7 +12793,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'(hello) (world)'1c"
         model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
-        self.assertEqual(model['replace_text'], '^[1]')
+        self.assertEqual(model['replace_text'], '$[1]')
 
     def test_segment_toggle_updates_replace_text_uses_first_match_flavor(self):
         """Replace text always uses the first-match flavor, even without '1' flag.
@@ -12807,7 +12807,7 @@ class TestSegmentSelection(unittest.TestCase):
         # Cap groups on so segment chips operate on capture groups.
         model['search'] = r"r'(a)(b)'c"
         model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], '^[1]')
+        self.assertEqual(model['replace_text'], '$[1]')
 
     def test_segment_toggle_clears_replace_text_when_empty(self):
         value = "hello world"
@@ -12815,7 +12815,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'(hello) (world)'1c"
         model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
-        self.assertEqual(model['replace_text'], '^[1]')
+        self.assertEqual(model['replace_text'], '$[1]')
         model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
         self.assertIsNone(model['replace_text'])
 
@@ -12831,24 +12831,24 @@ class TestSegmentSelection(unittest.TestCase):
     # --- simplifications ----------------------------------------------------
 
     def test_simplify_all_groups_to_group_zero(self):
-        """Selecting all capture groups collapses to ^[0]."""
+        """Selecting all capture groups collapses to $[0]."""
         value = "helloworld"
         model = init_model(value)
         model['tool'] = 'pick'
         model['search'] = r"r'(hello)(world)'1c"
         model, _ = update(self._segment_toggle_event('group_1'), ('x', 'x'), model, value)
         model, _ = update(self._segment_toggle_event('group_2'), ('x', 'x'), model, value)
-        self.assertEqual(model['replace_text'], '^[0]')
+        self.assertEqual(model['replace_text'], '$[0]')
 
     def test_simplify_group0_plus_suffix_to_tail_slice(self):
-        """{group_0, suffix} -> '<src>[^.start():]'."""
+        """{group_0, suffix} -> '<src>[$.start():]'."""
         value = "hello world!"
         model = init_model(value)
         model['tool'] = 'pick'
         model['search'] = r"r'hello'1"  # single segment, cap groups off
         model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
         model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], 'str1[^.start():]')
+        self.assertEqual(model['replace_text'], 'str1[$.start():]')
 
     def test_simplify_prefix_plus_group0_to_head_slice(self):
         value = "hello world"
@@ -12857,7 +12857,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['search'] = r"r'world'1"
         model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
         model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], 'str1[:^.end()]')
+        self.assertEqual(model['replace_text'], 'str1[:$.end()]')
 
     def test_simplify_full_coverage_to_var_name(self):
         """{prefix, group_0, suffix} -> '<src>'."""
@@ -12877,7 +12877,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['search'] = r"r'(hello)(world)'1c"
         for sid in ('group_1', 'group_2', 'suffix'):
             model, _ = update(self._segment_toggle_event(sid), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], 'str1[^.start():]')
+        self.assertEqual(model['replace_text'], 'str1[$.start():]')
 
     def test_adjacent_strings_join_with_plus(self):
         """Selecting prefix + group_1 (adjacent strings) joins with ' + '."""
@@ -12887,7 +12887,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['search'] = r"r'(world)'1c"
         model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
         model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], 'str1[:^.start()] + ^[1]')
+        self.assertEqual(model['replace_text'], 'str1[:$.start()] + $[1]')
 
     def test_non_adjacent_strings_emit_tuple(self):
         """Non-adjacent strings (with a gap) -> tuple."""
@@ -12898,7 +12898,7 @@ class TestSegmentSelection(unittest.TestCase):
         # Skip group_2 -> [group_1, group_3] is non-adjacent
         model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
         model, _ = update(self._segment_toggle_event('group_3'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], '(^[1], ^[3])')
+        self.assertEqual(model['replace_text'], '($[1], $[3])')
 
     def test_index_with_segment_emits_tuple(self):
         """Mixing an index (start/end) with a string segment yields a tuple."""
@@ -12908,7 +12908,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['search'] = r"r'(hello)'1c"
         model, _ = update(self._segment_toggle_event('start'), ('str1', 'str1'), model, value)
         model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], '(^.start(), ^[1])')
+        self.assertEqual(model['replace_text'], '($.start(), $[1])')
 
     def test_single_index_selection(self):
         """Selecting only the start index produces the bare expression."""
@@ -12917,7 +12917,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         model, _ = update(self._segment_toggle_event('start'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], '^.start()')
+        self.assertEqual(model['replace_text'], '$.start()')
 
     def test_single_prefix_selection(self):
         value = "hello world"
@@ -12925,7 +12925,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         model, _ = update(self._segment_toggle_event('prefix'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], 'str1[:^.start()]')
+        self.assertEqual(model['replace_text'], 'str1[:$.start()]')
 
     def test_single_suffix_selection(self):
         value = "hello world"
@@ -12933,7 +12933,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'hello'1"
         model, _ = update(self._segment_toggle_event('suffix'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], 'str1[^.end():]')
+        self.assertEqual(model['replace_text'], 'str1[$.end():]')
 
     # --- toolbar rendering --------------------------------------------------
 
@@ -13018,13 +13018,13 @@ class TestSegmentSelection(unittest.TestCase):
                         f"Expected only first match highlighted, got {non_first_count} 'highlight literal' classes")
 
     def test_visualize_segment_mode_renders_start_chip_with_snc_py_exp(self):
-        """Match start has a chip with snc-py-exp = '^.start()' (1st mode)."""
+        """Match start has a chip with snc-py-exp = '$.start()' (1st mode)."""
         value = "hello world"
         model = init_model(value)
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        self.assertIn('snc-py-exp="^.start()"', html_str)
+        self.assertIn('snc-py-exp="$.start()"', html_str)
 
     def test_visualize_segment_mode_renders_end_chip_with_snc_py_exp(self):
         value = "hello world"
@@ -13032,7 +13032,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        self.assertIn('snc-py-exp="^.end()"', html_str)
+        self.assertIn('snc-py-exp="$.end()"', html_str)
 
     def test_visualize_segment_mode_chips_have_segment_toggle_handlers(self):
         value = "hello world"
@@ -13233,8 +13233,8 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'(a)(b)'1c"
         html_str = visualize(value, model, ('str1', 'str1'), None)
-        self.assertIn('snc-py-exp="^[1]"', html_str)
-        self.assertIn('snc-py-exp="^.start()"', html_str)
+        self.assertIn('snc-py-exp="$[1]"', html_str)
+        self.assertIn('snc-py-exp="$.start()"', html_str)
 
     def test_replace_text_uses_first_match_even_for_multi_match_search(self):
         """Even when the search has no '1' flag, the Replace box uses first-match
@@ -13244,7 +13244,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'(a)(b)'c"   # no '1' flag
         model, _ = update(self._segment_toggle_event('group_1'), ('str1', 'str1'), model, value)
-        self.assertEqual(model['replace_text'], '^[1]')
+        self.assertEqual(model['replace_text'], '$[1]')
 
     # --- start/end labels show numeric index --------------------------------
 
@@ -13300,27 +13300,27 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        # Wrapper for first match's chars carries snc-py-exp pointing at ^[0].
+        # Wrapper for first match's chars carries snc-py-exp pointing at $[0].
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="\^\[0\]"',
+            r'<span class="char-span-container"[^>]*snc-py-exp="\$\[0\]"',
         )
         # Wrapper for prefix chars carries snc-py-exp for the slice expression.
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="str\[:\^\.start\(\)\]"',
+            r'<span class="char-span-container"[^>]*snc-py-exp="str\[:\$\.start\(\)\]"',
         )
         # Wrapper for suffix chars carries snc-py-exp for the tail slice.
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="str\[\^\.end\(\):\]"',
+            r'<span class="char-span-container"[^>]*snc-py-exp="str\[\$\.end\(\):\]"',
         )
         # No floating chip with the segment's label expression text - only the
         # bare 'start' / 'end' index chips are allowed as floating labels.
         # Confirm no segment-chip element carries the prefix/suffix expressions.
         self.assertNotRegex(
             html_str,
-            r'<span class="segment-chip[^"]*"[^>]*snc-py-exp="str\[:\^\.start\(\)\]"',
+            r'<span class="segment-chip[^"]*"[^>]*snc-py-exp="str\[:\$\.start\(\)\]"',
         )
 
 
@@ -13656,7 +13656,7 @@ from visualizer_utils import CHILD_SOURCE_BINDER
 
 
 class TestNestedScopeRoundTrip(unittest.TestCase):
-    """Nested in a cell, ^ is the match and ^^ is the string being searched.
+    """Nested in a cell, $ is the match and $$ is the string being searched.
     The replace box shows those; generated code shows neither."""
 
     def _nested_ctx(self, replace_text):
@@ -13670,23 +13670,23 @@ class TestNestedScopeRoundTrip(unittest.TestCase):
             eval_in_scope=lambda code: eval(code))
 
     def test_generated_code_binds_both_levels(self):
-        _model, ctx = self._nested_ctx('(^^)[:^.start()]')
+        _model, ctx = self._nested_ctx('($$)[:$.start()]')
         code = generate_action('find_or_map', ctx)[1]
         self.assertEqual(
             code,
             "[(_snc_cell_)[:mtch.start()] for mtch in "
             "re.finditer(r'foo', _snc_cell_, flags=re.M)]")
 
-    def test_parsing_generated_code_restores_the_caret_levels(self):
+    def test_parsing_generated_code_restores_the_dollar_levels(self):
         from string_visualizer import _ctx_to_model, parse_generated_code_or_assignment
-        _model, ctx = self._nested_ctx('(^^)[:^.start()]')
+        _model, ctx = self._nested_ctx('($$)[:$.start()]')
         code = generate_action('find_or_map', ctx)[1]
         parsed, _prefix = parse_generated_code_or_assignment(code)
         round_tripped = {}
         _ctx_to_model(parsed, round_tripped)
-        self.assertEqual(round_tripped['replace_text'], '(^^)[:^.start()]')
+        self.assertEqual(round_tripped['replace_text'], '($$)[:$.start()]')
 
-    def test_pick_builds_replace_text_in_caret_levels(self):
+    def test_pick_builds_replace_text_in_dollar_levels(self):
         from string_visualizer import _build_segment_replace_text
         model = init_model('foo bar')
         model['search'] = "r'foo'"
@@ -13694,7 +13694,7 @@ class TestNestedScopeRoundTrip(unittest.TestCase):
         self.assertEqual(
             _build_segment_replace_text(model, (None, CHILD_SOURCE_BINDER),
                                         'foo bar', lambda code: eval(code)),
-            '^^[^.end():]')
+            '$$[$.end():]')
 
 
 if __name__ == '__main__':

@@ -10,7 +10,7 @@ def truncate_container(items, limit, show_first=3):
     return list(items)[:show_first], remaining
 
 def get_fields(value):
-    return [f"^[{repr(k)}]" for k in value.keys()]
+    return [f"$[{repr(k)}]" for k in value.keys()]
 
 
 def can_visualize(value):

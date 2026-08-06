@@ -13,8 +13,8 @@ import shutil
 import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
-                              aggregate_handled_keys, eval_caret_expr,
-                              replace_carets_in_py_exp, caret_expr_parses)
+                              aggregate_handled_keys, eval_dollar_expr,
+                              replace_dollars_in_py_exp, dollar_expr_parses)
 from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
@@ -333,103 +333,104 @@ class TestAggregateHandledKeys(unittest.TestCase):
         self.assertEqual(result.count('Enter'), 1)
 
 
-class TestEvalCaretExpr(unittest.TestCase):
-    """Test eval_caret_expr: shared field evaluation using ^ expressions."""
+class TestEvalDollarExpr(unittest.TestCase):
+    """Test eval_dollar_expr: shared field evaluation using $ expressions."""
 
     def test_simple_attribute_fallback(self):
         class Obj:
             x = 42
-        self.assertEqual(eval_caret_expr('^.x', Obj()), 42)
+        self.assertEqual(eval_dollar_expr('$.x', Obj()), 42)
 
     def test_index_access_fallback(self):
-        self.assertEqual(eval_caret_expr('^[1]', [10, 20, 30]), 20)
+        self.assertEqual(eval_dollar_expr('$[1]', [10, 20, 30]), 20)
 
     def test_dict_key_access_fallback(self):
-        self.assertEqual(eval_caret_expr("^['name']", {'name': 'Alice'}), 'Alice')
+        self.assertEqual(eval_dollar_expr("$['name']", {'name': 'Alice'}), 'Alice')
 
     def test_method_call_fallback(self):
-        self.assertEqual(eval_caret_expr('^.upper()', 'hello'), 'HELLO')
+        self.assertEqual(eval_dollar_expr('$.upper()', 'hello'), 'HELLO')
 
     def test_chained_access_fallback(self):
         class Inner:
             val = 99
         class Outer:
             child = Inner()
-        self.assertEqual(eval_caret_expr('^.child.val', Outer()), 99)
+        self.assertEqual(eval_dollar_expr('$.child.val', Outer()), 99)
 
     def test_uses_eval_in_scope_when_both_provided(self):
         _my_var = [10, 20, 30]
         eis = lambda expr: eval(expr)
-        result = eval_caret_expr('^[2]', _my_var, eval_in_scope=eis)
+        result = eval_dollar_expr('$[2]', _my_var, eval_in_scope=eis)
         self.assertEqual(result, 30)
 
     def test_eval_in_scope_with_nested_source_expr(self):
         _my_var = [[1, 2], [3, 4]]
         eis = lambda expr: eval(expr)
-        result = eval_caret_expr('^[0]', _my_var[1], eval_in_scope=eis)
+        result = eval_dollar_expr('$[0]', _my_var[1], eval_in_scope=eis)
         self.assertEqual(result, 3)
 
     def test_falls_back_when_eval_in_scope_none(self):
-        self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=None), 42)
+        self.assertEqual(eval_dollar_expr('$[0]', [42], eval_in_scope=None), 42)
 
     def test_falls_back_when_source_expr_none(self):
         eis = lambda expr: eval(expr)
-        self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=eis), 42)
+        self.assertEqual(eval_dollar_expr('$[0]', [42], eval_in_scope=eis), 42)
 
     def test_the_expression_can_name_the_programs_variables(self):
-        # A caret expression is written where the user is looking, so the
-        # names beside the caret are their program's names. The scope stands
+        # A dollar expression is written where the user is looking, so the
+        # names beside the dollar are their program's names. The scope stands
         # in for a user module that defined `factor`; passing the `eval`
         # builtin instead would resolve against this test module.
         eis = lambda expr: eval(expr, {'factor': 10})
-        self.assertEqual(eval_caret_expr('^ * factor', 3, eval_in_scope=eis),
+        self.assertEqual(eval_dollar_expr('$ * factor', 3, eval_in_scope=eis),
                          30)
 
     def test_the_expression_can_call_the_programs_functions(self):
         eis = lambda expr: eval(expr, {'twice': lambda n: n * 2})
-        self.assertEqual(eval_caret_expr('twice(^)', 5, eval_in_scope=eis), 10)
+        self.assertEqual(eval_dollar_expr('twice($)', 5, eval_in_scope=eis), 10)
 
     def test_error_propagates(self):
         with self.assertRaises(Exception):
-            eval_caret_expr('^.nonexistent', 42)
+            eval_dollar_expr('$.nonexistent', 42)
 
 
-class TestReplaceCaretsInPyExp(unittest.TestCase):
-    """A caret run names a scope: ^ is the innermost value, ^^ its parent, and
+class TestReplaceDollarsInPyExp(unittest.TestCase):
+    """A dollar run names a scope: $ is the innermost value, $$ its parent, and
     replace_exps binds them innermost-first."""
 
     def test_binds_each_level_by_run_length(self):
         self.assertEqual(
-            replace_carets_in_py_exp('(^^)[:^.start()]', ['mtch', '_snc_cell_']),
+            replace_dollars_in_py_exp('($$)[:$.start()]', ['mtch', '_snc_cell_']),
             '(_snc_cell_)[:mtch.start()]')
 
-    def test_leaves_legal_python_carets_alone(self):
-        # A ^ that parses where it stands is the XOR operator or string content,
-        # not a scope reference.
+    def test_leaves_dollars_in_string_literals_alone(self):
+        # A $ that parses where it stands is string content, not a scope
+        # reference. $ is never legal Python outside a literal, so unlike the
+        # old caret syntax there is no operator to confuse it with.
         cases = [
+            ('"a $ b" + $[0]', ['mtch'], '"a $ b" + mtch[0]'),
+            ("$.split('$')", ['mtch'], "mtch.split('$')"),
             ('a ^ b', ['mtch'], 'a ^ b'),
-            ('"a ^ b" + ^[0]', ['mtch'], '"a ^ b" + mtch[0]'),
-            ("^.split('^')", ['mtch'], "mtch.split('^')"),
         ]
-        self.assertEqual([replace_carets_in_py_exp(e, b) for e, b, _ in cases],
+        self.assertEqual([replace_dollars_in_py_exp(e, b) for e, b, _ in cases],
                          [want for _, _, want in cases])
 
     def test_unbound_level_is_left_alone(self):
         # A caller that knows one scope shouldn't crash on text naming two, and
         # must not invent a binding it doesn't have.
-        self.assertEqual(replace_carets_in_py_exp('^^ + ^[0]', ['mtch']),
-                         '^^ + mtch[0]')
+        self.assertEqual(replace_dollars_in_py_exp('$$ + $[0]', ['mtch']),
+                         '$$ + mtch[0]')
 
-    def test_caret_expr_parses_reads_every_level_as_a_value(self):
+    def test_dollar_expr_parses_reads_every_level_as_a_value(self):
         self.assertEqual(
-            [caret_expr_parses(s) for s in
-             ('^.start()', '^^.foo', '^^ + ^', 'a ^ b', '^.(', 'def f(): pass')],
+            [dollar_expr_parses(s) for s in
+             ('$.start()', '$$.foo', '$$ + $', 'a ^ b', '$.(', 'def f(): pass')],
             [True, True, True, True, False, False])
 
     def test_binder_is_spliced_verbatim(self):
         # The replacement is not re-scanned, so a multi-token binder lands whole.
         self.assertEqual(
-            replace_carets_in_py_exp('^.upper()', ['rows[0].name']),
+            replace_dollars_in_py_exp('$.upper()', ['rows[0].name']),
             'rows[0].name.upper()')
 
 
@@ -462,20 +463,20 @@ class TestParseSlots(unittest.TestCase):
     """parse_slots splits a slot list into (exprs, slot_children)."""
 
     def test_bare_strings(self):
-        exprs, children = parse_slots(['^', '^.x'])
-        self.assertEqual(exprs, ['^', '^.x'])
+        exprs, children = parse_slots(['$', '$.x'])
+        self.assertEqual(exprs, ['$', '$.x'])
         self.assertEqual(children, {})
 
     def test_dict_entries_without_children(self):
-        exprs, children = parse_slots([{'expr': '^'}, {'expr': '^.x'}])
-        self.assertEqual(exprs, ['^', '^.x'])
+        exprs, children = parse_slots([{'expr': '$'}, {'expr': '$.x'}])
+        self.assertEqual(exprs, ['$', '$.x'])
         self.assertEqual(children, {})
 
     def test_children_collected_by_expr(self):
-        spec = [{'expr': 'f', 'children': {'builtins.str': [{'expr': '^'}]}}]
+        spec = [{'expr': 'f', 'children': {'builtins.str': [{'expr': '$'}]}}]
         exprs, children = parse_slots(spec)
         self.assertEqual(exprs, ['f'])
-        self.assertEqual(children, {'f': {'builtins.str': [{'expr': '^'}]}})
+        self.assertEqual(children, {'f': {'builtins.str': [{'expr': '$'}]}})
 
     def test_none_config(self):
         exprs, children = parse_slots(None)
@@ -483,17 +484,17 @@ class TestParseSlots(unittest.TestCase):
         self.assertEqual(children, {})
 
     def test_expr_transform_applied(self):
-        exprs, _ = parse_slots(['x', '^.y'],
-                               expr_transform=lambda e: e if '^' in e else '^' + e)
-        self.assertEqual(exprs, ['^x', '^.y'])
+        exprs, _ = parse_slots(['x', '$.y'],
+                               expr_transform=lambda e: e if '$' in e else '$' + e)
+        self.assertEqual(exprs, ['$x', '$.y'])
 
     def test_empty_children_not_stored(self):
         _, children = parse_slots([{'expr': 'f', 'children': {}}])
         self.assertEqual(children, {})
 
     def test_invalid_entries_skipped(self):
-        exprs, _ = parse_slots([123, {'no_expr': 1}, '^'])
-        self.assertEqual(exprs, ['^'])
+        exprs, _ = parse_slots([123, {'no_expr': 1}, '$'])
+        self.assertEqual(exprs, ['$'])
 
 
 class TestSaveSlotsAtPath(unittest.TestCase):
@@ -511,39 +512,39 @@ class TestSaveSlotsAtPath(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_save_root(self):
-        save_slots_at_path(self.dot, 'builtins.str', [], ['^', 'f'])
+        save_slots_at_path(self.dot, 'builtins.str', [], ['$', 'f'])
         self.assertEqual(load_root_slots(self.dot, 'builtins.str'),
-                         [{'expr': '^'}, {'expr': 'f'}])
+                         [{'expr': '$'}, {'expr': 'f'}])
 
     def test_preserves_other_types(self):
-        save_slots_at_path(self.dot, 'A', [], ['^.x'])
-        save_slots_at_path(self.dot, 'B', [], ['^.y'])
-        self.assertEqual(load_root_slots(self.dot, 'A'), [{'expr': '^.x'}])
-        self.assertEqual(load_root_slots(self.dot, 'B'), [{'expr': '^.y'}])
+        save_slots_at_path(self.dot, 'A', [], ['$.x'])
+        save_slots_at_path(self.dot, 'B', [], ['$.y'])
+        self.assertEqual(load_root_slots(self.dot, 'A'), [{'expr': '$.x'}])
+        self.assertEqual(load_root_slots(self.dot, 'B'), [{'expr': '$.y'}])
 
     def test_nested_path_creates_structure(self):
         save_slots_at_path(self.dot, 'builtins.str',
-                           [('f', 'builtins.str')], ['^', '^.x'])
+                           [('f', 'builtins.str')], ['$', '$.x'])
         slots = load_root_slots(self.dot, 'builtins.str')
         f_slot = next(s for s in slots if s['expr'] == 'f')
         self.assertEqual(f_slot['children']['builtins.str'],
-                         [{'expr': '^'}, {'expr': '^.x'}])
+                         [{'expr': '$'}, {'expr': '$.x'}])
 
     def test_root_resave_preserves_children_by_expr(self):
-        save_slots_at_path(self.dot, 'builtins.str', [], ['^', 'f'])
+        save_slots_at_path(self.dot, 'builtins.str', [], ['$', 'f'])
         save_slots_at_path(self.dot, 'builtins.str',
-                           [('f', 'builtins.str')], ['^'])
+                           [('f', 'builtins.str')], ['$'])
         # Re-save the root with the columns reordered; the nested children
         # under 'f' must survive (an ancestor never clobbers a descendant).
-        save_slots_at_path(self.dot, 'builtins.str', [], ['f', '^'])
+        save_slots_at_path(self.dot, 'builtins.str', [], ['f', '$'])
         slots = load_root_slots(self.dot, 'builtins.str')
         f_slot = next(s for s in slots if s['expr'] == 'f')
         self.assertEqual(f_slot.get('children'),
-                         {'builtins.str': [{'expr': '^'}]})
+                         {'builtins.str': [{'expr': '$'}]})
 
     def test_remove_expr_drops_its_subtree(self):
         save_slots_at_path(self.dot, 'T', [], ['a', 'b'])
-        save_slots_at_path(self.dot, 'T', [('b', 'X')], ['^'])
+        save_slots_at_path(self.dot, 'T', [('b', 'X')], ['$'])
         save_slots_at_path(self.dot, 'T', [], ['a'])
         slots = load_root_slots(self.dot, 'T')
         self.assertEqual([s['expr'] for s in slots], ['a'])
@@ -558,7 +559,7 @@ class TestSaveSlotsAtPath(unittest.TestCase):
                          [{'expr': 'a'}, {'expr': 'b'}, {'expr': 'c'}])
 
     def test_none_root_type_is_noop(self):
-        save_slots_at_path(self.dot, None, [], ['^'])
+        save_slots_at_path(self.dot, None, [], ['$'])
         self.assertIsNone(load_root_slots(self.dot, None))
 
 
@@ -567,13 +568,13 @@ class TestChildNestingKwargs(unittest.TestCase):
 
     def test_returns_nested_slots_for_cell_type(self):
         model = {
-            '_slot_children': {'f': {'builtins.str': [{'expr': '^'}]}},
+            '_slot_children': {'f': {'builtins.str': [{'expr': '$'}]}},
             '_config_root_type': 'builtins.str',
             '_config_root_dotfile': '.snc_list_columns.json',
             '_config_path': [],
         }
         kw = child_nesting_kwargs(model, 'f', ['a', 'b'])
-        self.assertEqual(kw['slots_config'], [{'expr': '^'}])
+        self.assertEqual(kw['slots_config'], [{'expr': '$'}])
         self.assertEqual(kw['config_root_type'], 'builtins.str')
         self.assertEqual(kw['config_root_dotfile'], '.snc_list_columns.json')
         self.assertEqual(kw['config_path'], [('f', 'builtins.str')])

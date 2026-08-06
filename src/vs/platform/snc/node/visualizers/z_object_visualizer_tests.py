@@ -188,14 +188,14 @@ class TestInitModel(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj)
 
-        # TestObj has ^.x, ^.y, ^.name attributes
-        self.assertIn('^.x', model['fields'])
-        self.assertIn('^.y', model['fields'])
-        self.assertIn('^.name', model['fields'])
+        # TestObj has $.x, $.y, $.name attributes
+        self.assertIn('$.x', model['fields'])
+        self.assertIn('$.y', model['fields'])
+        self.assertIn('$.name', model['fields'])
 
         # Should NOT contain trivial names like __class__, __init__, etc.
         for field in model['fields']:
-            attr_name = field.lstrip('^.')
+            attr_name = field.lstrip('$.')
             self.assertNotIn(attr_name, TRIVIAL_NAMES,
                              f"Trivial name '{attr_name}' should not be in fields")
 
@@ -215,7 +215,7 @@ class TestInitModel(unittest.TestCase):
         """When dotfile has fields for this type, use those."""
         obj = TestObj()
         full_class_name = _get_full_class_name(obj)
-        saved_fields = ['^.x', '^.name']
+        saved_fields = ['$.x', '$.name']
 
         with patch('z_object_visualizer.load_fields_from_dotfile', return_value=saved_fields):
             model = init_model(obj)
@@ -231,9 +231,9 @@ class TestInitModel(unittest.TestCase):
             model = init_model(obj)
 
         # Should still have the non-trivial attributes
-        self.assertIn('^.x', model['fields'])
-        self.assertIn('^.y', model['fields'])
-        self.assertIn('^.name', model['fields'])
+        self.assertIn('$.x', model['fields'])
+        self.assertIn('$.y', model['fields'])
+        self.assertIn('$.name', model['fields'])
 
 
 class TestResolveFields(unittest.TestCase):
@@ -241,8 +241,8 @@ class TestResolveFields(unittest.TestCase):
 
     def test_resolve_fields_prefers_dotfile(self):
         obj = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['^.name']):
-            self.assertEqual(_resolve_fields(obj), ['^.name'])
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['$.name']):
+            self.assertEqual(_resolve_fields(obj), ['$.name'])
 
     def test_resolve_fields_uses_defaults_when_dotfile_missing(self):
         import re
@@ -256,9 +256,9 @@ class TestResolveFields(unittest.TestCase):
         obj = TestObj()
         with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
             resolved = _resolve_fields(obj)
-        self.assertIn('^.x', resolved)
-        self.assertIn('^.y', resolved)
-        self.assertIn('^.name', resolved)
+        self.assertIn('$.x', resolved)
+        self.assertIn('$.y', resolved)
+        self.assertIn('$.name', resolved)
 
 
 # =============================================================================
@@ -279,7 +279,7 @@ class TestVisualize(unittest.TestCase):
         """Object visualization should contain table with field names and values."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('.x', html_output)
@@ -303,7 +303,7 @@ class TestVisualize(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj)
         model['adding_field'] = True
-        model['input_value'] = '^.na'
+        model['input_value'] = '$.na'
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('<input', html_output)
@@ -314,9 +314,9 @@ class TestVisualize(unittest.TestCase):
         """When editing_index is set, that row shows an <input>."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         model['editing_index'] = 0
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('<input', html_output)
@@ -328,55 +328,55 @@ class TestVisualize(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []  # no existing fields
         model['adding_field'] = True
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
         html_output = visualize(obj, model, _get_visualizer, None)
 
-        # Should show ^.x as a suggestion (since it starts with '^.x')
+        # Should show $.x as a suggestion (since it starts with '$.x')
         self.assertIn('FieldSelect', html_output)
 
     def test_visualize_filters_autocomplete_by_input(self):
-        """Typing '^.na' should show '^.name' but not '^.x'."""
+        """Typing '$.na' should show '$.name' but not '$.x'."""
         obj = TestObj()
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.na'
+        model['input_value'] = '$.na'
         html_output = visualize(obj, model, _get_visualizer, None)
 
-        # Should have ^.name as suggestion
-        self.assertIn('^.name', html_output)
-        # Should NOT have FieldSelect for ^.x (doesn't match '^.na' prefix)
+        # Should have $.name as suggestion
+        self.assertIn('$.name', html_output)
+        # Should NOT have FieldSelect for $.x (doesn't match '$.na' prefix)
         # .x is still shown in... hmm actually .x might not appear at all if no fields
         # Let's check FieldSelect specifically
-        self.assertNotIn("FieldSelect(accessor=&#x27;^.x&#x27;)", html_output)
+        self.assertNotIn("FieldSelect(accessor=&#x27;$.x&#x27;)", html_output)
 
     def test_visualize_excludes_already_shown_from_autocomplete(self):
         """Fields already in model['fields'] should not appear in autocomplete."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.name']
+        model['fields'] = ['$.name']
         model['adding_field'] = True
-        model['input_value'] = '^.'  # matches everything
+        model['input_value'] = '$.'  # matches everything
         html_output = visualize(obj, model, _get_visualizer, None)
 
-        # ^.name is already shown, so FieldSelect for ^.name should not be in autocomplete
-        # But ^.x and ^.y should be
+        # $.name is already shown, so FieldSelect for $.name should not be in autocomplete
+        # But $.x and $.y should be
         # Note: repr uses single quotes which get HTML-escaped to &#x27; in the output
-        self.assertIn("FieldSelect(accessor=&#x27;^.x&#x27;)", html_output)
-        self.assertIn("FieldSelect(accessor=&#x27;^.y&#x27;)", html_output)
-        # ^.name should NOT be in autocomplete selections
-        self.assertNotIn("FieldSelect(accessor=&#x27;^.name&#x27;)", html_output)
+        self.assertIn("FieldSelect(accessor=&#x27;$.x&#x27;)", html_output)
+        self.assertIn("FieldSelect(accessor=&#x27;$.y&#x27;)", html_output)
+        # $.name should NOT be in autocomplete selections
+        self.assertNotIn("FieldSelect(accessor=&#x27;$.name&#x27;)", html_output)
 
     def test_visualize_shows_live_value_for_partial_input(self):
         """When typing a partial accessor, the value column should attempt to eval it."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['adding_field'] = True
-        model['input_value'] = '^.name'
+        model['input_value'] = '$.name'
         html_output = visualize(obj, model, _get_visualizer, None)
 
-        # ^.name evaluates to 'test', should be shown
+        # $.name evaluates to 'test', should be shown
         self.assertIn('test', html_output)
 
     def test_visualize_shows_class_name_header(self):
@@ -392,7 +392,7 @@ class TestVisualize(unittest.TestCase):
         """Normal field names should have snc-mouse-down with FieldClick for double-click."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('FieldClick(index=0)', html_output)
@@ -402,7 +402,7 @@ class TestVisualize(unittest.TestCase):
         """Each field row should have a remove (×) button with RemoveFieldClick."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('RemoveFieldClick(index=0)', html_output)
@@ -425,9 +425,9 @@ class TestVisualize(unittest.TestCase):
         """Input should have autofocus attribute when editing a field."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         model['editing_index'] = 0
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('autofocus', html_output)
@@ -436,9 +436,9 @@ class TestVisualize(unittest.TestCase):
         """Input should have snc-select-all when editing (not when adding)."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         model['editing_index'] = 0
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('snc-select-all', html_output)
@@ -459,7 +459,7 @@ class TestVisualize(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
         model['selected_suggestion_index'] = 0
         html_output = visualize(obj, model, _get_visualizer, None)
 
@@ -472,7 +472,7 @@ class TestVisualize(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('snc-dropdown-trigger', html_output)
@@ -507,7 +507,7 @@ class TestUpdate(unittest.TestCase):
         """AddFieldClick event sets adding_field=True and clears input."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
 
         event = make_mouse_down_event(repr(AddFieldClick()))
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -522,24 +522,24 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['adding_field'] = True
 
-        event = make_input_event('^.na')
+        event = make_input_event('$.na')
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['input_value'], '^.na')
+        self.assertEqual(new_model['input_value'], '$.na')
 
     def test_field_select_adds_field_when_adding(self):
         """FieldSelect during add mode appends accessor to fields."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['adding_field'] = True
-        model['input_value'] = '^.na'
+        model['input_value'] = '$.na'
 
-        event = make_mouse_down_event(repr(FieldSelect(accessor='^.name')))
+        event = make_mouse_down_event(repr(FieldSelect(accessor='$.name')))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertIn('^.name', new_model['fields'])
+        self.assertIn('$.name', new_model['fields'])
         self.assertFalse(new_model['adding_field'])
         self.assertEqual(new_model['input_value'], '')
 
@@ -547,16 +547,16 @@ class TestUpdate(unittest.TestCase):
         """FieldSelect during edit mode replaces the field at editing_index."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.y']
+        model['fields'] = ['$.x', '$.y']
         model['editing_index'] = 0
-        model['input_value'] = '^.na'
+        model['input_value'] = '$.na'
 
-        event = make_mouse_down_event(repr(FieldSelect(accessor='^.name')))
+        event = make_mouse_down_event(repr(FieldSelect(accessor='$.name')))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'][0], '^.name')
-        self.assertEqual(new_model['fields'][1], '^.y')
+        self.assertEqual(new_model['fields'][0], '$.name')
+        self.assertEqual(new_model['fields'][1], '$.y')
         self.assertIsNone(new_model['editing_index'])
         self.assertEqual(new_model['input_value'], '')
 
@@ -564,20 +564,20 @@ class TestUpdate(unittest.TestCase):
         """FieldClick with detail=2 sets editing_index and input_value."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
 
         event = make_mouse_down_event(repr(FieldClick(index=0)), detail=2)
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['editing_index'], 0)
-        self.assertEqual(new_model['input_value'], '^.x')
+        self.assertEqual(new_model['input_value'], '$.x')
         self.assertFalse(new_model['adding_field'])
 
     def test_single_click_does_not_start_editing(self):
         """FieldClick with detail=1 does NOT start editing."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
 
         event = make_mouse_down_event(repr(FieldClick(index=0)), detail=1)
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -588,15 +588,15 @@ class TestUpdate(unittest.TestCase):
         """Enter key during add mode appends input_value to fields."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['adding_field'] = True
-        model['input_value'] = '^.name'
+        model['input_value'] = '$.name'
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertIn('^.name', new_model['fields'])
+        self.assertIn('$.name', new_model['fields'])
         self.assertFalse(new_model['adding_field'])
         self.assertEqual(new_model['input_value'], '')
 
@@ -604,22 +604,22 @@ class TestUpdate(unittest.TestCase):
         """Enter key during edit mode replaces field at editing_index."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.y']
+        model['fields'] = ['$.x', '$.y']
         model['editing_index'] = 0
-        model['input_value'] = '^.name'
+        model['input_value'] = '$.name'
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'][0], '^.name')
+        self.assertEqual(new_model['fields'][0], '$.name')
         self.assertIsNone(new_model['editing_index'])
 
     def test_enter_with_empty_input_does_not_add(self):
         """Enter with empty input_value during add should not add empty field."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['adding_field'] = True
         model['input_value'] = ''
 
@@ -634,7 +634,7 @@ class TestUpdate(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj)
         model['adding_field'] = True
-        model['input_value'] = '^.na'
+        model['input_value'] = '$.na'
 
         event = make_key_down_event('Escape')
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -646,9 +646,9 @@ class TestUpdate(unittest.TestCase):
         """Escape key during edit mode cancels editing."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         model['editing_index'] = 0
-        model['input_value'] = '^.foo'
+        model['input_value'] = '$.foo'
 
         event = make_key_down_event('Escape')
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -656,30 +656,30 @@ class TestUpdate(unittest.TestCase):
         self.assertIsNone(new_model['editing_index'])
         self.assertEqual(new_model['input_value'], '')
         # Field should be unchanged
-        self.assertEqual(new_model['fields'][0], '^.x')
+        self.assertEqual(new_model['fields'][0], '$.x')
 
     def test_field_select_saves_dotfile(self):
         """FieldSelect commit should call save_fields_to_dotfile."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['adding_field'] = True
 
-        event = make_mouse_down_event(repr(FieldSelect(accessor='^.name')))
+        event = make_mouse_down_event(repr(FieldSelect(accessor='$.name')))
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             # Should save with the updated fields list
             saved_fields = mock_save.call_args[0][2]
-            self.assertIn('^.name', saved_fields)
+            self.assertIn('$.name', saved_fields)
 
     def test_enter_saves_dotfile(self):
         """Enter commit should call save_fields_to_dotfile."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['adding_field'] = True
-        model['input_value'] = '^.name'
+        model['input_value'] = '$.name'
 
         event = make_key_down_event('Enter')
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
@@ -701,7 +701,7 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
 
         event = make_key_down_event('ArrowDown')
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -714,10 +714,10 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
         # Get the count of suggestions to set index to last
         from z_object_visualizer import _get_autocomplete_suggestions
-        suggestions = _get_autocomplete_suggestions(obj, [], '^.')
+        suggestions = _get_autocomplete_suggestions(obj, [], '$.')
         last_idx = min(len(suggestions), 10) - 1
         model['selected_suggestion_index'] = last_idx
 
@@ -732,13 +732,13 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
 
         event = make_key_down_event('ArrowUp')
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
         from z_object_visualizer import _get_autocomplete_suggestions
-        suggestions = _get_autocomplete_suggestions(obj, [], '^.')
+        suggestions = _get_autocomplete_suggestions(obj, [], '$.')
         expected = min(len(suggestions), 10) - 1
         self.assertEqual(new_model['selected_suggestion_index'], expected)
 
@@ -748,14 +748,14 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
         model['selected_suggestion_index'] = 0
 
         event = make_key_down_event('ArrowUp')
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
         from z_object_visualizer import _get_autocomplete_suggestions
-        suggestions = _get_autocomplete_suggestions(obj, [], '^.')
+        suggestions = _get_autocomplete_suggestions(obj, [], '$.')
         expected = min(len(suggestions), 10) - 1
         self.assertEqual(new_model['selected_suggestion_index'], expected)
 
@@ -765,10 +765,10 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
+        model['input_value'] = '$.'
         # Get suggestions and pick the first one
         from z_object_visualizer import _get_autocomplete_suggestions
-        suggestions = _get_autocomplete_suggestions(obj, [], '^.')
+        suggestions = _get_autocomplete_suggestions(obj, [], '$.')
         model['selected_suggestion_index'] = 0
         expected_field = suggestions[0]
 
@@ -784,14 +784,14 @@ class TestUpdate(unittest.TestCase):
         """Typing in the input should auto-highlight the first matching suggestion."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']  # ^.name is NOT already shown
+        model['fields'] = ['$.x']  # $.name is NOT already shown
         model['adding_field'] = True
         model['selected_suggestion_index'] = None
 
-        event = make_input_event('^.na')
+        event = make_input_event('$.na')
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        # ^.name matches '^.na' and is not in fields, so first suggestion should be selected
+        # $.name matches '$.na' and is not in fields, so first suggestion should be selected
         self.assertEqual(new_model['selected_suggestion_index'], 0)
 
     def test_field_input_clears_selection_when_no_suggestions(self):
@@ -801,7 +801,7 @@ class TestUpdate(unittest.TestCase):
         model['adding_field'] = True
         model['selected_suggestion_index'] = 0
 
-        event = make_input_event('^.zzzzz')
+        event = make_input_event('$.zzzzz')
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['selected_suggestion_index'])
@@ -824,8 +824,8 @@ class TestUpdate(unittest.TestCase):
         model = init_model(obj)
         model['fields'] = []
         model['adding_field'] = True
-        model['input_value'] = '^.'
-        suggestions = _get_autocomplete_suggestions(obj, [], '^.')
+        model['input_value'] = '$.'
+        suggestions = _get_autocomplete_suggestions(obj, [], '$.')
         model['selected_suggestion_index'] = 0
         expected_field = suggestions[0]
 
@@ -841,7 +841,7 @@ class TestUpdate(unittest.TestCase):
         """ArrowDown/Up should do nothing when not adding or editing."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
 
         event = make_key_down_event('ArrowDown')
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -851,45 +851,45 @@ class TestUpdate(unittest.TestCase):
         """RemoveFieldClick removes the field at the given index."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=1)))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'], ['^.x', '^.y'])
+        self.assertEqual(new_model['fields'], ['$.x', '$.y'])
 
     def test_remove_field_saves_dotfile(self):
         """RemoveFieldClick should persist the updated fields to dotfile."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=0)))
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             saved_fields = mock_save.call_args[0][2]
-            self.assertEqual(saved_fields, ['^.name'])
+            self.assertEqual(saved_fields, ['$.name'])
 
     def test_remove_field_out_of_range_is_noop(self):
         """RemoveFieldClick with invalid index does nothing."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=5)))
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'], ['^.x'])
+        self.assertEqual(new_model['fields'], ['$.x'])
 
     def test_remove_field_cancels_editing_if_index_matches(self):
         """Removing the field being edited should cancel editing."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         model['editing_index'] = 0
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=0)))
         with patch('z_object_visualizer.save_fields_to_dotfile'):
@@ -897,7 +897,7 @@ class TestUpdate(unittest.TestCase):
 
         self.assertIsNone(new_model['editing_index'])
         self.assertEqual(new_model['input_value'], '')
-        self.assertEqual(new_model['fields'], ['^.name'])
+        self.assertEqual(new_model['fields'], ['$.name'])
 
 
 # =============================================================================
@@ -937,7 +937,7 @@ class TestDragReorder(unittest.TestCase):
         """DragStart sets drag_from_index in model."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
 
         event = make_mouse_down_event(repr(DragStart(index=1)))
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -948,7 +948,7 @@ class TestDragReorder(unittest.TestCase):
         """DragOver while dragging sets drag_over_index."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
         model['drag_from_index'] = 2
 
         event = make_mouse_move_event(repr(DragOver(index=0)), buttons=1)
@@ -960,7 +960,7 @@ class TestDragReorder(unittest.TestCase):
         """DragOver with buttons=0 cancels drag."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
         model['drag_from_index'] = 2
         model['drag_over_index'] = 0
 
@@ -974,7 +974,7 @@ class TestDragReorder(unittest.TestCase):
         """DragOver without active drag is ignored."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
 
         event = make_mouse_move_event(repr(DragOver(index=1)), buttons=1)
         new_model, commands = update(event, ('x', 'x'), model, obj)
@@ -985,7 +985,7 @@ class TestDragReorder(unittest.TestCase):
         """DragEnd moves field from index 0 to index 2."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
         model['drag_from_index'] = 0
         model['drag_over_index'] = 2
 
@@ -993,7 +993,7 @@ class TestDragReorder(unittest.TestCase):
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'], ['^.name', '^.y', '^.x'])
+        self.assertEqual(new_model['fields'], ['$.name', '$.y', '$.x'])
         self.assertIsNone(new_model['drag_from_index'])
         self.assertIsNone(new_model['drag_over_index'])
 
@@ -1001,7 +1001,7 @@ class TestDragReorder(unittest.TestCase):
         """DragEnd moves field from index 2 to index 0."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
         model['drag_from_index'] = 2
         model['drag_over_index'] = 0
 
@@ -1009,7 +1009,7 @@ class TestDragReorder(unittest.TestCase):
         with patch('z_object_visualizer.save_fields_to_dotfile'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'], ['^.y', '^.x', '^.name'])
+        self.assertEqual(new_model['fields'], ['$.y', '$.x', '$.name'])
         self.assertIsNone(new_model['drag_from_index'])
         self.assertIsNone(new_model['drag_over_index'])
 
@@ -1017,20 +1017,20 @@ class TestDragReorder(unittest.TestCase):
         """DragEnd to the same position doesn't change order."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
         model['drag_from_index'] = 1
         model['drag_over_index'] = 1
 
         event = make_mouse_up_event(repr(DragEnd(index=1)))
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'], ['^.x', '^.name', '^.y'])
+        self.assertEqual(new_model['fields'], ['$.x', '$.name', '$.y'])
 
     def test_drag_end_saves_dotfile(self):
         """DragEnd should save reordered fields to dotfile."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
         model['drag_from_index'] = 0
         model['drag_over_index'] = 2
 
@@ -1043,18 +1043,18 @@ class TestDragReorder(unittest.TestCase):
         """DragEnd without active drag does nothing."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name', '^.y']
+        model['fields'] = ['$.x', '$.name', '$.y']
 
         event = make_mouse_up_event(repr(DragEnd(index=1)))
         new_model, commands = update(event, ('x', 'x'), model, obj)
 
-        self.assertEqual(new_model['fields'], ['^.x', '^.name', '^.y'])
+        self.assertEqual(new_model['fields'], ['$.x', '$.name', '$.y'])
 
     def test_visualize_shows_drag_handles(self):
         """Each field row should have a drag handle."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('DragStart(index=0)', html_output)
@@ -1064,7 +1064,7 @@ class TestDragReorder(unittest.TestCase):
         """Each field row should have DragOver and DragEnd handlers."""
         obj = TestObj()
         model = init_model(obj)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('DragOver(index=0)', html_output)
@@ -1092,12 +1092,12 @@ class TestDotfile(unittest.TestCase):
 
     def test_load_fields_from_dotfile(self):
         """Valid dotfile with type key → returns fields list."""
-        data = {'some.Type': ['^.x', '^.y']}
+        data = {'some.Type': ['$.x', '$.y']}
         with open(DOTFILE_NAME, 'w') as f:
             json.dump(data, f)
 
         result = load_fields_from_dotfile('some.Type')
-        self.assertEqual(result, ['^.x', '^.y'])
+        self.assertEqual(result, ['$.x', '$.y'])
 
     def test_load_fields_type_not_in_dotfile(self):
         """Dotfile exists but doesn't have this type → returns None."""
@@ -1118,33 +1118,33 @@ class TestDotfile(unittest.TestCase):
 
     def test_save_fields_to_dotfile(self):
         """Saves correct JSON structure (nested slot format)."""
-        save_fields_to_dotfile('some.Type', [], ['^.x', '^.y'])
+        save_fields_to_dotfile('some.Type', [], ['$.x', '$.y'])
 
         with open(DOTFILE_NAME, 'r') as f:
             data = json.load(f)
 
-        self.assertEqual(data['some.Type'], [{'expr': '^.x'}, {'expr': '^.y'}])
+        self.assertEqual(data['some.Type'], [{'expr': '$.x'}, {'expr': '$.y'}])
 
     def test_save_preserves_other_types(self):
         """Saving for type A doesn't clobber type B entries."""
-        save_fields_to_dotfile('type.A', [], ['^.a1', '^.a2'])
-        save_fields_to_dotfile('type.B', [], ['^.b1', '^.b2'])
+        save_fields_to_dotfile('type.A', [], ['$.a1', '$.a2'])
+        save_fields_to_dotfile('type.B', [], ['$.b1', '$.b2'])
 
         with open(DOTFILE_NAME, 'r') as f:
             data = json.load(f)
 
-        self.assertEqual(data['type.A'], [{'expr': '^.a1'}, {'expr': '^.a2'}])
-        self.assertEqual(data['type.B'], [{'expr': '^.b1'}, {'expr': '^.b2'}])
+        self.assertEqual(data['type.A'], [{'expr': '$.a1'}, {'expr': '$.a2'}])
+        self.assertEqual(data['type.B'], [{'expr': '$.b1'}, {'expr': '$.b2'}])
 
     def test_save_overwrites_same_type(self):
         """Saving the same type again overwrites the previous entry."""
-        save_fields_to_dotfile('some.Type', [], ['^.x'])
-        save_fields_to_dotfile('some.Type', [], ['^.x', '^.y'])
+        save_fields_to_dotfile('some.Type', [], ['$.x'])
+        save_fields_to_dotfile('some.Type', [], ['$.x', '$.y'])
 
         with open(DOTFILE_NAME, 'r') as f:
             data = json.load(f)
 
-        self.assertEqual(data['some.Type'], [{'expr': '^.x'}, {'expr': '^.y'}])
+        self.assertEqual(data['some.Type'], [{'expr': '$.x'}, {'expr': '$.y'}])
 
 
 # =============================================================================
@@ -1223,9 +1223,9 @@ class TestComposition(unittest.TestCase):
     def test_children_keyed_by_accessor(self):
         obj = CompositionTestObj()
         model = init_model(obj, _interactive_get_visualizer)
-        # ^.greeting is a string -> should have a child model from mock vis
-        self.assertIn('^.greeting', model['children'])
-        self.assertEqual(model['children']['^.greeting']['vis_type'], 'mock_interactive')
+        # $.greeting is a string -> should have a child model from mock vis
+        self.assertIn('$.greeting', model['children'])
+        self.assertEqual(model['children']['$.greeting']['vis_type'], 'mock_interactive')
 
     def test_callable_fields_have_no_child_model(self):
         """Callable fields (methods) should not be subvisualized."""
@@ -1235,8 +1235,8 @@ class TestComposition(unittest.TestCase):
             x = 42
         obj = WithMethod()
         model = init_model(obj, _interactive_get_visualizer)
-        # ^.my_method is callable -> should NOT have a child model
-        self.assertNotIn('^.my_method', model.get('children', {}))
+        # $.my_method is callable -> should NOT have a child model
+        self.assertNotIn('$.my_method', model.get('children', {}))
 
     def test_visualize_wraps_field_values_with_child_key(self):
         obj = CompositionTestObj()
@@ -1254,7 +1254,7 @@ class TestComposition(unittest.TestCase):
         for m in matches:
             try:
                 key = eval(html_module.unescape(m))
-                if key.startswith('^'):
+                if key.startswith('$'):
                     found_accessor_key = True
                     break
             except:
@@ -1265,32 +1265,32 @@ class TestComposition(unittest.TestCase):
     def test_update_routes_child_event_by_accessor(self):
         obj = CompositionTestObj()
         model = init_model(obj, _interactive_get_visualizer)
-        self.assertIn('^.greeting', model['children'])
+        self.assertIn('$.greeting', model['children'])
         # Pre-focus the child so the mousedown dispatches; the first mousedown
         # on an unfocused child only pins focus (click-to-focus).
-        model['focused_child'] = '^.greeting'
-        ce = ChildEvent(child_key='^.greeting', py_ev_str='MockClick()')
+        model['focused_child'] = '$.greeting'
+        ce = ChildEvent(child_key='$.greeting', py_ev_str='MockClick()')
         event = {
             'pythonEventStr': repr(ce),
             'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
         }
         new_model, _ = update(event, None, model, obj, _interactive_get_visualizer)
-        child_model = new_model['children'].get('^.greeting')
+        child_model = new_model['children'].get('$.greeting')
         self.assertIsNotNone(child_model)
         self.assertTrue(child_model.get('updated', False))
 
     def test_remove_field_cleans_up_child_model(self):
         obj = CompositionTestObj()
         model = init_model(obj, _interactive_get_visualizer)
-        self.assertIn('^.greeting', model['children'])
-        greeting_idx = model['fields'].index('^.greeting')
+        self.assertIn('$.greeting', model['children'])
+        greeting_idx = model['fields'].index('$.greeting')
         event = {
             'pythonEventStr': repr(RemoveFieldClick(index=greeting_idx)),
             'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
         }
         new_model, _ = update(event, None, model, obj, _interactive_get_visualizer)
-        self.assertNotIn('^.greeting', new_model.get('fields', []))
-        self.assertNotIn('^.greeting', new_model.get('children', {}))
+        self.assertNotIn('$.greeting', new_model.get('fields', []))
+        self.assertNotIn('$.greeting', new_model.get('children', {}))
 
     def test_drag_reorder_preserves_child_model_association(self):
         """Reordering fields should keep child models associated by accessor key."""
@@ -1355,7 +1355,7 @@ class TestInputRowEvalInScope(unittest.TestCase):
         p = Point(1, 2)
         model = init_model(p, _get_visualizer)
         model['adding_field'] = True
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
 
         html_output = visualize(p, model, _get_visualizer, None)
         self.assertIn('1', html_output)
@@ -1369,13 +1369,13 @@ class TestInputRowEvalInScope(unittest.TestCase):
         p = Point(1, 2)
         model = init_model(p, _get_visualizer)
         model['adding_field'] = True
-        model['input_value'] = '^.x'
+        model['input_value'] = '$.x'
 
         html_output = visualize(p, model, _get_visualizer, None)
         self.assertIn('1', html_output)
 
 
-class TestDotfileCaretHandling(unittest.TestCase):
+class TestDotfileDollarHandling(unittest.TestCase):
     """Test that load_fields_from_dotfile returns fields as stored."""
 
     def setUp(self):
@@ -1387,21 +1387,21 @@ class TestDotfileCaretHandling(unittest.TestCase):
         os.chdir(self.orig_cwd)
         shutil.rmtree(self.tmp_dir)
 
-    def test_load_preserves_embedded_caret(self):
-        """Fields with ^ embedded (not leading) are returned as-is."""
-        data = {'re.Match': ['str3[^.start():]']}
+    def test_load_preserves_embedded_dollar(self):
+        """Fields with $ embedded (not leading) are returned as-is."""
+        data = {'re.Match': ['str3[$.start():]']}
         with open(DOTFILE_NAME, 'w') as f:
             json.dump(data, f)
         result = load_fields_from_dotfile('re.Match')
-        self.assertEqual(result, ['str3[^.start():]'])
+        self.assertEqual(result, ['str3[$.start():]'])
 
-    def test_load_preserves_leading_caret(self):
-        """Fields with leading ^ are returned as-is."""
-        data = {'re.Match': ['^[0]', '^.start()']}
+    def test_load_preserves_leading_dollar(self):
+        """Fields with leading $ are returned as-is."""
+        data = {'re.Match': ['$[0]', '$.start()']}
         with open(DOTFILE_NAME, 'w') as f:
             json.dump(data, f)
         result = load_fields_from_dotfile('re.Match')
-        self.assertEqual(result, ['^[0]', '^.start()'])
+        self.assertEqual(result, ['$[0]', '$.start()'])
 
 
 # =============================================================================
@@ -1462,7 +1462,7 @@ class TestSmallView(unittest.TestCase):
     def test_shows_key_value_pairs(self):
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_out = self._small(obj, model)
         self.assertIn('.x', html_out)
         self.assertIn('10', html_out)
@@ -1491,7 +1491,7 @@ class TestSmallView(unittest.TestCase):
         """Long repr values should be truncated with ellipsis."""
         obj = LongReprObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.data']
+        model['fields'] = ['$.data']
         html_out = self._small(obj, model, max_width=300)
         # The 200-char string should be truncated, not fully present
         self.assertNotIn('x' * 200, html_out)
@@ -1501,7 +1501,7 @@ class TestSmallView(unittest.TestCase):
         """Callable fields (methods) should be omitted in small view."""
         obj = CallableFieldObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.my_method', '^.x']
+        model['fields'] = ['$.my_method', '$.x']
         html_out = self._small(obj, model)
         self.assertNotIn('my_method', html_out)
         self.assertIn('.x', html_out)
@@ -1511,7 +1511,7 @@ class TestSmallView(unittest.TestCase):
         """When fields don't fit the budget, show a +N indicator."""
         obj = ManyFieldsObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.aaa', '^.bbb', '^.ccc', '^.ddd', '^.eee', '^.fff', '^.ggg', '^.hhh']
+        model['fields'] = ['$.aaa', '$.bbb', '$.ccc', '$.ddd', '$.eee', '$.fff', '$.ggg', '$.hhh']
         html_out = self._small(obj, model, max_width=150, max_height=18)
         # With tight width and 1 line, can't fit all 8 fields
         self.assertIn('+', html_out)
@@ -1530,7 +1530,7 @@ class TestSmallView(unittest.TestCase):
         """With max_height ~18px (one line), output should use nowrap."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.y']
+        model['fields'] = ['$.x', '$.y']
         html_out = self._small(obj, model, max_height=18)
         self.assertIn('nowrap', html_out)
 
@@ -1538,7 +1538,7 @@ class TestSmallView(unittest.TestCase):
         """With larger max_height, output should allow wrapping."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.y']
+        model['fields'] = ['$.x', '$.y']
         html_out = self._small(obj, model, max_height=100)
         self.assertNotIn('nowrap', html_out)
 
@@ -1546,7 +1546,7 @@ class TestSmallView(unittest.TestCase):
         """Error fields should be styled with error color."""
         obj = ErrorFieldObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.bad']
+        model['fields'] = ['$.bad']
         html_out = self._small(obj, model)
         self.assertIn('boom', html_out)
         self.assertIn('class="error"', html_out)
@@ -1562,7 +1562,7 @@ class TestSmallView(unittest.TestCase):
         """Dunder attributes like __dict__, __module__ should be omitted."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.__dict__', '^.__module__', '^.x', '^.y']
+        model['fields'] = ['$.__dict__', '$.__module__', '$.x', '$.y']
         html_out = self._small(obj, model)
         self.assertNotIn('__dict__', html_out)
         self.assertNotIn('__module__', html_out)
@@ -1623,7 +1623,7 @@ class TestSmallViewPyExp(unittest.TestCase):
         """Without _source_expr, small view should not have snc-py-exp."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_out = self._small(obj, model)
         self.assertNotIn('snc-py-exp', html_out)
         self.assertNotIn('draggable', html_out)
@@ -1632,30 +1632,30 @@ class TestSmallViewPyExp(unittest.TestCase):
         """With _source_expr, each field pair gets snc-py-exp and draggable."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_out = self._small(obj, model)
         self.assertIn('snc-py-exp="obj.x"', html_out)
         self.assertIn('snc-py-exp="obj.name"', html_out)
         self.assertIn('draggable="true"', html_out)
 
-    def test_py_exp_with_caret_source(self):
-        """With _source_expr='^', bracket accessors stay as caret expressions."""
+    def test_py_exp_with_dollar_source(self):
+        """With _source_expr='$', bracket accessors stay as dollar expressions."""
         import re
         m = re.search(r'hello', 'hello world')
         model = {
-            'fields': ['^[0]', '^.start()', '^.end()'],
-            '_source_expr': '^',
+            'fields': ['$[0]', '$.start()', '$.end()'],
+            '_source_expr': '$',
         }
         html_out = self._small(m, model)
-        self.assertIn('snc-py-exp="^[0]"', html_out)
-        self.assertIn('snc-py-exp="^.start()"', html_out)
-        self.assertIn('snc-py-exp="^.end()"', html_out)
+        self.assertIn('snc-py-exp="$[0]"', html_out)
+        self.assertIn('snc-py-exp="$.start()"', html_out)
+        self.assertIn('snc-py-exp="$.end()"', html_out)
 
     def test_add_at_cursor_with_add_target(self):
         """With _add_target, fields also get snc-add-at-cursor and snc-add-target."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         model['_add_target'] = '.my-input'
         html_out = self._small(obj, model)
         self.assertIn('snc-add-at-cursor="obj.x"', html_out)
@@ -1665,7 +1665,7 @@ class TestSmallViewPyExp(unittest.TestCase):
         """Without _add_target, no snc-add-at-cursor appears."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         html_out = self._small(obj, model)
         self.assertNotIn('snc-add-at-cursor', html_out)
 
@@ -1673,7 +1673,7 @@ class TestSmallViewPyExp(unittest.TestCase):
         """Error fields should not get snc-py-exp."""
         obj = ErrorFieldObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.bad', '^.x']
+        model['fields'] = ['$.bad', '$.x']
         html_out = self._small(obj, model)
         self.assertNotIn('snc-py-exp="obj.bad"', html_out)
         self.assertIn('snc-py-exp="obj.x"', html_out)
@@ -1682,7 +1682,7 @@ class TestSmallViewPyExp(unittest.TestCase):
         """Draggable fields in small view use the py-exp-grab class."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         html_out = self._small(obj, model)
         self.assertIn('py-exp-grab', html_out)
 
@@ -1691,15 +1691,15 @@ class TestSmallViewPyExp(unittest.TestCase):
         import re
         m = re.search(r'(hel)(lo)', 'hello world')
         model = {
-            'fields': ['^[0]', '^.start()', '^.end()', '^[1]', '^[2]'],
-            '_source_expr': '^',
+            'fields': ['$[0]', '$.start()', '$.end()', '$[1]', '$[2]'],
+            '_source_expr': '$',
             '_add_target': '.search-box-replace',
         }
         html_out = self._small(m, model)
-        self.assertIn('snc-py-exp="^[0]"', html_out)
-        self.assertIn('snc-py-exp="^[1]"', html_out)
-        self.assertIn('snc-py-exp="^[2]"', html_out)
-        self.assertIn('snc-add-at-cursor="^[0]"', html_out)
+        self.assertIn('snc-py-exp="$[0]"', html_out)
+        self.assertIn('snc-py-exp="$[1]"', html_out)
+        self.assertIn('snc-py-exp="$[2]"', html_out)
+        self.assertIn('snc-add-at-cursor="$[0]"', html_out)
         self.assertIn('hello', html_out)
         self.assertIn('hel', html_out)
         self.assertIn('lo', html_out)
@@ -1716,7 +1716,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """Without var_and_exp, no snc-py-exp attributes should appear."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertNotIn('snc-py-exp', html_out)
 
@@ -1724,7 +1724,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """Plain text values get snc-py-exp with the correct expression."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertIn('snc-py-exp="obj.x"', html_out)
         self.assertIn('draggable="true"', html_out)
@@ -1733,7 +1733,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """When var_and_exp has a var_name, use it as source expression."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('my_point', 'my_point'))
-        model['fields'] = ['^.x', '^.name']
+        model['fields'] = ['$.x', '$.name']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertIn('snc-py-exp="my_point.x"', html_out)
         self.assertIn('snc-py-exp="my_point.name"', html_out)
@@ -1742,7 +1742,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """When var_and_exp has no var_name, use the expression."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=(None, 'get_obj()'))
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertIn('snc-py-exp="get_obj().x"', html_out)
 
@@ -1752,7 +1752,7 @@ class TestPyExpExtractable(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj, _interactive_get_visualizer,
                            var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.name']
+        model['fields'] = ['$.name']
         html_out = visualize(obj, model, _interactive_get_visualizer, None)
         self.assertIn('snc-py-exp="obj.name"', html_out)
         self.assertIn('class="py-exp-grab"', html_out)
@@ -1767,8 +1767,8 @@ class TestPyExpExtractable(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj, _interactive_get_visualizer,
                            var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.name']
-        model['focused_child'] = '^.name'
+        model['fields'] = ['$.name']
+        model['focused_child'] = '$.name'
         html_out = visualize(obj, model, _interactive_get_visualizer, None)
         self.assertNotIn('snc-py-exp="obj.name"', html_out)
         self.assertNotIn('class="py-exp-grab"', html_out)
@@ -1778,7 +1778,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """Plain text values use the simple grab wrapper."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertIn('class="py-exp-grab"', html_out)
 
@@ -1786,7 +1786,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """Callable fields should not get snc-py-exp."""
         obj = CallableFieldObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.my_method', '^.x']
+        model['fields'] = ['$.my_method', '$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertNotIn('snc-py-exp="obj.my_method"', html_out)
         self.assertIn('snc-py-exp="obj.x"', html_out)
@@ -1795,7 +1795,7 @@ class TestPyExpExtractable(unittest.TestCase):
         """Error fields should not get snc-py-exp."""
         obj = ErrorFieldObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
-        model['fields'] = ['^.bad', '^.x']
+        model['fields'] = ['$.bad', '$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         self.assertNotIn('snc-py-exp="obj.bad"', html_out)
         self.assertIn('snc-py-exp="obj.x"', html_out)
@@ -1813,17 +1813,17 @@ class TestPyExpExtractable(unittest.TestCase):
         self.assertIsNone(model['_source_expr'])
 
     def test_bracket_accessor_expression(self):
-        """Bracket accessor like ^[0] should produce correct expression."""
+        """Bracket accessor like $[0] should produce correct expression."""
         import re
         match = re.search(r'hello', 'hello world')
         model = init_model(match, _get_visualizer, var_and_exp=('m', 'm'))
-        model['fields'] = ['^[0]']
+        model['fields'] = ['$[0]']
         html_out = visualize(match, model, _get_visualizer, None)
         self.assertIn('snc-py-exp="m[0]"', html_out)
 
 
 class TestGetFields(unittest.TestCase):
-    """Test get_fields and eval_caret_expr integration on z_object_visualizer."""
+    """Test get_fields and eval_dollar_expr integration on z_object_visualizer."""
 
     def test_returns_accessor_codes_for_object(self):
         from z_object_visualizer import get_fields
@@ -1833,8 +1833,8 @@ class TestGetFields(unittest.TestCase):
                 self.y = y
         p = Point(1, 2)
         fields = get_fields(p)
-        self.assertIn('^.x', fields)
-        self.assertIn('^.y', fields)
+        self.assertIn('$.x', fields)
+        self.assertIn('$.y', fields)
 
     def test_primitives_return_none(self):
         from z_object_visualizer import get_fields
@@ -1842,22 +1842,22 @@ class TestGetFields(unittest.TestCase):
         self.assertIsNone(get_fields(42))
         self.assertIsNone(get_fields(3.14))
 
-    def test_eval_caret_expr_returns_raw_value(self):
-        from visualizer_utils import eval_caret_expr
+    def test_eval_dollar_expr_returns_raw_value(self):
+        from visualizer_utils import eval_dollar_expr
         class Point:
             def __init__(self, x, y):
                 self.x = x
                 self.y = y
         p = Point(1, 2)
-        self.assertEqual(eval_caret_expr('^.x', p), 1)
-        self.assertEqual(eval_caret_expr('^.y', p), 2)
+        self.assertEqual(eval_dollar_expr('$.x', p), 1)
+        self.assertEqual(eval_dollar_expr('$.y', p), 2)
 
-    def test_eval_caret_expr_raises_on_error(self):
-        from visualizer_utils import eval_caret_expr
+    def test_eval_dollar_expr_raises_on_error(self):
+        from visualizer_utils import eval_dollar_expr
         class Empty:
             pass
         with self.assertRaises(AttributeError):
-            eval_caret_expr('^.nonexistent', Empty())
+            eval_dollar_expr('$.nonexistent', Empty())
 
 
 class TestObjectVisualizerTooltips(unittest.TestCase):
@@ -1869,7 +1869,7 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         import re
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.y']
+        model['fields'] = ['$.x', '$.y']
         html_out = visualize(obj, model, _get_visualizer, None)
         m = re.search(
             r'<td snc-mouse-down="RemoveFieldClick[^"]*"([^>]*?)>',
@@ -1885,7 +1885,7 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         import re
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x', '^.y']
+        model['fields'] = ['$.x', '$.y']
         html_out = visualize(obj, model, _get_visualizer, None)
         m = re.search(
             r'<td snc-mouse-down="DragStart[^"]*"([^>]*?)>',
@@ -1901,7 +1901,7 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         import re
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
-        model['fields'] = ['^.x']
+        model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         m = re.search(
             r'<tr snc-mouse-down="AddFieldClick[^"]*"([^>]*?)>',
@@ -1919,7 +1919,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_root_model_stores_config_fields(self):
         o = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['^.x']):
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['$.x']):
             model = init_model(o, _get_nesting_visualizer)
         self.assertEqual(model['_config_root_type'], _get_full_class_name(o))
         self.assertEqual(model['_config_root_dotfile'], DOTFILE_NAME)
@@ -1938,11 +1938,11 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
         o = Outer()
         inner_type = _get_full_class_name(o.inner)
-        slots = [{'expr': '^.inner', 'children': {inner_type: [{'expr': '^.a'}]}}]
+        slots = [{'expr': '$.inner', 'children': {inner_type: [{'expr': '$.a'}]}}]
         with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
             model = init_model(o, _get_nesting_visualizer)
-        child = model['children']['^.inner']
-        self.assertEqual(child['fields'], ['^.a'])
+        child = model['children']['$.inner']
+        self.assertEqual(child['fields'], ['$.a'])
 
     def test_cross_type_object_field_list_uses_nested_columns(self):
         class Holder:
@@ -1950,12 +1950,12 @@ class TestNestedSlotsConfig(unittest.TestCase):
                 self.items = ['ABCdef', 'GHIjkl']
 
         o = Holder()
-        slots = [{'expr': '^.items',
-                  'children': {'builtins.str': [{'expr': '^.lower()'}]}}]
+        slots = [{'expr': '$.items',
+                  'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
         with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
             model = init_model(o, _get_nesting_visualizer)
-        child = model['children']['^.items']  # a list-visualizer model
-        self.assertEqual(child['columns'], ['^.lower()'])
+        child = model['children']['$.items']  # a list-visualizer model
+        self.assertEqual(child['columns'], ['$.lower()'])
 
     def test_cyclic_object_is_depth_capped_not_recursion_error(self):
         class Node:
@@ -1986,23 +1986,23 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_field_add_saves_with_path_scoped_signature(self):
         o = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['^.x']):
+        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['$.x']):
             model = init_model(o, _get_nesting_visualizer)
         model['adding_field'] = True
-        event = make_mouse_down_event(repr(FieldSelect(accessor='^.y')))
+        event = make_mouse_down_event(repr(FieldSelect(accessor='$.y')))
         with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
             update(event, None, model, o, _get_nesting_visualizer)
         mock_save.assert_called_once()
         args = mock_save.call_args.args
         self.assertEqual(args[0], _get_full_class_name(o))
         self.assertEqual(args[1], [])
-        self.assertIn('^.y', args[2])
+        self.assertIn('$.y', args[2])
 
 
 class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
     """A string visualizer in a field cell generates code about THAT FIELD.
 
-    The field accessor's ^ is the object; the string's ^ is the regex match.
+    The field accessor's $ is the object; the string's $ is the regex match.
     Handing the child a bound name keeps them apart, and the accessor is
     resolved back in - fully concrete here, since an object visualizer's
     generated code goes to the editor rather than into a column config.
@@ -2021,7 +2021,7 @@ class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
         get_vis = lambda v: string_visualizer if isinstance(v, str) else z_object_visualizer
 
         model = init_model(p, get_vis, eval_in_scope=eval_in_scope, var_and_exp=('p', 'p'))
-        key = '^.name'
+        key = '$.name'
         model['focused_child'] = key
         cell = model['children'][key]
         cell['search'] = "r'foo'"
@@ -2054,7 +2054,7 @@ class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
         get_vis = lambda v: string_visualizer if isinstance(v, str) else z_object_visualizer
 
         model = init_model(p, get_vis, eval_in_scope=eval_in_scope, var_and_exp=('p', 'p'))
-        key = '^.name'
+        key = '$.name'
         model['focused_child'] = key
         cell = model['children'][key]
         cell['search'] = "r'foo'"

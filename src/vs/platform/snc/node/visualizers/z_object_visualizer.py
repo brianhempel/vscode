@@ -50,7 +50,7 @@ from typing import List, Tuple, Any
 from visualizer_utils import (
     ChildEvent, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
-    strip_leading_caret, eval_caret_expr, replace_carets_in_py_exp,
+    strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
@@ -115,7 +115,7 @@ class KeyDown:
 TRIVIAL_NAMES = set(dir(object()))
 
 DEFAULT_FIELDS_FOR_TYPE = {
-    're.Match': ['^[0]', '^.start(0)', '^.end(0)'],
+    're.Match': ['$[0]', '$.start(0)', '$.end(0)'],
 }
 
 DOTFILE_NAME = '.snc_object_fields.json'
@@ -134,18 +134,18 @@ def get_fields(value):
 
 # === Dotfile operations ===
 
-def _ensure_caret_prefix(f):
-    # Field expressions only need a caret if they don't already reference the
-    # source value somewhere; a leading caret is only one of many valid forms
-    # (e.g. 'str3[^.start():]' references ^ inside an index expression).
-    return f if '^' in f else f'^{f}'
+def _ensure_dollar_prefix(f):
+    # Field expressions only need a dollar if they don't already reference the
+    # source value somewhere; a leading dollar is only one of many valid forms
+    # (e.g. 'str3[$.start():]' references $ inside an index expression).
+    return f if '$' in f else f'${f}'
 
 
 def load_fields_from_dotfile(full_class_name: str):
     """Load the raw slot list for a type from the dotfile (or None).
 
     Kept as the single root-read entry point so tests can patch it for
-    isolation. The caret-prefix normalization is applied later by parse_slots
+    isolation. The dollar-prefix normalization is applied later by parse_slots
     so it works uniformly with the nested slot format.
     """
     return load_root_slots(DOTFILE_NAME, full_class_name)
@@ -171,8 +171,8 @@ def _save_slots(model: dict) -> None:
 
 
 def _get_non_trivial_names(obj) -> list:
-    """Return sorted list of attribute accessors (e.g. '^.x') for non-trivial names."""
-    return sorted([f"^.{name}" for name in dir(obj) if name not in TRIVIAL_NAMES])
+    """Return sorted list of attribute accessors (e.g. '$.x') for non-trivial names."""
+    return sorted([f"$.{name}" for name in dir(obj) if name not in TRIVIAL_NAMES])
 
 
 def _resolve_fields(obj) -> list:
@@ -198,11 +198,11 @@ def _resolve_fields_and_children(obj, slots_config, config_path):
         loaded = slots_config
 
     if loaded is not None:
-        return parse_slots(loaded, expr_transform=_ensure_caret_prefix)
+        return parse_slots(loaded, expr_transform=_ensure_dollar_prefix)
 
     default = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
     if default is not None:
-        return parse_slots(default, expr_transform=_ensure_caret_prefix)
+        return parse_slots(default, expr_transform=_ensure_dollar_prefix)
 
     return list(_get_non_trivial_names(obj)), {}
 
@@ -230,7 +230,7 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None):
     is_error is True if evaluation raised an exception.
     """
     try:
-        val = eval_caret_expr(accessor_code, obj, eval_in_scope)
+        val = eval_dollar_expr(accessor_code, obj, eval_in_scope)
         val_str = None
     except Exception as e:
         return ('', str(e), None, True)
@@ -366,11 +366,11 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
     if isinstance(msg, ChildEvent) and get_visualizer is not None:
         _obj_ref = value
         def _child_value_getter(accessor_key, _obj=_obj_ref):
-            return eval_caret_expr(accessor_key, _obj, eval_in_scope)
+            return eval_dollar_expr(accessor_key, _obj, eval_in_scope)
         new_model, child_cmds = route_child_event(
             event, model, value, _child_value_getter, get_visualizer,
             # The field's value is bound to a name for the child, so the code it
-            # generates is caret-free and about the FIELD rather than the object.
+            # generates is dollar-free and about the FIELD rather than the object.
             var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
@@ -378,7 +378,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
         # stored row-generically - an object visualizer's generated code goes
         # straight to the editor, same as its clipboard text, so the accessor is
         # resolved all the way to a concrete path for both.
-        field_expr = replace_carets_in_py_exp(
+        field_expr = replace_dollars_in_py_exp(
             msg.child_key, [model.get('_source_expr') or link_source_expr(var_and_exp) or 'obj'])
         child_cmds = [nest_child_command(cmd, field_expr, field_expr)
                       for cmd in child_cmds]
@@ -581,7 +581,7 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
         if placeholder_args:
             continue
         key = accessor_code
-        stripped = strip_leading_caret(accessor_code)
+        stripped = strip_leading_dollar(accessor_code)
         if _is_dunder(stripped):
             continue
         pairs.append((key, val_str, is_error, accessor_code))
@@ -612,7 +612,7 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
         if key == '_overflow':
             parts.append(f'<span class="punct">+{html.escape(val)}</span>')
         elif source_expr and not is_error:
-            field_expr = replace_carets_in_py_exp(acc, [source_expr])
+            field_expr = replace_dollars_in_py_exp(acc, [source_expr])
             parts.append(render_small_field(key, val, field_expr, add_target))
         else:
             parts.append(f'<span class="field">{html.escape(key)}</span>')
@@ -675,7 +675,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
 
             can_extract = source_expr and not is_error and not placeholder_args
             if can_extract:
-                field_expr = replace_carets_in_py_exp(accessor_code, [source_expr])
+                field_expr = replace_dollars_in_py_exp(accessor_code, [source_expr])
                 exp_attr = f' snc-py-exp="{html.escape(field_expr)}" draggable="true"'
             else:
                 exp_attr = ''
@@ -729,7 +729,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 f'class="remove full-opacity-on-hover">'
                 f'<span class="snc-hover-hidden">×</span></td>'
                 f'<td snc-mouse-down="{html.escape(click_event)}" class="field-name">'
-                f'{html.escape(strip_leading_caret(accessor_code))}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
+                f'{html.escape(strip_leading_dollar(accessor_code))}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
                 f'{value_td}'
                 f'</tr>'
             )
@@ -810,7 +810,7 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eva
         f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
-        f'placeholder="^.field_name" '
+        f'placeholder="$.field_name" '
         f'spellcheck="false"'
         f'{extra_attrs} '
         f'class="obj-input" />'

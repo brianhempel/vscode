@@ -14,7 +14,7 @@ import shutil
 import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
-                              replace_carets_in_py_exp, CHILD_SOURCE_BINDER)
+                              replace_dollars_in_py_exp, CHILD_SOURCE_BINDER)
 import list_visualizer
 
 
@@ -136,7 +136,7 @@ class MockDictVisualizer:
     def can_visualize(self, value):
         return isinstance(value, dict)
     def get_fields(self, value):
-        return [f"^[{repr(k)}]" for k in value.keys()]
+        return [f"$[{repr(k)}]" for k in value.keys()]
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
@@ -153,7 +153,7 @@ class MockObjectVisualizer:
         if value is None or isinstance(value, (int, float)):
             return None
         names = sorted([name for name in dir(value) if not name.startswith('_')])
-        return [f'^.{name}' for name in names]
+        return [f'$.{name}' for name in names]
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
@@ -225,19 +225,19 @@ class TestInitModel(unittest.TestCase):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         self.assertIn('children', model)
-        self.assertIn('0\x00^', model['children'])
-        self.assertIn('1\x00^', model['children'])
+        self.assertIn('0\x00$', model['children'])
+        self.assertIn('1\x00$', model['children'])
 
     def test_child_models_come_from_child_visualizer(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
-        child_model = model['children']['0\x00^']
+        child_model = model['children']['0\x00$']
         self.assertEqual(child_model, _mock_string_vis.init_model("hello"))
 
     def test_int_child_model(self):
         lst = [42]
         model = init_model(lst, mock_get_visualizer)
-        self.assertIsNone(model['children']['0\x00^'])
+        self.assertIsNone(model['children']['0\x00$'])
 
     def test_aggregates_handled_keys(self):
         lst = ["hello", "world"]
@@ -265,7 +265,7 @@ class TestVisualize(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         matches = re.findall(r'snc-child-key="([^"]*)"', output)
         self.assertTrue(len(matches) > 0)
-        self.assertEqual(eval(html.unescape(matches[0])), '0\x00^')
+        self.assertEqual(eval(html.unescape(matches[0])), '0\x00$')
 
     def test_multiple_items_have_different_keys(self):
         lst = ["a", "b"]
@@ -273,8 +273,8 @@ class TestVisualize(unittest.TestCase):
         output = visualize(lst, model, mock_get_visualizer, None)
         matches = re.findall(r'snc-child-key="([^"]*)"', output)
         keys = {eval(html.unescape(m)) for m in matches}
-        self.assertIn('0\x00^', keys)
-        self.assertIn('1\x00^', keys)
+        self.assertIn('0\x00$', keys)
+        self.assertIn('1\x00$', keys)
 
     def test_contains_child_content(self):
         lst = ["hello"]
@@ -301,19 +301,19 @@ class TestUpdate(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         # Pre-focus the child so the mousedown dispatches; the first mousedown
         # on an unfocused child only pins focus (see TestFocusTracking).
-        model['focused_child'] = '0\x00^'
-        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
+        model['focused_child'] = '0\x00$'
+        event = make_child_mouse_event('0\x00$', 'MouseDown(index=0)')
         new_model, commands = update(event, ('x', 'x'), model, lst, mock_get_visualizer)
-        child_model = new_model['children']['0\x00^']
+        child_model = new_model['children']['0\x00$']
         self.assertIn('last_event', child_model)
 
     def test_child_event_preserves_other_children(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00$', 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertIn('1\x00^', new_model['children'])
-        self.assertNotIn('last_event', new_model['children']['1\x00^'])
+        self.assertIn('1\x00$', new_model['children'])
+        self.assertNotIn('last_event', new_model['children']['1\x00$'])
 
     def test_null_event_is_noop(self):
         lst = ["hello"]
@@ -342,15 +342,15 @@ class TestUpdate(unittest.TestCase):
 
         lst = ["x"]
         model = init_model(lst, get_vis)
-        model['focused_child'] = '0\x00^'  # see TestFocusTracking
-        event = make_child_mouse_event('0\x00^', 'X')
+        model['focused_child'] = '0\x00$'  # see TestFocusTracking
+        event = make_child_mouse_event('0\x00$', 'X')
         _, commands = update(event, None, model, lst, get_vis)
         self.assertIn('test_command', commands)
 
     def test_handled_keys_updated_after_child_event(self):
         lst = ["hello"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00$', 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn('handledKeys', new_model)
 
@@ -362,31 +362,31 @@ class TestNestedComposition(unittest.TestCase):
         lst = [[1, 2], [3, 4]]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['^[0]', '^[1]'])
-        self.assertIn('0\x00^[0]', model['children'])
-        self.assertIn('0\x00^[1]', model['children'])
-        self.assertIn('1\x00^[0]', model['children'])
-        self.assertIn('1\x00^[1]', model['children'])
+        self.assertEqual(model['columns'], ['$[0]', '$[1]'])
+        self.assertIn('0\x00$[0]', model['children'])
+        self.assertIn('0\x00$[1]', model['children'])
+        self.assertIn('1\x00$[0]', model['children'])
+        self.assertIn('1\x00$[1]', model['children'])
 
 
 class TestGetFields(unittest.TestCase):
-    """Test get_fields and eval_caret_expr integration on list_visualizer."""
+    """Test get_fields and eval_dollar_expr integration on list_visualizer."""
 
     def test_returns_string_indices(self):
         from list_visualizer import get_fields
-        self.assertEqual(get_fields([10, 20, 30]), ['^[0]', '^[1]', '^[2]'])
+        self.assertEqual(get_fields([10, 20, 30]), ['$[0]', '$[1]', '$[2]'])
 
     def test_empty_list(self):
         from list_visualizer import get_fields
         self.assertEqual(get_fields([]), [])
 
-    def test_eval_caret_expr_roundtrip(self):
+    def test_eval_dollar_expr_roundtrip(self):
         from list_visualizer import get_fields
-        from visualizer_utils import eval_caret_expr
+        from visualizer_utils import eval_dollar_expr
         lst = [10, 20, 30]
         fields = get_fields(lst)
-        self.assertEqual(eval_caret_expr(fields[0], lst), 10)
-        self.assertEqual(eval_caret_expr(fields[2], lst), 30)
+        self.assertEqual(eval_dollar_expr(fields[0], lst), 10)
+        self.assertEqual(eval_dollar_expr(fields[2], lst), 30)
 
 
 class TestTableDetection(unittest.TestCase):
@@ -396,40 +396,40 @@ class TestTableDetection(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertIn("^['name']", model['columns'])
-        self.assertIn("^['age']", model['columns'])
+        self.assertIn("$['name']", model['columns'])
+        self.assertIn("$['age']", model['columns'])
 
-    def test_list_of_strings_is_table_mode_with_caret_column(self):
+    def test_list_of_strings_is_table_mode_with_dollar_column(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['^'])
+        self.assertEqual(model['columns'], ['$'])
 
     def test_empty_list_is_table_mode(self):
         model = init_model([], mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['^'])
+        self.assertEqual(model['columns'], ['$'])
 
     def test_list_of_lists_is_table_mode(self):
         lst = [[1, 2, 3], [4, 5, 6]]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['^[0]', '^[1]', '^[2]'])
+        self.assertEqual(model['columns'], ['$[0]', '$[1]', '$[2]'])
 
-    def test_mixed_types_is_table_mode_with_caret_column(self):
+    def test_mixed_types_is_table_mode_with_dollar_column(self):
         lst = ["hello", 42]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['^'])
+        self.assertEqual(model['columns'], ['$'])
 
     def test_union_columns_from_different_field_sets(self):
         lst = [{'a': 1, 'b': 2}, {'b': 3, 'c': 4}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
         cols = model['columns']
-        self.assertIn("^['a']", cols)
-        self.assertIn("^['b']", cols)
-        self.assertIn("^['c']", cols)
+        self.assertIn("$['a']", cols)
+        self.assertIn("$['b']", cols)
+        self.assertIn("$['c']", cols)
 
     def test_list_of_objects_is_table_mode(self):
         class Point:
@@ -439,8 +439,8 @@ class TestTableDetection(unittest.TestCase):
         lst = [Point(1, 2), Point(3, 4)]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertIn('^.x', model['columns'])
-        self.assertIn('^.y', model['columns'])
+        self.assertIn('$.x', model['columns'])
+        self.assertIn('$.y', model['columns'])
 
     def test_single_item_list_of_dicts_is_table_mode(self):
         lst = [{'x': 1}]
@@ -452,8 +452,8 @@ class TestTableDetection(unittest.TestCase):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertIn("0\x00^['name']", model['children'])
-        self.assertIn("1\x00^['name']", model['children'])
+        self.assertIn("0\x00$['name']", model['children'])
+        self.assertIn("1\x00$['name']", model['children'])
 
 
 class TestTableRendering(unittest.TestCase):
@@ -471,8 +471,8 @@ class TestTableRendering(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
         unescaped = html.unescape(output)
-        self.assertIn("^['name']", unescaped)
-        self.assertIn("^['age']", unescaped)
+        self.assertIn("$['name']", unescaped)
+        self.assertIn("$['age']", unescaped)
         self.assertIn('<th', output)
 
     def test_renders_row_index_column(self):
@@ -508,8 +508,8 @@ class TestTableRendering(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
         unescaped = html.unescape(output)
-        self.assertIn("^['a']", unescaped)
-        self.assertIn("^['b']", unescaped)
+        self.assertIn("$['a']", unescaped)
+        self.assertIn("$['b']", unescaped)
         self.assertIn('<td></td>', output) # missing cell
 
     def test_string_list_renders_as_table(self):
@@ -535,7 +535,7 @@ class TestTableEventRouting(unittest.TestCase):
     def test_cell_event_routes_to_correct_cell(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
-        composite_key = "0\x00^['name']"
+        composite_key = "0\x00$['name']"
         model['focused_child'] = composite_key  # see TestFocusTracking
         event = make_child_mouse_event(composite_key, 'MouseDown(index=0)')
         new_model, commands = update(event, None, model, lst, mock_get_visualizer)
@@ -545,9 +545,9 @@ class TestTableEventRouting(unittest.TestCase):
     def test_cell_event_preserves_other_cells(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event("0\x00^['name']", 'MouseDown(index=0)')
+        event = make_child_mouse_event("0\x00$['name']", 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        bob_key = "1\x00^['name']"
+        bob_key = "1\x00$['name']"
         self.assertIn(bob_key, new_model['children'])
         bob_model = new_model['children'][bob_key]
         if bob_model and isinstance(bob_model, dict):
@@ -579,8 +579,8 @@ class TestTableEventRouting(unittest.TestCase):
 
         lst = [{'k': 'val'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['k']"  # see TestFocusTracking
-        event = make_child_mouse_event("0\x00^['k']", 'X')
+        model['focused_child'] = "0\x00$['k']"  # see TestFocusTracking
+        event = make_child_mouse_event("0\x00$['k']", 'X')
         _, commands = update(event, None, model, lst, get_vis)
         self.assertIn('table_cmd', commands)
 
@@ -633,7 +633,7 @@ class TestSmallParameter(unittest.TestCase):
         get_vis = lambda v: tracker
         lst = ["a", "b"]
         model = init_model(lst, get_vis)
-        model['focused_child'] = '1\x00^'
+        model['focused_child'] = '1\x00$'
         tracker.visualize_calls.clear()
         visualize(lst, model, get_vis, None)
         a_call = next(c for c in tracker.visualize_calls if c['value'] == 'a')
@@ -669,7 +669,7 @@ class TestSmallParameter(unittest.TestCase):
             return tracker
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['name']"
+        model['focused_child'] = "0\x00$['name']"
         tracker.visualize_calls.clear()
         visualize(lst, model, get_vis, None)
         alice_call = next(c for c in tracker.visualize_calls if c['value'] == 'Alice')
@@ -683,24 +683,24 @@ class TestFocusTracking(unittest.TestCase):
     def test_child_event_sets_focused_child(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        event = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
+        event = make_child_mouse_event('0\x00$', 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model.get('focused_child'), '0\x00^')
+        self.assertEqual(new_model.get('focused_child'), '0\x00$')
 
     def test_second_child_event_changes_focus(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        event1 = make_child_mouse_event('0\x00^', 'MouseDown(index=0)')
+        event1 = make_child_mouse_event('0\x00$', 'MouseDown(index=0)')
         model, _ = update(event1, None, model, lst, mock_get_visualizer)
-        self.assertEqual(model.get('focused_child'), '0\x00^')
-        event2 = make_child_mouse_event('1\x00^', 'MouseDown(index=0)')
+        self.assertEqual(model.get('focused_child'), '0\x00$')
+        event2 = make_child_mouse_event('1\x00$', 'MouseDown(index=0)')
         model, _ = update(event2, None, model, lst, mock_get_visualizer)
-        self.assertEqual(model.get('focused_child'), '1\x00^')
+        self.assertEqual(model.get('focused_child'), '1\x00$')
 
     def test_table_cell_event_sets_focused_child(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        composite_key = "0\x00^['name']"
+        composite_key = "0\x00$['name']"
         event = make_child_mouse_event(composite_key, 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model.get('focused_child'), composite_key)
@@ -829,11 +829,11 @@ class TestColumnAdd(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30, 'city': 'NYC'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        model['column_input_value'] = "^['ci"
-        event = make_column_mouse_event(repr(ColumnSelect(name="^['city']")))
+        model['column_input_value'] = "$['ci"
+        event = make_column_mouse_event(repr(ColumnSelect(name="$['city']")))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
-        self.assertIn("^['city']", new_model['columns'])
+        self.assertIn("$['city']", new_model['columns'])
         self.assertFalse(new_model['adding_column'])
         self.assertEqual(new_model['column_input_value'], '')
 
@@ -841,11 +841,11 @@ class TestColumnAdd(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        model['column_input_value'] = "^['age']"
+        model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
-        self.assertIn("^['age']", new_model['columns'])
+        self.assertIn("$['age']", new_model['columns'])
         self.assertFalse(new_model['adding_column'])
         self.assertEqual(new_model['column_input_value'], '')
 
@@ -864,7 +864,7 @@ class TestColumnAdd(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        event = make_column_mouse_event(repr(ColumnSelect(name="^['extra']")))
+        event = make_column_mouse_event(repr(ColumnSelect(name="$['extra']")))
         with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
@@ -893,23 +893,23 @@ class TestColumnEdit(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30, 'city': 'NYC'}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
-        model['column_input_value'] = "^['ci"
+        model['column_input_value'] = "$['ci"
         old_col = model['columns'][0]
-        event = make_column_mouse_event(repr(ColumnSelect(name="^['city']")))
+        event = make_column_mouse_event(repr(ColumnSelect(name="$['city']")))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'][0], "^['city']")
+        self.assertEqual(new_model['columns'][0], "$['city']")
         self.assertIsNone(new_model['editing_column_index'])
 
     def test_enter_commits_edit(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
-        model['column_input_value'] = "^['age']"
+        model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'][0], "^['age']")
+        self.assertEqual(new_model['columns'][0], "$['age']")
         self.assertIsNone(new_model['editing_column_index'])
 
     def test_escape_cancels_edit(self):
@@ -917,7 +917,7 @@ class TestColumnEdit(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         original_col = model['columns'][0]
         model['editing_column_index'] = 0
-        model['column_input_value'] = "^['bogus']"
+        model['column_input_value'] = "$['bogus']"
         event = make_column_key_event('Escape')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model['editing_column_index'])
@@ -931,12 +931,12 @@ class TestColumnRemove(unittest.TestCase):
     def test_remove_column_removes_from_list(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        self.assertIn("^['name']", model['columns'])
-        name_idx = model['columns'].index("^['name']")
+        self.assertIn("$['name']", model['columns'])
+        name_idx = model['columns'].index("$['name']")
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertNotIn("^['name']", new_model['columns'])
+        self.assertNotIn("$['name']", new_model['columns'])
 
     def test_remove_column_saves_dotfile(self):
         lst = [{'name': 'Alice', 'age': 30}]
@@ -949,13 +949,13 @@ class TestColumnRemove(unittest.TestCase):
     def test_remove_column_cleans_up_children(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
-        name_idx = model['columns'].index("^['name']")
-        self.assertIn("0\x00^['name']", model['children'])
+        name_idx = model['columns'].index("$['name']")
+        self.assertIn("0\x00$['name']", model['children'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertNotIn("0\x00^['name']", new_model['children'])
-        self.assertNotIn("1\x00^['name']", new_model['children'])
+        self.assertNotIn("0\x00$['name']", new_model['children'])
+        self.assertNotIn("1\x00$['name']", new_model['children'])
 
     def test_remove_out_of_range_is_noop(self):
         lst = [{'name': 'Alice'}]
@@ -969,7 +969,7 @@ class TestColumnRemove(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
-        model['column_input_value'] = "^['name']"
+        model['column_input_value'] = "$['name']"
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
@@ -1053,12 +1053,12 @@ class TestColumnMenu(unittest.TestCase):
     def test_menu_removes_column_and_closes(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        name_idx = model['columns'].index("^['name']")
+        name_idx = model['columns'].index("$['name']")
         model['openDropdown'] = {'id': f'col-menu-{name_idx}'}
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertNotIn("^['name']", new_model['columns'])
+        self.assertNotIn("$['name']", new_model['columns'])
         self.assertIsNone(new_model['openDropdown'])
 
     def test_column_edits_close_an_open_menu(self):
@@ -1168,7 +1168,7 @@ class TestColumnKeyboard(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        model['column_input_value'] = "^['na"
+        model['column_input_value'] = "$['na"
         event = make_column_key_event('Escape')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertFalse(new_model['adding_column'])
@@ -1237,16 +1237,16 @@ class TestColumnKeyboard(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        event = make_column_input_event("^['na")
+        event = make_column_input_event("$['na")
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['column_input_value'], "^['na")
+        self.assertEqual(new_model['column_input_value'], "$['na")
 
     def test_column_input_auto_highlights_first_suggestion(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         model['columns'] = []
-        event = make_column_input_event("^['n")
+        event = make_column_input_event("$['n")
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['selected_suggestion_index'], 0)
 
@@ -1255,7 +1255,7 @@ class TestColumnKeyboard(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         model['selected_suggestion_index'] = 0
-        event = make_column_input_event("^['zzzzz")
+        event = make_column_input_event("$['zzzzz")
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model['selected_suggestion_index'])
 
@@ -1266,21 +1266,21 @@ class TestColumnAutocomplete(unittest.TestCase):
     def test_get_all_possible_columns_from_dicts(self):
         lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'city': 'NYC'}]
         cols = _get_all_possible_columns(lst, mock_get_visualizer)
-        self.assertIn("^['name']", cols)
-        self.assertIn("^['age']", cols)
-        self.assertIn("^['city']", cols)
+        self.assertIn("$['name']", cols)
+        self.assertIn("$['age']", cols)
+        self.assertIn("$['city']", cols)
 
     def test_get_column_suggestions_filters_existing(self):
         lst = [{'name': 'Alice', 'age': 30}]
-        suggestions = _get_column_suggestions(lst, mock_get_visualizer, ["^['name']"], '')
-        self.assertNotIn("^['name']", suggestions)
-        self.assertIn("^['age']", suggestions)
+        suggestions = _get_column_suggestions(lst, mock_get_visualizer, ["$['name']"], '')
+        self.assertNotIn("$['name']", suggestions)
+        self.assertIn("$['age']", suggestions)
 
     def test_get_column_suggestions_filters_by_prefix(self):
         lst = [{'name': 'Alice', 'age': 30}]
-        suggestions = _get_column_suggestions(lst, mock_get_visualizer, [], "^['n")
-        self.assertIn("^['name']", suggestions)
-        self.assertNotIn("^['age']", suggestions)
+        suggestions = _get_column_suggestions(lst, mock_get_visualizer, [], "$['n")
+        self.assertIn("$['name']", suggestions)
+        self.assertNotIn("$['age']", suggestions)
 
     def test_get_all_possible_columns_empty_list(self):
         self.assertEqual(_get_all_possible_columns([], mock_get_visualizer), [])
@@ -1292,8 +1292,8 @@ class TestColumnAutocomplete(unittest.TestCase):
                 self.y = y
         lst = [Point(1, 2), Point(3, 4)]
         cols = _get_all_possible_columns(lst, mock_get_visualizer)
-        self.assertIn('^.x', cols)
-        self.assertIn('^.y', cols)
+        self.assertIn('$.x', cols)
+        self.assertIn('$.y', cols)
 
 
 class TestColumnDotfile(unittest.TestCase):
@@ -1320,15 +1320,15 @@ class TestColumnDotfile(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_save_and_load_columns(self):
-        save_columns_to_dotfile('builtins.dict', [], ["^['name']", "^['age']"])
+        save_columns_to_dotfile('builtins.dict', [], ["$['name']", "$['age']"])
         result = load_columns_from_dotfile('builtins.dict')
-        self.assertEqual(result, [{'expr': "^['name']"}, {'expr': "^['age']"}])
+        self.assertEqual(result, [{'expr': "$['name']"}, {'expr': "$['age']"}])
 
     def test_save_preserves_other_types(self):
-        save_columns_to_dotfile('type.A', [], ['^.x'])
-        save_columns_to_dotfile('type.B', [], ['^.y'])
-        self.assertEqual(load_columns_from_dotfile('type.A'), [{'expr': '^.x'}])
-        self.assertEqual(load_columns_from_dotfile('type.B'), [{'expr': '^.y'}])
+        save_columns_to_dotfile('type.A', [], ['$.x'])
+        save_columns_to_dotfile('type.B', [], ['$.y'])
+        self.assertEqual(load_columns_from_dotfile('type.A'), [{'expr': '$.x'}])
+        self.assertEqual(load_columns_from_dotfile('type.B'), [{'expr': '$.y'}])
 
     def test_load_corrupt_file(self):
         with open(COLUMN_DOTFILE_NAME, 'w') as f:
@@ -1349,18 +1349,18 @@ class TestColumnDotfile(unittest.TestCase):
         self.assertIn('Foo', key)
 
     def test_init_model_loads_from_dotfile(self):
-        save_columns_to_dotfile('builtins.dict', [], ["^['age']", "^['name']"])
+        save_columns_to_dotfile('builtins.dict', [], ["$['age']", "$['name']"])
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ["^['age']", "^['name']"])
+        self.assertEqual(model['columns'], ["$['age']", "$['name']"])
 
     def test_init_model_falls_back_when_no_dotfile(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertIn("^['name']", model['columns'])
-        self.assertIn("^['age']", model['columns'])
+        self.assertIn("$['name']", model['columns'])
+        self.assertIn("$['age']", model['columns'])
 
 
 class TestColumnVisualize(unittest.TestCase):
@@ -1405,7 +1405,7 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        model['column_input_value'] = "^['na"
+        model['column_input_value'] = "$['na"
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('<input', output)
         self.assertIn('snc-input', output)
@@ -1415,7 +1415,7 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
-        model['column_input_value'] = "^['name']"
+        model['column_input_value'] = "$['name']"
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('<input', output)
         self.assertIn('snc-select-all', output)
@@ -1425,7 +1425,7 @@ class TestColumnVisualize(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         model['columns'] = []
-        model['column_input_value'] = "^['"
+        model['column_input_value'] = "$['"
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('ColumnSelect', output)
         self.assertIn('snc-dropdown-panel', output)
@@ -1442,14 +1442,14 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
-        model['column_input_value'] = "^['name']"
+        model['column_input_value'] = "$['name']"
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('autofocus', output)
 
     def test_child_events_still_route_in_table_mode(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        composite_key = "0\x00^['name']"
+        composite_key = "0\x00$['name']"
         model['focused_child'] = composite_key  # see TestFocusTracking
         event = make_child_mouse_event(composite_key, 'MouseDown(index=0)')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
@@ -1469,10 +1469,10 @@ class TestColumnManagementForStringLists(unittest.TestCase):
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertTrue(new_model['adding_column'])
 
-    def test_remove_caret_column_from_string_list(self):
+    def test_remove_dollar_column_from_string_list(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(model['columns'], ['^'])
+        self.assertEqual(model['columns'], ['$'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
         with patch('list_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
@@ -1497,7 +1497,7 @@ class TestColumnHeaderExpression(unittest.TestCase):
         self.assertEqual(model['display_mode'], 'table')
         self.assertEqual(model.get('_source_expr'), 'people')
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        # Column ^['name'] -> [item['name'] for item in people]
+        # Column $['name'] -> [item['name'] for item in people]
         self.assertIn("snc-py-exp", html_output)
         expected_expr = html.escape("[item['name'] for item in people]")
         self.assertIn(f'snc-py-exp="{expected_expr}"', html_output)
@@ -1561,7 +1561,7 @@ class TestCellDraggablePyExp(unittest.TestCase):
         wrapper - it needs its mouse events."""
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
-        model['focused_child'] = f"0{CELL_KEY_SEP}^['name']"
+        model['focused_child'] = f"0{CELL_KEY_SEP}$['name']"
         html_output = visualize(lst, model, mock_get_visualizer, None)
         expected_expr = html.escape("people[0]['name']")
         # No drag wrapper around the focused cell.
@@ -1641,7 +1641,7 @@ class TestSourceExprInModel(unittest.TestCase):
 from list_visualizer import (
     SearchBoxInput, FirstMatchToggle, ActionButtonClick, DropdownToggle,
     CopyToClipboard,
-    parse_search_term, needs_implicit_caret,
+    parse_search_term, needs_implicit_dollar,
     _get_search_context, generate_action, _get_matching_indices,
     compose_column_searches,
 )
@@ -1718,8 +1718,8 @@ class TestParseSearchTerm(unittest.TestCase):
         self.assertEqual(result, ('slice', ('', '5')))
 
     def test_bare_expression(self):
-        result = parse_search_term('^ > 100')
-        self.assertEqual(result, ('expr', '^ > 100'))
+        result = parse_search_term('$ > 100')
+        self.assertEqual(result, ('expr', '$ > 100'))
 
     def test_integer_literal_is_expr(self):
         result = parse_search_term('5')
@@ -1729,9 +1729,9 @@ class TestParseSearchTerm(unittest.TestCase):
         result = parse_search_term('[1,3,5]')
         self.assertEqual(result, ('expr', '[1,3,5]'))
 
-    def test_predicate_with_caret(self):
-        result = parse_search_term('^.name == "Alice"')
-        self.assertEqual(result, ('expr', '^.name == "Alice"'))
+    def test_predicate_with_dollar(self):
+        result = parse_search_term('$.name == "Alice"')
+        self.assertEqual(result, ('expr', '$.name == "Alice"'))
 
     def test_complex_slice(self):
         result = parse_search_term('len(x):')
@@ -1742,59 +1742,59 @@ class TestParseSearchTerm(unittest.TestCase):
         self.assertNotEqual(result[0], 'slice')
 
 
-class TestNeedsImplicitCaret(unittest.TestCase):
-    """Test detection of binary operators needing implicit ^ prepend."""
+class TestNeedsImplicitDollar(unittest.TestCase):
+    """Test detection of binary operators needing implicit $ prepend."""
 
     def test_greater_than(self):
-        self.assertTrue(needs_implicit_caret('> 100'))
+        self.assertTrue(needs_implicit_dollar('> 100'))
 
     def test_less_than(self):
-        self.assertTrue(needs_implicit_caret('< 50'))
+        self.assertTrue(needs_implicit_dollar('< 50'))
 
     def test_greater_equal(self):
-        self.assertTrue(needs_implicit_caret('>= 10'))
+        self.assertTrue(needs_implicit_dollar('>= 10'))
 
     def test_less_equal(self):
-        self.assertTrue(needs_implicit_caret('<= 10'))
+        self.assertTrue(needs_implicit_dollar('<= 10'))
 
     def test_double_equals(self):
-        self.assertTrue(needs_implicit_caret('== "hello"'))
+        self.assertTrue(needs_implicit_dollar('== "hello"'))
 
     def test_not_equals(self):
-        self.assertTrue(needs_implicit_caret('!= 0'))
+        self.assertTrue(needs_implicit_dollar('!= 0'))
 
     def test_in_operator(self):
-        self.assertTrue(needs_implicit_caret('in [1,2,3]'))
+        self.assertTrue(needs_implicit_dollar('in [1,2,3]'))
 
     def test_not_in_operator(self):
-        self.assertTrue(needs_implicit_caret('not in [1,2,3]'))
+        self.assertTrue(needs_implicit_dollar('not in [1,2,3]'))
 
     def test_is_operator(self):
-        self.assertTrue(needs_implicit_caret('is None'))
+        self.assertTrue(needs_implicit_dollar('is None'))
 
     def test_is_not_operator(self):
-        self.assertTrue(needs_implicit_caret('is not None'))
+        self.assertTrue(needs_implicit_dollar('is not None'))
 
     def test_dot_attribute(self):
-        self.assertTrue(needs_implicit_caret('.startswith("foo")'))
+        self.assertTrue(needs_implicit_dollar('.startswith("foo")'))
 
-    def test_no_implicit_for_caret_expr(self):
-        self.assertFalse(needs_implicit_caret('^ > 100'))
+    def test_no_implicit_for_dollar_expr(self):
+        self.assertFalse(needs_implicit_dollar('$ > 100'))
 
     def test_no_implicit_for_integer(self):
-        self.assertFalse(needs_implicit_caret('5'))
+        self.assertFalse(needs_implicit_dollar('5'))
 
     def test_no_implicit_for_list(self):
-        self.assertFalse(needs_implicit_caret('[1,2,3]'))
+        self.assertFalse(needs_implicit_dollar('[1,2,3]'))
 
     def test_no_implicit_for_variable(self):
-        self.assertFalse(needs_implicit_caret('len(^) > 3'))
+        self.assertFalse(needs_implicit_dollar('len($) > 3'))
 
     def test_no_implicit_for_none(self):
-        self.assertFalse(needs_implicit_caret('None'))
+        self.assertFalse(needs_implicit_dollar('None'))
 
     def test_with_leading_whitespace(self):
-        self.assertTrue(needs_implicit_caret(' > 100'))
+        self.assertTrue(needs_implicit_dollar(' > 100'))
 
 
 class TestGetMatchingIndices(unittest.TestCase):
@@ -1802,15 +1802,15 @@ class TestGetMatchingIndices(unittest.TestCase):
 
     def test_predicate_match(self):
         lst = [10, 20, 30, 40, 50]
-        indices = _get_matching_indices('^ > 25', lst, eval)
+        indices = _get_matching_indices('$ > 25', lst, eval)
         self.assertEqual(indices, [2, 3, 4])
 
     def test_predicate_no_match(self):
         lst = [1, 2, 3]
-        indices = _get_matching_indices('^ > 100', lst, eval)
+        indices = _get_matching_indices('$ > 100', lst, eval)
         self.assertEqual(indices, [])
 
-    def test_implicit_caret(self):
+    def test_implicit_dollar(self):
         lst = [10, 20, 30]
         indices = _get_matching_indices('> 15', lst, eval)
         self.assertEqual(indices, [1, 2])
@@ -1842,7 +1842,7 @@ class TestGetMatchingIndices(unittest.TestCase):
 
     def test_predicate_with_equality(self):
         lst = ['alice', 'bob', 'alice']
-        indices = _get_matching_indices('^ == "alice"', lst, eval)
+        indices = _get_matching_indices('$ == "alice"', lst, eval)
         self.assertEqual(indices, [0, 2])
 
 
@@ -1866,9 +1866,9 @@ class TestSearchesSeeTheProgramScope(unittest.TestCase):
     def test_predicate_names_a_variable(self):
         lst = ['a', 'b', 'c']
         scope = program_scope(s='a')
-        self.assertEqual(_get_matching_indices('^ == s', lst, scope), [0])
+        self.assertEqual(_get_matching_indices('$ == s', lst, scope), [0])
 
-    def test_implicit_caret_predicate_names_a_variable(self):
+    def test_implicit_dollar_predicate_names_a_variable(self):
         lst = ['a', 'b', 'c']
         scope = program_scope(s='a')
         self.assertEqual(_get_matching_indices('== s', lst, scope), [0])
@@ -1876,26 +1876,26 @@ class TestSearchesSeeTheProgramScope(unittest.TestCase):
     def test_predicate_names_a_function(self):
         lst = [1, 2, 3, 4]
         scope = program_scope(is_even=lambda n: n % 2 == 0)
-        self.assertEqual(_get_matching_indices('is_even(^)', lst, scope),
+        self.assertEqual(_get_matching_indices('is_even($)', lst, scope),
                          [1, 3])
 
     def test_predicate_names_a_collection_to_test_membership(self):
         lst = ['a', 'b', 'c']
         scope = program_scope(keep=['a', 'c'])
-        self.assertEqual(_get_matching_indices('^ in keep', lst, scope),
+        self.assertEqual(_get_matching_indices('$ in keep', lst, scope),
                          [0, 2])
 
-    def test_the_array_is_still_two_carets(self):
-        # ^^ is bound by the matcher itself, so reaching into the program's
+    def test_the_array_is_still_two_dollars(self):
+        # $$ is bound by the matcher itself, so reaching into the program's
         # scope must not cost the bindings the matcher supplies.
         lst = [1, 5, 3, 5]
         scope = program_scope(max=max)
-        self.assertEqual(_get_matching_indices('^ == max(^^)', lst, scope),
+        self.assertEqual(_get_matching_indices('$ == max($$)', lst, scope),
                          [1, 3])
 
     def test_an_unknown_name_matches_nothing(self):
         lst = ['a', 'b', 'c']
-        self.assertEqual(_get_matching_indices('^ == nope', lst,
+        self.assertEqual(_get_matching_indices('$ == nope', lst,
                                                program_scope()), [])
 
     def test_a_column_search_naming_a_variable_matches_rows(self):
@@ -1904,15 +1904,15 @@ class TestSearchesSeeTheProgramScope(unittest.TestCase):
         # resolve against.
         lst = ['a', 'b', 'c']
         scope = program_scope(s='a')
-        composed = compose_column_searches(['^'], {'^': {'op': '==',
+        composed = compose_column_searches(['$'], {'$': {'op': '==',
                                                          'text': 's'}}, scope)
-        self.assertEqual(composed, '^ == s')
+        self.assertEqual(composed, '$ == s')
         self.assertEqual(_get_matching_indices(composed, lst, scope), [0])
 
     def test_count_counts_the_matches_of_a_search_naming_a_variable(self):
         lst = ['a', 'b', 'c']
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ == s'
+        model['search'] = '$ == s'
         output = visualize(lst, model, mock_get_visualizer,
                            program_scope(s='a', strs=lst))
         self.assertIn('Count: 1', output)
@@ -1920,7 +1920,7 @@ class TestSearchesSeeTheProgramScope(unittest.TestCase):
     def test_only_the_matching_row_is_highlighted_for_a_search_naming_a_variable(self):
         lst = ['a', 'b', 'c']
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ == s'
+        model['search'] = '$ == s'
         output = visualize(lst, model, mock_get_visualizer,
                            program_scope(s='a', strs=lst))
         self.assertEqual(output.count('class="row-match"'), 1)
@@ -1933,7 +1933,7 @@ class TestGetSearchContext(unittest.TestCase):
     """Test _get_search_context builds correct context dicts."""
 
     def test_predicate_context(self):
-        model = {'search': '^ > 100', 'first_match': False}
+        model = {'search': '$ > 100', 'first_match': False}
         ctx = _get_search_context(model, var_and_exp=('data', 'data'), eval_in_scope=eval)
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx['source_expr'], 'data')
@@ -1963,7 +1963,7 @@ class TestGetSearchContext(unittest.TestCase):
         self.assertTrue(ctx['is_multi_index'])
         self.assertEqual(ctx['indices_expr'], '[1,3,5]')
 
-    def test_implicit_caret_in_context(self):
+    def test_implicit_dollar_in_context(self):
         model = {'search': '> 100', 'first_match': False}
         ctx = _get_search_context(model, var_and_exp=('data', 'data'), eval_in_scope=eval)
         self.assertIsNotNone(ctx)
@@ -1971,7 +1971,7 @@ class TestGetSearchContext(unittest.TestCase):
         self.assertEqual(ctx['predicate_expr'], 'item > 100')
 
     def test_first_match_flag(self):
-        model = {'search': '^ > 100', 'first_match': True}
+        model = {'search': '$ > 100', 'first_match': True}
         ctx = _get_search_context(model, var_and_exp=('data', 'data'), eval_in_scope=eval)
         self.assertTrue(ctx['is_first'])
 
@@ -1981,7 +1981,7 @@ class TestGetSearchContext(unittest.TestCase):
         self.assertIsNone(ctx)
 
     def test_no_source_returns_none(self):
-        model = {'search': '^ > 0', 'first_match': False}
+        model = {'search': '$ > 0', 'first_match': False}
         ctx = _get_search_context(model, eval_in_scope=eval)
         self.assertIsNone(ctx)
 
@@ -2586,14 +2586,14 @@ class TestSearchBoxInput(unittest.TestCase):
     def test_search_input_sets_model_search(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        event = make_search_input_event('^ > 15')
+        event = make_search_input_event('$ > 15')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['search'], '^ > 15')
+        self.assertEqual(new_model['search'], '$ > 15')
 
     def test_empty_search_input_clears_search(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_search_input_event('')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model.get('search'))
@@ -2602,7 +2602,7 @@ class TestSearchBoxInput(unittest.TestCase):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         original_columns = list(model['columns'])
-        event = make_search_input_event('^ > 15')
+        event = make_search_input_event('$ > 15')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'], original_columns)
 
@@ -2614,7 +2614,7 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
     def test_first_search_input_auto_inserts_linked_filter(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        event = make_search_input_event('^ > 15')
+        event = make_search_input_event('$ > 15')
         new_model, commands = update(event, ('data', 'data'), model, lst,
                                      mock_get_visualizer, eval_in_scope=eval)
 
@@ -2628,11 +2628,11 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
     def test_second_search_input_updates_via_change_selected_text(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model, first = update(make_search_input_event('^ > 15'), ('data', 'data'),
+        model, first = update(make_search_input_event('$ > 15'), ('data', 'data'),
                               model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertIsInstance(first[0], tuple)
 
-        model, commands = update(make_search_input_event('^ > 25'), ('data', 'data'),
+        model, commands = update(make_search_input_event('$ > 25'), ('data', 'data'),
                                  model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
         self.assertIsInstance(commands[0], ChangeSelectedText)
@@ -2644,7 +2644,7 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model, commands = update(
-            make_search_input_event('^ > 15'),
+            make_search_input_event('$ > 15'),
             (None, 'data'),
             model,
             lst,
@@ -2668,7 +2668,7 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         # var_and_exp=None -> no source context -> no auto-insert.
-        new_model, commands = update(make_search_input_event('^ > 15'), None,
+        new_model, commands = update(make_search_input_event('$ > 15'), None,
                                      model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(commands, [])
         self.assertIsNone(new_model.get('linked_action'))
@@ -2680,7 +2680,7 @@ class TestActionButtonClickAutoLinks(unittest.TestCase):
     def test_action_button_click_inserts_and_links(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, commands = update(make_action_button_event('filter'),
                                  ('data', 'data'), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval)
@@ -2694,12 +2694,12 @@ class TestActionButtonClickAutoLinks(unittest.TestCase):
     def test_next_interaction_updates_in_place(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, first = update(make_action_button_event('filter'),
                               ('data', 'data'), model, lst,
                               mock_get_visualizer, eval_in_scope=eval)
         self.assertTrue(any(isinstance(c, tuple) for c in first))
-        model, commands = update(make_search_input_event('^ > 25'),
+        model, commands = update(make_search_input_event('$ > 25'),
                                  ('data', 'data'), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval)
         self.assertFalse(any(isinstance(c, tuple) for c in commands))
@@ -2708,7 +2708,7 @@ class TestActionButtonClickAutoLinks(unittest.TestCase):
     def test_copy_click_does_not_link(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, commands = update(make_action_button_event('filter', copy=True),
                                  ('data', 'data'), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval)
@@ -2722,7 +2722,7 @@ class TestNoUnlinkButtonInActionBar(unittest.TestCase):
     def test_linked_render_has_no_unlink_button(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['linked_action'] = 'filter'
         html_out = visualize(lst, model, mock_get_visualizer, None)
         self.assertNotIn('Unlink', html_out)
@@ -2754,7 +2754,7 @@ class TestActionButtonClick(unittest.TestCase):
     def test_filter_action_emits_new_code(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_action_button_event('filter', copy=False)
         _, commands = update(event, ('data', 'data'), model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
@@ -2766,7 +2766,7 @@ class TestActionButtonClick(unittest.TestCase):
     def test_filter_copy_emits_clipboard(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_action_button_event('filter', copy=True)
         _, commands = update(event, ('data', 'data'), model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
@@ -2830,7 +2830,7 @@ class TestActionButtonClick(unittest.TestCase):
     def test_join_action_with_search_emits_code(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_action_button_event("join:','", copy=False)
         _, commands = update(event, ('data', 'data'), model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
@@ -2852,7 +2852,7 @@ class TestActionButtonClick(unittest.TestCase):
     def test_join_copy_emits_clipboard(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_action_button_event("join:'\\n'", copy=True)
         _, commands = update(event, ('data', 'data'), model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
@@ -2874,7 +2874,7 @@ class TestActionButtonClick(unittest.TestCase):
     def test_join_enter_key_with_custom_sep(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['openDropdown'] = {'id': 'action-join', 'customSep': "' | '"}
         event = make_search_key_event('Enter')
         new_model, commands = update(event, ('data', 'data'), model, lst,
@@ -2951,9 +2951,9 @@ class TestSearchBoxRendering(unittest.TestCase):
     def test_search_box_shows_current_value(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('value="^ &gt; 15"', output)
+        self.assertIn('value="$ &gt; 15"', output)
 
     def test_first_match_toggle_rendered(self):
         lst = [10, 20, 30]
@@ -2995,28 +2995,28 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_action_buttons_rendered_when_not_small(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('ActionButtonClick', output)
 
     def test_action_buttons_hidden_when_small(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None, small=True)
         self.assertNotIn('ActionButtonClick', output)
 
     def test_filter_button_present(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn("action=&#x27;filter&#x27;", output)
 
     def test_filter_label_changes_with_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Find One', output)
@@ -3024,7 +3024,7 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_filter_label_without_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = False
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Filter', output)
@@ -3032,7 +3032,7 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_loop_dropdown_trigger_present(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('snc-dropdown-trigger', output)
         self.assertIn('Loop', output)
@@ -3040,7 +3040,7 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_delete_button_label_changes_with_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Delete First', output)
@@ -3048,7 +3048,7 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_delete_button_label_without_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = False
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Delete All', output)
@@ -3056,7 +3056,7 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_find_indices_button_label(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('First Index', output)
@@ -3078,14 +3078,14 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_count_button_present(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn("action=&#x27;count&#x27;", output)
 
     def test_count_disabled_in_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         count_pos = output.find("action=&#x27;count&#x27;, copy=False")
@@ -3098,7 +3098,7 @@ class TestActionButtonsRendering(unittest.TestCase):
     def test_question_dropdown_button(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         # The Any/All trigger is a hover-menu (no DropdownToggle event); look
         # for the panel options to confirm it's rendered.
@@ -3112,7 +3112,7 @@ class TestActionButtonsRendering(unittest.TestCase):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertIn('data-action-expr=', output)
 
@@ -3179,21 +3179,21 @@ class TestRowHighlighting(unittest.TestCase):
     def test_matched_rows_have_border(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertIn('row-match', output)
 
     def test_unmatched_rows_dimmed(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertIn('row-dim', output)
 
     def test_all_rows_present(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertIn('>10<', output)
         self.assertIn('>20<', output)
@@ -3211,7 +3211,7 @@ class TestRowHighlighting(unittest.TestCase):
     def test_first_match_mode_highlights_only_first(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, eval)
         border_count = output.count('row-match')
@@ -3223,7 +3223,7 @@ class TestRowHighlighting(unittest.TestCase):
     def test_no_hidden_rows_message(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertNotIn('rows hidden', output)
         self.assertNotIn('row hidden', output)
@@ -3245,7 +3245,7 @@ class TestEnterKeyFilter(unittest.TestCase):
     def test_enter_triggers_filter(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_search_key_event('Enter')
         _, commands = update(event, ('data', 'data'), model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
@@ -3267,15 +3267,15 @@ class TestEnterKeyFilter(unittest.TestCase):
         path doesn't filter; any auto-inserted LOC is the broad-link fallback)."""
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['adding_column'] = True
-        model['column_input_value'] = '^.x'
+        model['column_input_value'] = '$.x'
         event = make_search_key_event('Enter')
         new_model, commands = update(event, ('data', 'data'), model, lst,
                                      mock_get_visualizer, eval_in_scope=eval)
         # The column was committed (not left in adding-column state).
         self.assertFalse(new_model['adding_column'])
-        self.assertIn('^.x', new_model['columns'])
+        self.assertIn('$.x', new_model['columns'])
 
 
 class TestCmdDeleteKey(unittest.TestCase):
@@ -3284,7 +3284,7 @@ class TestCmdDeleteKey(unittest.TestCase):
     def test_cmd_backspace_triggers_delete(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         event = make_search_key_event('Backspace', meta=True)
         _, commands = update(event, ('data', 'data'), model, lst,
                              mock_get_visualizer, eval_in_scope=eval)
@@ -3308,7 +3308,7 @@ class TestLoopDropdown(unittest.TestCase):
     def test_loop_dropdown_rendered(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Loop', output)
         # Loop is now a hover-menu (data-hover-menu); options live in the
@@ -3318,7 +3318,7 @@ class TestLoopDropdown(unittest.TestCase):
     def test_loop_dropdown_options_when_open(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['openDropdown'] = {'id': 'action-loop'}
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('loop_no_idx', output)
@@ -3328,7 +3328,7 @@ class TestLoopDropdown(unittest.TestCase):
     def test_loop_dropdown_disabled_in_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         loop_pos = output.find('Loop')
@@ -3357,7 +3357,7 @@ class TestJoinDropdown(unittest.TestCase):
         # markup + JoinSeparatorInput row is always rendered.
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('Join', output)
         self.assertIn('JoinSeparatorInput', output)
@@ -3365,7 +3365,7 @@ class TestJoinDropdown(unittest.TestCase):
     def test_join_dropdown_disabled_in_first_match(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         output = visualize(lst, model, mock_get_visualizer, None)
         join_pos = output.find('Join')
@@ -3412,7 +3412,7 @@ class TestJoinDropdown(unittest.TestCase):
     def test_join_dropdown_highlighted_when_linked(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['linked_action'] = 'join'
         output = visualize(lst, model, mock_get_visualizer, None)
         join_pos = output.find('Join')
@@ -3426,7 +3426,7 @@ class TestJoinDropdown(unittest.TestCase):
     def test_join_dropdown_options_when_open(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['openDropdown'] = {'id': 'action-join'}
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn("join:&#x27;&#x27;", output)
@@ -3436,7 +3436,7 @@ class TestJoinDropdown(unittest.TestCase):
     def test_join_custom_input_present(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['openDropdown'] = {'id': 'action-join'}
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('JoinSeparatorInput', output)
@@ -3465,34 +3465,34 @@ class TestPredicatePreview(unittest.TestCase):
         return visualize(lst, model, mock_get_visualizer, self._scope(lst))
 
     def test_any_shows_true_when_predicate_matches(self):
-        out = self._viz([10, 20, 30], '^ > 15')
+        out = self._viz([10, 20, 30], '$ > 15')
         self.assertIn('Any (<span class="snc-code">True</span>)', out)
 
     def test_any_shows_false_when_no_match(self):
-        out = self._viz([10, 20, 30], '^ > 100')
+        out = self._viz([10, 20, 30], '$ > 100')
         self.assertIn('Any (<span class="snc-code">False</span>)', out)
 
     def test_if_any_shows_preview(self):
-        out = self._viz([10, 20, 30], '^ > 15')
+        out = self._viz([10, 20, 30], '$ > 15')
         self.assertIn('If Any (<span class="snc-code">True</span>)', out)
 
     def test_all_shows_true_when_all_match(self):
-        out = self._viz([10, 20, 30], '^ > 5')
+        out = self._viz([10, 20, 30], '$ > 5')
         self.assertIn('All (<span class="snc-code">True</span>)', out)
 
     def test_all_shows_false_when_not_all_match(self):
-        out = self._viz([10, 20, 30], '^ > 15')
+        out = self._viz([10, 20, 30], '$ > 15')
         self.assertIn('All (<span class="snc-code">False</span>)', out)
 
     def test_if_all_shows_preview(self):
-        out = self._viz([10, 20, 30], '^ > 5')
+        out = self._viz([10, 20, 30], '$ > 5')
         self.assertIn('If All (<span class="snc-code">True</span>)', out)
 
     def test_no_preview_without_source_expr(self):
         # Without a source expr the expression can't be built, so no suffix.
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         out = visualize(lst, model, mock_get_visualizer, self._scope(lst))
         self.assertNotIn('Any (<span class="snc-code">', out)
 
@@ -3500,12 +3500,12 @@ class TestPredicatePreview(unittest.TestCase):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         out = visualize(lst, model, mock_get_visualizer, None)
         self.assertNotIn('Any (<span class="snc-code">', out)
 
     def test_all_no_preview_in_first_match_mode(self):
-        out = self._viz([10, 20, 30], '^ > 15', first_match=True)
+        out = self._viz([10, 20, 30], '$ > 15', first_match=True)
         # All is disabled in first-match mode → no suffix, but Any still previews.
         self.assertNotIn('All (<span class="snc-code">', out)
         self.assertIn('Any (<span class="snc-code">True</span>)', out)
@@ -3538,7 +3538,7 @@ class TestScrollToMatch(unittest.TestCase):
         """SearchBoxInput sets _scroll_to_match, first match row gets attribute."""
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        event = make_search_input_event('^ > 15')
+        event = make_search_input_event('$ > 15')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertTrue(new_model.get('_scroll_to_match'))
         output = visualize(lst, new_model, mock_get_visualizer, eval)
@@ -3548,7 +3548,7 @@ class TestScrollToMatch(unittest.TestCase):
         """Attribute appears on the first matched row, not subsequent matches."""
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 10'
+        model['search'] = '$ > 10'
         model['_scroll_to_match'] = True
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertEqual(output.count('snc-scroll-to-match'), 1)
@@ -3557,7 +3557,7 @@ class TestScrollToMatch(unittest.TestCase):
         """Without _scroll_to_match flag, no attribute even with matches."""
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertNotIn('snc-scroll-to-match', output)
 
@@ -3573,7 +3573,7 @@ class TestScrollToMatch(unittest.TestCase):
         """No attribute when search has no matches."""
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 100'
+        model['search'] = '$ > 100'
         model['_scroll_to_match'] = True
         output = visualize(lst, model, mock_get_visualizer, eval)
         self.assertNotIn('snc-scroll-to-match', output)
@@ -3591,7 +3591,7 @@ class TestScrollToMatch(unittest.TestCase):
         """In first-match mode, attribute still appears on the single match."""
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['first_match'] = True
         model['_scroll_to_match'] = True
         output = visualize(lst, model, mock_get_visualizer, eval)
@@ -3601,7 +3601,7 @@ class TestScrollToMatch(unittest.TestCase):
         """The attribute should be on a <tr> element."""
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model['_scroll_to_match'] = True
         output = visualize(lst, model, mock_get_visualizer, eval)
         idx = output.find('snc-scroll-to-match')
@@ -3639,7 +3639,7 @@ class TestRelinkViaChainIcon(unittest.TestCase):
     def _linked_then_unlinked(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, _ = update(make_action_button_event('filter'), ('data', 'data'),
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_unlink_event(), ('data', 'data'),
@@ -3673,7 +3673,7 @@ class TestRelinkViaChainIcon(unittest.TestCase):
     def test_relink_defaults_to_auto_link_action_when_none_stashed(self):
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, _ = update(make_relink_event('insert'), ('data', 'data'),
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['linked_action'], 'filter')
@@ -3717,7 +3717,7 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
         model, _ = update(make_relink_event('takeover', text=self.line),
                           self.var_and_exp, model, self.lst,
                           mock_get_visualizer, eval_in_scope=eval)
-        model, commands = update(make_search_input_event('^ > 2'),
+        model, commands = update(make_search_input_event('$ > 2'),
                                  self.var_and_exp, model, self.lst,
                                  mock_get_visualizer, eval_in_scope=eval)
         self.assertTrue(any(isinstance(c, ChangeSelectedText) for c in commands))
@@ -3725,7 +3725,7 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
 
     def test_stashed_unlink_action_wins_over_adoption(self):
         model = init_model(self.lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, _ = update(make_action_button_event('filter'), self.var_and_exp,
                           model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
@@ -3742,7 +3742,7 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
         """An unrecognized line is still a valid link target, but the relink
         must not write over it — only the user's next interaction may."""
         model = init_model(self.lst, mock_get_visualizer)
-        model['search'] = '^ > 3'
+        model['search'] = '$ > 3'
         model, commands = update(
             make_relink_event('takeover', text='???  not parseable  ???'),
             self.var_and_exp, model, self.lst, mock_get_visualizer,
@@ -3759,7 +3759,7 @@ class TestCtxToModel(unittest.TestCase):
         model = {'search': None, 'first_match': False}
         ctx = {'is_predicate': True, 'predicate_expr': 'item > 100', 'is_first': False}
         _ctx_to_model(ctx, model)
-        self.assertEqual(model['search'], '^ > 100')
+        self.assertEqual(model['search'], '$ > 100')
         self.assertFalse(model['first_match'])
 
     def test_predicate_first_ctx_to_model(self):
@@ -3795,7 +3795,7 @@ class TestCtxToModel(unittest.TestCase):
         model = {'search': None, 'first_match': False}
         ctx = {'is_predicate': True, 'predicate_expr': 'item.startswith("a")', 'is_first': False}
         _ctx_to_model(ctx, model)
-        self.assertEqual(model['search'], '^.startswith("a")')
+        self.assertEqual(model['search'], '$.startswith("a")')
 
 
 class TestLinkedEditingBehavior(unittest.TestCase):
@@ -3852,7 +3852,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         """A search change that keeps the same action keeps the same name."""
         from list_visualizer import ChangeSelectedText
         model = self._adopt('data_filtered = [item for item in data if item > 3]')
-        event = make_search_input_event('^ > 2')
+        event = make_search_input_event('$ > 2')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertTrue(len(change_cmds) > 0)
@@ -3872,7 +3872,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
     def test_linked_search_change_emits_change_selected_text(self):
         from list_visualizer import ChangeSelectedText
         model = self._adopt('[item for item in data if item > 3]')
-        event = make_search_input_event('^ > 2')
+        event = make_search_input_event('$ > 2')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertTrue(len(change_cmds) > 0)
@@ -3893,7 +3893,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
     def test_nonlinked_action_button_emits_new_code(self):
         """Without linked mode, action buttons emit NewCode tuples, not ChangeSelectedText."""
         model = init_model(self.lst, mock_get_visualizer, var_and_exp=self.var_and_exp)
-        model['search'] = '^ > 3'
+        model['search'] = '$ > 3'
         event = make_action_button_event('filter')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         tuple_cmds = [c for c in commands if isinstance(c, tuple)]
@@ -3911,7 +3911,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
 
     def _clicked(self, action, model=None):
         model = model or init_model(self.lst, mock_get_visualizer)
-        model.setdefault('search', '^ > 15')
+        model.setdefault('search', '$ > 15')
         return update(make_action_button_event(action), self.var_and_exp,
                       model, self.lst, mock_get_visualizer, eval_in_scope=eval)
 
@@ -3937,7 +3937,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
         """The syntax guard must not silently drop statement updates."""
         from list_visualizer import ChangeSelectedText
         model, _ = self._clicked('loop_no_idx')
-        model, commands = update(make_search_input_event('^ > 25'), self.var_and_exp,
+        model, commands = update(make_search_input_event('$ > 25'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(changes), 1)
@@ -3946,7 +3946,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
     def test_copy_statement_action_copies_runnable_code(self):
         from list_visualizer import CopyToClipboard
         model = init_model(self.lst, mock_get_visualizer)
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         model, commands = update(make_action_button_event('loop_no_idx', copy=True),
                                  self.var_and_exp, model, self.lst,
                                  mock_get_visualizer, eval_in_scope=eval)
@@ -3960,7 +3960,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
         from list_visualizer import _preview_expr
         model = init_model(self.lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         preview = _preview_expr(model, 'loop_no_idx', eval)
         self.assertTrue(preview.endswith('\n    pass'))
         ast.parse(preview)
@@ -3969,7 +3969,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
         from list_visualizer import _preview_expr
         model = init_model(self.lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
-        model['search'] = '^ > 15'
+        model['search'] = '$ > 15'
         self.assertEqual(_preview_expr(model, 'filter', eval),
                          '[item for item in data if item > 15]')
 
@@ -4016,7 +4016,7 @@ class TestRelinkTakeoverOfStatementHeader(unittest.TestCase):
 
     def _unlinked_after(self, action):
         model = init_model(self.lst, mock_get_visualizer)
-        model['search'] = '^ > 3'
+        model['search'] = '$ > 3'
         model, _ = update(make_action_button_event(action), self.var_and_exp,
                           model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
@@ -4072,7 +4072,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
     def test_next_interaction_edits_the_line_instead_of_inserting(self):
         from list_visualizer import ChangeSelectedText
         model, _ = self._took_over(self.foreign)
-        model, commands = update(make_search_input_event('^ > 2'), self.var_and_exp,
+        model, commands = update(make_search_input_event('$ > 2'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertFalse(any(isinstance(c, tuple) for c in commands))
         changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
@@ -4084,8 +4084,8 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         must not be remembered as already-written. Otherwise the next
         interaction that regenerates it is suppressed as a no-op and the
         foreign text sits there forever under a chain icon claiming a link."""
-        model, _ = self._took_over(self.foreign, search='^ > 2')
-        model, commands = update(make_search_input_event('^ > 2'), self.var_and_exp,
+        model, _ = self._took_over(self.foreign, search='$ > 2')
+        model, commands = update(make_search_input_event('$ > 2'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual([(type(c).__name__, c.expression) for c in commands],
                          [('ChangeSelectedText',
@@ -4103,7 +4103,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
     def test_next_interaction_after_header_takeover_stays_a_header(self):
         from list_visualizer import ChangeSelectedText
         model, _ = self._took_over('if flag:')
-        model, commands = update(make_search_input_event('^ > 2'), self.var_and_exp,
+        model, commands = update(make_search_input_event('$ > 2'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(changes), 1)
@@ -4113,7 +4113,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         """A stashed `filter` would write a comprehension over the header."""
         from list_visualizer_grammar import _STATEMENT_ACTIONS
         model = init_model(self.lst, mock_get_visualizer)
-        model['search'] = '^ > 3'
+        model['search'] = '$ > 3'
         model, _ = update(make_action_button_event('filter'), self.var_and_exp,
                           model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
@@ -4128,7 +4128,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         """The mirror case: a stashed loop would leave `x = for item in ...:`."""
         from list_visualizer_grammar import _STATEMENT_ACTIONS
         model = init_model(self.lst, mock_get_visualizer)
-        model['search'] = '^ > 3'
+        model['search'] = '$ > 3'
         model, _ = update(make_action_button_event('loop_no_idx'), self.var_and_exp,
                           model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_unlink_event(), self.var_and_exp, model, self.lst,
@@ -4673,28 +4673,28 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         return get_vis
 
     def test_child_newcode_tuple_becomes_column(self):
-        nc_vis = self._make_newcode_vis([('result', "len(^['name'])")])
+        nc_vis = self._make_newcode_vis([('result', "len($['name'])")])
         get_vis = self._get_vis_for(nc_vis)
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
+        model['focused_child'] = "0\x00$['name']"  # see TestFocusTracking
         original_columns = list(model['columns'])
-        event = make_child_mouse_event("0\x00^['name']", 'X')
+        event = make_child_mouse_event("0\x00$['name']", 'X')
         new_model, commands = update(event, ('x', 'x'), model, lst, get_vis)
 
         self.assertEqual(commands, [], "NewCode tuple should not propagate as a command")
-        self.assertIn("len(^['name'])", new_model['columns'],
+        self.assertIn("len($['name'])", new_model['columns'],
                        "NewCode expr should be added as a new column")
 
     def test_child_newcode_tuple_not_inserted_to_buffer(self):
-        nc_vis = self._make_newcode_vis([('filtered', '[x for x in ^]')])
+        nc_vis = self._make_newcode_vis([('filtered', '[x for x in $]')])
         get_vis = self._get_vis_for(nc_vis)
 
         lst = ['hello', 'world']
         model = init_model(lst, get_vis)
-        model['focused_child'] = '0\x00^'  # see TestFocusTracking
-        event = make_child_mouse_event('0\x00^', 'X')
+        model['focused_child'] = '0\x00$'  # see TestFocusTracking
+        event = make_child_mouse_event('0\x00$', 'X')
         _, commands = update(event, ('x', 'x'), model, lst, get_vis)
 
         for cmd in commands:
@@ -4708,8 +4708,8 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
-        event = make_child_mouse_event("0\x00^['name']", 'X')
+        model['focused_child'] = "0\x00$['name']"  # see TestFocusTracking
+        event = make_child_mouse_event("0\x00$['name']", 'X')
         _, commands = update(event, None, model, lst, get_vis)
 
         self.assertEqual(len(commands), 1)
@@ -4722,8 +4722,8 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
-        event = make_child_mouse_event("0\x00^['name']", 'X')
+        model['focused_child'] = "0\x00$['name']"  # see TestFocusTracking
+        event = make_child_mouse_event("0\x00$['name']", 'X')
         _, commands = update(event, None, model, lst, get_vis)
 
         self.assertEqual(len(commands), 1)
@@ -4732,9 +4732,9 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
     def test_child_receives_binder_as_var_and_exp(self):
         """The child gets a bound NAME for the cell value, not the column expr.
 
-        The column's ^ means the row; the child's ^ means whatever it binds
+        The column's $ means the row; the child's $ means whatever it binds
         innermost. Handing over a name instead keeps the two apart, so the code
-        the child generates is caret-free and the column expression goes back in
+        the child generates is dollar-free and the column expression goes back in
         afterwards (see nest_generated_expr)."""
         captured = {}
         class CapturingVis:
@@ -4753,8 +4753,8 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
-        event = make_child_mouse_event("0\x00^['name']", 'X')
+        model['focused_child'] = "0\x00$['name']"  # see TestFocusTracking
+        event = make_child_mouse_event("0\x00$['name']", 'X')
         update(event, ('x', 'x'), model, lst, get_vis)
 
         self.assertEqual(captured['var_and_exp'], (None, CHILD_SOURCE_BINDER),
@@ -4763,20 +4763,20 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
     def test_mixed_commands_only_newcode_intercepted(self):
         """When child returns both NewCode and CopyToClipboard, only NewCode is intercepted."""
         nc_vis = self._make_newcode_vis([
-            ('result', "^['name'].upper()"),
+            ('result', "$['name'].upper()"),
             CopyToClipboard(text='copied'),
         ])
         get_vis = self._get_vis_for(nc_vis)
 
         lst = [{'name': 'Alice'}]
         model = init_model(lst, get_vis)
-        model['focused_child'] = "0\x00^['name']"  # see TestFocusTracking
-        event = make_child_mouse_event("0\x00^['name']", 'X')
+        model['focused_child'] = "0\x00$['name']"  # see TestFocusTracking
+        event = make_child_mouse_event("0\x00$['name']", 'X')
         new_model, commands = update(event, None, model, lst, get_vis)
 
         self.assertEqual(len(commands), 1, "Only CopyToClipboard should pass through")
         self.assertIsInstance(commands[0], CopyToClipboard)
-        self.assertIn("^['name'].upper()", new_model['columns'])
+        self.assertIn("$['name'].upper()", new_model['columns'])
 
 
 class TestColumnHeaderTooltips(unittest.TestCase):
@@ -4842,7 +4842,7 @@ class TestSearchBoxTooltips(unittest.TestCase):
         self.assertIn('data-tooltip="First match only"', attrs)
 
 
-_FINDALL_COL = "re.findall(r'[A-Z]{3}', (^), flags=re.M)"
+_FINDALL_COL = "re.findall(r'[A-Z]{3}', ($), flags=re.M)"
 
 
 class TestNestedSlotsConfig(unittest.TestCase):
@@ -4854,29 +4854,29 @@ class TestNestedSlotsConfig(unittest.TestCase):
         return f"{row}\x00{_FINDALL_COL}"
 
     def test_list_of_str_with_list_column_does_not_recurse(self):
-        slots = [{'expr': '^'}, {'expr': _FINDALL_COL}]
+        slots = [{'expr': '$'}, {'expr': _FINDALL_COL}]
         with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
             # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
             model = init_model(['ABCdef'], mock_get_visualizer)
-        self.assertEqual(model['columns'], ['^', _FINDALL_COL])
+        self.assertEqual(model['columns'], ['$', _FINDALL_COL])
         # The re.findall cell is a list[str]; with no nested config it must fall
         # back to the default single column, NOT re-read builtins.str's config.
         child = model['children'][self._findall_key()]
-        self.assertEqual(child['columns'], ['^'])
+        self.assertEqual(child['columns'], ['$'])
 
     def test_explicit_nested_children_applies(self):
         slots = [
-            {'expr': '^'},
+            {'expr': '$'},
             {'expr': _FINDALL_COL,
-             'children': {'builtins.str': [{'expr': '^.lower()'}]}},
+             'children': {'builtins.str': [{'expr': '$.lower()'}]}},
         ]
         with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
-        self.assertEqual(child['columns'], ['^.lower()'])
+        self.assertEqual(child['columns'], ['$.lower()'])
 
     def test_root_model_stores_config_fields(self):
-        slots = [{'expr': '^'}]
+        slots = [{'expr': '$'}]
         with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['x'], mock_get_visualizer)
         self.assertEqual(model['_config_root_type'], 'builtins.str')
@@ -4887,7 +4887,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_nested_child_carries_path_and_root(self):
         slots = [{'expr': _FINDALL_COL,
-                  'children': {'builtins.str': [{'expr': '^'}]}}]
+                  'children': {'builtins.str': [{'expr': '$'}]}}]
         with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
@@ -4922,7 +4922,7 @@ class TestNestedSlotsSave(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
-        event = make_column_mouse_event(repr(ColumnSelect(name="^['x']")))
+        event = make_column_mouse_event(repr(ColumnSelect(name="$['x']")))
         with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
             update(event, None, model, lst, mock_get_visualizer)
         mock_save.assert_called_once()
@@ -4930,13 +4930,13 @@ class TestNestedSlotsSave(unittest.TestCase):
         # New signature: (root_type, path, exprs, [dotfile])
         self.assertEqual(args[0], 'builtins.dict')
         self.assertEqual(args[1], [])
-        self.assertIn("^['x']", args[2])
+        self.assertIn("$['x']", args[2])
 
 
 class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
-    """A real string visualizer inside a cell speaks its own scope: ^ is the
-    match, ^^ the cell's string. The column it hands back must be in the LIST's
-    scope, where ^ is the row -- and must evaluate for every row.
+    """A real string visualizer inside a cell speaks its own scope: $ is the
+    match, $$ the cell's string. The column it hands back must be in the LIST's
+    scope, where $ is the row -- and must evaluate for every row.
     """
 
     def _drive(self, rows, column, events):
@@ -4968,23 +4968,23 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
     def test_pick_then_action_yields_a_column_that_evaluates_for_every_row(self):
         import string_visualizer
         rows = ['foo bar', 'baz foo']
-        model, _cmds, eval_in_scope = self._drive(rows, '^', [
+        model, _cmds, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.SegmentToggle(segment_id='prefix'),
             string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
         ])
-        added = [c for c in model['columns'] if c != '^']
+        added = [c for c in model['columns'] if c != '$']
         self.assertEqual(len(added), 1, f"expected one new column, got {model['columns']}")
         col = added[0]
-        values = [eval_in_scope(replace_carets_in_py_exp(col, [f'rows[{i}]']))
+        values = [eval_in_scope(replace_dollars_in_py_exp(col, [f'rows[{i}]']))
                   for i in range(len(rows))]
         self.assertEqual(values, [[''], ['baz ']])
 
     def test_cell_chips_drag_out_the_concrete_access_path(self):
         """Chips are dragged into the editor, so they must name the cell
-        concretely -- neither the ^^ the replace box shows nor a placeholder."""
+        concretely -- neither the $$ the replace box shows nor a placeholder."""
         import string_visualizer
         rows = ['foo bar', 'baz foo']
-        model, _cmds, eval_in_scope = self._drive(rows, '^', [
+        model, _cmds, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.SegmentToggle(segment_id='suffix'),
         ])
         get_vis = lambda v: string_visualizer if isinstance(v, str) else list_visualizer
@@ -5004,7 +5004,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         visualizer neither auto-links nor emits ChangeSelectedText."""
         import string_visualizer
         rows = ['foo bar', 'baz foo']
-        model, commands, _eval = self._drive(rows, '^', [
+        model, commands, _eval = self._drive(rows, '$', [
             string_visualizer.SegmentToggle(segment_id='prefix'),
             string_visualizer.SegmentToggle(segment_id='suffix'),
             string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
@@ -5012,10 +5012,10 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         ])
         self.assertEqual([c for c in commands if isinstance(c, ChangeSelectedText)], [],
                          'a cell must not rewrite editor text')
-        cell = model['children'][f'0{CELL_KEY_SEP}^']
+        cell = model['children'][f'0{CELL_KEY_SEP}$']
         self.assertIsNone(cell.get('linked_action'))
         # The one explicit action click is the only thing that adds a column.
-        self.assertEqual(len([c for c in model['columns'] if c != '^']), 1)
+        self.assertEqual(len([c for c in model['columns'] if c != '$']), 1)
 
     def test_copy_from_a_cell_yields_pasteable_code(self):
         """Clipboard text is pasted into the editor as-is, so unlike a stored
@@ -5026,7 +5026,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         for action, segment, expected in (('find_or_map', 'prefix', ['']),
                                           ('if_any', 'suffix', True)):
             with self.subTest(action=action):
-                _model, commands, eval_in_scope = self._drive(rows, '^', [
+                _model, commands, eval_in_scope = self._drive(rows, '$', [
                     string_visualizer.SegmentToggle(segment_id=segment),
                     string_visualizer.ActionButtonClick(action=action, copy=True),
                 ])
@@ -5039,7 +5039,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
     def test_copy_of_a_statement_from_a_cell_is_pasteable(self):
         import string_visualizer
         rows = ['foo bar', 'baz foo']
-        _model, commands, eval_in_scope = self._drive(rows, '^', [
+        _model, commands, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.SegmentToggle(segment_id='prefix'),
             string_visualizer.ActionButtonClick(action='loop', copy=True),
         ])
@@ -5056,14 +5056,14 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
                 self.name = name
 
         rows = [Row('foo bar'), Row('baz foo')]
-        model, _cmds, eval_in_scope = self._drive(rows, '^.name', [
+        model, _cmds, eval_in_scope = self._drive(rows, '$.name', [
             string_visualizer.SegmentToggle(segment_id='prefix'),
             string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
         ])
-        added = [c for c in model['columns'] if c != '^.name']
+        added = [c for c in model['columns'] if c != '$.name']
         self.assertEqual(len(added), 1, f"expected one new column, got {model['columns']}")
         col = added[0]
-        values = [eval_in_scope(replace_carets_in_py_exp(col, [f'rows[{i}]']))
+        values = [eval_in_scope(replace_dollars_in_py_exp(col, [f'rows[{i}]']))
                   for i in range(len(rows))]
         self.assertEqual(values, [[''], ['baz ']])
 
@@ -5095,8 +5095,8 @@ def make_pick_toggle_event(region_id):
 
 # The worked example from the plan: a match on row 2 of 5, two columns.
 PICK_STRS = ['abc', 'efg', 'Asdfasdz', 'sdfd', '']
-PICK_COLUMNS = ['^', 'len(^)']
-PICK_SEARCH = 'len(^) > 4'
+PICK_COLUMNS = ['$', 'len($)']
+PICK_SEARCH = 'len($) > 4'
 
 
 def pick_eval(code):
@@ -5209,7 +5209,7 @@ class TestPickRegions(unittest.TestCase):
         self.assertEqual(len(ids), 6)
 
     def test_single_row_list_has_only_match_band(self):
-        self.assertEqual(_pick_region_ids(['^'], 0, 1),
+        self.assertEqual(_pick_region_ids(['$'], 0, 1),
                          ['match_idx', 'match_col_0'])
 
     def test_region_expressions(self):
@@ -5221,10 +5221,10 @@ class TestPickRegions(unittest.TestCase):
             'post_idx': 'list(range(i + 1, len(strs)))',
             # The identity column is the sublist itself -- no comprehension.
             'pre_col_0': 'strs[:i]',
-            'match_col_0': '^',
+            'match_col_0': '$',
             'post_col_0': 'strs[i + 1:]',
             'pre_col_1': '[len(x) for x in strs[:i]]',
-            'match_col_1': 'len(^)',
+            'match_col_1': 'len($)',
             'post_col_1': '[len(x) for x in strs[i + 1:]]',
         })
 
@@ -5282,7 +5282,7 @@ class TestPickRegions(unittest.TestCase):
     def test_stale_region_ids_are_dropped(self):
         # col_5 doesn't exist; the surviving pick still assembles.
         model = make_pick_model(picked=['match_col_5', 'match_col_1'])
-        self.assertEqual(model['pick_expr'], 'len(^)')
+        self.assertEqual(model['pick_expr'], 'len($)')
 
 
 class TestPickExpr(unittest.TestCase):
@@ -5295,10 +5295,10 @@ class TestPickExpr(unittest.TestCase):
         self.assertIsNone(self._expr([]))
 
     def test_single_region_is_bare(self):
-        self.assertEqual(self._expr(['match_col_1']), 'len(^)')
+        self.assertEqual(self._expr(['match_col_1']), 'len($)')
 
     def test_multiple_regions_become_a_tuple(self):
-        self.assertEqual(self._expr(['match_idx', 'match_col_1']), '(i, len(^))')
+        self.assertEqual(self._expr(['match_idx', 'match_col_1']), '(i, len($))')
 
     def test_canonical_order_regardless_of_click_order(self):
         self.assertEqual(self._expr(['match_col_1', 'match_idx']),
@@ -5340,11 +5340,11 @@ class TestPickExpr(unittest.TestCase):
             '(i, strs)')
 
     def test_needs_index(self):
-        self.assertFalse(_pick_needs_index('len(^)'))
-        self.assertFalse(_pick_needs_index('^'))
+        self.assertFalse(_pick_needs_index('len($)'))
+        self.assertFalse(_pick_needs_index('$'))
         self.assertTrue(_pick_needs_index('i'))
         self.assertTrue(_pick_needs_index('strs[:i]'))
-        self.assertTrue(_pick_needs_index('(i, len(^))'))
+        self.assertTrue(_pick_needs_index('(i, len($))'))
 
 
 class TestPickGeneratedCode(unittest.TestCase):
@@ -5386,7 +5386,7 @@ class TestPickGeneratedCode(unittest.TestCase):
             'next((item for item in strs if len(item) > 4), None)')
 
     def test_picking_the_whole_row_degenerates_to_the_plain_filter(self):
-        # ^ IS the item, so this is the ordinary first-match filter.
+        # $ IS the item, so this is the ordinary first-match filter.
         self.assertEqual(
             self._generate(['match_col_0']),
             'next((item for item in strs if len(item) > 4), None)')
@@ -5429,7 +5429,7 @@ class TestPickPreview(unittest.TestCase):
 
     def test_reports_the_error_for_a_broken_column(self):
         model = make_pick_model(picked=['match_col_1'],
-                                columns=['^', '^.nope'])
+                                columns=['$', '$.nope'])
         self.assertIn('attribute', (self._preview(model) or '').lower())
 
 
@@ -5444,7 +5444,7 @@ class TestPickUpdateFlow(unittest.TestCase):
         model = make_pick_model()
         model, _ = self._send(model, make_pick_toggle_event('match_col_1'))
         self.assertEqual(model['picked'], ['match_col_1'])
-        self.assertEqual(model['pick_expr'], 'len(^)')
+        self.assertEqual(model['pick_expr'], 'len($)')
         model, _ = self._send(model, make_pick_toggle_event('match_col_1'))
         self.assertIsNone(model['picked'])
         self.assertIsNone(model['pick_expr'])
@@ -5653,7 +5653,7 @@ class TestListGrammarPick(_ListActionTestBase):
         parsed = self.parse_generated_code(code)
         model = {}
         _ctx_to_model(parsed, model)
-        self.assertEqual(model['pick_expr'], 'len(^)')
+        self.assertEqual(model['pick_expr'], 'len($)')
         self.assertEqual(model['tool'], 'pick')
         self.assertTrue(model['first_match'])
         # Region ids aren't recoverable from the expression, so nothing is
@@ -5698,7 +5698,7 @@ class TestListGrammarPick(_ListActionTestBase):
     def test_ctx_to_model_clears_pick_for_an_unpicked_line(self):
         from list_visualizer import _ctx_to_model
         parsed = self.parse_generated_code('[item for item in strs if len(item) > 4]')
-        model = {'tool': 'pick', 'pick_expr': 'len(^)', 'picked': ['match_col_1']}
+        model = {'tool': 'pick', 'pick_expr': 'len($)', 'picked': ['match_col_1']}
         _ctx_to_model(parsed, model)
         self.assertIsNone(model['pick_expr'])
         self.assertEqual(model['tool'], 'normal')
@@ -5745,19 +5745,19 @@ def make_column_search_toggle_event(dropdown_id):
 
 
 class TestColumnSearchPredicate(unittest.TestCase):
-    """One column's [op] + text becomes a predicate in COLUMN scope, where ^ is
+    """One column's [op] + text becomes a predicate in COLUMN scope, where $ is
     the column value."""
 
     def test_operator_prepends_the_column_value(self):
         cases = [
-            ('>=', '3', '^ >= 3'),
-            ('>', '3', '^ > 3'),
-            ('==', "'ATG'", "^ == 'ATG'"),
-            ('!=', "'ATG'", "^ != 'ATG'"),
-            ('<', '3', '^ < 3'),
-            ('<=', '3', '^ <= 3'),
-            ('in', "['a', 'b']", "^ in ['a', 'b']"),
-            ('not in', "['a', 'b']", "^ not in ['a', 'b']"),
+            ('>=', '3', '$ >= 3'),
+            ('>', '3', '$ > 3'),
+            ('==', "'ATG'", "$ == 'ATG'"),
+            ('!=', "'ATG'", "$ != 'ATG'"),
+            ('<', '3', '$ < 3'),
+            ('<=', '3', '$ <= 3'),
+            ('in', "['a', 'b']", "$ in ['a', 'b']"),
+            ('not in', "['a', 'b']", "$ not in ['a', 'b']"),
         ]
         for op, text, expected in cases:
             with self.subTest(op=op):
@@ -5768,7 +5768,7 @@ class TestColumnSearchPredicate(unittest.TestCase):
             with self.subTest(op=op):
                 pred = column_search_predicate(op, '3')
                 self.assertIsNotNone(pred)
-                self.assertTrue(caret_expr_parses_helper(pred), pred)
+                self.assertTrue(dollar_expr_parses_helper(pred), pred)
 
     def test_empty_text_is_inactive_whatever_the_operator(self):
         for op in COLUMN_SEARCH_OPS:
@@ -5778,30 +5778,30 @@ class TestColumnSearchPredicate(unittest.TestCase):
                 self.assertIsNone(column_search_predicate(op, None))
 
     def test_blank_operator_keeps_an_expression_that_names_the_column(self):
-        self.assertEqual(column_search_predicate('', 'isOdd(^) and ^ > 5'),
-                         'isOdd(^) and ^ > 5')
+        self.assertEqual(column_search_predicate('', 'isOdd($) and $ > 5'),
+                         'isOdd($) and $ > 5')
 
     def test_blank_operator_calls_a_bare_predicate_function(self):
-        self.assertEqual(column_search_predicate('', 'isOdd'), 'isOdd(^)')
+        self.assertEqual(column_search_predicate('', 'isOdd'), 'isOdd($)')
 
     def test_blank_operator_calls_a_dotted_predicate_function(self):
         self.assertEqual(column_search_predicate('', 'str.isdigit'),
-                         'str.isdigit(^)')
+                         'str.isdigit($)')
 
     def test_blank_operator_asks_the_scope_whether_a_name_is_callable(self):
         scope = {'isOdd': lambda n: n % 2 == 1, 'threshold': 5}
         eval_in_scope = lambda code: eval(code, {}, scope)
         self.assertEqual(column_search_predicate('', 'isOdd', eval_in_scope),
-                         'isOdd(^)')
+                         'isOdd($)')
         # A name bound to a value isn't a predicate to call - it stands on its
         # own, exactly as it would in the main search box.
         self.assertEqual(column_search_predicate('', 'threshold', eval_in_scope),
                          'threshold')
 
     def test_blank_operator_still_honors_a_leading_operator(self):
-        self.assertEqual(column_search_predicate('', '>= 3'), '^ >= 3')
+        self.assertEqual(column_search_predicate('', '>= 3'), '$ >= 3')
         self.assertEqual(column_search_predicate('', '.isdigit()'),
-                         '^.isdigit()')
+                         '$.isdigit()')
 
     def test_blank_operator_leaves_a_plain_value_verbatim(self):
         # Same as typing it into the main box: a truthy literal matches
@@ -5809,47 +5809,47 @@ class TestColumnSearchPredicate(unittest.TestCase):
         self.assertEqual(column_search_predicate('', "'ATG'"), "'ATG'")
 
 
-def caret_expr_parses_helper(s):
+def dollar_expr_parses_helper(s):
     """Whether a column-scope predicate is syntactically usable."""
-    from visualizer_utils import caret_expr_parses
-    return caret_expr_parses(s)
+    from visualizer_utils import dollar_expr_parses
+    return dollar_expr_parses(s)
 
 
 class TestLiftColumnPredicate(unittest.TestCase):
     """A column-scope predicate lifts into ITEM scope (what the main search box
-    speaks): ^ becomes the column expression, and every longer caret run loses
-    one level -- ^^ (the item) becomes ^, ^^^ (the array) becomes ^^."""
+    speaks): $ becomes the column expression, and every longer dollar run loses
+    one level -- $$ (the item) becomes $, $$$ (the array) becomes $$."""
 
-    def test_column_expression_replaces_the_single_caret(self):
-        self.assertEqual(lift_column_predicate("^ == 'ATG'", 'len(^)'),
-                         "len(^) == 'ATG'")
+    def test_column_expression_replaces_the_single_dollar(self):
+        self.assertEqual(lift_column_predicate("$ == 'ATG'", 'len($)'),
+                         "len($) == 'ATG'")
 
     def test_identity_column_lifts_to_itself(self):
-        self.assertEqual(lift_column_predicate('^ >= 3', '^'), '^ >= 3')
+        self.assertEqual(lift_column_predicate('$ >= 3', '$'), '$ >= 3')
 
     def test_subscript_column_needs_no_parens(self):
-        self.assertEqual(lift_column_predicate("^ == 'a'", "^['name']"),
-                         "^['name'] == 'a'")
+        self.assertEqual(lift_column_predicate("$ == 'a'", "$['name']"),
+                         "$['name'] == 'a'")
 
     def test_non_atomic_column_is_parenthesized(self):
-        self.assertEqual(lift_column_predicate('^ * 2 > 5', '^ + 1'),
-                         '(^ + 1) * 2 > 5')
+        self.assertEqual(lift_column_predicate('$ * 2 > 5', '$ + 1'),
+                         '($ + 1) * 2 > 5')
 
-    def test_item_level_loses_a_caret(self):
-        self.assertEqual(lift_column_predicate('^ == ^^', 'len(^)'),
-                         'len(^) == ^')
+    def test_item_level_loses_a_dollar(self):
+        self.assertEqual(lift_column_predicate('$ == $$', 'len($)'),
+                         'len($) == $')
 
-    def test_array_level_loses_a_caret(self):
-        self.assertEqual(lift_column_predicate('^ == max(^^^)', 'len(^)'),
-                         'len(^) == max(^^)')
+    def test_array_level_loses_a_dollar(self):
+        self.assertEqual(lift_column_predicate('$ == max($$$)', 'len($)'),
+                         'len($) == max($$)')
 
-    def test_carets_inside_string_literals_are_left_alone(self):
-        self.assertEqual(lift_column_predicate("^ == '^^'", 'len(^)'),
-                         "len(^) == '^^'")
+    def test_dollars_inside_string_literals_are_left_alone(self):
+        self.assertEqual(lift_column_predicate("$ == '$$'", 'len($)'),
+                         "len($) == '$$'")
 
     def test_every_occurrence_is_lifted(self):
-        self.assertEqual(lift_column_predicate('isOdd(^) and ^ > 5', 'len(^)'),
-                         'isOdd(len(^)) and len(^) > 5')
+        self.assertEqual(lift_column_predicate('isOdd($) and $ > 5', 'len($)'),
+                         'isOdd(len($)) and len($) > 5')
 
 
 class TestComposeColumnSearches(unittest.TestCase):
@@ -5861,69 +5861,69 @@ class TestComposeColumnSearches(unittest.TestCase):
         return {'compose': compose, 'op': op, 'text': text}
 
     def test_nothing_active_is_none(self):
-        self.assertIsNone(compose_column_searches(['^'], {}))
-        self.assertIsNone(compose_column_searches(['^'], None))
+        self.assertIsNone(compose_column_searches(['$'], {}))
+        self.assertIsNone(compose_column_searches(['$'], None))
 
     def test_empty_text_is_skipped(self):
-        self.assertIsNone(compose_column_searches(['^'], {'^': self.row('')}))
+        self.assertIsNone(compose_column_searches(['$'], {'$': self.row('')}))
 
     def test_single_column(self):
         self.assertEqual(
-            compose_column_searches(['len(^)'], {'len(^)': self.row("'ATG'")}),
-            "len(^) == 'ATG'")
+            compose_column_searches(['len($)'], {'len($)': self.row("'ATG'")}),
+            "len($) == 'ATG'")
 
     def test_two_and_columns_join_in_column_order(self):
-        columns = ['len(^)', "^['name']"]
-        searches = {"^['name']": self.row("'a'"), 'len(^)': self.row('3', op='>=')}
+        columns = ['len($)', "$['name']"]
+        searches = {"$['name']": self.row("'a'"), 'len($)': self.row('3', op='>=')}
         self.assertEqual(compose_column_searches(columns, searches),
-                         "len(^) >= 3 and ^['name'] == 'a'")
+                         "len($) >= 3 and $['name'] == 'a'")
 
     def test_or_column_is_ord_against_the_and_group(self):
-        columns = ['a(^)', 'b(^)', 'c(^)']
+        columns = ['a($)', 'b($)', 'c($)']
         searches = {
-            'a(^)': self.row('1'),
-            'b(^)': self.row('2'),
-            'c(^)': self.row('3', compose='or'),
+            'a($)': self.row('1'),
+            'b($)': self.row('2'),
+            'c($)': self.row('3', compose='or'),
         }
         self.assertEqual(compose_column_searches(columns, searches),
-                         '(a(^) == 1 and b(^) == 2) or c(^) == 3')
+                         '(a($) == 1 and b($) == 2) or c($) == 3')
 
     def test_a_single_and_term_needs_no_group_parens(self):
         # `and` already binds tighter than `or`.
-        columns = ['a(^)', 'c(^)']
-        searches = {'a(^)': self.row('1'), 'c(^)': self.row('3', compose='or')}
+        columns = ['a($)', 'c($)']
+        searches = {'a($)': self.row('1'), 'c($)': self.row('3', compose='or')}
         self.assertEqual(compose_column_searches(columns, searches),
-                         'a(^) == 1 or c(^) == 3')
+                         'a($) == 1 or c($) == 3')
 
     def test_only_or_columns(self):
-        columns = ['a(^)', 'c(^)']
-        searches = {'a(^)': self.row('1', compose='or'),
-                    'c(^)': self.row('3', compose='or')}
+        columns = ['a($)', 'c($)']
+        searches = {'a($)': self.row('1', compose='or'),
+                    'c($)': self.row('3', compose='or')}
         self.assertEqual(compose_column_searches(columns, searches),
-                         'a(^) == 1 or c(^) == 3')
+                         'a($) == 1 or c($) == 3')
 
     def test_the_and_group_leads_regardless_of_column_order(self):
         # The dropdown marks each term as part of the group or or'd against it,
         # so the group comes first even when its column sits later.
-        columns = ['a(^)', 'b(^)']
-        searches = {'a(^)': self.row('1', compose='or'), 'b(^)': self.row('2')}
+        columns = ['a($)', 'b($)']
+        searches = {'a($)': self.row('1', compose='or'), 'b($)': self.row('2')}
         self.assertEqual(compose_column_searches(columns, searches),
-                         'b(^) == 2 or a(^) == 1')
+                         'b($) == 2 or a($) == 1')
 
     def test_an_or_inside_the_group_is_parenthesized(self):
-        columns = ['^', "^['x']"]
+        columns = ['$', "$['x']"]
         searches = {
-            '^': self.row('^ == 1 or ^ == 2', op=''),
-            "^['x']": self.row('0', op='>'),
+            '$': self.row('$ == 1 or $ == 2', op=''),
+            "$['x']": self.row('0', op='>'),
         }
         self.assertEqual(compose_column_searches(columns, searches),
-                         "(^ == 1 or ^ == 2) and ^['x'] > 0")
+                         "($ == 1 or $ == 2) and $['x'] > 0")
 
     def test_column_order_drives_term_order(self):
-        columns = ["^['b']", "^['a']"]
-        searches = {"^['a']": self.row('1'), "^['b']": self.row('2')}
+        columns = ["$['b']", "$['a']"]
+        searches = {"$['a']": self.row('1'), "$['b']": self.row('2')}
         self.assertEqual(compose_column_searches(columns, searches),
-                         "^['b'] == 2 and ^['a'] == 1")
+                         "$['b'] == 2 and $['a'] == 1")
 
 
 class TestColumnSearchEvents(unittest.TestCase):
@@ -6028,12 +6028,12 @@ class TestColumnSearchEvents(unittest.TestCase):
         model, _ = update(make_column_search_input_event(0, "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model['editing_column_index'] = 0
-        model['column_input_value'] = 'len(^)'
+        model['column_input_value'] = 'len($)'
         model, _ = update(make_column_key_event('Enter'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertNotIn(old, model['column_searches'])
-        self.assertEqual(model['column_searches']['len(^)']['text'], "'Alice'")
-        self.assertEqual(model['search'], "len(^) == 'Alice'")
+        self.assertEqual(model['column_searches']['len($)']['text'], "'Alice'")
+        self.assertEqual(model['search'], "len($) == 'Alice'")
 
     def test_reordering_columns_recomposes_in_the_new_order(self):
         lst, model = self.make_model()
@@ -6051,11 +6051,11 @@ class TestColumnSearchEvents(unittest.TestCase):
         # Nothing was pushed from a column, so there is nothing to push -- the
         # main box is the user's.
         lst, model = self.make_model()
-        model, _ = update(make_search_input_event('^ == 3'), None, model, lst,
+        model, _ = update(make_search_input_event('$ == 3'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        self.assertEqual(model['search'], '^ == 3')
+        self.assertEqual(model['search'], '$ == 3')
 
     def test_column_searches_default_to_none_not_a_shared_dict(self):
         lst, _ = self.make_model()
@@ -6291,16 +6291,16 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
 
     def test_composed_search_matches_rows(self):
         lst = ['a', 'abcd', 'ab', 'abcde']
-        self.assertEqual(_get_matching_indices('len(^) >= 3', lst, eval),
+        self.assertEqual(_get_matching_indices('len($) >= 3', lst, eval),
                          [1, 3])
 
-    def test_main_search_can_name_the_array_with_two_carets(self):
+    def test_main_search_can_name_the_array_with_two_dollars(self):
         lst = [1, 5, 3, 5]
-        self.assertEqual(_get_matching_indices('^ == max(^^)', lst, eval),
+        self.assertEqual(_get_matching_indices('$ == max($$)', lst, eval),
                          [1, 3])
 
-    def test_generated_code_inlines_the_array_for_two_carets(self):
-        model = {'search': '^ == max(^^)', 'first_match': False}
+    def test_generated_code_inlines_the_array_for_two_dollars(self):
+        model = {'search': '$ == max($$)', 'first_match': False}
         ctx = _get_search_context(model, var_and_exp=('data', 'data'),
                                   eval_in_scope=eval)
         self.assertEqual(ctx['predicate_expr'], 'item == max(data)')
@@ -6310,7 +6310,7 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
     def column_search_model(self):
         lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bo', 'age': 20}]
         model = init_model(lst, mock_get_visualizer)
-        model['columns'] = ['len(^["name"])']
+        model['columns'] = ['len($["name"])']
         eval_in_scope = lambda code: eval(code, {'len': len, 'max': max},
                                           {'data': lst})
         return lst, model, eval_in_scope
@@ -6322,7 +6322,7 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
         model, commands = update(make_column_search_input_event(0, '3'),
                                  ('data', 'data'), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval_in_scope)
-        self.assertEqual(model['search'], 'len(^["name"]) == 3')
+        self.assertEqual(model['search'], 'len($["name"]) == 3')
         self.assertEqual([c[1] for c in commands if isinstance(c, tuple)],
                          ['[item for item in data if len(item["name"]) == 3]'])
         self.assertEqual(model['linked_action'], 'filter')
@@ -6360,10 +6360,10 @@ TALLY_LIST = ['c', 'aa', 'b', 'c', 'b', 'c', 'c', 'c', 'aa', 'b']
 
 
 def tally_model(lst=None):
-    """A one-column ('^') table model over *lst*."""
+    """A one-column ('$') table model over *lst*."""
     lst = TALLY_LIST if lst is None else lst
     model = init_model(lst, mock_get_visualizer)
-    model['columns'] = ['^']
+    model['columns'] = ['$']
     return lst, model
 
 
@@ -6373,7 +6373,7 @@ class TestColumnValues(unittest.TestCase):
 
     def test_the_item_column_needs_no_eval_at_all(self):
         lst, model = tally_model()
-        self.assertEqual(_column_values('^', lst, model), lst)
+        self.assertEqual(_column_values('$', lst, model), lst)
 
     def test_a_computed_column_is_gathered_in_one_eval(self):
         # One comprehension over the whole list, not one eval per row: the same
@@ -6387,7 +6387,7 @@ class TestColumnValues(unittest.TestCase):
             calls.append(code)
             return eval(code, {}, {'data': lst})
 
-        self.assertEqual(_column_values("^['name']", lst, model, counting_eval),
+        self.assertEqual(_column_values("$['name']", lst, model, counting_eval),
                          ['Alice', 'Bo'])
         self.assertEqual(len(calls), 1)
         self.assertIn('for item in data', calls[0])
@@ -6396,14 +6396,14 @@ class TestColumnValues(unittest.TestCase):
         lst = [{'name': 'Alice'}, {'name': 'Bo'}]
         model = init_model(lst, mock_get_visualizer)
         self.assertIsNone(model.get('_source_expr'))
-        self.assertEqual(_column_values("^['name']", lst, model),
+        self.assertEqual(_column_values("$['name']", lst, model),
                          ['Alice', 'Bo'])
 
     def test_a_row_the_column_cannot_be_read_from_is_dropped(self):
         # A summary shouldn't cost the other n-1 rows.
         lst = [{'name': 'Alice'}, {}, {'name': 'Bo'}]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(_column_values("^['name']", lst, model),
+        self.assertEqual(_column_values("$['name']", lst, model),
                          ['Alice', 'Bo'])
 
     def test_one_bad_row_falls_the_whole_comprehension_back_to_per_row(self):
@@ -6411,7 +6411,7 @@ class TestColumnValues(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
         eval_in_scope = lambda code: eval(code, {}, {'data': lst})
-        self.assertEqual(_column_values("^['name']", lst, model, eval_in_scope),
+        self.assertEqual(_column_values("$['name']", lst, model, eval_in_scope),
                          ['Alice', 'Bo'])
 
 
@@ -6458,7 +6458,7 @@ class TestTallyLiteral(unittest.TestCase):
         self.assertIsNone(_tally_literal(Thing()))
 
     def test_a_value_that_does_not_compare_equal_to_itself_is_not_offered(self):
-        # `^ == nan` matches nothing, so there is no filter to offer.
+        # `$ == nan` matches nothing, so there is no filter to offer.
         self.assertIsNone(_tally_literal(float('nan')))
 
     def test_the_literal_evaluates_back_to_the_value(self):
@@ -6496,7 +6496,7 @@ class TestTallySelection(unittest.TestCase):
     def test_a_search_the_tally_did_not_write_checks_nothing(self):
         for row in [{'op': '>=', 'text': '3'},
                     {'op': '', 'text': 'isOdd'},
-                    {'op': '==', 'text': '^^ + 1'},
+                    {'op': '==', 'text': '$$ + 1'},
                     {'op': '==', 'text': ''},
                     {'op': 'in', 'text': '[]'},
                     {'op': 'in', 'text': 'threshold'}]:
@@ -6522,34 +6522,34 @@ class TestWriteTallySelection(unittest.TestCase):
 
     def write(self, literals, exclude=False):
         lst, model = tally_model()
-        _write_tally_selection(model, '^', literals, exclude)
+        _write_tally_selection(model, '$', literals, exclude)
         return model
 
     def test_nothing_selected_is_no_filter(self):
         model = self.write([])
         self.assertIsNone(model['column_searches'])
-        self.assertFalse(_column_search_active(model, '^'))
+        self.assertFalse(_column_search_active(model, '$'))
 
     def test_one_value_compares(self):
-        row = self.write(["'c'"])['column_searches']['^']
+        row = self.write(["'c'"])['column_searches']['$']
         self.assertEqual((row['op'], row['text']), ('==', "'c'"))
 
     def test_several_values_use_membership(self):
-        row = self.write(["'c'", "'b'"])['column_searches']['^']
+        row = self.write(["'c'", "'b'"])['column_searches']['$']
         self.assertEqual((row['op'], row['text']), ('in', "['c', 'b']"))
 
     def test_excluding_negates_the_operator(self):
-        row = self.write(["'c'"], exclude=True)['column_searches']['^']
+        row = self.write(["'c'"], exclude=True)['column_searches']['$']
         self.assertEqual((row['op'], row['text']), ('!=', "'c'"))
-        row = self.write(["'c'", "'b'"], exclude=True)['column_searches']['^']
+        row = self.write(["'c'", "'b'"], exclude=True)['column_searches']['$']
         self.assertEqual((row['op'], row['text']), ('not in', "['c', 'b']"))
 
     def test_excluding_nothing_keeps_the_bit_without_filtering(self):
         # Exclude can be ticked before any value is picked, and there is no
         # operator or text that says so.
         model = self.write([], exclude=True)
-        self.assertTrue(model['column_searches']['^']['exclude'])
-        self.assertFalse(_column_search_active(model, '^'))
+        self.assertTrue(model['column_searches']['$']['exclude'])
+        self.assertFalse(_column_search_active(model, '$'))
 
     def test_the_written_search_round_trips_through_the_selection(self):
         for literals, exclude in [([], False), (["'c'"], False),
@@ -6557,7 +6557,7 @@ class TestWriteTallySelection(unittest.TestCase):
                                   (["'c'", "'b'"], True), ([], True)]:
             with self.subTest(literals=literals, exclude=exclude):
                 model = self.write(literals, exclude)
-                self.assertEqual(_tally_selection(_column_search_row(model, '^')),
+                self.assertEqual(_tally_selection(_column_search_row(model, '$')),
                                  (literals, exclude))
 
 
@@ -6566,7 +6566,7 @@ class TestTallyLiterals(unittest.TestCase):
 
     def test_in_first_seen_order(self):
         lst, model = tally_model()
-        self.assertEqual(_tally_literals('^', model, lst),
+        self.assertEqual(_tally_literals('$', model, lst),
                          ["'c'", "'aa'", "'b'"])
 
     def test_values_with_no_literal_are_left_out(self):
@@ -6575,12 +6575,12 @@ class TestTallyLiterals(unittest.TestCase):
                 return '<thing>'
         lst = ['c', Thing()]
         _, model = tally_model(lst)
-        self.assertEqual(_tally_literals('^', model, lst), ["'c'"])
+        self.assertEqual(_tally_literals('$', model, lst), ["'c'"])
 
     def test_a_column_with_no_tally_offers_nothing(self):
         lst = list(range(TALLY_MAX_CARDINALITY + 1))
         _, model = tally_model(lst)
-        self.assertEqual(_tally_literals('^', model, lst), [])
+        self.assertEqual(_tally_literals('$', model, lst), [])
 
 
 class TestTallyEvents(unittest.TestCase):
@@ -6591,21 +6591,21 @@ class TestTallyEvents(unittest.TestCase):
                       mock_get_visualizer, eval_in_scope=eval)
 
     def row(self, model):
-        return _column_search_row(model, '^')
+        return _column_search_row(model, '$')
 
     def test_checking_one_value_compares_against_it(self):
         lst, model = tally_model()
         model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('==', "'c'"))
-        self.assertEqual(model['search'], "^ == 'c'")
+        self.assertEqual(model['search'], "$ == 'c'")
 
     def test_checking_a_second_value_switches_to_membership(self):
         lst, model = tally_model()
         model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
         model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
         self.assertEqual(self.row(model)['text'], "['c', 'b']")
-        self.assertEqual(model['search'], "^ in ['c', 'b']")
+        self.assertEqual(model['search'], "$ in ['c', 'b']")
 
     def test_the_membership_list_follows_the_tally_order_not_the_click_order(self):
         # So the generated search is the same however the user got there.
@@ -6665,7 +6665,7 @@ class TestTallyEvents(unittest.TestCase):
 
     def test_select_none_keeps_exclude_and_compose(self):
         lst, model = tally_model()
-        _set_column_search(model, '^', compose='or')
+        _set_column_search(model, '$', compose='or')
         model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
         model, _ = self.click(model, lst, TallySelectAll(index=0))
         model, _ = self.click(model, lst, TallySelectNone(index=0))
@@ -6678,7 +6678,7 @@ class TestTallyEvents(unittest.TestCase):
         model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('!=', "'c'"))
-        self.assertEqual(model['search'], "^ != 'c'")
+        self.assertEqual(model['search'], "$ != 'c'")
         model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('not in', "['c', 'b']"))
@@ -6696,13 +6696,13 @@ class TestTallyEvents(unittest.TestCase):
         model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
         self.assertTrue(self.row(model)['exclude'])
         self.assertIsNone(model['search'])
-        self.assertFalse(_column_search_active(model, '^'))
+        self.assertFalse(_column_search_active(model, '$'))
 
     def test_exclude_ticked_first_is_honored_by_the_next_click(self):
         lst, model = tally_model()
         model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
         model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        self.assertEqual(model['search'], "^ != 'c'")
+        self.assertEqual(model['search'], "$ != 'c'")
 
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model()
@@ -6789,7 +6789,7 @@ class TestTallyRendering(unittest.TestCase):
 
     def test_the_checked_row_is_the_one_the_search_names(self):
         lst, model = tally_model()
-        _set_column_search(model, '^', op='==', text="'aa'")
+        _set_column_search(model, '$', op='==', text="'aa'")
         rows = self.rows(self.tally(self.open_menu_html(model, lst)))
         self.assertEqual([' checked' in row for row in rows],
                          [False, True, False])
@@ -6798,7 +6798,7 @@ class TestTallyRendering(unittest.TestCase):
 
     def test_a_hand_written_search_checks_nothing(self):
         lst, model = tally_model()
-        _set_column_search(model, '^', op='', text='isOdd')
+        _set_column_search(model, '$', op='', text='isOdd')
         rows = self.rows(self.tally(self.open_menu_html(model, lst)))
         self.assertEqual([' checked' in row for row in rows], [False] * 3)
 
@@ -6833,7 +6833,7 @@ class TestTallyRendering(unittest.TestCase):
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
         self.assertNotIn(' checked', self.checkboxes(tally)[0])
-        _set_column_search(model, '^', op='!=', text="'c'")
+        _set_column_search(model, '$', op='!=', text="'c'")
         tally = self.tally(self.open_menu_html(model, lst))
         self.assertIn(' checked', self.checkboxes(tally)[0])
 
@@ -6849,7 +6849,7 @@ class TestTallyRendering(unittest.TestCase):
     def test_values_that_cannot_be_counted_say_so_instead(self):
         lst = [{'a': 1}, {'a': 2}]
         model = init_model(lst, mock_get_visualizer)
-        model['columns'] = ['^']
+        model['columns'] = ['$']
         tally = self.tally(self.open_menu_html(model, lst))
         self.assertIn('col-tally-note', tally)
         self.assertEqual(self.rows(tally), [])
@@ -6857,7 +6857,7 @@ class TestTallyRendering(unittest.TestCase):
     def test_an_empty_table_has_no_tally_at_all(self):
         lst = []
         model = init_model(lst, mock_get_visualizer)
-        model['columns'] = ['^']
+        model['columns'] = ['$']
         model['openDropdown'] = {'id': 'col-menu-0'}
         self.assertNotIn('col-tally',
                          visualize(lst, model, mock_get_visualizer, None))
@@ -6865,7 +6865,7 @@ class TestTallyRendering(unittest.TestCase):
     def test_a_computed_column_tallies_its_own_values(self):
         lst = [{'name': 'Alice'}, {'name': 'Bo'}, {'name': 'Cy'}]
         model = init_model(lst, mock_get_visualizer)
-        model['columns'] = ['len(^["name"])']
+        model['columns'] = ['len($["name"])']
         model['openDropdown'] = {'id': 'col-menu-0'}
         eval_in_scope = lambda code: eval(code, {'len': len}, {'data': lst})
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
@@ -6951,7 +6951,7 @@ class TestTallyFilterBox(unittest.TestCase):
         return re.findall(r'col-tally-count">([^<]*)<', tally)
 
     def text(self, model):
-        return _column_search_row(model, '^')['text']
+        return _column_search_row(model, '$')['text']
 
     def test_the_box_sits_above_the_values_it_narrows(self):
         lst, model = tally_model()
@@ -7020,7 +7020,7 @@ class TestTallyFilterBox(unittest.TestCase):
         lst, model = tally_model()
         model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
         model = self.type(model, lst, 'aa')
-        self.assertEqual(model['search'], "^ == 'c'")
+        self.assertEqual(model['search'], "$ == 'c'")
 
     def test_the_box_survives_picking_values(self):
         # Narrowing down and then ticking a few is the whole point of it.
@@ -7028,7 +7028,7 @@ class TestTallyFilterBox(unittest.TestCase):
         model = self.type(model, lst, 'a')
         model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
         self.assertEqual(model['tally_filter'], 'a')
-        self.assertEqual(model['search'], "^ == 'aa'")
+        self.assertEqual(model['search'], "$ == 'aa'")
 
     def test_select_all_takes_only_the_values_on_show(self):
         lst, model = tally_model()
@@ -7066,7 +7066,7 @@ class TestTallyFilterBox(unittest.TestCase):
 
     def test_another_column_starts_with_an_empty_box(self):
         lst, model = tally_model()
-        model['columns'] = ['^', 'len(^)']
+        model['columns'] = ['$', 'len($)']
         model = self.type(model, lst, 'a')
         model['openDropdown'] = {'id': 'col-menu-0'}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
@@ -7173,7 +7173,7 @@ class TestTallySortMenu(unittest.TestCase):
         return re.findall(r'col-tally-count">([^<]*)<', tally)
 
     def text(self, model):
-        return _column_search_row(model, '^')['text']
+        return _column_search_row(model, '$')['text']
 
     def open_chip(self, model, index=0):
         model['col_search_dropdown'] = f'tally-sort-{index}'
@@ -7271,12 +7271,12 @@ class TestTallySortMenu(unittest.TestCase):
                           self.tally(model, lst), re.DOTALL)
         self.assertEqual([' checked' in row for row in rows],
                          [False, False, True])
-        self.assertEqual(model['search'], "^ == 'aa'")
+        self.assertEqual(model['search'], "$ == 'aa'")
 
     def test_the_selectable_literals_follow_the_chosen_order(self):
         lst, model = tally_model()
         model['tally_sort'] = 'item asc'
-        self.assertEqual(_tally_literals('^', model, lst),
+        self.assertEqual(_tally_literals('$', model, lst),
                          ["'aa'", "'b'", "'c'"])
 
     def test_the_membership_list_follows_the_chosen_order(self):
@@ -7316,7 +7316,7 @@ class TestTallySortMenu(unittest.TestCase):
 
     def test_another_column_starts_in_first_seen_order(self):
         lst, model = tally_model()
-        model['columns'] = ['^', 'len(^)']
+        model['columns'] = ['$', 'len($)']
         model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
         model['openDropdown'] = {'id': 'col-menu-0'}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
@@ -7484,7 +7484,7 @@ class TestTallyCountFilterNamesTheProgramsValues(unittest.TestCase):
         model, _ = update(make_column_mouse_event(repr(TallySelectAll(index=0))),
                           None, model, lst, mock_get_visualizer,
                           eval_in_scope=program_scope(n=3))
-        self.assertEqual(_column_search_row(model, '^')['text'], "['c', 'b']")
+        self.assertEqual(_column_search_row(model, '$')['text'], "['c', 'b']")
 
 
 class TestTallyExtreme(unittest.TestCase):
@@ -7564,7 +7564,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         return re.findall(r'col-tally-count">([^<]*)<', tally)
 
     def text(self, model):
-        return _column_search_row(model, '^')['text']
+        return _column_search_row(model, '$')['text']
 
     def open_chip(self, model, index=0):
         model['col_search_dropdown'] = f'tally-count-op-{index}'
@@ -7703,7 +7703,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         lst, model = tally_model()
         model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
         model = self.type(model, lst, '3')
-        self.assertEqual(model['search'], "^ == 'aa'")
+        self.assertEqual(model['search'], "$ == 'aa'")
 
     def test_select_all_takes_only_the_values_on_show(self):
         lst, model = tally_model()
@@ -7840,7 +7840,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
 
     def test_another_column_starts_with_an_empty_box(self):
         lst, model = tally_model()
-        model['columns'] = ['^', 'len(^)']
+        model['columns'] = ['$', 'len($)']
         model = self.type(model, lst, '3')
         model['openDropdown'] = {'id': 'col-menu-0'}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))

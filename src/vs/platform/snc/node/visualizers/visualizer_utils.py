@@ -177,7 +177,7 @@ def get_full_class_name(obj) -> str:
 # =============================================================================
 #
 # A "slot" is one column (for a list, evaluated per item) or one field (for an
-# object, evaluated on the object); in both cases `^` denotes "a value of type
+# object, evaluated on the object); in both cases `$` denotes "a value of type
 # T". The on-disk config maps a type key T -> [slot, ...]; a slot is a bare
 # expr string or {"expr": ..., "children": {T2: [slot, ...]}}. When descending
 # into a slot's cell, `children` is consulted by the cell's own type key, so a
@@ -208,7 +208,7 @@ def parse_slots(slots_config, expr_transform=None):
     slot_children maps a slot's expr -> its {T2: [slot, ...]} children map
     (only for slots that actually carry children). Bare-string entries are
     treated as childless slots. `expr_transform` is applied to each expr (used
-    by the object visualizer to ensure a leading caret).
+    by the object visualizer to ensure a leading dollar).
     """
     exprs = []
     slot_children = {}
@@ -337,43 +337,43 @@ def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
 
 
 # =============================================================================
-# Caret (^) utilities
+# Dollar ($) utilities
 # =============================================================================
 
-# ^ is a rare python infix operator, generally invalid in variable position.
-# replace only ^ that are in variable position (not in strings, etc)
-# does this by replace-and-check one by one to see if parse succeeds with the ^ retained
-CARETS_RE = re.compile(r'(?<!\^)\^+(?!\^)')
+# $ is not a Python token at all, so it can only appear legally inside a string
+# literal. replace only $ that are in variable position (not in strings, etc)
+# does this by replace-and-check one by one to see if parse succeeds with the $ retained
+DOLLARS_RE = re.compile(r'(?<!\$)\$+(?!\$)')
 
-# replace_exps should be array, where replace_exps[0] is the replacement for ^, replace_exps[1] for ^^, etc
-# replace_exps should not have carets in them. if necessary, run this on them first
+# replace_exps should be array, where replace_exps[0] is the replacement for $, replace_exps[1] for $$, etc
+# replace_exps should not have dollars in them. if necessary, run this on them first
 # a run naming a scope beyond replace_exps is left as written - the caller only
 # knows the scopes it was given, and must not invent a binding for the rest
-def replace_carets_in_py_exp(py_exp: str, replace_exps) -> str:
-    temp_names = {} # temp name to number of carets
+def replace_dollars_in_py_exp(py_exp: str, replace_exps) -> str:
+    temp_names = {} # temp name to number of dollars
     def temp_replacer(m):
-        n_carets = len(m[0])
-        temp_name = f'_{n_carets}carets_{len(temp_names)}_'
-        temp_names[temp_name] = n_carets
+        n_dollars = len(m[0])
+        temp_name = f'_{n_dollars}dollars_{len(temp_names)}_'
+        temp_names[temp_name] = n_dollars
         return temp_name
-    out = CARETS_RE.sub(temp_replacer, py_exp)
+    out = DOLLARS_RE.sub(temp_replacer, py_exp)
 
-    for name, n_carets in temp_names.items():
+    for name, n_dollars in temp_names.items():
         try:
-            temp_str = out.replace(name, '^'*n_carets)
+            temp_str = out.replace(name, '$'*n_dollars)
             ast.parse(temp_str)
-            out = temp_str # parse succeeded, meaning the carets were likely in a string and should not be replaced
+            out = temp_str # parse succeeded, meaning the dollars were likely in a string and should not be replaced
         except SyntaxError:
-            if n_carets <= len(replace_exps):
-                out = out.replace(name, replace_exps[n_carets-1])
+            if n_dollars <= len(replace_exps):
+                out = out.replace(name, replace_exps[n_dollars-1])
             else:
-                out = out.replace(name, '^'*n_carets)
+                out = out.replace(name, '$'*n_dollars)
 
     return out
 
 
-def caret_expr_parses(s: str, mode: str = 'eval') -> bool:
-    """Whether *s* is valid Python once every caret run is read as a value.
+def dollar_expr_parses(s: str, mode: str = 'eval') -> bool:
+    """Whether *s* is valid Python once every dollar run is read as a value.
 
     Used to validate text the user typed, which may name any number of scopes,
     so the levels are collapsed to one placeholder rather than bound.
@@ -383,10 +383,10 @@ def caret_expr_parses(s: str, mode: str = 'eval') -> bool:
         return True
     except SyntaxError:
         pass
-    if '^' not in s:
+    if '$' not in s:
         return False
     try:
-        ast.parse(CARETS_RE.sub('_crt_', s), mode=mode)
+        ast.parse(DOLLARS_RE.sub('_dlr_', s), mode=mode)
         return True
     except SyntaxError:
         return False
@@ -394,24 +394,24 @@ def caret_expr_parses(s: str, mode: str = 'eval') -> bool:
 
 # --- Nesting: how a child visualizer talks about its own value ----------------
 #
-# A caret run names a scope: ^ is the innermost value, ^^ its parent, and so on.
-# A list column or object field is written in ITS OWN scope, where ^ is the row
+# A dollar run names a scope: $ is the innermost value, $$ its parent, and so on.
+# A list column or object field is written in ITS OWN scope, where $ is the row
 # or the object. A child visualizer nested in one of those cells introduces a
-# new innermost scope (the string visualizer binds ^ to the current regex
-# match), so the cell's own value is one scope out: ^^.
+# new innermost scope (the string visualizer binds $ to the current regex
+# match), so the cell's own value is one scope out: $$.
 #
-# The child never emits carets in generated code, though. The parent binds the
+# The child never emits dollars in generated code, though. The parent binds the
 # cell value to CHILD_SOURCE_BINDER and hands that over as the child's source
-# expression; the child generates ordinary caret-free Python against it, and the
-# parent swaps its own (caret-bearing) expression back in via
-# nest_generated_expr when it takes the code. That keeps replace_exps caret-free
+# expression; the child generates ordinary dollar-free Python against it, and the
+# parent swaps its own (dollar-bearing) expression back in via
+# nest_generated_expr when it takes the code. That keeps replace_exps dollar-free
 # everywhere and keeps generated code parseable at every intermediate step.
 #
-# In its own UI the child still SHOWS that value as ^^, which is what the user
+# In its own UI the child still SHOWS that value as $$, which is what the user
 # reads in the replace box.
 
 CHILD_SOURCE_BINDER = '_snc_cell_'
-CHILD_SOURCE_DISPLAY = '^^'
+CHILD_SOURCE_DISPLAY = '$$'
 
 
 def is_nested(var_and_exp) -> bool:
@@ -429,7 +429,7 @@ def nest_generated_expr(expr: str, parent_expr: str) -> str:
     """Bring a child's generated code into the parent's scope.
 
     *parent_expr* is how the parent refers to the child's value in the parent's
-    own scope (a list column, an object field accessor) and may contain carets.
+    own scope (a list column, an object field accessor) and may contain dollars.
     """
     return expr.replace(CHILD_SOURCE_BINDER, f'({parent_expr})')
 
@@ -439,7 +439,7 @@ def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
 
     The two expressions differ by destination, not by scope depth. Generated
     code (a NewCode 2-tuple) may be headed for the parent's own config, where a
-    caret expression is exactly right - a list column has to stay row-generic.
+    dollar expression is exactly right - a list column has to stay row-generic.
     Clipboard text is pasted into the editor verbatim, so it has to name the
     value concretely; a parent whose code_expr is already concrete passes the
     same expression twice.
@@ -453,23 +453,23 @@ def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
     return cmd
 
 
-def strip_leading_caret(name: str) -> str:
-    """Remove a single leading ^ for display purposes."""
-    if name.startswith('^'):
+def strip_leading_dollar(name: str) -> str:
+    """Remove a single leading $ for display purposes."""
+    if name.startswith('$'):
         return name[1:]
     return name
 
 
-def eval_caret_expr(field_expr: str, value, eval_in_scope=None):
-    """Evaluate a ^-prefixed field expression against a value.
+def eval_dollar_expr(field_expr: str, value, eval_in_scope=None):
+    """Evaluate a $-prefixed field expression against a value.
 
     The value comes in as an argument and the expression is compiled in the
-    user's scope, so a column like `^ * factor` can name their program's
-    variables alongside the caret. Without a scope to compile it in -- an
+    user's scope, so a column like `$ * factor` can name their program's
+    variables alongside the dollar. Without a scope to compile it in -- an
     unfocused preview, a test -- this module's globals are all there is, which
-    is enough for an expression that only reaches through the caret.
+    is enough for an expression that only reaches through the dollar.
     """
-    code = f'(lambda _v: {replace_carets_in_py_exp(field_expr, ["_v"])})'
+    code = f'(lambda _v: {replace_dollars_in_py_exp(field_expr, ["_v"])})'
     return (eval(code) if eval_in_scope is None else eval_in_scope(code))(value)
 
 

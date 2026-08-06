@@ -66,7 +66,7 @@ PICK TOOL:
     'end'     -> match.end() index
     'prefix'  -> str[:match.start()]
     'group_0' -> the whole match (when cap groups OFF or single segment)
-    'group_N' -> the Nth capture group (^[N])
+    'group_N' -> the Nth capture group ($[N])
     'suffix'  -> str[match.end():]
 - Each chip carries:
     * snc-mouse-down="SegmentToggle(segment_id=...)" so a click toggles
@@ -78,10 +78,10 @@ PICK TOOL:
     * Adjacent strs -> joined with " + " (concatenation)
     * Anything else -> tuple "(item1, item2, ...)"
 - Simplifications applied during assembly:
-    * All capture groups (group_1..N) -> collapse to group_0 (^[0])
+    * All capture groups (group_1..N) -> collapse to group_0 ($[0])
     * {prefix, group_0, suffix}        -> just <src>
-    * {group_0, suffix}                -> <src>[^.start():]
-    * {prefix, group_0}                -> <src>[:^.end()]
+    * {group_0, suffix}                -> <src>[$.start():]
+    * {prefix, group_0}                -> <src>[:$.end()]
 - Multi-match mode (no '1' flag): each chip's expression becomes a list
   comprehension over re.finditer(...), e.g.
     group_1 -> [m[1] for m in re.finditer(r'pat', src, flags=re.M)]
@@ -128,10 +128,10 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import (replace_carets_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
+from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
                               LinkConfig, handle_relink,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
-                              caret_expr_parses, is_nested,
+                              dollar_expr_parses, is_nested,
                               nerd_font_icon, render_tool_toolbar)
 import z_object_visualizer
 
@@ -292,7 +292,7 @@ DC3 = chr(0x13)  # $  - end of line/string anchor
 _SENTINEL_CHARS = [DC2, DC3]
 
 # Lambda parameter the previews bind the string itself to, so a replace
-# expression that mentions ^^ (see CHILD_SOURCE_DISPLAY) can be evaluated
+# expression that mentions $$ (see CHILD_SOURCE_DISPLAY) can be evaluated
 # against the real value rather than a name only the generated code has.
 _PREVIEW_SOURCE_BINDER = '_snc_v'
 
@@ -1570,8 +1570,8 @@ def _find_closing_delimiter(search: str | None) -> int | None:
 
 
 def _is_valid_python_expression(s: str) -> bool:
-    """Check if s parses as a valid Python expression (supports ^ caret syntax)."""
-    return caret_expr_parses(s)
+    """Check if s parses as a valid Python expression (supports $ dollar-scope syntax)."""
+    return dollar_expr_parses(s)
 
 
 def parse_slice_parts(search: str | None) -> tuple | None:
@@ -1581,7 +1581,7 @@ def parse_slice_parts(search: str | None) -> tuple | None:
     are blank or parse as valid Python expressions, return (left, right).
     Returns None if no valid slice split is found.
 
-    Uses the same guess-and-check approach as replace_carets_in_py_exp.
+    Uses the same guess-and-check approach as replace_dollars_in_py_exp.
     """
     if not search:
         return None
@@ -3900,7 +3900,7 @@ def _preview_chip(expr: str, val_repr: str, target: str = '.snc-replace-input') 
 def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
     """Render the first regex match as a compact z_object small view between find/replace.
 
-    Returns HTML string with draggable match properties (^[0], ^.start(), ^.end(),
+    Returns HTML string with draggable match properties ($[0], $.start(), $.end(),
     and capture groups), or '' if no regex match exists.
     """
     selection_regex = model.get('search')
@@ -3912,7 +3912,7 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
             return '<div class="match-object-preview"><span class="small">No matches</span></div>'
         val_repr = _trunc_repr(matched)
         field_html = z_object_visualizer.render_small_field(
-            '^', val_repr, '^', add_target='.search-box-replace')
+            '$', val_repr, '$', add_target='.search-box-replace')
         return f'<div class="match-object-preview"><span class="small">{field_html}</span></div>'
 
     matches = _find_matches(selection_regex, value, eval_in_scope)
@@ -3922,7 +3922,7 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
     if not isinstance(m, re.Match):
         return '<div class="match-object-preview"><span class="small">Match not a match object, ut oh</span></div>'
 
-    fields = ['^[0]', '^.start()', '^.end()']
+    fields = ['$[0]', '$.start()', '$.end()']
     grouped_match = None
     if is_regex_search(selection_regex):
         inner = get_regex_inner_pattern(selection_regex)
@@ -3934,14 +3934,14 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
                 if grouped_match and grouped_match.lastindex:
                     for i in range(1, grouped_match.lastindex + 1):
                         if grouped_match.group(i) is not None:
-                            fields.append(f'^[{i}]')
+                            fields.append(f'$[{i}]')
             except Exception:
                 grouped_match = None
 
     display_match = grouped_match if grouped_match is not None else m
     match_model = {
         'fields': fields,
-        '_source_expr': '^',
+        '_source_expr': '$',
         '_add_target': '.search-box-replace',
     }
     obj_html = z_object_visualizer.visualize(
@@ -3955,10 +3955,10 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
     Returns HTML string, or '' if preconditions are not met (replace not visible,
     no search, or no matches).
 
-    For index/slice searches, ^ is the matched string (not a match object),
-    so the preview shows ^ => 'str' instead of ^[0], ^.start(), ^.end().
+    For index/slice searches, $ is the matched string (not a match object),
+    so the preview shows $ => 'str' instead of $[0], $.start(), $.end().
 
-    When the regex has capture groups, shows ^[1], ^[2], etc. alongside ^[0].
+    When the regex has capture groups, shows $[1], $[2], etc. alongside $[0].
     All expression chips are clickable (snc-add-at-cursor) to insert into the replace box.
     """
     if not model.get('replace_visible', False):
@@ -3975,7 +3975,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
             return ''
 
         m_repr = html.escape(_trunc_repr(matched_str))
-        # row1 = _preview_chip('^', m_repr)
+        # row1 = _preview_chip('$', m_repr)
 
         result_str = ''
         replace_text = model.get('replace_text')
@@ -4006,13 +4006,13 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
     mend = html.escape(_trunc_repr(m.end()))
 
     # row1 = (
-    #     _preview_chip('^[0]', m0)
-    #     + _preview_chip('^.start()', mstart)
-    #     + _preview_chip('^.end()', mend)
+    #     _preview_chip('$[0]', m0)
+    #     + _preview_chip('$.start()', mstart)
+    #     + _preview_chip('$.end()', mend)
     # )
 
     # produce grouped_match for the transform evaluation so that
-    # expressions like ^[2] resolve against the real capture groups.
+    # expressions like $[2] resolve against the real capture groups.
     # group_chips = ''
     grouped_match = None
     if is_regex_search(selection_regex):
@@ -4027,7 +4027,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
                         # g = grouped_match.group(i)
                         # if g is not None:
                             # g_repr = html.escape(_trunc_repr(g))
-                            # group_chips += _preview_chip(f'^[{i}]', g_repr)
+                            # group_chips += _preview_chip(f'$[{i}]', g_repr)
             except Exception:
                 grouped_match = None
 
@@ -4285,10 +4285,10 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     if replace_expr:
         model['replace_visible'] = True
         # Inverse of _replace_expr_bound: turn the bound names back into the
-        # caret levels the replace box shows.
+        # dollar levels the replace box shows.
         model['replace_text'] = re.sub(
             rf'\b{CHILD_SOURCE_BINDER}\b', CHILD_SOURCE_DISPLAY,
-            re.sub(r'\bmtch\b', '^', replace_expr))
+            re.sub(r'\bmtch\b', '$', replace_expr))
     else:
         has_replace = ctx.get('has_replace', False)
         if not has_replace:
@@ -4330,20 +4330,20 @@ def _display_source_expr(source_expr: str) -> str:
     """How the source string is SHOWN (replace box, segment chips).
 
     Nested in a list cell or object field, the value is bound to a name for code
-    generation - but the user reads it as ^^, one scope out from the ^ bound to
+    generation - but the user reads it as $$, one scope out from the $ bound to
     the current match.
     """
     return CHILD_SOURCE_DISPLAY if source_expr == CHILD_SOURCE_BINDER else source_expr
 
 
 def _replace_expr_bound(replace_text: str, *binders: str) -> str:
-    """The replace box's text as Python, with each caret level bound.
+    """The replace box's text as Python, with each dollar level bound.
 
-    binders[0] binds ^ (the current match); binders[1] binds ^^ (the string
+    binders[0] binds $ (the current match); binders[1] binds $$ (the string
     being searched) - a name when generating code, the value itself when
     evaluating a preview.
     """
-    return replace_carets_in_py_exp(_unwrap_backtick_expr(replace_text), list(binders))
+    return replace_dollars_in_py_exp(_unwrap_backtick_expr(replace_text), list(binders))
 
 
 def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = None, eval_in_scope=None) -> dict | None:
@@ -4535,12 +4535,12 @@ from string_visualizer_grammar import (
 # Selections are then assembled into model['replace_text'] with simplifications.
 #
 # Segment IDs (canonical order, same order used to assemble the Replace box):
-#   start   - match start index (^.start())
-#   prefix  - substring from string start to match start (str[:^.start()])
-#   group_0 - whole match string (^[0]); used when cap groups OFF / single segment
-#   group_N - Nth capture group (^[N]); used when cap groups ON
-#   suffix  - substring from match end to string end (str[^.end():])
-#   end     - match end index (^.end())
+#   start   - match start index ($.start())
+#   prefix  - substring from string start to match start (str[:$.start()])
+#   group_0 - whole match string ($[0]); used when cap groups OFF / single segment
+#   group_N - Nth capture group ($[N]); used when cap groups ON
+#   suffix  - substring from match end to string end (str[$.end():])
+#   end     - match end index ($.end())
 #
 # Multi-match mode (no '1' flag) wraps each in a list comprehension over
 # re.finditer(...). Adjacent string segments concatenate with '+'; otherwise
@@ -4608,22 +4608,22 @@ def _segment_expr(seg_id: str, *, source_expr: str, is_first: bool,
                   finditer_call: str | None) -> str:
     """Return the Python expression for a single segment.
 
-    First-match mode (is_first True) treats '^' as the match-object alias.
+    First-match mode (is_first True) treats '$' as the match-object alias.
     Multi-match mode wraps with `[ ... for m in {finditer_call}]` so the
     expression evaluates to a list across all matches.
     """
     if is_first:
         if seg_id == 'start':
-            return '^.start()'
+            return '$.start()'
         if seg_id == 'end':
-            return '^.end()'
+            return '$.end()'
         if seg_id == 'prefix':
-            return f'{source_expr}[:^.start()]'
+            return f'{source_expr}[:$.start()]'
         if seg_id == 'suffix':
-            return f'{source_expr}[^.end():]'
+            return f'{source_expr}[$.end():]'
         if seg_id.startswith('group_'):
             n = seg_id[len('group_'):]
-            return f'^[{n}]'
+            return f'$[{n}]'
         return seg_id  # unknown -> defensive
 
     # Multi-match: wrap each per-match expression in a list comprehension.
@@ -4789,7 +4789,7 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
 
     Returns TWO sets of expressions because they intentionally differ:
       - 'replace_exprs' (drives model['replace_text']):
-        ALWAYS the first-match flavor (^.start(), ^[1], ...). Action buttons
+        ALWAYS the first-match flavor ($.start(), $[1], ...). Action buttons
         like Loop / Map Matches wrap this into the all-matches form, so
         building list comprehensions here would just double-wrap.
       - 'chip_exprs' (drives snc-py-exp on chips and segment chars):
@@ -4803,7 +4803,7 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
     The two sets also differ in how they name the SOURCE string. chip_exprs use
     the concrete access path (`rows[0].name`) so a dragged-out expression stands
     on its own; replace_exprs use the display form, which for a nested cell is
-    `^^` - one scope out from the `^` bound to the match (see
+    `$$` - one scope out from the `$` bound to the match (see
     _display_source_expr). At the top level the two coincide.
 
     Returns dict:
@@ -4874,11 +4874,11 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
 
     # Regex / string path. Replace exprs always use first-match flavor.
     replace_exprs = {
-        'start': '^.start()',
-        'end': '^.end()',
-        'prefix': f'{display_expr}[:^.start()]',
-        'group_0': '^[0]',
-        'suffix': f'{display_expr}[^.end():]',
+        'start': '$.start()',
+        'end': '$.end()',
+        'prefix': f'{display_expr}[:$.start()]',
+        'group_0': '$[0]',
+        'suffix': f'{display_expr}[$.end():]',
     }
 
     # Chip exprs match Replace exprs when the user is in 1st-mode. Otherwise
@@ -4886,8 +4886,8 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
     # dragged-out expression evaluates to the list across all matches.
     is_first = is_first_match_mode(selection_regex)
     first_match_chip_exprs = {**replace_exprs,
-                              'prefix': f'{source_expr}[:^.start()]',
-                              'suffix': f'{source_expr}[^.end():]'}
+                              'prefix': f'{source_expr}[:$.start()]',
+                              'suffix': f'{source_expr}[$.end():]'}
     if is_first:
         chip_exprs = first_match_chip_exprs
     else:
@@ -4912,8 +4912,8 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
         'chip_exprs': chip_exprs,
         'simplifications': {
             'full': display_expr,
-            'tail': f'{display_expr}[^.start():]',
-            'head': f'{display_expr}[:^.end()]',
+            'tail': f'{display_expr}[$.start():]',
+            'head': f'{display_expr}[:$.end()]',
         },
     }
 
@@ -4928,7 +4928,7 @@ def _segment_id_to_replace_expression(seg_id: str, seg_ctx: dict) -> str:
         return exprs[seg_id]
     if seg_id.startswith('group_') and not seg_ctx.get('is_index_slice'):
         n = seg_id[len('group_'):]
-        return f'^[{n}]'
+        return f'$[{n}]'
     return seg_id
 
 
@@ -4956,7 +4956,7 @@ def _segment_id_to_chip_expression(seg_id: str, seg_ctx: dict, value: str,
                 if rest.endswith(']'):
                     finditer_call = rest[:-1]
                     return f'[m[{n}] for m in {finditer_call}]'
-        return f'^[{n}]'
+        return f'$[{n}]'
     return seg_id
 
 
@@ -5055,14 +5055,14 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
             seg_id = f'group_{seg_idx + 1}'  # segment_index is 0-based, group_N is 1-based
             new_highlights.append((
                 start, end, 'segment-group',
-                f"{seg_id}|{_chip_expr_for(seg_id)}|^[{seg_idx + 1}]",
+                f"{seg_id}|{_chip_expr_for(seg_id)}|$[{seg_idx + 1}]",
                 (1, 1), seg_idx))
     else:
         seg_id = 'group_0'
         new_highlights.append((
             match_start_internal, match_end_internal,
             'segment-group',
-            f"{seg_id}|{_chip_expr_for(seg_id)}|^[0]",
+            f"{seg_id}|{_chip_expr_for(seg_id)}|$[0]",
             (1, 1), 0))
 
     # Suffix region (match end to string end). Empty if match ends at string end.
@@ -5075,7 +5075,7 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
 
     # start/end index chips: rendered as standalone inline chips at the match
     # boundaries. Chip LABELS show the numeric position of the first match
-    # (e.g. "6" / "11"); snc-py-exp carries the actual expression (^.start()
+    # (e.g. "6" / "11"); snc-py-exp carries the actual expression ($.start()
     # in 1st mode, list-comp otherwise). The start chip is inserted BEFORE
     # the match's first char so it floats over the left edge; the end chip
     # is inserted AFTER the match's last char so it floats over the right edge.
@@ -5116,7 +5116,7 @@ def _chip_label(seg_id: str, source_expr: str, is_first: bool) -> str:
         return 'post'
     if seg_id.startswith('group_'):
         n = seg_id[len('group_'):]
-        return f'^[{n}]'
+        return f'$[{n}]'
     return seg_id
 
 
@@ -5131,7 +5131,7 @@ def _build_segment_replace_text(model: dict, var_and_exp, value: str,
       4. {prefix, group_0} selected                 -> emit head-slice.
 
     The exact tail/head slice expressions vary based on search type:
-      - regex first-match : '<src>[^.start():]' / '<src>[:^.end()]'
+      - regex first-match : '<src>[$.start():]' / '<src>[:$.end()]'
       - index/slice       : '<src>[<start_expr>:]' / '<src>[:<end_expr>]'
 
     After simplification, the remaining string segments become a single concat
@@ -5156,8 +5156,8 @@ def _build_segment_replace_text(model: dict, var_and_exp, value: str,
             'chip_exprs': {},
             'simplifications': {
                 'full': source_expr,
-                'tail': f'{source_expr}[^.start():]',
-                'head': f'{source_expr}[:^.end()]',
+                'tail': f'{source_expr}[$.start():]',
+                'head': f'{source_expr}[:$.end()]',
             },
         }
 
@@ -5169,7 +5169,7 @@ def _build_segment_replace_text(model: dict, var_and_exp, value: str,
 
     # Simplification 1: all groups -> group_0 (only meaningful when cap groups
     # are on AND the regex has at least 2 groups - selecting the only group
-    # in a single-group regex should remain ^[1]).
+    # in a single-group regex should remain $[1]).
     if (len(group_ids_in_order) >= 2
             and group_ids_in_order != ['group_0']
             and all(g in sel_set for g in group_ids_in_order)):
@@ -5179,7 +5179,7 @@ def _build_segment_replace_text(model: dict, var_and_exp, value: str,
     has_g0_or_all_groups = 'group_0' in sel_set
 
     # Simplifications 2-4 collapse adjacent string segments into a single
-    # slice expression (regex: ^.start()/^.end(); index/slice: literal bounds).
+    # slice expression (regex: $.start()/$.end(); index/slice: literal bounds).
     if has_g0_or_all_groups:
         if {'prefix', 'group_0', 'suffix'} <= sel_set:
             sel_set -= {'prefix', 'group_0', 'suffix'}

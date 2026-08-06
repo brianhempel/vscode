@@ -12,7 +12,7 @@ This visualizer follows the Elm architecture with three core functions:
 
 2. init_model(value) -> dict
    - Returns the initial model state
-   - Auto-detects columns from item fields, or defaults to ['^'] (the item)
+   - Auto-detects columns from item fields, or defaults to ['$'] (the item)
    - Loads saved column configuration from dotfile
 
 3. update(event, var_and_exp, model, value) -> (new_model, commands)
@@ -33,7 +33,7 @@ Columns shown in the table are configurable and persisted:
 2. Auto-detection via _detect_table_columns:
    - Samples items and returns union of fields if all support get_fields
 
-3. Default: ['^'] (the item itself)
+3. Default: ['$'] (the item itself)
    - Used when items lack fields (strings, ints, mixed types, empty lists)
    - Users can add computed columns via the (+) button
 ================================================================================
@@ -55,10 +55,10 @@ from visualizer_utils import (
     with_pass_body,
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix,
-    CARETS_RE,
-    strip_leading_caret, eval_caret_expr, replace_carets_in_py_exp,
+    DOLLARS_RE,
+    strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
-    caret_expr_parses, is_nested,
+    dollar_expr_parses, is_nested,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
@@ -355,7 +355,7 @@ def _get_column_suggestions(lst, get_visualizer, current_columns, input_value):
 
 # === Search parsing ===
 
-_IMPLICIT_CARET_RE = re.compile(
+_IMPLICIT_DOLLAR_RE = re.compile(
     r'^\s*(?:'
     r'>=|<=|!=|==|>|<'
     r'|in\b'
@@ -367,13 +367,13 @@ _IMPLICIT_CARET_RE = re.compile(
 )
 
 
-def needs_implicit_caret(search: str) -> bool:
-    """True if search text starts with a binary operator, meaning ^ should be prepended."""
-    return bool(_IMPLICIT_CARET_RE.match(search))
+def needs_implicit_dollar(search: str) -> bool:
+    """True if search text starts with a binary operator, meaning $ should be prepended."""
+    return bool(_IMPLICIT_DOLLAR_RE.match(search))
 
 
 def _is_valid_python_expression(s: str) -> bool:
-    return caret_expr_parses(s)
+    return dollar_expr_parses(s)
 
 
 def parse_search_term(search: str | None) -> tuple | None:
@@ -404,8 +404,8 @@ def parse_search_term(search: str | None) -> tuple | None:
 #     [and|or] [>= > == != < <= in "not in" (code)] (text)
 #
 # The text is written in COLUMN scope, one level deeper than the main search
-# box: ^ is the column value (not necessarily the row, since a column can be
-# computed), ^^ is the row item, ^^^ is the array.
+# box: $ is the column value (not necessarily the row, since a column can be
+# computed), $$ is the row item, $$$ is the array.
 #
 # Nothing here filters rows or generates code. Every active column search is
 # lifted into the main search box's scope and folded into one search string,
@@ -438,39 +438,39 @@ _ATOMIC_NODES = (ast.Name, ast.Constant, ast.Call, ast.Subscript, ast.Attribute,
                  ast.SetComp, ast.JoinedStr)
 
 
-def _parse_caret_expr(expr: str):
-    """Parse a caret-bearing expression, or None if it doesn't parse.
+def _parse_dollar_expr(expr: str):
+    """Parse a dollar-bearing expression, or None if it doesn't parse.
 
-    Caret runs stand in for values, so they're collapsed to a placeholder name
-    (the same trick caret_expr_parses uses) before parsing.
+    Dollar runs stand in for values, so they're collapsed to a placeholder name
+    (the same trick dollar_expr_parses uses) before parsing.
     """
     try:
-        return ast.parse(CARETS_RE.sub('_crt_', expr), mode='eval').body
+        return ast.parse(DOLLARS_RE.sub('_crt_', expr), mode='eval').body
     except SyntaxError:
         return None
 
 
 def _atomize(expr: str) -> str:
     """Parenthesize an expression unless it already binds tighter than any
-    operator, so `len(^)` composes as-is while `^ + 1` gets wrapped.
+    operator, so `len($)` composes as-is while `$ + 1` gets wrapped.
 
     An expression that doesn't parse is left alone: parens can't rescue it, and
     the user still has to recognize their own text in the main search box.
     """
-    node = _parse_caret_expr(expr)
+    node = _parse_dollar_expr(expr)
     if node is None or isinstance(node, _ATOMIC_NODES):
         return expr
     return f'({expr})'
 
 
 def _is_predicate_function(text: str, eval_in_scope=None) -> bool:
-    """Whether a caret-free column search names a function to call on ^.
+    """Whether a dollar-free column search names a function to call on $.
 
     A bare name or dotted name is the only shape that qualifies. When there's a
     scope to ask, it settles whether the name is a function (`isOdd`) or a value
     that stands on its own (`threshold`); without one, the shape decides.
     """
-    node = _parse_caret_expr(text)
+    node = _parse_dollar_expr(text)
     if not isinstance(node, (ast.Name, ast.Attribute)):
         return False
     if eval_in_scope is None:
@@ -484,7 +484,7 @@ def _is_predicate_function(text: str, eval_in_scope=None) -> bool:
 
 
 def column_search_predicate(op: str, text: str, eval_in_scope=None) -> str | None:
-    """One column search row as a predicate in column scope (^ = the column
+    """One column search row as a predicate in column scope ($ = the column
     value), or None when the row is inactive.
 
     An operator alone is not a search: with no text there is nothing to compare
@@ -494,38 +494,38 @@ def column_search_predicate(op: str, text: str, eval_in_scope=None) -> str | Non
     if not text or _EMPTY_COLLECTION_RE.match(text):
         return None
     if op:
-        return f'^ {op} {text}'
+        return f'$ {op} {text}'
     # Blank operator: the text is the whole predicate.
-    if CARETS_RE.search(text):
+    if DOLLARS_RE.search(text):
         return text
-    if needs_implicit_caret(text):
-        return f'^{text.lstrip()}' if text.lstrip().startswith('.') else f'^ {text}'
+    if needs_implicit_dollar(text):
+        return f'${text.lstrip()}' if text.lstrip().startswith('.') else f'$ {text}'
     if _is_predicate_function(text, eval_in_scope):
-        return f'{text}(^)'
+        return f'{text}($)'
     return text
 
 
 def lift_column_predicate(pred: str, col_expr: str) -> str:
     """Rewrite a column-scope predicate into item scope (what the main search
-    box speaks): ^ becomes the column expression, and every longer caret run
-    loses a level, so ^^ (the item) becomes ^ and ^^^ (the array) becomes ^^.
+    box speaks): $ becomes the column expression, and every longer dollar run
+    loses a level, so $$ (the item) becomes $ and $$$ (the array) becomes $$.
     """
-    depth = max((len(m[0]) for m in CARETS_RE.finditer(pred)), default=1)
-    # Substituted in two passes via caret-free placeholders:
-    # replace_carets_in_py_exp tells code carets from string-literal carets by
+    depth = max((len(m[0]) for m in DOLLARS_RE.finditer(pred)), default=1)
+    # Substituted in two passes via dollar-free placeholders:
+    # replace_dollars_in_py_exp tells code dollars from string-literal dollars by
     # re-parsing with the run restored, and a replacement that itself contains
-    # carets never parses -- which would make every run after the first look
+    # dollars never parses -- which would make every run after the first look
     # like code even inside a string.
     holders = [f'_snc_lift{n}_' for n in range(1, depth + 1)]
-    out = replace_carets_in_py_exp(pred, holders)
+    out = replace_dollars_in_py_exp(pred, holders)
     for n, holder in enumerate(holders, start=1):
-        out = out.replace(holder, _atomize(col_expr) if n == 1 else '^' * (n - 1))
+        out = out.replace(holder, _atomize(col_expr) if n == 1 else '$' * (n - 1))
     return out
 
 
 def _paren_if_loose(term: str) -> str:
     """Parenthesize a term whose top level would swallow a surrounding `and`."""
-    node = _parse_caret_expr(term)
+    node = _parse_dollar_expr(term)
     if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
         return f'({term})'
     if isinstance(node, (ast.IfExp, ast.Lambda, ast.NamedExpr)):
@@ -705,12 +705,12 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     drag. Rows the column can't be read from are dropped: a summary shouldn't
     cost the other n-1 rows.
     """
-    if col.strip() == '^':
+    if col.strip() == '$':
         return list(lst)
 
     source_expr = model.get('_source_expr')
     if source_expr is not None and eval_in_scope is not None:
-        item_expr = replace_carets_in_py_exp(col, ['item'])
+        item_expr = replace_dollars_in_py_exp(col, ['item'])
         try:
             return list(eval_in_scope(f'[{item_expr} for item in {source_expr}]'))
         except Exception:
@@ -721,7 +721,7 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     values = []
     for item in lst:
         try:
-            values.append(eval_caret_expr(col, item, eval_in_scope))
+            values.append(eval_dollar_expr(col, item, eval_in_scope))
         except Exception:
             pass
     return values
@@ -1114,8 +1114,8 @@ def _get_search_context(model: dict, var_and_exp=None,
         }
 
     expr_text = term
-    if needs_implicit_caret(expr_text):
-        expr_text = '^ ' + expr_text.lstrip() if not expr_text.lstrip().startswith('.') else '^' + expr_text.lstrip()
+    if needs_implicit_dollar(expr_text):
+        expr_text = '$ ' + expr_text.lstrip() if not expr_text.lstrip().startswith('.') else '$' + expr_text.lstrip()
 
     _eval = eval_in_scope or (lambda c: ast.literal_eval(c))
     try:
@@ -1147,18 +1147,18 @@ def _get_search_context(model: dict, var_and_exp=None,
             'is_first': first,
         }
 
-    predicate_with_caret = expr_text
-    if needs_implicit_caret(search):
+    predicate_with_dollar = expr_text
+    if needs_implicit_dollar(search):
         if search.lstrip().startswith('.'):
-            predicate_with_caret = '^' + search.lstrip()
+            predicate_with_dollar = '$' + search.lstrip()
         else:
-            predicate_with_caret = '^ ' + search.lstrip()
+            predicate_with_dollar = '$ ' + search.lstrip()
     else:
-        predicate_with_caret = search
+        predicate_with_dollar = search
 
-    # ^ is the item and ^^ the array, which is the level a column search's ^^^
+    # $ is the item and $$ the array, which is the level a column search's $$$
     # lands on once it is lifted into this scope.
-    predicate_expr = replace_carets_in_py_exp(predicate_with_caret,
+    predicate_expr = replace_dollars_in_py_exp(predicate_with_dollar,
                                               ['item', _atomize(source_expr)])
 
     ctx = {
@@ -1172,7 +1172,7 @@ def _get_search_context(model: dict, var_and_exp=None,
     # first-match mode and rides along for generate_action to wrap.
     pick_expr = model.get('pick_expr')
     if pick_expr:
-        ctx['pick_expr'] = replace_carets_in_py_exp(pick_expr, ['item'])
+        ctx['pick_expr'] = replace_dollars_in_py_exp(pick_expr, ['item'])
         ctx['needs_index'] = _pick_needs_index(pick_expr)
         ctx['pick_is_array'] = _pick_is_array(model)
         ctx['is_first'] = True
@@ -1213,7 +1213,7 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
         model['search'] = ctx.get('indices_expr', '')
     elif ctx.get('is_predicate'):
         pred = ctx.get('predicate_expr', '')
-        model['search'] = re.sub(r'\bitem\b', '^', pred)
+        model['search'] = re.sub(r'\bitem\b', '$', pred)
     model['first_match'] = bool(ctx.get('is_first'))
 
     # A picked expression survives the round-trip through the line of code, but
@@ -1222,7 +1222,7 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     # expression, with nothing highlighted until the user picks again.
     pick_expr = ctx.get('pick_expr')
     if pick_expr:
-        model['pick_expr'] = re.sub(r'\bitem\b', '^', pick_expr)
+        model['pick_expr'] = re.sub(r'\bitem\b', '$', pick_expr)
         model['first_match'] = True
         model['tool'] = 'pick'
     else:
@@ -1535,7 +1535,7 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
 # === Matching indices for highlighting ===
 
 def _compile_predicate(predicate_expr: str, eval_in_scope=None):
-    """A caret-substituted predicate as a callable of (item, lst).
+    """A dollar-substituted predicate as a callable of (item, lst).
 
     Built in the user's scope so the predicate's free names resolve to their
     program's, which is the only place they were ever written. Without a scope
@@ -1595,11 +1595,11 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
         return list(range(max(0, start), min(stop, len(lst))))
 
     expr_text = term
-    if needs_implicit_caret(expr_text):
+    if needs_implicit_dollar(expr_text):
         if expr_text.lstrip().startswith('.'):
-            expr_text = '^' + expr_text.lstrip()
+            expr_text = '$' + expr_text.lstrip()
         else:
-            expr_text = '^ ' + expr_text.lstrip()
+            expr_text = '$ ' + expr_text.lstrip()
 
     _eval = eval_in_scope or (lambda c: ast.literal_eval(c))
     try:
@@ -1621,21 +1621,21 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
             matched.update(range(max(0, s), min(e, len(lst))))
         return sorted(matched)
 
-    predicate_with_caret = search
-    if needs_implicit_caret(search):
+    predicate_with_dollar = search
+    if needs_implicit_dollar(search):
         if search.lstrip().startswith('.'):
-            predicate_with_caret = '^' + search.lstrip()
+            predicate_with_dollar = '$' + search.lstrip()
         else:
-            predicate_with_caret = '^ ' + search.lstrip()
+            predicate_with_dollar = '$ ' + search.lstrip()
 
-    predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['_item', '_lst'])
+    predicate_expr = replace_dollars_in_py_exp(predicate_with_dollar, ['_item', '_lst'])
 
     # The predicate is the user's own text, so the names in it are their
     # program's names: `== s` has to mean the same `s` the line above defines.
     # Compiling it as a lambda through eval_in_scope is what puts those names in
     # reach -- evaluating it here would only ever see this module's globals, and
     # the NameError would land in the per-row except below as "no matches".
-    # The row item and the array come in as arguments, so a caret keeps naming
+    # The row item and the array come in as arguments, so a dollar keeps naming
     # them whatever the surrounding scope calls its own variables.
     try:
         predicate = _compile_predicate(predicate_expr, eval_in_scope)
@@ -1665,8 +1665,8 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
 # Region ids are '{band}_{column}': band is 'pre' / 'match' / 'post' and column
 # is 'idx' (the row-index column) or 'col_<n>' (an index into model['columns']).
 #
-# Region expressions are written in the table's own scope, where ^ is the row
-# item and `i` is the matched row's index. generate_action binds ^ to `item` and
+# Region expressions are written in the table's own scope, where $ is the row
+# item and `i` is the matched row's index. generate_action binds $ to `item` and
 # wraps the whole assembled expression in a single next(...) over the first
 # match, which is what makes `i` available.
 
@@ -1754,9 +1754,9 @@ def _pick_range_expr(col_id: str, columns, source_expr: str,
         sub = source_expr
     else:
         sub = f'{source_expr}[{start or ""}:{stop or ""}]'
-    inner = replace_carets_in_py_exp(col, [_PICK_INNER_VAR])
+    inner = replace_dollars_in_py_exp(col, [_PICK_INNER_VAR])
     if inner == _PICK_INNER_VAR:
-        # The identity column (a bare ^, which is the default) maps each row to
+        # The identity column (a bare $, which is the default) maps each row to
         # itself, so the sublist is already the answer -- no comprehension.
         return sub
     return f'[{inner} for {_PICK_INNER_VAR} in {sub}]'
@@ -1770,7 +1770,7 @@ def _pick_match_expr(col_id: str, columns) -> str | None:
 
 
 def _pick_region_expr(region_id: str, columns, source_expr: str) -> str | None:
-    """Caret-form expression for a single region, or None if it doesn't exist."""
+    """Dollar-form expression for a single region, or None if it doesn't exist."""
     parsed = _parse_pick_region_id(region_id)
     if parsed is None:
         return None
@@ -1827,7 +1827,7 @@ def _pick_is_array(model: dict) -> bool:
 
 
 def _build_pick_expr(model: dict, source_expr: str) -> str | None:
-    """Assemble model['picked'] into one caret-form expression.
+    """Assemble model['picked'] into one dollar-form expression.
 
     Bands of the same column collapse when they are contiguous: pre+match+post
     is that column over the whole list, pre+match is everything up to and
@@ -1883,7 +1883,7 @@ def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
 
 def _pick_needs_index(pick_expr: str) -> bool:
     """Whether an assembled expression refers to the matched row's index."""
-    code = replace_carets_in_py_exp(pick_expr, ['item'])
+    code = replace_dollars_in_py_exp(pick_expr, ['item'])
     try:
         tree = ast.parse(code, mode='eval')
     except SyntaxError:
@@ -1919,7 +1919,7 @@ def can_visualize(value):
 
 
 def get_fields(value):
-    return [f'^[{i}]' for i in range(len(value))]
+    return [f'$[{i}]' for i in range(len(value))]
 
 
 def _detect_table_columns(lst, get_visualizer):
@@ -1982,7 +1982,7 @@ def _resolve_columns(lst, get_visualizer, slots_config, config_path):
     At the root (config_path is None) the dotfile is read by item type. When
     nested, only the parent-supplied slots_config is used -- the type config is
     NOT re-read, which is what breaks the infinite recursion. A missing config
-    falls back to auto-detected columns (or ['^']).
+    falls back to auto-detected columns (or ['$']).
     """
     if config_path is None:
         type_key = config_key(lst)
@@ -1995,7 +1995,7 @@ def _resolve_columns(lst, get_visualizer, slots_config, config_path):
 
     columns = _detect_table_columns(lst, get_visualizer)
     if columns is None:
-        columns = ['^']
+        columns = ['$']
     return columns, {}
 
 
@@ -2013,7 +2013,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     }
 
     if get_visualizer is None:
-        return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
+        return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['$'],
                 '_slot_children': {}, **config_fields,
                 **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
@@ -2039,9 +2039,9 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         for col in columns:
             try:
                 if source_expr is not None and eval_in_scope is not None:
-                    cell_value = eval_in_scope(replace_carets_in_py_exp(col, [f'{source_expr}[{i}]']))
+                    cell_value = eval_in_scope(replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]']))
                 else:
-                    cell_value = eval_caret_expr(col, item, eval_in_scope)
+                    cell_value = eval_dollar_expr(col, item, eval_in_scope)
             except Exception:
                 cell_value = None
             if cell_value is not None:
@@ -2122,8 +2122,8 @@ def _render_column_search_chip(dropdown_id, current, options, make_event,
 def _render_column_search_row(col, index, model) -> str:
     """Render one column's search: [and|or] [comparison] (text).
 
-    The text is written in column scope, where ^ is the column value, ^^ the row
-    item and ^^^ the array. Whatever the user types here is lifted and folded
+    The text is written in column scope, where $ is the column value, $$ the row
+    item and $$$ the array. Whatever the user types here is lifted and folded
     into the main search box, which does the actual filtering.
     """
     row = _column_search_row(model, col)
@@ -2161,7 +2161,7 @@ def _render_column_search_row(col, index, model) -> str:
         f'value="{html.escape(row["text"])}" '
         f'{focus_attrs}'
         f'placeholder="Column Search" '
-        f'data-tooltip="^ is this column, ^^ the item, ^^^ the list" '
+        f'data-tooltip="$ is this column, $$ the item, $$$ the list" '
         f'spellcheck="false" '
         f'class="col-search-input search-box" />'
         f'<span class="col-search-chips">{op_html}</span>'
@@ -2378,7 +2378,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
 
     source_expr = model.get('_source_expr')
     if source_expr is not None:
-        item_expr = replace_carets_in_py_exp(col, ['item'])
+        item_expr = replace_dollars_in_py_exp(col, ['item'])
         full_expr = f'[{item_expr} for item in {source_expr}]'
         py_exp_attr = f' snc-py-exp="{html.escape(full_expr)}" draggable="true"'
     else:
@@ -2420,7 +2420,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
-        f'{html.escape(strip_leading_caret(col) or col)}</span>'
+        f'{html.escape(strip_leading_dollar(col) or col)}</span>'
         f'{menu_html}'
         f'</span>'
         f'</th>'
@@ -2752,7 +2752,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     loop_enabled = not (has_search and first) or pick_array
     loop_trigger_cls = 'snc-dropdown-trigger' + ('' if loop_enabled else ' dimmed')
     # An array pick is a projection of a row range, so its elements have no
-    # meaningful "original index": for a column like len(^) they aren't the rows
+    # meaningful "original index": for a column like len($) they aren't the rows
     # at all, and for a post-band pick the offset lives inside the next(...).
     orig_idx_enabled = loop_enabled and not pick_array
     loop_rows = ''.join([
@@ -2962,7 +2962,7 @@ def _pick_standalone_exprs(model: dict, source_expr: str, eval_in_scope,
         if not expr:
             continue
         ctx = dict(base)
-        ctx['pick_expr'] = replace_carets_in_py_exp(expr, ['item'])
+        ctx['pick_expr'] = replace_dollars_in_py_exp(expr, ['item'])
         ctx['needs_index'] = _pick_needs_index(expr)
         ctx['is_first'] = True
         result = generate_action('filter', ctx)
@@ -3162,9 +3162,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             composite_key = f"{i}{CELL_KEY_SEP}{col}"
             try:
                 if source_expr is not None and eval_in_scope is not None:
-                    cell_value = eval_in_scope(replace_carets_in_py_exp(col, [f'{source_expr}[{i}]']))
+                    cell_value = eval_in_scope(replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]']))
                 else:
-                    cell_value = eval_caret_expr(col, item, eval_in_scope)
+                    cell_value = eval_dollar_expr(col, item, eval_in_scope)
             except Exception:
                 cell_value = None
 
@@ -3180,7 +3180,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
                 cell_expr = None
                 if source_expr is not None:
-                    cell_expr = replace_carets_in_py_exp(col, [f'{source_expr}[{i}]'])
+                    cell_expr = replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]'])
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -3227,8 +3227,8 @@ def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
     idx = int(row_key)
     if source_expr is not None and eval_in_scope is not None:
-        return eval_in_scope(replace_carets_in_py_exp(field_key, [f'{source_expr}[{idx}]']))
-    return eval_caret_expr(field_key, lst[idx], eval_in_scope)
+        return eval_in_scope(replace_dollars_in_py_exp(field_key, [f'{source_expr}[{idx}]']))
+    return eval_dollar_expr(field_key, lst[idx], eval_in_scope)
 
 
 def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
@@ -3236,7 +3236,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         return (model, [])
 
     if model is None:
-        model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['^'],
+        model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['$'],
                  '_slot_children': {}, '_config_root_type': None,
                  '_config_root_dotfile': None, '_config_path': [],
                  **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
@@ -3259,15 +3259,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope, model.get('_source_expr')),
             get_visualizer=get_visualizer,
             # The cell's value is bound to a name for the child, so the code it
-            # generates is caret-free; the column expression goes back in below.
+            # generates is dollar-free; the column expression goes back in below.
             var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
-        # A column stays row-generic (the cell_col caret expression); anything
+        # A column stays row-generic (the cell_col dollar expression); anything
         # bound for the clipboard names this row concretely, since the user
         # pastes it into the editor as-is.
         src = model.get('_source_expr')
-        concrete_cell = (replace_carets_in_py_exp(cell_col, [f'{src}[{row_key}]'])
+        concrete_cell = (replace_dollars_in_py_exp(cell_col, [f'{src}[{row_key}]'])
                          if src else cell_col)
         commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
 
@@ -3508,7 +3508,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 elif (op not in COLUMN_SEARCH_MEMBERSHIP_OPS
                         and text == COLUMN_SEARCH_COLLECTION_HINT):
                     # Brackets nothing ever went into: take them back rather than
-                    # leave `^ == []` behind.
+                    # leave `$ == []` behind.
                     _set_column_search(model, col, op=op, text='')
                 else:
                     _set_column_search(model, col, op=op)
