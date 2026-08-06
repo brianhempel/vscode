@@ -6825,7 +6825,7 @@ class TestTallyRendering(unittest.TestCase):
         self.assertIn(html.escape(repr(TallyExcludeToggle(index=0))), tally)
         self.assertIn('Exclude', tally)
         # The header reads before the values it acts on.
-        self.assertLess(tally.index('col-tally-header'),
+        self.assertLess(tally.index('col-tally-controls'),
                         tally.index('col-tally-row'))
 
     def test_exclude_shows_whether_it_is_ticked(self):

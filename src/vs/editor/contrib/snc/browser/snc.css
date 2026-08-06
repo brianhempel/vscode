@@ -50,6 +50,10 @@
 
 	--snc-default-font-size: 14px;
 	--snc-menu-font-size: 11px;
+
+	/* Scrollbar width is not inherited, so must set it at every overflow: auto element */
+	--snc-scrollbar-width: thin;
+	--snc-scrollbar-color: rgba(127, 127, 127, 0.1) transparent;
 }
 
 /* Visualizers don't look good when flush against a colored gutter */
@@ -392,6 +396,8 @@
   margin-top: 5px;
   max-height: 350px;
   overflow: auto;
+	scrollbar-width: var(--snc-scrollbar-width);
+	scrollbar-color: var(--snc-scrollbar-color);
 
   /* Panels whose contents are regex/code (fuzzy-pattern picker, repetition
      picker) opt into the monospace code font with the .code modifier. */
@@ -426,15 +432,6 @@
 
   &.categorized {
   	padding: 0px;
-  }
-
-  &::-webkit-scrollbar {
-      width: 4px;
-  }
-
-  &::-webkit-scrollbar-thumb {
-      background-color: #8080805e;
-      border-radius: 5px;
   }
 }
 
@@ -710,6 +707,8 @@
 .obj-visualizer {
 	font-family: var(--snc-code-font-family);
 	overflow-x: auto;
+	scrollbar-width: var(--snc-scrollbar-width);
+	scrollbar-color: var(--snc-scrollbar-color);
 	outline: none;
 	margin: 5px 10px;
 	margin-bottom: 3px;
@@ -828,8 +827,8 @@
 /* Scroll container wrapping the table (dynamic max-height stays inline). */
 .list-table-scroll {
 	overflow: auto;
-	scrollbar-width: thin;
-	scrollbar-color: rgba(127, 127, 127, 0.1) transparent;
+	scrollbar-width: var(--snc-scrollbar-width);
+	scrollbar-color: var(--snc-scrollbar-color);
 	font-family: var(--snc-code-font-family);
 	margin-bottom: -1px; /* overlap/hide bottom table border so it doesn't double-up with the search area border */
 	/* margin-right: -1px;  overlap/hide bottom table border so it doesn't double-up with the visualizer border */
@@ -1006,10 +1005,27 @@
 	   same way that row is separated from the actions above it. */
 	.col-tally {
 		font-size: 9px;
-		padding: 4px 2px 0;
-		margin-top: 3px;
+		padding: 7px 2px 0;
+		margin-top: 6px;
 		border-top: 1px solid var(--snc-border-color);
 		line-height: 1.5;
+		position: relative;
+	}
+
+	.col-tally-tally-header {
+		position: absolute;
+		font-weight: bold;
+		font-size: 10px;
+		top: -8px;
+		text-align: center;
+		width: 100%;
+		color: var(--snc-text-muted);
+
+		/* the actual clickable section title */
+		> span {
+			background-color: var(--snc-bg);
+			padding: 1px 5px;
+		}
 	}
 
 	.col-tally-filter {
@@ -1026,6 +1042,7 @@
 	}
 
 	.col-tally-sort,
+	.col-tally-controls,
 	.col-tally-header {
 		display: flex;
 		align-items: center;
@@ -1036,7 +1053,7 @@
 		gap: 1px;
 	}
 
-	.col-tally-header {
+	.col-tally-controls {
 		gap: 6px;
 		margin-bottom: 2px;
 		justify-content: space-between;
@@ -1067,6 +1084,8 @@
 	.col-tally-list {
 		max-height: 222px;
 		overflow-y: auto;
+		scrollbar-width: var(--snc-scrollbar-width);
+		scrollbar-color: var(--snc-scrollbar-color);
 	}
 
 	.col-tally-exclude {
@@ -1130,6 +1149,18 @@
 		margin: 0;
 	}
 
+	.col-tally-header {
+		font-weight: bold;
+		position: sticky;
+		top: 0;
+		background-color: var(--snc-bg);
+	}
+	.col-tally-items-header {
+		flex: 1;
+	}
+	.col-tally-counts-header {
+		flex: none;
+	}
 	.col-tally-item {
 		flex: 1;
 		/* Long values are already elided in the middle by the visualizer; this
