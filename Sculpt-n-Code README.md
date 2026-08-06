@@ -26,7 +26,7 @@ pip install pytest
 # If you want to write Python that downloads URLs, you'll need SSL certs
 /Applications/Python\ 3.14/Install\ Certificates.command
 
-# Build
+# Build, may have to run `npm run watch` the first time to build extensions
 npm run watch-snc
 
 # Launch app. Run in separate terminal from watch-snc

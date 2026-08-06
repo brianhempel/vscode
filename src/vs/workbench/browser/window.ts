@@ -154,8 +154,11 @@ export abstract class BaseWindow extends Disposable {
 					didClear = true;
 					(window as { vscodeOriginalClearTimeout?: typeof window.clearTimeout }).vscodeOriginalClearTimeout?.apply(this, [handle]);
 					timeoutDisposables.delete(timeoutDisposable);
-					// Remove from the window's DisposableStore without re-disposing (we're already inside dispose)
-					disposables.deleteAndLeak(timeoutDisposable);
+					// Remove from the window's DisposableStore. We are already inside this disposable's
+					// `dispose()`, so the re-entrant `dispose()` call is a no-op. Do not use
+					// `deleteAndLeak` here: it re-registers the disposable with the GC based disposable
+					// tracker (which was just unregistered), producing bogus [LEAKED DISPOSABLE] warnings.
+					disposables.delete(timeoutDisposable);
 				});
 
 				disposables.add(timeoutDisposable);
