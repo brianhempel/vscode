@@ -192,55 +192,37 @@ class TestBuildNewCodeEditsReportsHeaderLines(unittest.TestCase):
         self.assertEqual(edit['headerLines'], 2)
         self.assertEqual(len(edit['text'].split('\n')), 3)
 
-    def test_import_edit_has_no_header_lines(self):
-        edits = _build_new_code_edits("xs = [1, 2]\n", 1, "found", "re.findall(r'a', s)")
-        imports = [e for e in edits if e['text'].strip() == 'import re']
-        self.assertEqual(len(imports), 1)
-        self.assertNotIn('headerLines', imports[0])
+    def test_the_generated_line_is_the_only_edit(self):
+        # Whatever else the code needs -- an import it can't run without -- is
+        # the editor's to place, since only the editor knows the file as it
+        # stands now.
+        edits = _build_new_code_edits("xs = [1, 2]\n", 1, "found",
+                                      "re.findall(r'a', s)")
+        self.assertEqual(len(edits), 1)
 
 
-class TestAutoImportPlacement(unittest.TestCase):
-    """An auto-added import lands after the file's prologue: the module docstring
-    plus the leading imports, the same span split_leading_imports pre-executes.
-    Inserted above the docstring it would stop being one, dropping it into the
-    body where the runner visualizes it as a plain expression."""
+class TestNewCodeImports(unittest.TestCase):
+    """A visualizer says what its code needs imported. The runner carries that
+    declaration out on the wire; it never reads the code to guess, and it never
+    decides whether the file already has it."""
 
-    def _edits(self, source):
-        return _build_new_code_edits(source, 1, 'found', "re.findall(r'a', s)")
+    def _dicts(self, command, source_code="s = 'a'\n"):
+        return _commands_to_dicts([command], line=1, idx_in_line=0, model=None,
+                                  source_code=source_code)
 
-    def _import_edit(self, source):
-        return next(e for e in self._edits(source) if e['text'].strip() == 'import re')
+    def test_a_command_carries_what_it_declared(self):
+        dicts = self._dicts(('found', "re.findall(r'a', s)", ('import re',)))
+        self.assertEqual(dicts[0]['imports'], ['import re'])
 
-    def _blank_line_edits(self, source):
-        return [e for e in self._edits(source) if e['text'] == '']
+    def test_a_command_declaring_nothing_needs_nothing(self):
+        self.assertEqual(self._dicts(('picked', 'xs[1:]'))[0]['imports'], [])
 
-    def test_lands_after_one_line_docstring(self):
-        self.assertEqual(self._import_edit('"""Doc."""\ns = "a"\n')['afterLine'], 1)
-
-    def test_lands_after_multi_line_docstring(self):
-        self.assertEqual(self._import_edit('"""\nDoc.\n"""\ns = "a"\n')['afterLine'], 3)
-
-    def test_lands_after_docstring_and_imports(self):
-        self.assertEqual(self._import_edit('"""Doc."""\nimport os\ns = "a"\n')['afterLine'], 2)
-
-    def test_lands_after_a_parenthesized_import(self):
-        # Anchoring to its first line would insert into the middle of the import.
-        self.assertEqual(self._import_edit('from os import (\n    sep,\n)\ns = "a"\n')['afterLine'], 3)
-
-    def test_string_expression_is_not_a_docstring(self):
-        self.assertEqual(self._import_edit("'a' + 'b'\ns = 'x'\n")['afterLine'], 0)
-
-    def test_string_after_imports_is_not_a_docstring(self):
-        self.assertEqual(self._import_edit('import os\n"hello"\ns = "a"\n')['afterLine'], 1)
-
-    def test_blank_line_separates_the_import_from_the_code(self):
-        self.assertEqual(len(self._blank_line_edits('"""Doc."""\ns = "a"\n')), 1)
-
-    def test_no_blank_line_when_one_is_already_there(self):
-        self.assertEqual(self._blank_line_edits('"""Doc."""\n\ns = "a"\n'), [])
-
-    def test_unparseable_source_still_lands_after_the_imports(self):
-        self.assertEqual(self._import_edit('import os\ns = "a"\ndef f(:\n')['afterLine'], 1)
+    def test_the_runner_reads_the_declaration_and_not_the_code(self):
+        # `re.` in the text says nothing on its own: the visualizer that wrote
+        # it is what knows whether the module is really being used.
+        dicts = self._dicts(('found', "re.findall(r'a', s)"))
+        self.assertEqual(dicts[0]['imports'], [])
+        self.assertEqual(len(dicts[0]['edits']), 1)
 
 
 @dataclass

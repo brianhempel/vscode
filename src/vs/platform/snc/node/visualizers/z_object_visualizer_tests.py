@@ -2036,7 +2036,7 @@ class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
             model, cmds = update(event, ('p', 'p'), model, p, get_vis, eval_in_scope)
             commands += cmds
 
-        code = [c[1] for c in commands if isinstance(c, tuple) and len(c) == 2]
+        code = [c[1] for c in commands if isinstance(c, tuple) and len(c) in (2, 3)]
         self.assertEqual(len(code), 1, f'expected one generated line, got {commands}')
         self.assertEqual(eval_in_scope(code[0]), [''])
 

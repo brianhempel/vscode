@@ -443,6 +443,22 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     return (_suggest_name_for_action(action, gen_ctx), result[0])
 
 
+# `re.` as the module, not the tail of a name like `score.`
+_RE_CALL_RE = re.compile(r'(?<![\w.])re\.')
+
+
+def code_imports(code: str) -> tuple:
+    """What code generated from this grammar can't run without.
+
+    A statement about our own templates, not a rule about Python at large: the
+    ones that search, split and substitute are written with `re.` calls (see
+    STRING_VIZ_GRAMMAR), and they are the only reason generated code reaches
+    outside the builtins. The rest -- slices, `.upper()`, `.join(...)` -- needs
+    nothing.
+    """
+    return ('import re',) if _RE_CALL_RE.search(code) else ()
+
+
 def generate_copy_expr_for_if(action: str, ctx: dict) -> str | None:
     """Generate just the boolean expression for copy of if_any/if_all actions."""
     has_repl = _has_replace(ctx)

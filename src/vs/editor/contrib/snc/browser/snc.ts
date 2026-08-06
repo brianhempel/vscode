@@ -7,8 +7,9 @@ import { Range } from '../../../common/core/range.js';
 import { Selection } from '../../../common/core/selection.js';
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
-import { TrackedRangeStickiness } from '../../../common/model.js';
-import { IProcessOptions, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData, UiEvent } from '../../../../platform/snc/common/snc.js';
+import { ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
+import { IProcessOptions, IVisualizationItem, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, UiEvent } from '../../../../platform/snc/common/snc.js';
+import { IPythonImportInsertion, pythonImportInsertion } from '../../../../platform/snc/common/pythonImports.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
@@ -109,7 +110,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly onInputEvent: (pythonEventStr: string, value: string) => void;
 	// Invoked when the user clicks the "+" button in an expression tooltip to
 	// assign that expression to a new variable on the line below.
-	private readonly onInsertNewVar: (expression: string) => void;
+	private readonly onInsertNewVar: (expression: string, imports?: readonly string[]) => void;
 	// Returns true when this widget's line is currently the focused line and
 	// thus rendered full-size. When false, the widget is in small mode and
 	// the first mousedown is intercepted as an "expand" request instead of
@@ -165,7 +166,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -291,38 +292,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_input_event('snc-input', ev);
 		}));
 
-		// Drag-and-drop for snc-py-exp elements.
-		// Only allow drag from the border/padding of the snc-py-exp wrapper,
-		// not from inside nested visualizer content (marked draggable="false").
-		this._register(dom.addDisposableListener(this.domNode, 'dragstart', (ev: DragEvent) => {
-			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp');
-			if (pyExpEl && ev.dataTransfer) {
-				if (this.lastMouseDownTarget) {
-					let el: Element | null = this.lastMouseDownTarget instanceof Element
-						? this.lastMouseDownTarget
-						: this.lastMouseDownTarget.parentElement;
-					while (el && el !== pyExpEl) {
-						if (el.getAttribute('draggable') === 'false') {
-							ev.preventDefault();
-							return;
-						}
-						el = el.parentElement;
-					}
-				}
-
-				const expression = pyExpEl.getAttribute('snc-py-exp') ?? '';
-				ev.dataTransfer.setData('text/plain', expression);
-				ev.dataTransfer.effectAllowed = 'copy';
-				this.hidePyExpTooltip();
-
-				const dragGhost = document.createElement('div');
-				dragGhost.textContent = expression;
-				dragGhost.className = 'snc-py-exp-drag-ghost';
-				document.body.appendChild(dragGhost);
-				ev.dataTransfer.setDragImage(dragGhost, 0, 0);
-				setTimeout(() => dragGhost.remove(), 0);
-			}
-		}));
+		for (const d of this.pyExpListeners(this.domNode, this.domNode)) {
+			this._register(d);
+		}
 
 		// Allow snc-input elements to accept snc-py-exp drops
 		this._register(dom.addDisposableListener(this.domNode, 'dragover', (ev: DragEvent) => {
@@ -349,49 +321,6 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				input.classList.remove('snc-drop-target');
 				inputEl.dispatchEvent(new Event('input', { bubbles: true }));
 			}
-		}));
-
-		// Tooltip + highlight on hover for snc-py-exp draggable zones.
-		// Only activate when the cursor is over the draggable border/padding
-		// of an snc-py-exp element, not over inner content (marked draggable="false").
-		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
-			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp');
-			const inDraggableZone = pyExpEl ? this.isInDraggableZone(ev.target as Node, pyExpEl) : false;
-
-			if (inDraggableZone) {
-				clearTimeout(this.pyExpTooltipHideTimer);
-				if (pyExpEl !== this.pyExpCurrentTarget) {
-					if (this.pyExpCurrentTarget) {
-						this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
-					}
-					this.pyExpCurrentTarget = pyExpEl!;
-					pyExpEl!.classList.add('snc-py-exp-drag-hover');
-					clearTimeout(this.pyExpTooltipTimer);
-					this.pyExpTooltipTimer = setTimeout(() => {
-						this.showPyExpTooltip(pyExpEl!);
-					}, 100);
-				}
-			} else if (this.pyExpCurrentTarget) {
-				this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
-				this.pyExpCurrentTarget = null;
-				this.schedulePyExpTooltipHide();
-			}
-		}));
-		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
-			const relatedTarget = ev.relatedTarget as Node | null;
-			// Don't hide if moving into the tooltip itself
-			if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
-				return;
-			}
-			// Don't clean up if moving within the same snc-py-exp (mouseover will handle it)
-			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exp')) {
-				return;
-			}
-			if (this.pyExpCurrentTarget) {
-				this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
-				this.pyExpCurrentTarget = null;
-			}
-			this.schedulePyExpTooltipHide();
 		}));
 
 		// Tooltip on hover for action buttons with data-action-expr
@@ -450,6 +379,90 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Add the widget to the editor
 		this.editor.addOverlayWidget(this);
+	}
+
+	/**
+	 * Hover tooltip, highlight and drag for snc-py-exp handles.
+	 *
+	 * Only activates over the draggable border/padding of the handle, not over
+	 * inner content (marked draggable="false"), so a nested visualizer's own
+	 * handles keep their hovers.
+	 *
+	 * Like simpleTooltipListeners, the widget root gets these once at
+	 * construction and each hoisted dropdown panel gets its own set: a hoisted
+	 * panel no longer sits under the root, so nothing from there reaches the
+	 * handles inside it (the column ▾ menu's tally headers, for instance).
+	 */
+	private pyExpListeners(root: HTMLElement, stopAt: Element): IDisposable[] {
+		return [
+			dom.addDisposableListener(root, 'dragstart', (ev: DragEvent) => {
+				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp', stopAt);
+				if (pyExpEl && ev.dataTransfer) {
+					if (this.lastMouseDownTarget) {
+						let el: Element | null = this.lastMouseDownTarget instanceof Element
+							? this.lastMouseDownTarget
+							: this.lastMouseDownTarget.parentElement;
+						while (el && el !== pyExpEl) {
+							if (el.getAttribute('draggable') === 'false') {
+								ev.preventDefault();
+								return;
+							}
+							el = el.parentElement;
+						}
+					}
+
+					const expression = pyExpEl.getAttribute('snc-py-exp') ?? '';
+					setPyExpDragData(ev.dataTransfer, expression, importsOf(pyExpEl));
+					this.hidePyExpTooltip();
+
+					const dragGhost = document.createElement('div');
+					dragGhost.textContent = expression;
+					dragGhost.className = 'snc-py-exp-drag-ghost';
+					document.body.appendChild(dragGhost);
+					ev.dataTransfer.setDragImage(dragGhost, 0, 0);
+					setTimeout(() => dragGhost.remove(), 0);
+				}
+			}),
+			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
+				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp', stopAt);
+				const inDraggableZone = pyExpEl ? this.isInDraggableZone(ev.target as Node, pyExpEl) : false;
+
+				if (inDraggableZone) {
+					clearTimeout(this.pyExpTooltipHideTimer);
+					if (pyExpEl !== this.pyExpCurrentTarget) {
+						if (this.pyExpCurrentTarget) {
+							this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
+						}
+						this.pyExpCurrentTarget = pyExpEl!;
+						pyExpEl!.classList.add('snc-py-exp-drag-hover');
+						clearTimeout(this.pyExpTooltipTimer);
+						this.pyExpTooltipTimer = setTimeout(() => {
+							this.showPyExpTooltip(pyExpEl!);
+						}, 100);
+					}
+				} else if (this.pyExpCurrentTarget) {
+					this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
+					this.pyExpCurrentTarget = null;
+					this.schedulePyExpTooltipHide();
+				}
+			}),
+			dom.addDisposableListener(root, 'mouseout', (ev: MouseEvent) => {
+				const relatedTarget = ev.relatedTarget as Node | null;
+				// Don't hide if moving into the tooltip itself
+				if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
+					return;
+				}
+				// Don't clean up if moving within the same snc-py-exp (mouseover will handle it)
+				if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exp', stopAt)) {
+					return;
+				}
+				if (this.pyExpCurrentTarget) {
+					this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
+					this.pyExpCurrentTarget = null;
+				}
+				this.schedulePyExpTooltipHide();
+			}),
+		];
 	}
 
 	/**
@@ -550,7 +563,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 * `<name> = <expr>` assignment; a whole statement (e.g. a visualizer-generated
 	 * `for`/`if` snippet) is inserted verbatim without an assignment.
 	 */
-	private createNewVarButton(expression: string, hideTooltip: () => void): HTMLButtonElement {
+	private createNewVarButton(expression: string, imports: string[], hideTooltip: () => void): HTMLButtonElement {
 		const newVarBtn = document.createElement('button');
 		newVarBtn.className = 'snc-copy-btn snc-new-var-btn';
 		newVarBtn.textContent = '+';
@@ -561,7 +574,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			e.preventDefault();
 			e.stopPropagation();
 			hideTooltip();
-			this.onInsertNewVar(expression);
+			this.onInsertNewVar(expression, imports);
 		});
 		return newVarBtn;
 	}
@@ -596,7 +609,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		});
 		tooltip.appendChild(copyBtn);
 
-		tooltip.appendChild(this.createNewVarButton(expression, () => this.hidePyExpTooltip()));
+		const imports = importsOf(target);
+		tooltip.appendChild(this.createNewVarButton(expression, imports, () => this.hidePyExpTooltip()));
 
 		const exprSpan = document.createElement('span');
 		exprSpan.textContent = expression;
@@ -606,8 +620,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			if (e.dataTransfer) {
 				this.pyExpTooltipDragInProgress = true;
 				clearTimeout(this.pyExpTooltipHideTimer);
-				e.dataTransfer.setData('text/plain', expression);
-				e.dataTransfer.effectAllowed = 'copy';
+				setPyExpDragData(e.dataTransfer, expression, imports);
 
 				const dragGhost = document.createElement('div');
 				dragGhost.textContent = expression;
@@ -723,7 +736,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		});
 		tooltip.appendChild(copyBtn);
 
-		tooltip.appendChild(this.createNewVarButton(expression, () => this.hideActionTooltip()));
+		const imports = importsOf(target);
+		tooltip.appendChild(this.createNewVarButton(expression, imports, () => this.hideActionTooltip()));
 
 		const exprSpan = document.createElement('span');
 		exprSpan.className = 'snc-action-tooltip-expr';
@@ -732,8 +746,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		exprSpan.style.cursor = 'grab';
 		exprSpan.addEventListener('dragstart', (e) => {
 			if (e.dataTransfer) {
-				e.dataTransfer.setData('text/plain', expression);
-				e.dataTransfer.effectAllowed = 'copy';
+				setPyExpDragData(e.dataTransfer, expression, imports);
 				const dragGhost = document.createElement('div');
 				dragGhost.textContent = expression;
 				dragGhost.className = 'snc-py-exp-drag-ghost';
@@ -1631,6 +1644,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			})
 		);
 		this.hoistedDropdownListeners.push(...this.simpleTooltipListeners(panel, container));
+		// Handles inside the panel (the column ▾ menu's tally headers) are out of
+		// the widget root's reach now, so they need their own set too.
+		this.hoistedDropdownListeners.push(...this.pyExpListeners(panel, container));
 		this.hoistedDropdownListeners.push(
 			dom.addDisposableListener(panel, 'input', (ev: Event) => {
 				const target = ev.target as HTMLElement;
@@ -1994,6 +2010,75 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
  * existing line, so the first line of editText starts on the line after
  * `insertedRange.startLineNumber`.
  */
+/** How many lines an insert edit adds; several imports can share one edit. */
+function editLineCount(edit: NewCodeEdit): number {
+	return edit.text.split('\n').length;
+}
+
+/**
+ * The imports an expression handle declares (`snc-py-exp-imports`, written by
+ * `py_exp_attrs` in visualizer_utils.py). Empty when the expression runs on
+ * what the file already has.
+ */
+function importsOf(el: Element | null): string[] {
+	const raw = el?.getAttribute('snc-py-exp-imports');
+	if (!raw) {
+		return [];
+	}
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.filter(entry => typeof entry === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Put a dragged expression on the clipboard data in both forms: `text/plain` so
+ * it can land anywhere, and SNC's own mime carrying the imports beside it so a
+ * drop into a Python editor can bring them along (see SncPyExpDropProvider).
+ */
+function setPyExpDragData(dataTransfer: DataTransfer, expression: string, imports: string[]): void {
+	dataTransfer.setData('text/plain', expression);
+	dataTransfer.setData(SNC_PY_EXP_MIME, JSON.stringify({ expr: expression, imports }));
+	dataTransfer.effectAllowed = 'copy';
+}
+
+/**
+ * The edits that add whatever a generated expression needs imported, skipping
+ * anything the file already has.
+ *
+ * The visualizer that wrote the code declares the imports — on a NewCode
+ * command, or in `snc-py-exp-imports` on a drag handle. Where they go is
+ * pythonImportInsertion's single answer, so the two ways in agree; several
+ * missing imports share one edit, landing in the order they were declared.
+ */
+function importEdits(model: ITextModel, imports: readonly string[] | undefined): NewCodeEdit[] {
+	if (!imports?.length) {
+		return [];
+	}
+	const lines = model.getLinesContent();
+	const missing: string[] = [];
+	let insertion: IPythonImportInsertion | undefined;
+	for (const importStatement of imports) {
+		const where = pythonImportInsertion(lines, importStatement);
+		if (where) {
+			missing.push(importStatement);
+			insertion = where;
+		}
+	}
+	if (!insertion || !missing.length) {
+		return [];
+	}
+	const edits: NewCodeEdit[] = [
+		{ type: 'insert', afterLine: insertion.afterLine, text: missing.join('\n') },
+	];
+	if (insertion.needsSeparator) {
+		edits.push({ type: 'insert', afterLine: insertion.afterLine, text: '' });
+	}
+	return edits;
+}
+
 function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine: boolean, insertedRange: Range): Selection | null {
 	const firstLine = editText.split('\n')[0];
 
@@ -2074,6 +2159,7 @@ const NEW_VAR_FUNC_NAMES: Record<string, string> = {
 	sorted: 'ordered', reversed: 'reversed', any: 'result', all: 'result',
 	next: 'match', list: 'items', set: 'unique', tuple: 'items',
 	dict: 'mapping', abs: 'absolute', round: 'rounded', count: 'count',
+	Counter: 'tally',
 };
 
 /**
@@ -3364,7 +3450,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); },
 							() => this.effectiveFocusedLine() === lineNumber,
 							() => this.requestExpand(lineNumber),
-							(expression) => { this.insertNewVarFromExpression(lineNumber, expression); },
+							(expression, imports) => { this.insertNewVarFromExpression(lineNumber, expression, imports); },
 							() => { this.onLinkChainClick(lineNumber, visIndex); },
 							this.clipboardService
 						);
@@ -3502,8 +3588,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 				return;
 			}
 
+			// The visualizer said what its code needs to run; turning that into
+			// edits is ours, since only we know the file as it stands now. They
+			// join the command's own edits so everything below — the ordering,
+			// the scroll anchor, the shifted trigger line — sees one list.
+			const edits = [...command.edits, ...importEdits(model, command.imports)];
+
 			// Sort edits bottom-to-top so line numbers remain valid as we insert
-			const sortedEdits = [...command.edits].sort((a, b) => b.afterLine - a.afterLine);
+			const sortedEdits = [...edits].sort((a, b) => b.afterLine - a.afterLine);
 
 			// Capture a scroll anchor so inserting lines above the viewport (e.g.
 			// an auto-added `import re` at the top of the file) doesn't make the
@@ -3574,8 +3666,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				// Other edits inserted above the trigger line (e.g. an auto-added
 				// `import re`) shift the visualizer's source line down. Account for
 				// that so the link and cursor target the actual (post-edit) line.
-				const linesInsertedAbove = command.edits.reduce(
-					(n, e) => n + (e.afterLine < command.triggerLine ? 1 : 0), 0);
+				const linesInsertedAbove = edits.reduce(
+					(n, e) => n + (e.afterLine < command.triggerLine ? editLineCount(e) : 0), 0);
 				const actualTriggerLine = command.triggerLine + linesInsertedAbove;
 
 				// The assignment is always inserted immediately after the (shifted)
@@ -3585,7 +3677,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const insertedLine = actualTriggerLine + 1;
 				// A statement's body is the user's, so the link covers only the
 				// header lines Python reported.
-				const mainEdit = command.edits.find(e => e.afterLine === command.triggerLine);
+				const mainEdit = edits.find(e => e.afterLine === command.triggerLine);
 				const lastHeaderLine = insertedLine + Math.max(1, mainEdit?.headerLines ?? 1) - 1;
 				const linkedRange = new Range(
 					insertedLine, model.getLineFirstNonWhitespaceColumn(insertedLine) || 1,
@@ -3609,8 +3701,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// Lines inserted strictly above the anchor (e.g. an auto-added
 			// `import re`) push it down; count them and re-anchor accordingly.
 			if (shouldStabilizeScroll && anchorLineNumber > 0) {
-				const linesInsertedAboveAnchor = command.edits.reduce(
-					(n, e) => n + (e.afterLine < anchorLineNumber ? 1 : 0), 0);
+				const linesInsertedAboveAnchor = edits.reduce(
+					(n, e) => n + (e.afterLine < anchorLineNumber ? editLineCount(e) : 0), 0);
 				const newAnchorLine = anchorLineNumber + linesInsertedAboveAnchor;
 				const newAnchorTop = this.editor.getTopForLineNumber(newAnchorLine);
 				this.editor.setScrollTop(newAnchorTop + anchorDelta, ScrollType.Immediate);
@@ -3632,8 +3724,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * identifier already present in the document. Mirrors the Python runner's
 	 * `_find_available_variable_name`: appends/increments a numeric suffix
 	 * (`data` → `data2` → `data3`, `x1` → `x2`).
+	 *
+	 * `reserved` is for names the document is about to gain in the same edit —
+	 * an import going in beside the assignment. `Counter = Counter(data)` reads
+	 * fine until the next line calls `Counter` again, so a name we are in the
+	 * act of binding has to count as taken.
 	 */
-	private findAvailableVarName(desired: string, excludedRange?: Range): string {
+	private findAvailableVarName(desired: string, excludedRange?: Range, reserved: readonly string[] = []): string {
 		const model = this.editor.getModel();
 		if (!model) {
 			return desired;
@@ -3644,7 +3741,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			const endOffset = model.getOffsetAt(excludedRange.getEndPosition());
 			text = text.slice(0, startOffset) + text.slice(endOffset);
 		}
-		const existing = new Set(text.match(/[A-Za-z_]\w*/g) ?? []);
+		const existing = new Set([...(text.match(/[A-Za-z_]\w*/g) ?? []), ...reserved]);
 		if (!existing.has(desired)) {
 			return desired;
 		}
@@ -3673,7 +3770,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * user is most likely to rename (the assignment target or loop variable).
 	 * Triggered by the "+" button in an expression tooltip.
 	 */
-	private insertNewVarFromExpression(lineNumber: number, expression: string): void {
+	private insertNewVarFromExpression(lineNumber: number, expression: string, imports?: readonly string[]): void {
 		const model = this.editor.getModel();
 		if (!model) {
 			return;
@@ -3682,6 +3779,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (!expr) {
 			return;
 		}
+
+		// Whatever the expression needs imported goes in with it, so the names
+		// those imports bind are already spoken for by the time we pick one.
+		const imported = importEdits(model, imports);
+		const importedNames = imported.flatMap(edit => edit.text.match(/[A-Za-z_]\w*/g) ?? []);
 
 		// Match the trigger line's indentation so the new statement lands at the
 		// same block level.
@@ -3693,7 +3795,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (isAssignableExpression(expr)) {
 			// Derive a descriptive name from the expression, de-duplicated against
 			// identifiers already present so we don't shadow an existing variable.
-			const varName = this.findAvailableVarName(suggestVarNameForExpression(expr));
+			const varName = this.findAvailableVarName(
+				suggestVarNameForExpression(expr), undefined, importedNames);
 			editText = `${indent}${varName} = ${expr}`;
 		} else {
 			// A whole statement (e.g. a `for`/`if` snippet): insert it verbatim,
@@ -3707,7 +3810,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 			text: '\n' + editText
 		};
 
-		const newSelections = model.pushEditOperations([], [editOperation], (inverseEdits) => {
+		// The imports go in with the assignment, in one edit operation: one undo
+		// step, and the line count can't shift between the two halves. What they
+		// insert lands above the trigger line, so the cursor comes down by that
+		// much.
+		const importOperations = imported.map(edit => ({
+			range: new Range(edit.afterLine + 1, 1, edit.afterLine + 1, 1),
+			text: edit.text + '\n',
+		}));
+		const linesInsertedAbove = imported.reduce(
+			(n, edit) => n + (edit.afterLine < lineNumber ? editLineCount(edit) : 0), 0);
+
+		const newSelections = model.pushEditOperations([], [editOperation, ...importOperations], (inverseEdits) => {
 			const inv = inverseEdits[0];
 			if (!inv) {
 				return null;
@@ -3719,7 +3833,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (newSelections && newSelections.length > 0) {
 			this.editor.setSelection(newSelections[0]);
 		} else {
-			this.editor.setPosition({ lineNumber: lineNumber + 1, column: 1 });
+			this.editor.setPosition({ lineNumber: lineNumber + 1 + linesInsertedAbove, column: 1 });
 		}
 		this.editor.focus();
 	}

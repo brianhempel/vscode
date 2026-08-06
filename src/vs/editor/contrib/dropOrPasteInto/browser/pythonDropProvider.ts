@@ -11,6 +11,8 @@ import { Mimes } from '../../../../base/common/mime.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { relativePath } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
+import { pythonImportInsertion } from '../../../../platform/snc/common/pythonImports.js';
+import { SNC_PY_EXP_MIME } from '../../../../platform/snc/common/snc.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IPosition, Position } from '../../../common/core/position.js';
 import { Range } from '../../../common/core/range.js';
@@ -22,6 +24,9 @@ const urllibImport = 'import urllib.request';
 
 /** Kind of the "read this into a string" drop edit, shared with its callers. */
 export const pythonReadDropEditKind = HierarchicalKind.Empty.append('uri', 'python', 'openRead');
+
+/** Kind of the "drop an expression dragged out of a visualizer" edit. */
+export const sncPyExpDropEditKind = HierarchicalKind.Empty.append('text', 'python', 'sncPyExp');
 
 /** A file to read from disk, or a URL to read over the network. */
 type ReadSource =
@@ -41,66 +46,21 @@ type ImportPlacement =
 	| { readonly kind: 'inline'; readonly text: string };
 
 /**
- * Last line of a string literal opening at `start`, or undefined if that line is
- * something other than a string literal.
- */
-function stringLiteralEnd(lines: string[], start: number): number | undefined {
-	// Drop any of the prefixes Python allows on a literal, e.g. r"""...""".
-	const text = lines[start].trim().replace(/^[a-zA-Z]{1,2}(?=['"])/, '');
-	const triple = text.startsWith('"""') ? '"""' : text.startsWith('\'\'\'') ? '\'\'\'' : undefined;
-	if (!triple) {
-		// A one-line 'doc' counts; an expression like 'a' + 'b' does not.
-		return /^(['"])(?:[^'"\\]|\\.)*\1$/.test(text) ? start : undefined;
-	}
-	if (text.length > triple.length && text.endsWith(triple)) {
-		return start;
-	}
-	for (let i = start + 1; i < lines.length; i++) {
-		if (lines[i].includes(triple)) {
-			return i;
-		}
-	}
-	return undefined;
-}
-
-/**
- * Where to put an auto-added import: after the file's prologue — a module docstring
- * and any leading imports — followed by a blank line, the way the Python backend
- * places the imports its visualizers need. Landing above a docstring would push it
- * into the body, where the runner treats it as an expression to visualize.
+ * Where an auto-added import goes relative to what is being dropped. The anchor
+ * itself comes from pythonImportInsertion, which is the one place that reads the
+ * file's prologue; only the choice between riding along and standing apart is
+ * this provider's, since only it has a drop position.
  */
 function importPlacement(model: ITextModel, importStatement: string, position: IPosition): ImportPlacement | undefined {
-	const lines = model.getLinesContent();
-	if (lines.some(line => line.trim() === importStatement)) {
+	const insertion = pythonImportInsertion(model.getLinesContent(), importStatement);
+	if (!insertion) {
 		return undefined;
 	}
 
-	let insertAfter = 0; // 1-indexed line to insert after; 0 means before line 1
-	for (let i = 0; i < lines.length;) {
-		const trimmed = lines[i].trim();
-		if (!trimmed || trimmed.startsWith('#')) {
-			i++;
-			continue;
-		}
-		if (trimmed.startsWith('import ') || trimmed.startsWith('from ')) {
-			insertAfter = i + 1;
-			i++;
-			continue;
-		}
-		// Only a string literal ahead of every import can be the module docstring.
-		const docstringEnd = insertAfter === 0 ? stringLiteralEnd(lines, i) : undefined;
-		if (docstringEnd === undefined) {
-			break;
-		}
-		insertAfter = docstringEnd + 1;
-		i = docstringEnd + 1;
-	}
-
 	const lineCount = model.getLineCount();
-	const atEndOfFile = insertAfter >= lineCount;
-	const range = atEndOfFile
+	const range = insertion.atEndOfFile
 		? new Range(lineCount, model.getLineMaxColumn(lineCount), lineCount, model.getLineMaxColumn(lineCount))
-		: new Range(insertAfter + 1, 1, insertAfter + 1, 1);
+		: new Range(insertion.afterLine + 1, 1, insertion.afterLine + 1, 1);
 
 	// The import rides along with the dropped text unless it belongs strictly
 	// above it. Landing on the same position, two insertions would apply in an
@@ -112,9 +72,8 @@ function importPlacement(model: ITextModel, importStatement: string, position: I
 		return { kind: 'inline', text: `${lead}${importStatement}\n\n` };
 	}
 
-	// Separate the import block from the code below it, unless something already does.
-	const separator = !atEndOfFile && lines[insertAfter].trim() !== '' ? '\n' : '';
-	const lead = atEndOfFile ? '\n' : '';
+	const separator = insertion.needsSeparator ? '\n' : '';
+	const lead = insertion.atEndOfFile ? '\n' : '';
 	return { kind: 'separateEdit', range, text: `${lead}${importStatement}\n${separator}` };
 }
 
@@ -211,6 +170,73 @@ export class PythonReadDropProvider implements DocumentDropEditProvider {
 	}
 }
 
+/**
+ * Drops an expression dragged out of an SNC visualizer, bringing whatever it
+ * needs imported along with it.
+ *
+ * The visualizer that rendered the handle declares those imports (see
+ * `py_exp_attrs` in visualizer_utils.py); the drag carries them beside the
+ * expression on SNC's own mime type, and this is where they meet the file.
+ * `text/plain` still carries the expression alone, so dropping into a terminal,
+ * another editor, or a search box works as it always has.
+ */
+export class SncPyExpDropProvider implements DocumentDropEditProvider {
+
+	readonly kind = sncPyExpDropEditKind;
+	readonly providedDropEditKinds = [this.kind];
+	readonly dropMimeTypes = [SNC_PY_EXP_MIME];
+
+	async provideDocumentDropEdits(model: ITextModel, position: IPosition, dataTransfer: IReadonlyVSDataTransfer, token: CancellationToken): Promise<DocumentDropEditsSession | undefined> {
+		const entry = dataTransfer.get(SNC_PY_EXP_MIME);
+		if (!entry) {
+			return;
+		}
+
+		const raw = await entry.asString();
+		if (token.isCancellationRequested) {
+			return;
+		}
+
+		let payload: { expr?: string; imports?: string[] };
+		try {
+			payload = JSON.parse(raw);
+		} catch {
+			return;
+		}
+		const expr = payload.expr;
+		if (!expr) {
+			return;
+		}
+
+		// Every import that isn't there yet, in declaration order. Two of them
+		// stacking at the same anchor is fine: each rides in the same edit, so
+		// they land in the order they were declared rather than racing.
+		const inline: string[] = [];
+		const separate: { range: Range; text: string }[] = [];
+		for (const importStatement of payload.imports ?? []) {
+			const placement = importPlacement(model, importStatement, position);
+			if (placement?.kind === 'inline') {
+				inline.push(placement.text);
+			} else if (placement?.kind === 'separateEdit') {
+				separate.push({ range: placement.range, text: placement.text });
+			}
+		}
+
+		return {
+			edits: [{
+				insertText: inline.join('') + expr,
+				title: 'Insert Python expression',
+				kind: this.kind,
+				handledMimeType: SNC_PY_EXP_MIME,
+				additionalEdit: separate.length
+					? { edits: separate.map(edit => ({ resource: model.uri, versionId: undefined, textEdit: edit })) }
+					: undefined,
+			}],
+			dispose() { },
+		};
+	}
+}
+
 export class PythonDropProvidersFeature extends Disposable {
 	constructor(
 		@ILanguageFeaturesService languageFeaturesService: ILanguageFeaturesService,
@@ -218,5 +244,6 @@ export class PythonDropProvidersFeature extends Disposable {
 	) {
 		super();
 		this._register(languageFeaturesService.documentDropEditProvider.register({ language: 'python' }, new PythonReadDropProvider(workspaceContextService)));
+		this._register(languageFeaturesService.documentDropEditProvider.register({ language: 'python' }, new SncPyExpDropProvider()));
 	}
 }

@@ -129,7 +129,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
 from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
-                              LinkConfig, handle_relink,
+                              LinkConfig, handle_relink, new_code_command, py_exp_attrs,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
                               dollar_expr_parses, is_nested,
                               nerd_font_icon, render_tool_toolbar)
@@ -900,9 +900,8 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
         seg_expr = parts[1] if len(parts) >= 2 else ''
         seg_event = repr(SegmentToggle(segment_id=seg_id_for_listener))
         mouse_listener = (f'snc-mouse="{str(index)}" '
-                          f'snc-mouse-down="{html.escape(seg_event)}" '
-                          f'snc-py-exp="{html.escape(seg_expr)}" '
-                          f'draggable="true"')
+                          f'snc-mouse-down="{html.escape(seg_event)}"'
+                          f'{py_exp_attrs(seg_expr)}')
 
     # snc-mouse="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
     # (this abbreviation speeds up the string visualization quite a bit)
@@ -3108,7 +3107,8 @@ def _action_btn(label: str, action: str, enabled: bool = True,
         cls += ' dimmed'
     if linked:
         cls += ' linked'
-    expr_attr = f' data-action-expr="{html.escape(expr)}"' if expr else ''
+    expr_attr = py_exp_attrs(expr, imports=code_imports(expr), draggable=False,
+                             attr='data-action-expr')
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
             f'{expr_attr}>{label}</span>')
 
@@ -3133,10 +3133,10 @@ def _preview_expr(model: dict, action: str, eval_in_scope) -> str:
 def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '') -> str:
     act_event = repr(ActionButtonClick(action=action, copy=False))
     disabled = '' if enabled else ' dimmed'
-    py_exp_attrs = (f' snc-py-exp="{html.escape(expr)}" snc-py-exp-align="right"'
-                    if expr else '')
+    exp_attrs = py_exp_attrs(expr, imports=code_imports(expr), draggable=False,
+                             align='right')
     return (
-        f'<div class="snc-dropdown-option{disabled}"{py_exp_attrs}>'
+        f'<div class="snc-dropdown-option{disabled}"{exp_attrs}>'
         f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
         f'</div>'
     )
@@ -3536,7 +3536,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         len_expr = f'len({resolved_source_expr})'
         char_els.append(
             f'<span class="len-anchor">'
-            f'<span snc-py-exp="{html.escape(len_expr)}" draggable="true" '
+            f'<span{py_exp_attrs(len_expr)} '
             f'class="len-indicator"'
             f'>{len_val}</span></span>'
         )
@@ -4520,7 +4520,7 @@ def _get_search_context(model: dict, var_and_exp=None, *, source_expr: str = Non
 
 from string_visualizer_grammar import (
     generate_action, generate_copy_expr_for_if, parse_generated_code_or_assignment,
-    _STATEMENT_ACTIONS,
+    code_imports, _STATEMENT_ACTIONS,
 )
 
 
@@ -4719,9 +4719,8 @@ def _segment_chip_html(seg_id: str, expr: str, label: str, *,
     return (
         f'<span class="segment-label-anchor segment-chip-anchor">'
         f'<span class="{cls}" '
-        f'snc-mouse-down="{html.escape(event)}" '
-        f'snc-py-exp="{html.escape(expr)}" '
-        f'draggable="true">{html.escape(label)}</span>'
+        f'snc-mouse-down="{html.escape(event)}"'
+        f'{py_exp_attrs(expr)}>{html.escape(label)}</span>'
         f'</span>'
     )
 
@@ -5425,7 +5424,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     if ctx:
                         result = generate_action('find_or_map', ctx)
                         if result:
-                            commands.append(result)
+                            commands.append(new_code_command(result, code_imports))
 
             elif key == 'Backspace' and meta_key:
                 if model.get('openDropdown'):
@@ -5443,7 +5442,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
-                            commands.append(result)
+                            commands.append(new_code_command(result, code_imports))
 
             elif key == 'r' and meta_key:
                 if model.get('linked_action'):
@@ -5453,7 +5452,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     if ctx:
                         result = generate_action('replace', ctx)
                         if result:
-                            commands.append(result)
+                            commands.append(new_code_command(result, code_imports))
 
             elif key == 'Escape':
                 # Close dropdown if open, otherwise clear selections
@@ -5760,7 +5759,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                         if copy:
                             commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
-                            commands.append(result)
+                            commands.append(new_code_command(result, code_imports))
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
@@ -5812,6 +5811,7 @@ _LINK_CONFIG = LinkConfig(
     default_action=_AUTO_LINK_ACTION,
     default_statement_action=_AUTO_LINK_STATEMENT_ACTION,
     statement_actions=_STATEMENT_ACTIONS,
+    code_imports=code_imports,
 )
 
 
@@ -5840,7 +5840,7 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     model['linked_has_assignment'] = bool(suggest_name)
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
-    commands.append(result)
+    commands.append(new_code_command(result, code_imports))
 
 
 def _emit_linked_update(expr: str, model: dict, commands: list,

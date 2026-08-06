@@ -34,6 +34,14 @@ export interface IProcessOptions {
 	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
 }
 
+/**
+ * Mime type an snc-py-exp drag carries alongside `text/plain`, holding
+ * `{ expr, imports }` as JSON. `text/plain` stays the expression on its own, so
+ * dropping anywhere else still works; this is what lets a drop into a Python
+ * editor bring the imports the expression needs with it.
+ */
+export const SNC_PY_EXP_MIME = 'application/vnd.snc.py-exp';
+
 export interface NewCodeEdit {
 	type: 'insert';
 	afterLine: number; // 1-indexed; 0 means insert before line 1
@@ -45,7 +53,10 @@ export interface NewCodeEdit {
 }
 
 export type SNCCommand =
-	| { type: 'NewCode'; triggerLine: number; triggerVisIndex: number; edits: NewCodeEdit[] }
+	// `imports` is what the visualizer that generated this code says it needs to
+	// run. Whether the file already has them, and where a missing one goes, is
+	// the editor's to decide — see pythonImports.ts.
+	| { type: 'NewCode'; triggerLine: number; triggerVisIndex: number; edits: NewCodeEdit[]; imports?: string[] }
 	| { type: 'CopyToClipboard'; text: string }
 	// The backend supplies expression intent; the editor's linked range remains
 	// authoritative for the concrete assignment target. On semantic action

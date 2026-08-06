@@ -239,54 +239,18 @@ def _detect_insertion_indent(lines: List[str], line: int) -> str:
     return current_indent_str
 
 
-def _import_anchor_line(source_code: str) -> int:
-    """1-indexed line an auto-added import goes after (0 means before line 1).
-
-    The anchor is the end of the file's prologue — a module docstring plus the
-    leading imports — which is the same span `split_leading_imports` pre-executes.
-    An import placed above the docstring would leave it a body expression, which
-    the runner then visualizes as a value.
-    """
-    try:
-        body = ast.parse(source_code).body
-    except SyntaxError:
-        # Source mid-edit still needs a sensible anchor, so fall back to reading
-        # the leading lines. Docstrings aside, they say where the imports end.
-        anchor = 0
-        for i, l in enumerate(source_code.split('\n')):
-            stripped = l.strip()
-            if stripped.startswith('import ') or stripped.startswith('from '):
-                anchor = i + 1
-            elif stripped and not stripped.startswith('#'):
-                break
-        return anchor
-
-    anchor = 0
-    for stmt in body:
-        # Only a string ahead of every import is the module docstring; a later one
-        # is code the body has to keep.
-        is_docstring = (
-            anchor == 0
-            and isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and isinstance(stmt.value.value, str)
-        )
-        if not (isinstance(stmt, (ast.Import, ast.ImportFrom)) or is_docstring):
-            break
-        anchor = stmt.end_lineno or stmt.lineno
-    return anchor
-
-
 def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str) -> List[Dict[str, Any]]:
     """Convert a (suggest_var_name, expr) tuple into a list of line-level edits.
 
     Each edit is {"type": "insert", "afterLine": N, "text": "..."} where afterLine
     is 1-indexed (0 means before the first line).
 
-    Handles variable name collision avoidance, indentation matching,
-    and automatic import insertion.
+    Handles variable name collision avoidance and indentation matching. What
+    the code needs imported travels separately, as the visualizer's own
+    declaration on the command: only the editor knows the file as it stands
+    now, so it is the one that decides whether an import is missing and where
+    it would go.
     """
-    import re as _re
     edits: List[Dict[str, Any]] = []
 
     if suggest_var_name:
@@ -311,20 +275,6 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     edits.append({"type": "insert", "afterLine": line, "text": text,
                   "headerLines": header_lines})
 
-    # Detect and insert needed imports
-    needed_imports: List[str] = []
-    if _re.search(r'\bre\.', expr):
-        needed_imports.append('import re')
-
-    insert_after = _import_anchor_line(source_code) if needed_imports else 0
-    for import_stmt in needed_imports:
-        if any(l.strip() == import_stmt for l in lines):
-            continue
-        edits.append({"type": "insert", "afterLine": insert_after, "text": import_stmt})
-        next_line_idx = insert_after  # 0-indexed line after the import block
-        if next_line_idx < len(lines) and lines[next_line_idx].strip() != '':
-            edits.append({"type": "insert", "afterLine": insert_after, "text": ""})
-
     return edits
 
 
@@ -344,14 +294,18 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
     cmd_dicts: List[Dict[str, Any]] = []
     for cmd in commands:
         try:
-            if isinstance(cmd, tuple) and len(cmd) == 2:
-                suggest_var_name, expr = cmd
+            if isinstance(cmd, tuple) and len(cmd) in (2, 3):
+                suggest_var_name, expr = cmd[0], cmd[1]
                 edits = _build_new_code_edits(source_code, line, suggest_var_name, expr)
                 cmd_dict: Dict[str, Any] = {
                     "type": "NewCode",
                     "triggerLine": line,
                     "triggerVisIndex": idx_in_line,
                     "edits": edits,
+                    # What the visualizer that wrote this code says it needs to
+                    # run. Whether the file already has it, and where a missing
+                    # one goes, is the editor's to answer.
+                    "imports": list(cmd[2]) if len(cmd) > 2 else [],
                 }
             else:
                 cmd_dict = {"type": type(cmd).__name__}

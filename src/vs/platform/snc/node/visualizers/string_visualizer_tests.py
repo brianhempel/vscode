@@ -148,10 +148,10 @@ def make_mouse_up_event(index: int, legacy_index: bool = True) -> dict:
 def _command_text(cmd) -> str:
     """Return the code/text carried by a command, for substring assertions.
 
-    Handles NewCode tuples (suggest_name, expr), ChangeSelectedText, and
-    CopyToClipboard. Returns '' for anything else.
+    Handles NewCode tuples (suggest_name, expr[, imports]), ChangeSelectedText,
+    and CopyToClipboard. Returns '' for anything else.
     """
-    if isinstance(cmd, tuple) and len(cmd) == 2:
+    if isinstance(cmd, tuple) and len(cmd) in (2, 3):
         return cmd[1] or ''
     text = getattr(cmd, 'text', None)
     return text or ''
@@ -998,7 +998,7 @@ class TestKeyboardEvents(unittest.TestCase):
                                  self.var_and_exp, model, self.value)
 
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
         self.assertEqual(model['linked_action'], 'find_or_map')
@@ -3239,7 +3239,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
         model, insert_cmds = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
                                     self.var_and_exp, self.model, self.value)
         self.assertEqual(len(insert_cmds), 1)
-        suggest_name, expr = insert_cmds[0]
+        suggest_name, expr = insert_cmds[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("list(re.finditer(r'hello.*world'", expr)
 
@@ -3253,7 +3253,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
         model, insert_cmds = update(make_search_box_input_event(r"r'hello'"),
                                     self.var_and_exp, self.model, self.value)
         self.assertEqual(len(insert_cmds), 1)
-        suggest_name, expr = insert_cmds[0]
+        suggest_name, expr = insert_cmds[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("list(re.finditer(r'hello'", expr)
 
@@ -3262,7 +3262,7 @@ class TestSearchBoxEnterGeneratesCode(unittest.TestCase):
         model, insert_cmds = update(make_search_box_input_event(r"r'hello'"),
                                     self.var_and_exp, self.model, self.value)
         self.assertEqual(len(insert_cmds), 1)
-        suggest_name, expr = insert_cmds[0]
+        suggest_name, expr = insert_cmds[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("list(re.finditer(r'hello'", expr)
 
@@ -3283,7 +3283,7 @@ class TestAutoLinkOnInteraction(unittest.TestCase):
 
         # A NewCode tuple is emitted on the very first meaningful interaction.
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("re.finditer(r'hello'", expr)
 
@@ -3756,7 +3756,7 @@ class TestBareExpressionSuggestions(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 (None, "print('hello world')"), model, "hello world")
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "result_matches")
         self.assertIn("re.finditer(r'hello'", expr)
 
@@ -3767,7 +3767,7 @@ class TestBareExpressionSuggestions(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 (None, "print('hello world')"), model, "hello world")
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "result")
         self.assertIn("re.sub(r'hello'", expr)
 
@@ -5964,7 +5964,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("list(re.finditer(", expr)
 
@@ -5974,7 +5974,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_match")
         self.assertIn("re.search(", expr)
         self.assertNotIn("finditer", expr)
@@ -5985,7 +5985,7 @@ class TestFirstMatchEnterCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIn("re.search(", expr)
 
 
@@ -6003,7 +6003,7 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertIn("re.sub(", expr)
         self.assertNotIn("count=1", expr)
@@ -6014,7 +6014,7 @@ class TestFirstMatchBackspaceCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertIn("re.sub(", expr)
         self.assertIn("count=1", expr)
@@ -6292,7 +6292,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertNotIn('re.I', expr)
 
     def test_case_insensitive_enter_has_re_I(self):
@@ -6301,7 +6301,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('re.I', expr)
         self.assertIn('re.M', expr)
 
@@ -6311,7 +6311,7 @@ class TestCaseInsensitiveEnterCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIn('re.search(', expr)
         self.assertIn('re.I', expr)
         self.assertEqual(suggest_name, "x_match")
@@ -6330,7 +6330,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertNotIn('re.I', expr)
 
     def test_case_insensitive_backspace_has_re_I(self):
@@ -6338,7 +6338,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('re.I', expr)
         self.assertIn('re.M', expr)
 
@@ -6348,7 +6348,7 @@ class TestCaseInsensitiveBackspaceCodeGen(unittest.TestCase):
         model, commands = update(make_key_down_event('Backspace', meta_key=True),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('count=1', expr)
         self.assertIn('re.I', expr)
 
@@ -6583,7 +6583,7 @@ class TestCaptureGroupsCodeGeneration(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('(hello)', expr)
         self.assertIn('(world)', expr)
 
@@ -6593,7 +6593,7 @@ class TestCaptureGroupsCodeGeneration(unittest.TestCase):
         model, commands = update(make_key_down_event('Enter'),
                                 self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("hello.*world", expr)
         self.assertNotIn('(hello)', expr)
 
@@ -6904,7 +6904,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("re.escape('hello')", expr)
         self.assertIn("re.finditer(", expr)
@@ -6915,7 +6915,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_match")
         self.assertIn("re.search(", expr)
         self.assertIn("re.escape('hello')", expr)
@@ -6925,7 +6925,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.finditer(", expr)
         self.assertIn("re.I", expr)
 
@@ -6934,7 +6934,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIn("re.search(", expr)
         self.assertIn("re.I", expr)
         self.assertEqual(suggest_name, "x_match")
@@ -6945,7 +6945,7 @@ class TestStringSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('re.escape("hello")', expr)
 
 
@@ -6962,7 +6962,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertIn(".replace('hello', '')", expr)
         self.assertNotIn("re.sub", expr)
@@ -6972,7 +6972,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn(".replace('hello', '', 1)", expr)
 
     def test_many_match_case_insensitive(self):
@@ -6980,7 +6980,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.sub(", expr)
         self.assertIn("re.escape('hello')", expr)
         self.assertIn("re.I", expr)
@@ -6990,7 +6990,7 @@ class TestStringSearchBackspaceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.sub(", expr)
         self.assertIn("count=1", expr)
         self.assertIn("re.I", expr)
@@ -7192,7 +7192,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        name, expr = commands[0]
+        name, expr = commands[0][:2]
         self.assertEqual(name, 'x_matches')
         self.assertIn('re.finditer(re.escape(s)', expr)
         self.assertNotIn('re.I', expr)
@@ -7202,7 +7202,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        name, expr = commands[0]
+        name, expr = commands[0][:2]
         self.assertEqual(name, 'x_match')
         self.assertIn('re.search(re.escape(s)', expr)
         self.assertIn('re.I', expr)
@@ -7212,7 +7212,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        name, expr = commands[0]
+        name, expr = commands[0][:2]
         self.assertIn('re.finditer(re.escape(s)', expr)
 
     def test_bare_complex_expression(self):
@@ -7220,7 +7220,7 @@ class TestExpressionSearchEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('re.escape(x.lower())', expr)
 
 
@@ -7236,7 +7236,7 @@ class TestExpressionSearchBackspaceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        name, expr = commands[0]
+        name, expr = commands[0][:2]
         self.assertEqual(name, 'x')
         self.assertIn('.replace(s, \'\')', expr)
 
@@ -7244,14 +7244,14 @@ class TestExpressionSearchBackspaceCodeGen(unittest.TestCase):
         self.model['search'] = '`s`1'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn(".replace(s, '', 1)", expr)
 
     def test_backtick_many_ci(self):
         self.model['search'] = '`s`i'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('re.sub(re.escape(s)', expr)
         self.assertIn('re.I', expr)
 
@@ -7259,7 +7259,7 @@ class TestExpressionSearchBackspaceCodeGen(unittest.TestCase):
         self.model['search'] = '`s`1i'
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('re.sub(re.escape(s)', expr)
         self.assertIn('count=1', expr)
         self.assertIn('re.I', expr)
@@ -7472,7 +7472,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertEqual(expr, "['world' for mtch in re.finditer(r'hello', x, flags=re.M)]")
 
@@ -7483,7 +7483,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("next(", expr)
         self.assertIn("'world' for mtch in", expr)
@@ -7495,7 +7495,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.M|re.I", expr)
         self.assertIn("'world' for mtch in", expr)
 
@@ -7506,7 +7506,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("re.escape('hello')", expr)
         self.assertIn("'world' for mtch in", expr)
@@ -7518,7 +7518,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("next(", expr)
 
     def test_string_replace_case_insensitive(self):
@@ -7528,7 +7528,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.I", expr)
 
     def test_expression_replace_many_match(self):
@@ -7538,7 +7538,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("re.escape(s)", expr)
 
@@ -7549,7 +7549,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("mtch[0].upper() for mtch in", expr)
 
     def test_backtick_wrapped_expression(self):
@@ -7559,7 +7559,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("mtch[0].upper() for mtch in", expr)
 
     def test_dollar_method_call(self):
@@ -7569,7 +7569,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("mtch.group(1) for mtch in", expr)
 
     def test_arbitrary_code_accepted(self):
@@ -7579,7 +7579,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("some_func(mtch[0]) for mtch in", expr)
 
     def test_empty_replace_text_does_nothing(self):
@@ -7590,7 +7590,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
                             self.var_and_exp, self.model, self.value)
         # With no replace text, Enter does Get (list of matches)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIn("re.finditer(", expr)
 
     def test_replace_visible_false_does_extract(self):
@@ -7601,7 +7601,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertIn("re.finditer(", expr)
 
@@ -7612,7 +7612,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('"world" for mtch in', expr)
 
     def test_fstring_replace(self):
@@ -7622,7 +7622,7 @@ class TestReplaceEnterCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("f'hi {name}' for mtch in", expr)
 
     def test_no_search_does_nothing(self):
@@ -7735,7 +7735,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
 
@@ -7745,7 +7745,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_match")
         self.assertEqual(expr, "re.search(r'hello', x, flags=re.M)")
 
@@ -7756,7 +7756,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertEqual(expr, "[mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M)]")
 
@@ -7768,7 +7768,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertEqual(expr, "next((mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M)), None)")
 
@@ -7777,7 +7777,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_matches")
         self.assertEqual(expr, "list(re.finditer(r'hello', x, flags=re.M))")
 
@@ -7788,7 +7788,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_transformed")
         self.assertIn("for mtch in re.finditer(", expr)
         self.assertNotIn("re.sub(", expr)
@@ -7808,7 +7808,7 @@ class TestActionButtonGetTransform(unittest.TestCase):
         _, commands = update(make_action_button_event('find_or_map'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.escape('hello')", expr)
 
     def test_find_or_map_no_search_does_nothing(self):
@@ -7839,7 +7839,7 @@ class TestActionButtonReplace(unittest.TestCase):
         _, commands = update(make_action_button_event('replace'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, flags=re.M)")
 
@@ -7849,7 +7849,7 @@ class TestActionButtonReplace(unittest.TestCase):
         _, commands = update(make_action_button_event('replace'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, count=1, flags=re.M)")
 
     def test_replace_button_not_in_replace_mode(self):
@@ -7864,7 +7864,7 @@ class TestActionButtonReplace(unittest.TestCase):
         _, commands = update(make_key_down_event('r', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertEqual(expr, "re.sub(r'hello', lambda mtch: 'world', x, flags=re.M)")
 
@@ -7883,7 +7883,7 @@ class TestActionButtonReplace(unittest.TestCase):
         _, commands = update(make_action_button_event('replace'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.sub(re.escape('hello')", expr)
 
 
@@ -7905,7 +7905,7 @@ class TestActionButtonDelete(unittest.TestCase):
         _, commands = update(make_action_button_event('delete'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertEqual(expr, "re.sub(r'hello', '', x, flags=re.M)")
 
@@ -7914,7 +7914,7 @@ class TestActionButtonDelete(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x")
         self.assertEqual(expr, "re.sub(r'hello', '', x, flags=re.M)")
 
@@ -7943,7 +7943,7 @@ class TestActionButtonDelete(unittest.TestCase):
         _, commands = update(make_action_button_event('delete'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "x.replace('hello', '')")
 
     # --- Disabled in Pick mode / when replace box is open -------------------
@@ -8013,7 +8013,7 @@ class TestActionButtonLoop(unittest.TestCase):
         _, commands = update(make_action_button_event('loop'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIsNone(suggest_name)
         self.assertIn("for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):", expr)
         self.assertNotIn("pass", expr)
@@ -8045,7 +8045,7 @@ class TestActionButtonLoop(unittest.TestCase):
         _, commands = update(make_action_button_event('loop'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIsNone(suggest_name)
         self.assertIn("for i, val in enumerate(", expr)
         self.assertIn("mtch[0].upper() for mtch in re.finditer(", expr)
@@ -8085,7 +8085,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         _, commands = update(make_action_button_event('match_strings'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(expr, "re.findall(r'hello', x, flags=re.M)")
 
     def test_match_strings_first(self):
@@ -8094,7 +8094,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         _, commands = update(make_action_button_event('match_strings'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(expr, "next(iter(re.findall(r'hello', x, flags=re.M)), None)")
 
     def test_match_strings_expr_search(self):
@@ -8103,7 +8103,7 @@ class TestActionButtonMatchStrings(unittest.TestCase):
         _, commands = update(make_action_button_event('match_strings'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.findall(re.escape('hello')", expr)
 
     def test_match_strings_disabled_in_replace_mode(self):
@@ -8160,7 +8160,7 @@ class TestActionButtonLoopMatchStrings(unittest.TestCase):
         _, commands = update(make_action_button_event('loop_match_strings'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIsNone(suggest_name)
         self.assertIn("for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):", expr)
         self.assertNotIn("pass", expr)
@@ -8200,7 +8200,7 @@ class TestActionButtonAny(unittest.TestCase):
         _, commands = update(make_action_button_event('any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_any")
         self.assertEqual(expr, "bool(re.search(r'hello', x, flags=re.M))")
 
@@ -8211,7 +8211,7 @@ class TestActionButtonAny(unittest.TestCase):
         _, commands = update(make_action_button_event('any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_any")
         self.assertEqual(expr, "any(mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
@@ -8229,7 +8229,7 @@ class TestActionButtonAny(unittest.TestCase):
         _, commands = update(make_action_button_event('any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.search(re.escape('hello')", expr)
 
 
@@ -8253,7 +8253,7 @@ class TestActionButtonAll(unittest.TestCase):
         _, commands = update(make_action_button_event('all'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_all")
         self.assertEqual(expr, "all(mtch[0].upper() for mtch in re.finditer(r'hello', x, flags=re.M))")
 
@@ -8295,7 +8295,7 @@ class TestActionButtonIfAny(unittest.TestCase):
         _, commands = update(make_action_button_event('if_any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIsNone(suggest_name)
         self.assertIn("if re.search(r'hello', x, flags=re.M):", expr)
         self.assertNotIn("pass", expr)
@@ -8307,7 +8307,7 @@ class TestActionButtonIfAny(unittest.TestCase):
         _, commands = update(make_action_button_event('if_any'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIsNone(suggest_name)
         self.assertIn("if any(", expr)
         self.assertNotIn("pass", expr)
@@ -8344,7 +8344,7 @@ class TestActionButtonIfAll(unittest.TestCase):
         _, commands = update(make_action_button_event('if_all'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertIsNone(suggest_name)
         self.assertIn("if all(", expr)
         self.assertNotIn("pass", expr)
@@ -8390,7 +8390,7 @@ class TestActionButtonCount(unittest.TestCase):
         _, commands = update(make_action_button_event('count'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_count")
         self.assertEqual(expr, "sum(1 for _ in re.finditer(r'hello', x, flags=re.M))")
 
@@ -8401,7 +8401,7 @@ class TestActionButtonCount(unittest.TestCase):
         _, commands = update(make_action_button_event('count'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_count")
         self.assertEqual(expr, "sum(1 for mtch in re.finditer(r'hello', x, flags=re.M) if mtch[0].upper())")
 
@@ -8418,7 +8418,7 @@ class TestActionButtonCount(unittest.TestCase):
         _, commands = update(make_action_button_event('count'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.escape('hello')", expr)
 
 
@@ -8442,7 +8442,7 @@ class TestActionButtonFilter(unittest.TestCase):
         _, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_filtered")
         self.assertEqual(expr, r"[mtch for mtch in re.finditer(r'\w+', x, flags=re.M) if len(mtch[0]) > 4]")
 
@@ -8472,7 +8472,7 @@ class TestActionButtonFilter(unittest.TestCase):
         _, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.escape('hello')", expr)
         self.assertIn("if len(mtch[0]) > 4", expr)
 
@@ -8482,7 +8482,7 @@ class TestActionButtonFilter(unittest.TestCase):
         _, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, _ = commands[0]
+        suggest_name, _ = commands[0][:2]
         self.assertEqual(suggest_name, "result_filtered")
 
     def test_filter_first_match(self):
@@ -8491,7 +8491,7 @@ class TestActionButtonFilter(unittest.TestCase):
         _, commands = update(make_action_button_event('filter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("next(", expr)
         self.assertIn("if len(mtch[0]) > 4", expr)
 
@@ -8514,7 +8514,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_indices")
         self.assertEqual(expr, r"[mtch.start() for mtch in re.finditer(r'\w+', x, flags=re.M)]")
 
@@ -8525,7 +8525,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_indices")
         self.assertEqual(expr, r"[mtch.start() for mtch in re.finditer(r'\w+', x, flags=re.M) if len(mtch[0]) > 4]")
 
@@ -8535,7 +8535,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("next(", expr)
         self.assertIn("mtch.start()", expr)
 
@@ -8547,7 +8547,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("next(", expr)
         self.assertIn("mtch.start()", expr)
         self.assertIn("if len(mtch[0]) > 4", expr)
@@ -8566,7 +8566,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("re.escape('hello')", expr)
         self.assertIn("mtch.start()", expr)
 
@@ -8576,7 +8576,7 @@ class TestActionButtonFindIndices(unittest.TestCase):
         _, commands = update(make_action_button_event('find_indices'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, _ = commands[0]
+        suggest_name, _ = commands[0][:2]
         self.assertEqual(suggest_name, "result_indices")
 
 
@@ -8598,7 +8598,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_parts")
         self.assertEqual(expr, "re.split(r'hello', x, flags=re.M)")
 
@@ -8608,7 +8608,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "re.split(r'hello', x, maxsplit=1, flags=re.M)")
 
     def test_split_string_search(self):
@@ -8617,7 +8617,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "x.split('hello')")
 
     def test_split_string_search_first_match(self):
@@ -8626,7 +8626,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "x.split('hello', 1)")
 
     def test_split_string_search_case_insensitive(self):
@@ -8635,7 +8635,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "re.split(re.escape('hello'), x, flags=re.I)")
 
     def test_split_case_insensitive(self):
@@ -8644,7 +8644,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "re.split(r'hello', x, flags=re.M|re.I)")
 
     def test_copy_split(self):
@@ -8662,7 +8662,7 @@ class TestActionButtonSplit(unittest.TestCase):
         _, commands = update(make_action_button_event('split'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        suggest_name, _ = commands[0]
+        suggest_name, _ = commands[0][:2]
         self.assertEqual(suggest_name, "result_parts")
 
 
@@ -9758,7 +9758,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('x[5]', expr)
 
     def test_slice_enter_generates_slicing(self):
@@ -9767,7 +9767,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('x[5:10]', expr)
 
     def test_slice_start_only_enter(self):
@@ -9776,7 +9776,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('x[5:]', expr)
 
     def test_slice_stop_only_enter(self):
@@ -9785,7 +9785,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Enter'),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('x[:5]', expr)
 
     def test_index_delete_generates_concatenation(self):
@@ -9794,7 +9794,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('x[:5]', expr)
         self.assertIn('x[5 + 1:]', expr)
 
@@ -9804,7 +9804,7 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         _, commands = update(make_key_down_event('Backspace', meta_key=True),
                             self.var_and_exp, self.model, self.value)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn('x[:5]', expr)
         self.assertIn('x[10:]', expr)
 
@@ -11212,7 +11212,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        suggest_name, expr = commands[0]
+        suggest_name, expr = commands[0][:2]
         self.assertEqual(suggest_name, "x_chars")
         self.assertEqual(expr, "[x[i] for i in [0,0,4,-1]]")
 
@@ -11224,7 +11224,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[(lambda mtch: mtch.upper())(x[i]) for i in [0,0,4,-1]]")
 
     def test_count_multi_index(self):
@@ -11233,7 +11233,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "len([0,0,4,-1])")
 
     def test_copy_multi_index(self):
@@ -11250,7 +11250,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("for i, mtch in enumerate(", expr)
 
     def test_filter_multi_index(self):
@@ -11261,7 +11261,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertIn("for mtch in", expr)
         self.assertIn("if mtch != 'h'", expr)
 
@@ -11271,7 +11271,7 @@ class TestMultiIndexActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[0,0,4,-1]")
 
 
@@ -11294,7 +11294,7 @@ class TestBroadcastSliceActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[x[i:] for i in [2,3]]")
 
     def test_find_or_map_broadcast_both(self):
@@ -11304,7 +11304,7 @@ class TestBroadcastSliceActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[x[i:j] for i, j in zip([0,1], [3,2])]")
 
     def test_find_or_map_broadcast_right(self):
@@ -11314,7 +11314,7 @@ class TestBroadcastSliceActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[x[:i] for i in [3,2]]")
 
 
@@ -11337,7 +11337,7 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[x[i:j] for i, j in [(2,3),(0,4)]]")
 
     def test_find_or_map_multi_pair_with_replace(self):
@@ -11348,7 +11348,7 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[(lambda mtch: len(mtch))(x[i:j]) for i, j in [(2,3),(0,4)]]")
 
     def test_find_indices_multi_pair(self):
@@ -11357,7 +11357,7 @@ class TestMultiPairSliceActionButtons(unittest.TestCase):
                             self.var_and_exp, self.model, self.value,
                             eval_in_scope=eval)
         self.assertEqual(len(commands), 1)
-        _, expr = commands[0]
+        _, expr = commands[0][:2]
         self.assertEqual(expr, "[i for i, j in [(2,3),(0,4)]]")
 
 
@@ -13651,7 +13651,7 @@ class TestDisclosureButtonTooltip(unittest.TestCase):
         self.assertIn('data-tooltip="Toggle replace/map/filter"', attrs)
 
 
-from string_visualizer_grammar import generate_action
+from string_visualizer_grammar import generate_action, code_imports
 from visualizer_utils import CHILD_SOURCE_BINDER
 
 
@@ -13695,6 +13695,29 @@ class TestNestedScopeRoundTrip(unittest.TestCase):
             _build_segment_replace_text(model, (None, CHILD_SOURCE_BINDER),
                                         'foo bar', lambda code: eval(code)),
             '$$[$.end():]')
+
+
+class TestGeneratedCodeSaysWhatItNeeds(unittest.TestCase):
+    """The grammar owns the templates that reach for the re module, so it is
+    what declares the import. Nothing downstream reads the code to guess."""
+
+    def imports(self, action, model_search, text='foo bar'):
+        from string_visualizer import _get_search_context
+        model = init_model(text)
+        model['search'] = model_search
+        ctx = _get_search_context(model, ('s', 's'),
+                                  eval_in_scope=lambda code: eval(code))
+        return code_imports(generate_action(action, ctx)[1])
+
+    def test_a_search_needs_the_re_module(self):
+        self.assertEqual(self.imports('find_or_map', "r'foo'"), ('import re',))
+
+    def test_code_that_does_not_reach_for_re_needs_nothing(self):
+        self.assertEqual(code_imports("s[1:3]"), ())
+        self.assertEqual(code_imports("s.upper()"), ())
+
+    def test_a_name_ending_in_re_is_not_the_module(self):
+        self.assertEqual(code_imports("score.upper()"), ())
 
 
 if __name__ == '__main__':

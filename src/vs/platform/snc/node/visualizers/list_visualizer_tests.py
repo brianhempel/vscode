@@ -6,6 +6,7 @@ Run:
 """
 
 import ast
+import json
 import unittest
 import html
 import os
@@ -1590,7 +1591,9 @@ class TestListNeverSelfWraps(unittest.TestCase):
         html_output = visualize(lst, model, mock_get_visualizer, None,
                                 small=True, var_and_exp=(None, 'nums'))
         self.assertFalse(html_output.startswith('<span snc-py-exp'))
-        self.assertNotIn('snc-py-exp="nums"', html_output)
+        # The $ column header does hand over the whole list -- that is the
+        # column -- but from inside the table, not from a wrapper around it.
+        self.assertNotIn('py-exp-grab', html_output)
 
     def test_small_without_var_and_exp_renders_bare(self):
         lst = [1, 2, 3]
@@ -4699,7 +4702,7 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
 
         for cmd in commands:
             self.assertFalse(
-                isinstance(cmd, tuple) and len(cmd) == 2,
+                isinstance(cmd, tuple) and len(cmd) in (2, 3),
                 "No (suggest_var_name, expr) tuples should reach the command list")
 
     def test_child_copy_to_clipboard_passes_through(self):
@@ -6215,7 +6218,11 @@ class TestColumnSearchRendering(unittest.TestCase):
         self.assertIn('search-box', input_html)
         # The chips paint over the input, so they come after it.
         self.assertLess(row.index('col-search-input'), row.index('col-search-chips'))
-        self.assertLess(row.index('col-search-compose'), row.index('col-search-op'))
+        # The operator reads first, at the box's left edge, the way it reads in
+        # the predicate it writes; how the column composes with the others is a
+        # separate question and sits at the far end.
+        self.assertLess(row.index('col-search-op'), row.index('col-search-chips-right'))
+        self.assertLess(row.index('col-search-op'), row.index('col-search-compose'))
 
     def test_chip_options_render_only_while_that_chip_is_open(self):
         lst = [{'name': 'Alice'}]
@@ -6226,7 +6233,7 @@ class TestColumnSearchRendering(unittest.TestCase):
         model['col_search_dropdown'] = 'op-0'
         th = _first_column_header(self.open_menu_html(model, lst))
         self.assertIn('ColumnSearchOpSelect', th)
-        self.assertIn('(none)', th)
+        self.assertIn('(code)', th)
         for op in COLUMN_SEARCH_OPS:
             if op:
                 self.assertIn(html.escape(op), th)
@@ -6351,7 +6358,11 @@ from list_visualizer import (
     _column_values, _tally, _tally_literal, _tally_selection,
     _write_tally_selection, _tally_literals, _tally_shows, _sorted_tally,
     _tally_count_shows, _tally_extreme,
+    _column_values_expr, _tally_exprs, _column_tally_rows, _tally_lists,
+    _tally_row_count_expr,
 )
+
+from collections import Counter
 
 
 # The list from the tally sketch in the TODO: 'c' 5, 'aa' 2, 'b' 3, first seen
@@ -6771,8 +6782,8 @@ class TestTallyRendering(unittest.TestCase):
         # The title sits on the border, so it reads before everything below it.
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertIn('<div class="col-tally-title"><span>Tally</span></div>',
-                      tally)
+        self.assertIn('<div class="col-tally-title"><span '
+                      'class="col-tally-title-text">Tally</span></div>', tally)
         self.assertLess(tally.index('col-tally-title'),
                         tally.index('col-tally-row'))
 
@@ -7216,7 +7227,7 @@ class TestTallySortMenu(unittest.TestCase):
         lst, model = tally_model()
         tally = self.tally(model, lst)
         self.assertIn('col-tally-sort', tally)
-        self.assertIn('Sort by', tally)
+        self.assertIn('Sort:', tally)
         self.assertLess(tally.index('col-tally-sort'),
                         tally.index('col-tally-row'))
 
@@ -7887,6 +7898,408 @@ class TestTallyCountFilterBox(unittest.TestCase):
         model = self.type(model, lst, '3')
         model = self.click(model, lst, AddColumnClick())
         self.assertEqual(model['tally_count_filter'], '')
+
+
+class TestColumnValuesExpr(unittest.TestCase):
+    """The expression for a whole column, which is what the tally counts and
+    what the header hands to a drag."""
+
+    def test_the_item_column_is_the_list_itself(self):
+        self.assertEqual(_column_values_expr('$', 'data'), 'data')
+
+    def test_a_computed_column_is_one_comprehension(self):
+        self.assertEqual(_column_values_expr("$['name']", 'data'),
+                         "[item['name'] for item in data]")
+
+    def test_a_bare_expression_source_is_used_as_written(self):
+        self.assertEqual(_column_values_expr('$ * 2', 'get_items()'),
+                         '[item * 2 for item in get_items()]')
+
+    def test_the_item_column_is_recognised_however_it_is_spaced(self):
+        self.assertEqual(_column_values_expr(' $ ', 'data'), 'data')
+
+
+class TestTallyExprs(unittest.TestCase):
+    """The Python behind the Tally / Items / Counts headers: what the section is
+    showing, so what the user drags out is the list they were reading."""
+
+    def exprs(self, model, lst, eval_in_scope=None):
+        model = dict(model, _source_expr='data')
+        return _tally_exprs('$', model, _tally(_column_values('$', lst, model)),
+                            'data', eval_in_scope)
+
+    def tally_expr(self, model, lst, eval_in_scope=None):
+        return self.exprs(model, lst, eval_in_scope)[0]
+
+    def test_an_untouched_tally_is_just_the_count(self):
+        lst, model = tally_model()
+        self.assertEqual(self.exprs(model, lst),
+                         ('Counter(data)',
+                          'list(Counter(data))',
+                          'list(Counter(data).values())'))
+
+    def test_a_computed_column_counts_the_column(self):
+        # Counter takes any iterable, so there is no list to build on the way in.
+        lst = [{'name': 'Alice'}, {'name': 'Bo'}]
+        model = dict(init_model(lst, mock_get_visualizer), _source_expr='data')
+        model['columns'] = ["$['name']"]
+        tally = _tally(_column_values("$['name']", lst, model))
+        self.assertEqual(
+            _tally_exprs("$['name']", model, tally, 'data')[0],
+            "Counter(item['name'] for item in data)")
+
+    def test_a_column_that_is_the_item_is_counted_as_it_stands(self):
+        lst, model = tally_model()
+        self.assertEqual(self.tally_expr(model, lst), 'Counter(data)')
+
+    def test_no_source_to_read_from_means_no_expression(self):
+        lst, model = tally_model()
+        model['_source_expr'] = None
+        self.assertIsNone(
+            _tally_exprs('$', model, _tally(lst), None))
+
+    # --- the Sort by chip ---
+
+    def test_most_common_first(self):
+        lst, model = tally_model()
+        model['tally_sort'] = 'common'
+        self.assertEqual(
+            self.exprs(model, lst),
+            ('{v: c for v, c in Counter(data).most_common()}',
+             '[v for v, c in Counter(data).most_common()]',
+             '[c for v, c in Counter(data).most_common()]'))
+
+    def test_rarest_first(self):
+        lst, model = tally_model()
+        model['tally_sort'] = 'rare'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for v, c in reversed(Counter(data).most_common())}')
+
+    def test_by_value(self):
+        lst, model = tally_model()
+        model['tally_sort'] = 'item asc'
+        self.assertEqual(self.tally_expr(model, lst),
+                         '{v: c for v, c in sorted(Counter(data).items())}')
+        model['tally_sort'] = 'item desc'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for v, c in sorted(Counter(data).items(), reverse=True)}')
+
+    def test_a_column_of_mixed_types_sorts_on_how_it_reads(self):
+        # The same fallback the display takes: values with no order of their own
+        # still read in some order.
+        lst = ['b', 1, 'b']
+        _, model = tally_model(lst)
+        model['tally_sort'] = 'item asc'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for v, c in sorted(Counter(data).items(), '
+            'key=lambda vc: repr(vc[0]))}')
+
+    # --- the display filters ---
+
+    def test_the_filter_box_narrows_the_expression_too(self):
+        lst, model = tally_model()
+        model['tally_filter'] = ' A '
+        self.assertEqual(
+            self.exprs(model, lst),
+            ("{v: c for v, c in Counter(data).items() if 'a' in repr(v).lower()}",
+             "[v for v, c in Counter(data).items() if 'a' in repr(v).lower()]",
+             "[c for v, c in Counter(data).items() if 'a' in repr(v).lower()]"))
+
+    def test_the_count_box_narrows_the_expression_too(self):
+        lst, model = tally_model()
+        model['tally_count_filter'] = '3'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for v, c in Counter(data).items() if c >= 3}')
+        model['tally_count_op'] = '=='
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for v, c in Counter(data).items() if c == 3}')
+
+    def test_a_count_box_naming_the_programs_own_value_says_so(self):
+        lst, model = tally_model()
+        model['tally_count_filter'] = 'floor'
+        self.assertEqual(
+            self.tally_expr(model, lst, lambda code: eval(code, {'floor': 3})),
+            '{v: c for v, c in Counter(data).items() if c >= floor}')
+
+    def test_a_count_box_holding_an_operator_of_its_own_is_parenthesized(self):
+        lst, model = tally_model()
+        model['tally_count_filter'] = 'floor - 1'
+        self.assertEqual(
+            self.tally_expr(model, lst, lambda code: eval(code, {'floor': 4})),
+            '{v: c for v, c in Counter(data).items() if c >= (floor - 1)}')
+
+    def test_a_count_box_with_nothing_to_compare_against_narrows_nothing(self):
+        lst, model = tally_model()
+        model['tally_count_filter'] = 'half'  # a name that never arrives
+        self.assertEqual(self.tally_expr(model, lst), 'Counter(data)')
+
+    def test_the_two_boxes_narrow_together(self):
+        lst, model = tally_model()
+        model['tally_filter'] = 'a'
+        model['tally_count_filter'] = '2'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            "{v: c for v, c in Counter(data).items() "
+            "if 'a' in repr(v).lower() and c >= 2}")
+
+    def test_min_and_max_ask_the_list_rather_than_the_box(self):
+        # Counting twice to answer one question would be a strange way to write
+        # it, so the count and the extreme are each named once and used after.
+        lst, model = tally_model()
+        model['tally_count_op'] = 'max'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for _cnts in [Counter(data)] '
+            'for _max in [max(_cnts.values())] '
+            'for v, c in _cnts.items() if c == _max}')
+        model['tally_count_op'] = 'min'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for _cnts in [Counter(data)] '
+            'for _min in [min(_cnts.values())] '
+            'for v, c in _cnts.items() if c == _min}')
+
+    def test_min_and_max_answer_about_the_list_the_filter_box_left(self):
+        lst, model = tally_model()
+        model['tally_filter'] = 'a'
+        model['tally_count_op'] = 'max'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            "{v: c for _cnts in [Counter(data)] "
+            "for _max in [max(c2 for v2, c2 in _cnts.items() "
+            "if 'a' in repr(v2).lower())] "
+            "for v, c in _cnts.items() "
+            "if 'a' in repr(v).lower() and c == _max}")
+
+    def test_the_extreme_reads_the_order_the_menu_is_listing_in(self):
+        lst, model = tally_model()
+        model['tally_sort'] = 'common'
+        model['tally_count_op'] = 'min'
+        self.assertEqual(
+            self.tally_expr(model, lst),
+            '{v: c for _cnts in [Counter(data)] '
+            'for _min in [min(_cnts.values())] '
+            'for v, c in _cnts.most_common() if c == _min}')
+
+    def test_a_count_that_is_asked_for_once_is_not_named(self):
+        # Naming it would be a line about nothing: the comparison the box makes
+        # reads the counter no more often than the values do.
+        lst, model = tally_model()
+        model['tally_count_filter'] = '3'
+        self.assertNotIn('_cnts', self.tally_expr(model, lst))
+
+    def test_a_menu_showing_nothing_has_nothing_to_hand_over(self):
+        lst, model = tally_model()
+        model['tally_filter'] = 'zzz'
+        self.assertIsNone(self.exprs(model, lst))
+
+    def test_the_expressions_produce_what_the_menu_lists(self):
+        # The point of all of it: run the code and get the rows on screen.
+        lst, model = tally_model()
+        model['tally_sort'] = 'common'
+        model['tally_filter'] = 'a'
+        scope = {'data': lst, 'Counter': Counter}
+        tally_expr, items_expr, counts_expr = self.exprs(model, lst)
+        self.assertEqual(eval(tally_expr, scope), {'aa': 2})
+        self.assertEqual(eval(items_expr, scope), ['aa'])
+        self.assertEqual(eval(counts_expr, scope), [2])
+
+    def test_every_sort_and_filter_combination_still_runs(self):
+        lst = ['c', 'aa', 'b', 'c', 'b', 'c', 'aa']
+        _, model = tally_model(lst)
+        scope = {'data': lst, 'Counter': Counter}
+        for sort in TALLY_SORTS:
+            for filter_text in ('', 'a'):
+                for op, count in [('>=', '2'), ('<=', '2'), ('==', '2'),
+                                  ('min', ''), ('max', '')]:
+                    with self.subTest(sort=sort, filter=filter_text, op=op):
+                        model = dict(model, tally_sort=sort,
+                                     tally_filter=filter_text,
+                                     tally_count_op=op,
+                                     tally_count_filter=count)
+                        exprs = self.exprs(model, lst)
+                        if exprs is None:
+                            continue
+                        tally_expr, items_expr, counts_expr = exprs
+                        counted = eval(tally_expr, scope)
+                        self.assertEqual(list(counted), eval(items_expr, scope))
+                        self.assertEqual(list(counted.values()),
+                                         eval(counts_expr, scope))
+                        rendered = _column_tally_rows('$', model, lst)
+                        extreme = _tally_extreme(model, rendered)
+                        shown = [(text, c) for text, c, _lit in rendered
+                                 if _tally_lists(model, text, c, extreme)]
+                        produced = [(repr(v), c) for v, c in counted.items()]
+                        if sort == 'rare':
+                            # See test_rare_reverses_ties: same rows, and only
+                            # equally rare ones can be in a different order.
+                            produced, shown = sorted(produced), sorted(shown)
+                        self.assertEqual(produced, shown)
+
+    def test_rare_reverses_ties(self):
+        # `reversed(most_common())` is the readable way to ask for it, and the
+        # one place it parts company with the list on screen: the display sorts
+        # by count and so leaves equally rare values in first-seen order, while
+        # reversing hands them back last-seen first. Same values, same counts.
+        lst = ['c', 'c', 'a', 'b']
+        _, model = tally_model(lst)
+        model['tally_sort'] = 'rare'
+        self.assertEqual(
+            [v for v, _c in _sorted_tally(_tally(lst), 'rare')], ['a', 'b', 'c'])
+        self.assertEqual(
+            list(eval(self.tally_expr(model, lst),
+                      {'data': lst, 'Counter': Counter})),
+            ['b', 'a', 'c'])
+
+
+class TestTallyRowCounts(unittest.TestCase):
+    """A row's count is a question about one value, so it hands over the code
+    that asks it -- without counting the other values to get there."""
+
+    def counts(self, model, lst, col='$'):
+        model = dict(model, _source_expr='data', columns=[col],
+                     openDropdown={'id': 'col-menu-0'})
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        return [html.unescape(m) for m in
+                re.findall(r'<span class="col-tally-count"([^>]*)>', th)]
+
+    def test_the_item_column_asks_the_list_itself(self):
+        lst, model = tally_model()
+        self.assertIn('snc-py-exp="data.count(\'c\')"', self.counts(model, lst)[0])
+
+    def test_a_computed_column_counts_what_matches(self):
+        lst = [{'species': s} for s in ('cat', 'dog', 'cat')]
+        _, model = tally_model(lst)
+        self.assertIn(
+            'snc-py-exp="sum(1 for item in data '
+            'if item[\'species\'] == \'cat\')"',
+            self.counts(model, lst, "$['species']")[0])
+
+    def test_the_count_reads_leftwards_from_the_rows_edge(self):
+        lst, model = tally_model()
+        self.assertIn('snc-py-exp-align="right"', self.counts(model, lst)[0])
+
+    def test_the_counts_are_what_the_rows_show(self):
+        lst = [{'species': s} for s in ('cat', 'dog', 'cat', 'bird', 'cat')]
+        _, model = tally_model(lst)
+        exprs = [re.search(r'snc-py-exp="([^"]*)"', attrs).group(1)
+                 for attrs in self.counts(model, lst, "$['species']")]
+        self.assertEqual([eval(html.unescape(e), {'data': lst}) for e in exprs],
+                         [3, 1, 1])
+
+    def test_a_value_with_no_literal_has_nothing_to_ask_with(self):
+        class Thing:
+            def __repr__(self):
+                return '<thing>'
+        lst = ['c', Thing()]
+        _, model = tally_model(lst)
+        counts = self.counts(model, lst)
+        self.assertIn('snc-py-exp', counts[0])
+        self.assertNotIn('snc-py-exp', counts[1])
+
+    def test_a_column_with_no_source_hands_over_nothing(self):
+        lst, model = tally_model()
+        model = dict(model, openDropdown={'id': 'col-menu-0'})
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        self.assertNotIn('snc-py-exp', th)
+
+    def test_only_a_sequence_is_asked_to_count_its_own(self):
+        # `.count` is the list's way of answering this, so it needs a value
+        # that has one. Today that is every value here; it may not always be.
+        self.assertEqual(_tally_row_count_expr('$', 'data', "'c'", ['c', 'a']),
+                         "data.count('c')")
+        self.assertEqual(_tally_row_count_expr('$', 'data', "'c'", ('c', 'a')),
+                         "data.count('c')")
+        self.assertEqual(_tally_row_count_expr('$', 'data', "'c'", {'c', 'a'}),
+                         "sum(1 for item in data if item == 'c')")
+
+    def test_a_string_is_not_asked_to_count_its_own(self):
+        # str.count answers a different question -- how many times one string
+        # occurs inside another -- so it is no substitute here.
+        self.assertEqual(_tally_row_count_expr('$', 'data', "'a'", 'aa'),
+                         "sum(1 for item in data if item == 'a')")
+
+
+class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
+    """The three headers are the grab handles for what the section computed."""
+
+    def tally(self, model, lst, column=0):
+        model = dict(model, _source_expr='data',
+                     openDropdown={'id': f'col-menu-{column}'})
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        self.assertIn('<div class="col-tally">', th)
+        return th[th.index('<div class="col-tally">'):]
+
+    def exp_of(self, markup, klass):
+        match = re.search(r'<span class="' + klass + r'"([^>]*)>', markup)
+        self.assertIsNotNone(match, f'no {klass} span in {markup}')
+        return match.group(1)
+
+    def test_the_title_hands_over_the_tally(self):
+        lst, model = tally_model()
+        title = self.exp_of(self.tally(model, lst), 'col-tally-title-text')
+        self.assertIn('snc-py-exp="Counter(data)"', title)
+        self.assertIn('draggable="true"', title)
+
+    def test_the_headers_hand_over_the_values_and_the_counts(self):
+        lst, model = tally_model()
+        tally = self.tally(model, lst)
+        self.assertIn('snc-py-exp="list(Counter(data))"',
+                      self.exp_of(tally, 'col-tally-item-header'))
+        self.assertIn('snc-py-exp="list(Counter(data).values())"',
+                      self.exp_of(tally, 'col-tally-count-header'))
+
+    def test_the_counts_tooltip_stays_inside_the_menu(self):
+        # It sits at the panel's right edge, so it reads leftwards.
+        lst, model = tally_model()
+        self.assertIn('snc-py-exp-align="right"',
+                      self.exp_of(self.tally(model, lst),
+                                  'col-tally-count-header'))
+
+    def test_the_expressions_say_which_import_they_need(self):
+        lst, model = tally_model()
+        attrs = self.exp_of(self.tally(model, lst), 'col-tally-title-text')
+        imports = re.search(r'snc-py-exp-imports="([^"]*)"', attrs)
+        self.assertIsNotNone(imports)
+        self.assertEqual(json.loads(html.unescape(imports.group(1))),
+                         ['from collections import Counter'])
+
+    def test_a_column_with_no_source_hands_over_nothing(self):
+        lst, model = tally_model()
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            None))
+        self.assertNotIn('snc-py-exp', th[th.index('<div class="col-tally">'):])
+
+    def test_a_tally_too_long_to_list_still_hands_over_its_count(self):
+        lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
+        _, model = tally_model(lst)
+        tally = self.tally(model, lst)
+        self.assertIn('col-tally-note', tally)
+        self.assertIn('snc-py-exp="Counter(data)"',
+                      self.exp_of(tally, 'col-tally-title-text'))
+
+    def test_values_that_cannot_be_counted_hand_over_nothing(self):
+        lst = [{'a': 1}, {'a': 2}]
+        _, model = tally_model(lst)
+        tally = self.tally(model, lst)
+        self.assertIn('col-tally-note', tally)
+        self.assertNotIn('snc-py-exp', tally)
+
+    def test_a_menu_showing_nothing_hands_over_nothing(self):
+        lst, model = tally_model()
+        model['tally_filter'] = 'zzz'
+        tally = self.tally(model, lst)
+        self.assertIn('col-tally-note', tally)
+        self.assertNotIn('snc-py-exp', tally)
 
 
 if __name__ == '__main__':

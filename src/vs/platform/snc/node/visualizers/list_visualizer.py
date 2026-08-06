@@ -57,7 +57,9 @@ from visualizer_utils import (
     wrap_child_prefix, wrap_child_suffix,
     DOLLARS_RE,
     strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
+    py_exp_attrs,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
+    new_code_command,
     dollar_expr_parses, is_nested,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
@@ -552,7 +554,11 @@ def compose_column_searches(columns, column_searches, eval_in_scope=None) -> str
         if not pred:
             continue
         term = lift_column_predicate(pred, col)
-        (or_terms if row.get('compose').lower() == 'or' else and_terms).append(term)
+        # A row that never said how it composes composes the way every other
+        # default does. Only `or` is a choice; `and` is what not choosing means,
+        # so a row built without the key reads as one rather than crashing here.
+        compose = row.get('compose') or 'and'
+        (or_terms if compose.lower() == 'or' else and_terms).append(term)
 
     if not and_terms and not or_terms:
         return None
@@ -697,6 +703,32 @@ TALLY_COUNT_OPS = ('>=', '==', '<=') + TALLY_COUNT_EXTREME_OPS
 TALLY_COUNT_OP_DEFAULT = '>='
 
 
+def _column_item_expr(col: str) -> str | None:
+    """One row's value for a column, written against a row bound to `item` --
+    or None when the column is the item itself and there is nothing to read."""
+    return None if col.strip() == '$' else replace_dollars_in_py_exp(col, ['item'])
+
+
+def _column_values_clause(col: str, source_expr: str) -> str | None:
+    """A column's values as a comprehension body, `<value> for item in <source>`,
+    for a caller that brackets it itself -- or None when the column is the item
+    and the source already is the values.
+
+    The one description of where a column's values come from: what the header
+    hands to a drag, what the tally counts, and what the tally hands over in
+    turn.
+    """
+    item_expr = _column_item_expr(col)
+    return None if item_expr is None else f'{item_expr} for item in {source_expr}'
+
+
+def _column_values_expr(col: str, source_expr: str) -> str:
+    """The same as a list: the source itself when the column is the item, and a
+    comprehension over it otherwise."""
+    clause = _column_values_clause(col, source_expr)
+    return source_expr if clause is None else f'[{clause}]'
+
+
 def _column_values(col, lst, model, eval_in_scope=None) -> list:
     """Every row's value for one column, in row order.
 
@@ -710,9 +742,8 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
 
     source_expr = model.get('_source_expr')
     if source_expr is not None and eval_in_scope is not None:
-        item_expr = replace_dollars_in_py_exp(col, ['item'])
         try:
-            return list(eval_in_scope(f'[{item_expr} for item in {source_expr}]'))
+            return list(eval_in_scope(_column_values_expr(col, source_expr)))
         except Exception:
             # A comprehension is all or nothing, so one unreadable row lands
             # here too; the loop below gets the rest.
@@ -836,6 +867,20 @@ def _tally_sort(model: dict) -> str:
     return sort if sort in TALLY_SORTS else TALLY_SORT_DEFAULT
 
 
+def _tally_comparable(tally: dict) -> bool:
+    """Whether a column's values have an order of their own to be sorted by.
+
+    A column of mixed types doesn't, and both the list on screen and the code
+    the headers hand over fall back to sorting on how the rows read -- so they
+    have to agree on when that is.
+    """
+    try:
+        sorted(tally)
+        return True
+    except TypeError:
+        return False
+
+
 def _sorted_tally(tally: dict, sort: str) -> List[Tuple[Any, int]]:
     """A tally's values and counts in one of the orders the Sort by chip offers.
 
@@ -849,14 +894,12 @@ def _sorted_tally(tally: dict, sort: str) -> List[Tuple[Any, int]]:
     if sort == 'rare':
         return sorted(items, key=lambda item: item[1])
     if sort in ('item asc', 'item desc'):
-        reverse = (sort == 'item desc')
-        try:
-            return sorted(items, key=lambda item: item[0], reverse=reverse)
-        except TypeError:
-            # A column of mixed types has no order of its own, but its rows
-            # still read in some order: sorting how they read is at least an
-            # order the user can see on screen.
-            return sorted(items, key=lambda item: repr(item[0]), reverse=reverse)
+        # A column of mixed types has no order of its own, but its rows still
+        # read in some order: sorting how they read is at least an order the
+        # user can see on screen.
+        key = ((lambda item: item[0]) if _tally_comparable(tally)
+               else (lambda item: repr(item[0])))
+        return sorted(items, key=key, reverse=(sort == 'item desc'))
     return items
 
 
@@ -1023,6 +1066,169 @@ def _in_tally_order(literals, order) -> List[str]:
     the same however the user clicked their way to it."""
     rank = {literal: i for i, literal in enumerate(order)}
     return sorted(literals, key=lambda literal: rank.get(literal, len(rank)))
+
+
+# The tally is a Counter, and the headers hand out code that says so.
+TALLY_IMPORTS = ('from collections import Counter',)
+
+
+def _tally_counter_expr(col: str, source_expr: str) -> str:
+    """The whole tally, before the menu has narrowed or reordered anything.
+
+    Counter takes any iterable, so a computed column goes in as a generator --
+    there is no list to build on the way to counting it.
+    """
+    clause = _column_values_clause(col, source_expr)
+    return f'Counter({clause if clause is not None else source_expr})'
+
+
+def _tally_row_count_expr(col: str, source_expr: str, literal: str,
+                          values) -> str:
+    """How many rows have one value -- the number that row is showing.
+
+    A question about a single value, so it asks about that one rather than
+    counting the whole column to look one answer up.
+
+    When the column is the item, the values are the source itself, and a
+    sequence can count one of its own. Only a sequence: a set has no `.count`
+    at all, and a string's counts substrings rather than elements, which is a
+    different question with the same name. Anything else -- and every computed
+    column, which has no list to ask -- counts the rows that match as it goes.
+    """
+    item_expr = _column_item_expr(col)
+    if item_expr is None:
+        if isinstance(values, (list, tuple)):
+            return f'{source_expr}.count({literal})'
+        item_expr = 'item'
+    return f'sum(1 for item in {source_expr} if {item_expr} == {literal})'
+
+
+def _tally_order_expr(counter_expr: str, sort: str, comparable: bool) -> str:
+    """The tally's values and counts as the Sort by chip has them.
+
+    Each order is the one a Python programmer would reach for, so the code reads
+    as the sort rather than as a re-implementation of it.
+    """
+    if sort == 'common':
+        return f'{counter_expr}.most_common()'
+    if sort == 'rare':
+        # The one order where the code and the list on screen can part company:
+        # the display sorts by count, so equally rare values stay in first-seen
+        # order, while reversing hands those back last-seen first. Same values
+        # and same counts either way, and this is how one asks for it in Python.
+        return f'reversed({counter_expr}.most_common())'
+    if sort in ('item asc', 'item desc'):
+        # A column of mixed types has no order of its own; the display falls
+        # back to sorting on how the rows read, so the code says that too.
+        key = '' if comparable else ', key=lambda vc: repr(vc[0])'
+        reverse = ', reverse=True' if sort == 'item desc' else ''
+        return f'sorted({counter_expr}.items(){key}{reverse})'
+    return f'{counter_expr}.items()'
+
+
+def _tally_text_condition(model: dict, var: str = 'v') -> str | None:
+    """The filter box as a condition on *var*, or None when it isn't narrowing.
+
+    The same case-insensitive substring of how a row reads that `_tally_shows`
+    applies, said in Python.
+    """
+    text = (model.get('tally_filter') or '').strip().lower()
+    return f'{text!r} in repr({var}).lower()' if text else None
+
+
+def _tally_extreme_expr(model: dict, counts_var: str) -> str:
+    """The count Min or Max is asking for.
+
+    Over the list the filter box left rather than the whole tally, the way
+    `_tally_extreme` reads it -- so the two boxes together can't argue their way
+    to an empty list.
+    """
+    op = _tally_count_op(model)
+    shown = _tally_text_condition(model, 'v2')
+    if shown:
+        return f'{op}(c2 for v2, c2 in {counts_var}.items() if {shown})'
+    return f'{op}({counts_var}.values())'
+
+
+def _tally_filter_exprs(model: dict, eval_in_scope=None) -> List[str]:
+    """The display filters as conditions on a value `v` and its count `c`.
+
+    One condition per box that is actually narrowing -- a box filtering nothing
+    has nothing to say in code either. Min and Max compare against the name the
+    comprehension binds for them rather than asking the tally a second time.
+    """
+    conditions = []
+    text_condition = _tally_text_condition(model)
+    if text_condition:
+        conditions.append(text_condition)
+
+    op = _tally_count_op(model)
+    if op in TALLY_COUNT_EXTREME_OPS:
+        conditions.append(f'c == _{op}')
+    else:
+        count_text = (model.get('tally_count_filter') or '').strip()
+        if _tally_count_threshold(count_text, eval_in_scope) is not None:
+            # The box may name the program's own value rather than a number, so
+            # it goes in as written -- parenthesized where an operator of its
+            # own would otherwise be pulled apart by the comparison.
+            conditions.append(f'c {op} {_atomize(count_text)}')
+    return conditions
+
+
+def _tally_exprs(col, model: dict, tally, source_expr,
+                 eval_in_scope=None) -> Tuple[str, str, str] | None:
+    """The Python behind the Tally, Items and Counts headers: the mapping the
+    section is showing, its values, and its counts.
+
+    Built from the same sort and display filters the rendering reads, so what
+    the user drags out is the list they were looking at.
+
+    Anything the code would otherwise ask for twice is named once and used
+    after, through a comprehension clause over a one-tuple: counting a list to
+    find its rarest value, then counting it again to compare against, is a
+    strange way to write down a question the menu only asked once.
+
+    None when there is no expression to hand over: a list with no source to name
+    it by, values that can't be counted, or filters that have left nothing on
+    show -- there is no code that means an empty menu.
+    """
+    if source_expr is None or not isinstance(tally, dict):
+        return None
+
+    rows = _tally_rows(tally, model)
+    extreme = _tally_extreme(model, rows)
+    if not any(_tally_lists(model, shown, count, extreme, eval_in_scope)
+               for shown, count, _literal in rows):
+        return None
+
+    counter_expr = _tally_counter_expr(col, source_expr)
+    sort = _tally_sort(model)
+    conditions = _tally_filter_exprs(model, eval_in_scope)
+    if sort == TALLY_SORT_DEFAULT and not conditions:
+        # Nothing sorted and nothing narrowed: the count is the whole answer.
+        return (counter_expr, f'list({counter_expr})',
+                f'list({counter_expr}.values())')
+
+    # Only Min and Max read the tally more than once -- for the extreme, and
+    # then for the values to compare against it -- so only they are worth a
+    # name. Everything else says `Counter(...)` where it means it. The names
+    # lead with an underscore: they are the comprehension's own scaffolding,
+    # not something the user asked to have around.
+    op = _tally_count_op(model)
+    clauses = []
+    if op in TALLY_COUNT_EXTREME_OPS:
+        base = '_cnts'
+        clauses.append(f'for {base} in [{counter_expr}]')
+        clauses.append(f'for _{op} in [{_tally_extreme_expr(model, base)}]')
+    else:
+        base = counter_expr
+
+    clauses.append(
+        f'for v, c in {_tally_order_expr(base, sort, _tally_comparable(tally))}')
+    body = ' '.join(clauses)
+    if conditions:
+        body += f' if {" and ".join(conditions)}'
+    return (f'{{v: c {body}}}', f'[v {body}]', f'[c {body}]')
 
 
 def _is_list_of_ints(val) -> bool:
@@ -1271,6 +1477,17 @@ def pick_filter_expr(ctx: dict) -> str:
                if ctx.get('needs_index') else f'item in {ctx["source_expr"]}')
     return (f'next(({ctx["pick_expr"]} for {binding} '
             f'if {ctx["predicate_expr"]}), None)')
+
+
+def code_imports(code: str) -> tuple:
+    """What code generated by this visualizer can't run without.
+
+    Nothing, so far: every action here is builtins, comprehensions and slicing
+    over the user's own list. The tally headers do need Counter, but they hand
+    their expression straight to the editor rather than through an action, and
+    declare TALLY_IMPORTS where they do it.
+    """
+    return ()
 
 
 def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
@@ -2173,7 +2390,7 @@ def _render_column_search_row(col, index, model) -> str:
 
 _TALLY_NOTES = {
     TALLY_TOO_MANY: f'More than {TALLY_MAX_CARDINALITY} distinct values',
-    TALLY_UNHASHABLE: "These values can't be counted",
+    TALLY_UNHASHABLE: "These values are not \"hashable\" and are therefore not counted.",
 }
 
 def _render_tally_check(checked: bool, disabled: bool = False) -> str:
@@ -2214,14 +2431,28 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     Only computed while the menu is open, which is the one time the whole column
     is worth evaluating.
     """
-    title_html = '<div class="col-tally-title"><span>Tally</span></div>'
+    def title_html(expr):
+        # The three headers are the section's grab handles: each hands over the
+        # code for what it names, so what the user reads is what they can drag
+        # into the file.
+        return (f'<div class="col-tally-title"><span class="col-tally-title-text"'
+                f'{py_exp_attrs(expr, imports=TALLY_IMPORTS)}>Tally</span></div>')
+
+    source_expr = model.get('_source_expr')
     tally = _tally(_column_values(col, lst, model, eval_in_scope))
     if tally is None:
         return ''
     if not isinstance(tally, dict):
-        return (f'<div class="col-tally">{title_html}'
+        # A tally too long to list is still a tally worth handing over; values
+        # that can't be counted have no expression to give.
+        note_expr = (_tally_counter_expr(col, source_expr)
+                     if tally == TALLY_TOO_MANY and source_expr else None)
+        return (f'<div class="col-tally">{title_html(note_expr)}'
                 f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
                 f'</div>')
+    tally_expr, items_expr, counts_expr = (
+        _tally_exprs(col, model, tally, source_expr, eval_in_scope)
+        or (None, None, None))
 
     selected, exclude = _tally_selection(_column_search_row(model, col))
     selected = set(selected)
@@ -2252,12 +2483,15 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             continue
         checked = literal in selected
         toggle_event = repr(TallyItemToggle(index=index, literal=literal))
+        count_expr = (_tally_row_count_expr(col, source_expr, literal, lst)
+                      if source_expr else None)
         rows.append(
             f'<div class="col-tally-row{" checked" if checked else ""}" '
             f'snc-mouse-down="{html.escape(toggle_event)}">'
             f'{_render_tally_check(checked)}'
             f'<span class="col-tally-item snc-code">{label}</span>'
-            f'<span class="col-tally-count">{count}</span>'
+            f'<span class="col-tally-count"'
+            f'{py_exp_attrs(count_expr, align="right")}>{count}</span>'
             f'</div>')
 
     # A way of reaching a value in a long list, so it reads before them -- and
@@ -2326,14 +2560,19 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     if rows:
         body = (
             f'<div class="col-tally-list-header">'
-            f'<span class="col-tally-item-header">Items</span>'
-            f'<span class="col-tally-count-header">Counts</span>'
+            f'<span class="col-tally-item-header"'
+            f'{py_exp_attrs(items_expr, imports=TALLY_IMPORTS)}>Items</span>'
+            # Counts sits at the panel's right edge, so its tooltip reads
+            # leftwards rather than off the side of the menu.
+            f'<span class="col-tally-count-header"'
+            f'{py_exp_attrs(counts_expr, imports=TALLY_IMPORTS, align="right")}'
+            f'>Counts</span>'
             f'</div>'
             f'<div class="col-tally-list">{"".join(rows)}</div>'
         )
     else:
         body = '<div class="col-tally-note">No values match</div>'
-    return (f'<div class="col-tally">{title_html}'
+    return (f'<div class="col-tally">{title_html(tally_expr)}'
             f'{filter_html}{controls_html}{body}'
             f'</div>')
 
@@ -2385,12 +2624,8 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
         th_classes.append('col-filtered')
 
     source_expr = model.get('_source_expr')
-    if source_expr is not None:
-        item_expr = replace_dollars_in_py_exp(col, ['item'])
-        full_expr = f'[{item_expr} for item in {source_expr}]'
-        py_exp_attr = f' snc-py-exp="{html.escape(full_expr)}" draggable="true"'
-    else:
-        py_exp_attr = ''
+    py_exp_attr = ('' if source_expr is None
+                   else py_exp_attrs(_column_values_expr(col, source_expr)))
 
     # The ▾ trigger is pinned to the cell's right edge by .col-header-inner's flex
     # layout (which lives on an inner span, never on the <th>: display:flex on a
@@ -2581,6 +2816,16 @@ def _preview_expr(model, action, eval_in_scope):
     return with_pass_body(result[1]) if result else ''
 
 
+def _preview_py_exp_attrs(model, action, eval_in_scope, **kwargs) -> str:
+    """The same preview, as the attributes that hand it to the editor.
+
+    What the code needs imported is declared here, beside the code, exactly as
+    it is when the same action is clicked rather than dragged.
+    """
+    expr = _preview_expr(model, action, eval_in_scope)
+    return py_exp_attrs(expr, imports=code_imports(expr), **kwargs)
+
+
 def _compute_predicate_previews(model: dict, eval_in_scope) -> tuple:
     """Compute (any_val, all_val) boolean previews for the Any/All dropdown.
 
@@ -2714,11 +2959,10 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         if extra_classes:
             cls += ' ' + extra_classes
         event = repr(ActionButtonClick(action=action, copy=False))
-        expr_attr = ''
-        if enabled:
-            expr = _preview_expr(model, action, eval_in_scope)
-            if expr:
-                expr_attr = f' data-action-expr="{html.escape(expr)}"'
+        expr_attr = (_preview_py_exp_attrs(model, action, eval_in_scope,
+                                           draggable=False,
+                                           attr='data-action-expr')
+                     if enabled else '')
         title_attr = f' title="{html.escape(title)}"' if title else ''
         return (
             f'<span class="{cls}" snc-mouse-down="{html.escape(event)}"'
@@ -2730,11 +2974,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         if not enabled:
             cls += ' dimmed'
         act_event = repr(ActionButtonClick(action=action, copy=False))
-        py_exp_attr = ''
-        if enabled:
-            expr = _preview_expr(model, action, eval_in_scope)
-            if expr:
-                py_exp_attr = f' snc-py-exp="{html.escape(expr)}" snc-py-exp-align="right"'
+        py_exp_attr = (_preview_py_exp_attrs(model, action, eval_in_scope,
+                                             draggable=False, align='right')
+                       if enabled else '')
         return (
             f'<div class="{cls}"{py_exp_attr}>'
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
@@ -2839,9 +3081,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     for sep_expr in join_presets:
         act_action = f'join:{sep_expr}'
         act_event = repr(ActionButtonClick(action=act_action, copy=False))
-        preview = _preview_expr(model, act_action, eval_in_scope) if join_enabled else ''
-        py_exp_attr = (f' snc-py-exp="{html.escape(preview)}" snc-py-exp-align="right"'
-                       if preview else '')
+        py_exp_attr = (_preview_py_exp_attrs(model, act_action, eval_in_scope,
+                                             draggable=False, align='right')
+                       if join_enabled else '')
         rows.append(
             f'<div class="snc-dropdown-option"{py_exp_attr}>'
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">'
@@ -2854,9 +3096,10 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
                   else "''")
     custom_input_event = "lambda e: JoinSeparatorInput(value=e.get('value', ''))"
     custom_act_action = f'join:{custom_sep}'
-    custom_preview = _preview_expr(model, custom_act_action, eval_in_scope) if join_enabled else ''
-    custom_py_exp_attr = (f' snc-py-exp="{html.escape(custom_preview)}" snc-py-exp-align="right"'
-                          if custom_preview else '')
+    custom_py_exp_attr = (_preview_py_exp_attrs(model, custom_act_action,
+                                                eval_in_scope, draggable=False,
+                                                align='right')
+                          if join_enabled else '')
     rows.append(
         f'<div class="snc-dropdown-option"{custom_py_exp_attr}>'
         f'<input type="text" snc-input="{html.escape(custom_input_event)}" '
@@ -2994,9 +3237,7 @@ def _render_pick_region(row: int, col_id: str, model: dict, first_idx: int,
     if region_id in (model.get('picked') or []):
         classes.append('selected')
     event = repr(PickToggle(region_id=region_id))
-    expr = standalone_exprs.get(region_id)
-    expr_attr = (f' snc-py-exp="{html.escape(expr)}" draggable="true"'
-                 if expr else '')
+    expr_attr = py_exp_attrs(standalone_exprs.get(region_id))
     return (
         f'<span class="{" ".join(classes)}" '
         f'snc-mouse-down="{html.escape(event)}"{expr_attr}></span>'
@@ -3282,9 +3523,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         filtered_commands: List[Any] = []
         type_key = _get_item_type_key(value) if value else None
         for cmd in commands:
-            if isinstance(cmd, tuple) and len(cmd) == 2:
-                _suggest_var_name, expr = cmd
-                new_model['columns'].append(expr)
+            if isinstance(cmd, tuple) and len(cmd) in (2, 3):
+                new_model['columns'].append(cmd[1])
                 if type_key:
                     _save_slots(new_model)
             else:
@@ -3457,7 +3697,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             ctx['join_separator'] = custom_sep
                             result = generate_action(action, ctx)
                             if result:
-                                commands.append(result)
+                                commands.append(new_code_command(result, code_imports))
                         model['openDropdown'] = None
                     elif model.get('search'):
                         if model.get('linked_action'):
@@ -3467,7 +3707,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             if ctx:
                                 result = generate_action('filter', ctx)
                                 if result:
-                                    commands.append(result)
+                                    commands.append(new_code_command(result, code_imports))
 
             elif key == 'Backspace' and event_json.get('metaKey', False):
                 if model.get('linked_action'):
@@ -3477,7 +3717,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
-                            commands.append(result)
+                            commands.append(new_code_command(result, code_imports))
 
             elif key == 'Escape':
                 if model.get('col_search_dropdown'):
@@ -3707,7 +3947,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         if copy:
                             commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
-                            commands.append(result)
+                            commands.append(new_code_command(result, code_imports))
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
@@ -3771,6 +4011,7 @@ _LINK_CONFIG = LinkConfig(
     default_statement_action=_AUTO_LINK_STATEMENT_ACTION,
     statement_actions=_STATEMENT_ACTIONS,
     whole_value_context=_get_whole_list_context,
+    code_imports=code_imports,
 )
 
 
@@ -3797,4 +4038,4 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
     model['linked_has_assignment'] = bool(suggest_name)
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
-    commands.append(result)
+    commands.append(new_code_command(result, code_imports))

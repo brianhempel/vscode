@@ -1024,7 +1024,7 @@
 		color: var(--snc-text-muted);
 
 		/* the title itself, so its background can mask the border it sits on */
-		> span {
+		.col-tally-title-text {
 			background-color: var(--snc-bg);
 			padding: 1px 5px;
 		}

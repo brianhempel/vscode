@@ -52,7 +52,7 @@ from visualizer_utils import (
     wrap_child_html, route_child_event, aggregate_handled_keys,
     strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
-    get_full_class_name, truncate_str,
+    get_full_class_name, truncate_str, py_exp_attrs,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
 )
@@ -546,7 +546,7 @@ def _is_dunder(key):
 
 def render_small_field(display_key: str, val_repr: str, expr: str, add_target: str = None) -> str:
     """Render a single interactive field chip: key=value, draggable with snc-py-exp."""
-    exp_attr = f' snc-py-exp="{html.escape(expr)}" draggable="true"'
+    exp_attr = py_exp_attrs(expr)
     add_attr = ''
     if add_target:
         add_attr = (f' snc-add-at-cursor="{html.escape(expr)}"'
@@ -676,7 +676,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
             can_extract = source_expr and not is_error and not placeholder_args
             if can_extract:
                 field_expr = replace_dollars_in_py_exp(accessor_code, [source_expr])
-                exp_attr = f' snc-py-exp="{html.escape(field_expr)}" draggable="true"'
+                exp_attr = py_exp_attrs(field_expr)
             else:
                 exp_attr = ''
 

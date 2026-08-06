@@ -6,6 +6,8 @@ Run:
 """
 
 import ast
+import json
+import re
 import unittest
 import html
 import os
@@ -14,7 +16,9 @@ import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               aggregate_handled_keys, eval_dollar_expr,
-                              replace_dollars_in_py_exp, dollar_expr_parses)
+                              replace_dollars_in_py_exp, dollar_expr_parses,
+                              py_exp_attrs, nest_child_command,
+                              CHILD_SOURCE_BINDER)
 from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
@@ -682,6 +686,66 @@ class TestWithoutPassBody(unittest.TestCase):
     def test_expression_returned_unchanged(self):
         self.assertEqual(without_pass_body('xs[1:2]'), 'xs[1:2]')
         self.assertEqual(without_pass_body('compass'), 'compass')
+
+
+class TestNestChildCommandKeepsTheDeclaration(unittest.TestCase):
+    """Code coming back from a child visualizer is rebound to the parent's
+    scope. What it needs imported doesn't change on the way up."""
+
+    def test_a_nested_command_keeps_its_imports(self):
+        cmd = ('found', f"re.findall(r'a', {CHILD_SOURCE_BINDER})",
+               ('import re',))
+        nested = nest_child_command(cmd, 'item', 'xs[0]')
+        self.assertEqual(nested[0], 'found')
+        self.assertEqual(nested[1], "re.findall(r'a', (item))")
+        self.assertEqual(nested[2], ('import re',))
+
+    def test_a_command_that_declared_nothing_stays_a_pair(self):
+        cmd = ('picked', f'{CHILD_SOURCE_BINDER}[1:]')
+        self.assertEqual(nest_child_command(cmd, 'item', 'xs[0]'),
+                         ('picked', '(item)[1:]'))
+
+
+class TestPyExpAttrs(unittest.TestCase):
+    """The attributes that hand an expression to the editor: the tooltip that
+    shows it, the drag that carries it, and the imports it can't run without."""
+
+    def test_the_expression_comes_out_escaped(self):
+        self.assertEqual(py_exp_attrs('d["<k>"]'),
+                         ' snc-py-exp="d[&quot;&lt;k&gt;&quot;]" draggable="true"')
+
+    def test_a_handle_that_is_only_hovered_is_not_draggable(self):
+        self.assertEqual(py_exp_attrs('xs[0]', draggable=False),
+                         ' snc-py-exp="xs[0]"')
+
+    def test_a_handle_at_the_right_edge_reads_leftwards(self):
+        self.assertIn(' snc-py-exp-align="right"',
+                      py_exp_attrs('xs[0]', draggable=False, align='right'))
+
+    def test_an_expression_says_which_imports_it_needs(self):
+        # Declared by whatever produced the code; nothing downstream re-derives
+        # it from the text. JSON so one statement per entry survives intact.
+        attrs = py_exp_attrs('re.findall(p, s)',
+                             imports=('import re', 'import os'))
+        match = re.search(r'snc-py-exp-imports="([^"]*)"', attrs)
+        self.assertIsNotNone(match)
+        self.assertEqual(json.loads(html.unescape(match.group(1))),
+                         ['import re', 'import os'])
+
+    def test_an_action_buttons_expression_rides_on_its_own_attribute(self):
+        # A different tooltip system picks it up, but the imports keep one name.
+        attrs = py_exp_attrs("re.findall(p, s)", imports=('import re',),
+                             draggable=False, attr='data-action-expr')
+        self.assertIn(' data-action-expr="re.findall(p, s)"', attrs)
+        self.assertIn(' snc-py-exp-imports=', attrs)
+        self.assertNotIn(' snc-py-exp=', attrs)
+
+    def test_an_expression_needing_nothing_says_nothing(self):
+        self.assertNotIn('snc-py-exp-imports', py_exp_attrs('xs[0]'))
+
+    def test_no_expression_means_no_attributes_at_all(self):
+        self.assertEqual(py_exp_attrs(''), '')
+        self.assertEqual(py_exp_attrs(None), '')
 
 
 if __name__ == '__main__':

@@ -434,18 +434,37 @@ def nest_generated_expr(expr: str, parent_expr: str) -> str:
     return expr.replace(CHILD_SOURCE_BINDER, f'({parent_expr})')
 
 
+def new_code_command(result, code_imports=None) -> tuple:
+    """A generated ``(suggest_name, code)`` pair as a NewCode command.
+
+    An optional third slot says what the code can't run without: the visualizer
+    that wrote it is the one that knows, so it declares it here rather than
+    leaving the runner or the editor to read the text and guess. Whether the
+    file already has those imports, and where a missing one would go, is the
+    editor's to answer -- it is the only side that knows the file as it stands
+    now.
+
+    Code that needs nothing stays the pair it has always been, so "no third
+    slot" reads as "nothing to add" everywhere the command travels.
+    """
+    imports = tuple(code_imports(result[1])) if code_imports else ()
+    return (result[0], result[1], imports) if imports else (result[0], result[1])
+
+
 def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
     """Resolve the binder in one command coming back from a child visualizer.
 
     The two expressions differ by destination, not by scope depth. Generated
-    code (a NewCode 2-tuple) may be headed for the parent's own config, where a
+    code (a NewCode tuple) may be headed for the parent's own config, where a
     dollar expression is exactly right - a list column has to stay row-generic.
     Clipboard text is pasted into the editor verbatim, so it has to name the
     value concretely; a parent whose code_expr is already concrete passes the
     same expression twice.
     """
-    if isinstance(cmd, tuple) and len(cmd) == 2:
-        return (cmd[0], nest_generated_expr(cmd[1], code_expr))
+    if isinstance(cmd, tuple) and len(cmd) in (2, 3):
+        # Rebinding the scope doesn't change what the code needs imported, so
+        # any declaration travels up with it untouched.
+        return (cmd[0], nest_generated_expr(cmd[1], code_expr), *cmd[2:])
     # Duck-typed: each visualizer declares its own CopyToClipboard.
     text = getattr(cmd, 'text', None)
     if isinstance(text, str) and CHILD_SOURCE_BINDER in text:
@@ -565,6 +584,10 @@ class LinkConfig:
     whole_value_context is an optional second context source, used when the
     model has no search: a list can still generate over the whole list, a
     string has nothing to generate without a search.
+
+    code_imports is how the visualizer says what the code it just generated
+    needs imported to run; a visualizer whose code never reaches outside the
+    builtins leaves it off.
     """
     parse_line: Callable[[str], Tuple[Any, str]]
     get_context: Callable[..., 'dict | None']
@@ -575,6 +598,7 @@ class LinkConfig:
     default_statement_action: str
     statement_actions: 'frozenset[str]'
     whole_value_context: 'Callable[..., dict | None] | None' = None
+    code_imports: 'Callable[[str], tuple] | None' = None
 
 
 def link_source_expr(var_and_exp) -> 'str | None':
@@ -687,7 +711,7 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
                                                  suggested_var_name=None))
     elif result and mode == 'insert':
         written = result[1]
-        commands.append(result)
+        commands.append(new_code_command(result, cfg.code_imports))
 
     if source_expr and (result or mode == 'takeover'):
         model['linked_action'] = action
@@ -697,6 +721,36 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
         # Statement actions have no name to assign to.
         model['linked_has_assignment'] = action not in cfg.statement_actions
         model['last_linked_expr'] = written
+
+
+def py_exp_attrs(expr, *, imports=(), draggable: bool = True,
+                 align: str = None, attr: str = 'snc-py-exp') -> str:
+    """The attributes that hand a Python expression to the editor, ready to be
+    dropped into a tag (they lead with a space).
+
+    An expression that can't run on its own says so here: *imports* is what the
+    visualizer producing the code knows it needs, and the front end decides
+    whether the file already has them and where they would go. Nothing in
+    between reads the expression to guess.
+
+    *attr* is which tooltip system picks the expression up -- the py-exp one by
+    default, or `data-action-expr` for an action button, whose tooltip offers
+    the same copy, insert and drag. Either way the imports ride along under the
+    one name, so the editor has a single place to look.
+
+    Renders nothing without an expression, so a caller with no access path to
+    offer can drop this in unconditionally.
+    """
+    if not expr:
+        return ''
+    attrs = f' {attr}="{html.escape(expr)}"'
+    if imports:
+        attrs += f' snc-py-exp-imports="{html.escape(json.dumps(list(imports)))}"'
+    if draggable:
+        attrs += ' draggable="true"'
+    if align:
+        attrs += f' snc-py-exp-align="{html.escape(align)}"'
+    return attrs
 
 
 def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
@@ -712,7 +766,7 @@ def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
     expr = var_and_exp[1] if var_and_exp else None
     if not expr:
         return inner_html
-    return (f'<span snc-py-exp="{html.escape(expr)}" draggable="true" '
+    return (f'<span{py_exp_attrs(expr)} '
             f'class="py-exp-grab">{inner_html}</span>')
 
 
