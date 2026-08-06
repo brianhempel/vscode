@@ -6762,10 +6762,38 @@ class TestTallyRendering(unittest.TestCase):
     def test_items_and_counts_in_first_seen_order(self):
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', tally),
+        self.assertEqual(re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', tally),
                          [html.escape(repr(v)) for v in ('c', 'aa', 'b')])
         self.assertEqual(re.findall(r'col-tally-count">([^<]*)<', tally),
                          ['5', '2', '3'])
+
+    def test_the_section_says_what_it_is(self):
+        # The title sits on the border, so it reads before everything below it.
+        lst, model = tally_model()
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn('<div class="col-tally-title"><span>Tally</span></div>',
+                      tally)
+        self.assertLess(tally.index('col-tally-title'),
+                        tally.index('col-tally-row'))
+
+    def test_the_two_columns_of_values_are_named(self):
+        lst, model = tally_model()
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertEqual(
+            re.findall(r'col-tally-(?:item|count)-header">([^<]*)<', tally),
+            ['Items', 'Counts'])
+        # The names head the list, so they read before it and not among it.
+        self.assertLess(tally.index('col-tally-list-header'),
+                        tally.index('col-tally-list"'))
+        self.assertNotIn('-header', tally[tally.index('col-tally-list"'):])
+
+    def test_a_note_stands_in_for_the_columns_that_are_not_there(self):
+        # Nothing is listed, so naming columns for it would name nothing.
+        lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
+        _, model = tally_model(lst)
+        tally = self.tally(self.open_menu_html(model, lst))
+        self.assertIn('col-tally-title', tally)
+        self.assertNotIn('col-tally-list-header', tally)
 
     def test_the_tally_comes_after_the_search_row_it_writes_into(self):
         lst, model = tally_model()
@@ -6871,7 +6899,7 @@ class TestTallyRendering(unittest.TestCase):
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             eval_in_scope))
         tally = self.tally(th)
-        self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', tally),
+        self.assertEqual(re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', tally),
                          ['5', '2'])
         self.assertEqual(re.findall(r'col-tally-count">([^<]*)<', tally),
                          ['1', '2'])
@@ -6880,7 +6908,7 @@ class TestTallyRendering(unittest.TestCase):
         lst = ['x' * 200, 'y']
         _, model = tally_model(lst)
         tally = self.tally(self.open_menu_html(model, lst))
-        shown = re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)[0]
+        shown = re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', tally)[0]
         self.assertIn('…', shown)
         self.assertIn(html.escape(repr('x' * 200)), tally)
 
@@ -6945,7 +6973,7 @@ class TestTallyFilterBox(unittest.TestCase):
         return th[th.index('<div class="col-tally">'):]
 
     def items(self, tally):
-        return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
+        return re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', tally)
 
     def counts(self, tally):
         return re.findall(r'col-tally-count">([^<]*)<', tally)
@@ -7167,7 +7195,7 @@ class TestTallySortMenu(unittest.TestCase):
         return tally[start:end if end != -1 else len(tally)]
 
     def items(self, tally):
-        return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
+        return re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', tally)
 
     def counts(self, tally):
         return re.findall(r'col-tally-count">([^<]*)<', tally)
@@ -7475,7 +7503,7 @@ class TestTallyCountFilterNamesTheProgramsValues(unittest.TestCase):
         model['openDropdown'] = {'id': 'col-menu-0'}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             program_scope(n=3)))
-        self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', th),
+        self.assertEqual(re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', th),
                          [html.escape(repr(v)) for v in ('c', 'b')])
 
     def test_all_reaches_only_what_the_expression_leaves_on_show(self):
@@ -7558,7 +7586,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         return tally[start:end if end != -1 else len(tally)]
 
     def items(self, tally):
-        return re.findall(r'col-tally-item[^>]*>([^<]*)<', tally)
+        return re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', tally)
 
     def counts(self, tally):
         return re.findall(r'col-tally-count">([^<]*)<', tally)

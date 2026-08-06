@@ -2214,12 +2214,12 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     Only computed while the menu is open, which is the one time the whole column
     is worth evaluating.
     """
-    tally_open_div_tag = f'<div class="col-tally"><div class="col-tally-tally-header"><span>Tally</span></div>'
+    title_html = '<div class="col-tally-title"><span>Tally</span></div>'
     tally = _tally(_column_values(col, lst, model, eval_in_scope))
     if tally is None:
         return ''
     if not isinstance(tally, dict):
-        return (f'{tally_open_div_tag}'
+        return (f'<div class="col-tally">{title_html}'
                 f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
                 f'</div>')
 
@@ -2302,7 +2302,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             lambda v: repr(TallySortSelect(index=index, sort=v)),
             model.get('col_search_dropdown'), 'col-tally-sort',
             'Order the values are listed in', _tally_sort_label)
-    header = (
+    controls_html = (
         f'<div class="col-tally-controls">'
         f'<span class="col-search-chip" '
         f'data-tooltip="Select every value shown" '
@@ -2316,7 +2316,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         f'data-tooltip="Filter to everything but the selected values" '
         f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(index=index)))}">'
         f'{_render_tally_check(exclude)} Exclude</span>'
-        f'<div class="col-tally-sort">Sort:'
+        f'<div class="col-tally-sort-box">Sort:'
         f'{sort_html}'
         f'</div>{count_html}'
         f'</div>'
@@ -2325,12 +2325,16 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     # back to the values.
     if rows:
         body = (
-            f'<div class="col-tally-header"><span class="col-tally-items-header">Items</span><span class="col-tally-counts-header">Counts</span></div>'
+            f'<div class="col-tally-list-header">'
+            f'<span class="col-tally-item-header">Items</span>'
+            f'<span class="col-tally-count-header">Counts</span>'
+            f'</div>'
             f'<div class="col-tally-list">{"".join(rows)}</div>'
         )
     else:
         body = '<div class="col-tally-note">No values match</div>'
-    return (f'{tally_open_div_tag}{filter_html}{header}{body}'
+    return (f'<div class="col-tally">{title_html}'
+            f'{filter_html}{controls_html}{body}'
             f'</div>')
 
 

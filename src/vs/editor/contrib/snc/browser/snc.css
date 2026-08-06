@@ -1012,7 +1012,9 @@
 		position: relative;
 	}
 
-	.col-tally-tally-header {
+	/* "Tally", straddling the border that separates this section from the
+	   search row above it. */
+	.col-tally-title {
 		position: absolute;
 		font-weight: bold;
 		font-size: 10px;
@@ -1021,7 +1023,7 @@
 		width: 100%;
 		color: var(--snc-text-muted);
 
-		/* the actual clickable section title */
+		/* the title itself, so its background can mask the border it sits on */
 		> span {
 			background-color: var(--snc-bg);
 			padding: 1px 5px;
@@ -1041,15 +1043,17 @@
 		border-color: var(--snc-border-color);
 	}
 
-	.col-tally-sort,
+	.col-tally-sort-box,
 	.col-tally-controls,
-	.col-tally-header {
+	.col-tally-list-header {
 		display: flex;
 		align-items: center;
 		padding: 0 2px;
 		color: var(--snc-text-muted);
 	}
-	.col-tally-sort {
+	/* "Sort:" and the chip that follows it, the way .col-tally-count-box holds
+	   the count box and its chip. */
+	.col-tally-sort-box {
 		gap: 1px;
 	}
 
@@ -1149,18 +1153,18 @@
 		margin: 0;
 	}
 
-	.col-tally-header {
+	/* Names the two columns of .col-tally-list below, so each heading is laid
+	   out like the cell it heads. */
+	.col-tally-list-header {
 		font-weight: bold;
-		position: sticky;
-		top: 0;
-		background-color: var(--snc-bg);
 	}
-	.col-tally-items-header {
+	.col-tally-item-header {
 		flex: 1;
 	}
-	.col-tally-counts-header {
+	.col-tally-count-header {
 		flex: none;
 	}
+
 	.col-tally-item {
 		flex: 1;
 		/* Long values are already elided in the middle by the visualizer; this
