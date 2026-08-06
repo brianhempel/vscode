@@ -1643,6 +1643,7 @@ from list_visualizer import (
     CopyToClipboard,
     parse_search_term, needs_implicit_caret,
     _get_search_context, generate_action, _get_matching_indices,
+    compose_column_searches,
 )
 
 
@@ -1843,6 +1844,87 @@ class TestGetMatchingIndices(unittest.TestCase):
         lst = ['alice', 'bob', 'alice']
         indices = _get_matching_indices('^ == "alice"', lst, eval)
         self.assertEqual(indices, [0, 2])
+
+
+def program_scope(**names):
+    """An eval_in_scope for a user program that defined `names`.
+
+    The real one is `lambda _c: eval(_c)` compiled into the user's module, so
+    the code it runs resolves against the program's globals and nothing else.
+    Passing the `eval` builtin instead -- what most tests here do -- resolves
+    against whichever visualizer module happens to be calling it, which is
+    exactly the confusion these tests are about.
+    """
+    program_globals = dict(names)
+    return lambda code: eval(code, program_globals)
+
+
+class TestSearchesSeeTheProgramScope(unittest.TestCase):
+    """A search is written where the user is looking, so the names in it are
+    the program's names -- `== s`, not just `== 'a'`."""
+
+    def test_predicate_names_a_variable(self):
+        lst = ['a', 'b', 'c']
+        scope = program_scope(s='a')
+        self.assertEqual(_get_matching_indices('^ == s', lst, scope), [0])
+
+    def test_implicit_caret_predicate_names_a_variable(self):
+        lst = ['a', 'b', 'c']
+        scope = program_scope(s='a')
+        self.assertEqual(_get_matching_indices('== s', lst, scope), [0])
+
+    def test_predicate_names_a_function(self):
+        lst = [1, 2, 3, 4]
+        scope = program_scope(is_even=lambda n: n % 2 == 0)
+        self.assertEqual(_get_matching_indices('is_even(^)', lst, scope),
+                         [1, 3])
+
+    def test_predicate_names_a_collection_to_test_membership(self):
+        lst = ['a', 'b', 'c']
+        scope = program_scope(keep=['a', 'c'])
+        self.assertEqual(_get_matching_indices('^ in keep', lst, scope),
+                         [0, 2])
+
+    def test_the_array_is_still_two_carets(self):
+        # ^^ is bound by the matcher itself, so reaching into the program's
+        # scope must not cost the bindings the matcher supplies.
+        lst = [1, 5, 3, 5]
+        scope = program_scope(max=max)
+        self.assertEqual(_get_matching_indices('^ == max(^^)', lst, scope),
+                         [1, 3])
+
+    def test_an_unknown_name_matches_nothing(self):
+        lst = ['a', 'b', 'c']
+        self.assertEqual(_get_matching_indices('^ == nope', lst,
+                                               program_scope()), [])
+
+    def test_a_column_search_naming_a_variable_matches_rows(self):
+        # What the user types in a column's search box is lifted into the main
+        # search box, so a name typed there has the same program scope to
+        # resolve against.
+        lst = ['a', 'b', 'c']
+        scope = program_scope(s='a')
+        composed = compose_column_searches(['^'], {'^': {'op': '==',
+                                                         'text': 's'}}, scope)
+        self.assertEqual(composed, '^ == s')
+        self.assertEqual(_get_matching_indices(composed, lst, scope), [0])
+
+    def test_count_counts_the_matches_of_a_search_naming_a_variable(self):
+        lst = ['a', 'b', 'c']
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ == s'
+        output = visualize(lst, model, mock_get_visualizer,
+                           program_scope(s='a', strs=lst))
+        self.assertIn('Count: 1', output)
+
+    def test_only_the_matching_row_is_highlighted_for_a_search_naming_a_variable(self):
+        lst = ['a', 'b', 'c']
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '^ == s'
+        output = visualize(lst, model, mock_get_visualizer,
+                           program_scope(s='a', strs=lst))
+        self.assertEqual(output.count('class="row-match"'), 1)
+        self.assertEqual(output.count('class="row-dim"'), 2)
 
 
 # === Code generation tests ===
@@ -6090,25 +6172,25 @@ class TestColumnSearchRendering(unittest.TestCase):
 
     def search_row(self, th):
         """The search row's markup: the last thing in the column menu."""
-        return th[th.index('<div class="col-search-row">'):]
+        return th[th.index('<div class="col-search-area">'):]
 
     def test_closed_menu_renders_no_search_row(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        self.assertNotIn('col-search-row',
+        self.assertNotIn('col-search-area',
                          visualize(lst, model, mock_get_visualizer, None))
 
     def test_open_menu_renders_both_chips_and_the_input(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         th = _first_column_header(self.open_menu_html(model, lst))
-        self.assertIn('col-search-row', th)
+        self.assertIn('col-search-area', th)
         self.assertIn('col-search-compose', th)
         self.assertIn('col-search-op', th)
         self.assertIn('col-search-input', th)
         self.assertIn('ColumnSearchInput(index=0', th)
         # The search row comes after the action rows, per the menu's TODO order.
-        self.assertLess(th.index('Remove Column'), th.index('col-search-row'))
+        self.assertLess(th.index('Remove Column'), th.index('col-search-area'))
 
     def test_chips_show_the_current_choice(self):
         lst = [{'name': 'Alice'}]
@@ -6688,7 +6770,7 @@ class TestTallyRendering(unittest.TestCase):
     def test_the_tally_comes_after_the_search_row_it_writes_into(self):
         lst, model = tally_model()
         th = self.open_menu_html(model, lst)
-        self.assertLess(th.index('col-search-row'), th.index('col-tally'))
+        self.assertLess(th.index('col-search-area'), th.index('col-tally'))
 
     def test_each_row_carries_its_own_literal(self):
         lst, model = tally_model()
@@ -7319,6 +7401,90 @@ class TestTallyCountShows(unittest.TestCase):
         for op in TALLY_COUNT_EXTREME_OPS:
             with self.subTest(op=op):
                 self.assertFalse(_tally_count_shows(op, '', 2, None))
+
+
+class TestTallyCountFilterNamesTheProgramsValues(unittest.TestCase):
+    """The count box compares against a whole number, and a number can be
+    written the way every other box in the visualizer writes one: as the
+    program's own names and expressions, not only as digits."""
+
+    def test_a_variable_is_the_count_to_compare_against(self):
+        scope = program_scope(n=3)
+        self.assertTrue(_tally_count_shows('>=', 'n', 5, eval_in_scope=scope))
+        self.assertTrue(_tally_count_shows('>=', 'n', 3, eval_in_scope=scope))
+        self.assertFalse(_tally_count_shows('>=', 'n', 2, eval_in_scope=scope))
+
+    def test_an_expression_is_the_count_to_compare_against(self):
+        scope = program_scope(strs=['a', 'b', 'c', 'd'])
+        self.assertTrue(_tally_count_shows('==', 'len(strs) // 2', 2,
+                                           eval_in_scope=scope))
+        self.assertFalse(_tally_count_shows('==', 'len(strs) // 2', 3,
+                                            eval_in_scope=scope))
+
+    def test_digits_still_ask_the_scope_for_nothing(self):
+        # The common case stays what it was, scope or no scope: a box holding a
+        # number has no name in it to look up.
+        for scope in (None, program_scope()):
+            with self.subTest(scope=scope):
+                self.assertTrue(_tally_count_shows('>=', '3', 3,
+                                                   eval_in_scope=scope))
+                self.assertFalse(_tally_count_shows('>=', '3', 2,
+                                                    eval_in_scope=scope))
+
+    def test_a_name_the_program_does_not_define_filters_nothing(self):
+        # Same as a half-typed number: an empty list is a poor answer to text
+        # the box can't compare against.
+        for count in (1, 5):
+            with self.subTest(count=count):
+                self.assertTrue(_tally_count_shows('==', 'nope', count,
+                                                   eval_in_scope=program_scope()))
+
+    def test_an_expression_that_is_not_a_whole_number_filters_nothing(self):
+        scope = program_scope(n=5)
+        for text in ('n / 2', "'a'", 'None', '[1]'):
+            with self.subTest(text=text):
+                self.assertTrue(_tally_count_shows('==', text, 2,
+                                                   eval_in_scope=scope))
+
+    def test_a_whole_number_that_arrived_as_a_float_is_still_a_count(self):
+        scope = program_scope(n=4)
+        self.assertTrue(_tally_count_shows('==', 'n / 2', 2,
+                                           eval_in_scope=scope))
+        self.assertFalse(_tally_count_shows('==', 'n / 2', 3,
+                                            eval_in_scope=scope))
+
+    def test_a_boolean_is_not_a_count(self):
+        # True == 1, but nobody means "values one row has" by naming a flag.
+        scope = program_scope(flag=True)
+        for count in (1, 2):
+            with self.subTest(count=count):
+                self.assertTrue(_tally_count_shows('==', 'flag', count,
+                                                   eval_in_scope=scope))
+
+    def test_min_and_max_still_ignore_whatever_the_box_holds(self):
+        scope = program_scope(n=9)
+        self.assertTrue(_tally_count_shows('min', 'n', 2, 2,
+                                           eval_in_scope=scope))
+        self.assertFalse(_tally_count_shows('min', 'n', 3, 2,
+                                            eval_in_scope=scope))
+
+    def test_an_expression_narrows_the_values_the_menu_lists(self):
+        # 'c' has 5 rows, 'b' 3 and 'aa' 2, so `>= n` with n = 3 drops 'aa'.
+        lst, model = tally_model()
+        model['tally_count_filter'] = 'n'
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        th = _first_column_header(visualize(lst, model, mock_get_visualizer,
+                                            program_scope(n=3)))
+        self.assertEqual(re.findall(r'col-tally-item[^>]*>([^<]*)<', th),
+                         [html.escape(repr(v)) for v in ('c', 'b')])
+
+    def test_all_reaches_only_what_the_expression_leaves_on_show(self):
+        lst, model = tally_model()
+        model['tally_count_filter'] = 'n'
+        model, _ = update(make_column_mouse_event(repr(TallySelectAll(index=0))),
+                          None, model, lst, mock_get_visualizer,
+                          eval_in_scope=program_scope(n=3))
+        self.assertEqual(_column_search_row(model, '^')['text'], "['c', 'b']")
 
 
 class TestTallyExtreme(unittest.TestCase):

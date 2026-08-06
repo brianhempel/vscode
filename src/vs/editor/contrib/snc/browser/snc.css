@@ -884,6 +884,10 @@
 	margin-left: auto;
 }
 
+.snc-dropdown-trigger > .open { /* hmmm, only some list col buttons have the .open class */
+	background-color: var(--snc-active-bg) !important;
+}
+
 .list-visualizer .col-menu {
 	color: var(--snc-text-muted);
 	cursor: pointer;
@@ -892,6 +896,11 @@
 	font-size: 18px;
 	padding: 0 1px;
 	margin-right: -1px;
+	border-radius: 3px;
+}
+
+.list-visualizer .col-menu:hover {
+	background-color: var(--snc-hover-bg) !important;
 }
 
 /* An open menu's panel is hoisted out of the <th>, so the header stops being
@@ -936,27 +945,33 @@
 
 .col-menu-panel {
 	/* Separates the search from the action rows above it. */
-	.col-search-row {
+	.col-search-area {
 		padding: 4px;
 		margin-top: 3px;
 		border-top: 1px solid var(--snc-border-color);
 	}
 
-	.col-search-chips {
+	.col-search-chips, .col-search-chips-right {
 		display: flex;
 		position: absolute;
-		left: 4px;
 		height: 100%;
 		align-items: center;
 	}
+	.col-search-chips {
+		left: 2px;
+	}
+	.col-search-chips-right {
+		right: 2px;
+	}
 
 	.col-search-chip {
-		padding: 0 1px;
+		padding: 0 2px;
 		border-radius: 3px;
 		color: var(--snc-text-muted);
 		cursor: pointer;
 		user-select: none;
 		white-space: nowrap;
+		background-color: rgba(0, 0, 0, 0.04);
 
 		&:hover,
 		&.open {
@@ -973,8 +988,9 @@
 
 	.col-search-input {
 		box-sizing: border-box;
-		width: 200px;
-		padding-left: calc(7.5ch); /* for "(none)" and "not in" */
+		min-width: 150px;
+		padding-left: calc(7.5ch); /* for "(code)" and "not in" */
+		padding-right: calc(4.5ch); /* for "AND" */
 	}
 
 	/* look at the comparator dropdown to know how much left padding we need */
@@ -1020,23 +1036,16 @@
 		gap: 1px;
 	}
 
-	.col-tally-header { /* All None link-buttons */
+	.col-tally-header {
 		gap: 6px;
 		margin-bottom: 2px;
-	}
-
-	/* The count box, at the far end of the Sort by row: how often a value
-	   occurs, as another way of narrowing to it. Its comparison chip sits on top
-	   of it the way the column search's operator does, so the input reserves
-	   room for the two characters with its left padding. */
-	.col-tally-count-box {
-		margin-left: auto;
+		justify-content: space-between;
 	}
 
 	.col-tally-count-filter {
 		font-size: 9px;
 		box-sizing: border-box;
-		width: 10ch;
+		width: 9.5ch;
 		border-color: transparent;
 		padding: 2px 2px 2px 3.5ch;
 		border-radius: 3px;
@@ -1060,32 +1069,24 @@
 		overflow-y: auto;
 	}
 
-	.col-tally-link {
-		cursor: pointer;
-		user-select: none;
-
-		&:hover {
-			color: var(--snc-text-color);
-			text-decoration: underline;
-		}
-	}
-
-	/* Sits at the far end of the header, away from the two select buttons: it
-	   acts on the selection rather than making one. */
 	.col-tally-exclude {
 		display: flex;
 		align-items: center;
-		gap: 2px;
-		margin-left: auto;
+		gap: 1px;
 		border-radius: 3px;
 		padding: 0 2px;
 		cursor: pointer;
 		user-select: none;
+		margin: 0 -3px 0 -1px; /* looks better *shrug* */
 
 		&:hover {
 			color: var(--snc-text-color);
 			background: var(--snc-hover-bg);
 		}
+	}
+
+	.col-tally-count-box {
+		margin-left: -1px; /* looks better *shrugh* */
 	}
 
 	.col-tally-row {
@@ -1159,7 +1160,7 @@
 	min-width: 0;
 }
 
-/* The (none) operator. Muted only in the option list, where the other options
+/* The (code) operator. Muted only in the option list, where the other options
    are full-strength code */
 .col-search-chip-panel .col-search-blank {
 	color: var(--snc-text-muted);

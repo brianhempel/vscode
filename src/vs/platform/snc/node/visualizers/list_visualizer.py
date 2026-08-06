@@ -401,7 +401,7 @@ def parse_search_term(search: str | None) -> tuple | None:
 #
 # Each column can carry its own search, edited in that column's ▾ menu as
 #
-#     [and|or] [>= > == != < <= in "not in" (none)] (text)
+#     [and|or] [>= > == != < <= in "not in" (code)] (text)
 #
 # The text is written in COLUMN scope, one level deeper than the main search
 # box: ^ is the column value (not necessarily the row, since a column can be
@@ -552,7 +552,7 @@ def compose_column_searches(columns, column_searches, eval_in_scope=None) -> str
         if not pred:
             continue
         term = lift_column_predicate(pred, col)
-        (or_terms if row.get('compose') == 'or' else and_terms).append(term)
+        (or_terms if row.get('compose').lower() == 'or' else and_terms).append(term)
 
     if not and_terms and not or_terms:
         return None
@@ -914,13 +914,47 @@ def _tally_count_op(model: dict) -> str:
     return op if op in TALLY_COUNT_OPS else TALLY_COUNT_OP_DEFAULT
 
 
+def _tally_count_threshold(text: str, eval_in_scope=None) -> int | None:
+    """The whole number the tally's count box is comparing against, or None
+    when it isn't comparing against one.
+
+    Digits are read as digits, so the common case asks the scope for nothing.
+    Anything else is the user's own expression, evaluated where they wrote it:
+    a count is a number like any other in the program, so the box can say
+    `len(names) // 2` or name a threshold the program already worked out.
+
+    Nothing but a whole number comes back. A count is one, so a number still
+    being typed (`-`, `1.`), a name that never arrives, and `n / 2` for an odd
+    n all say the same thing here -- there is nothing to compare against yet.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        value = (ast.literal_eval(text) if eval_in_scope is None
+                 else eval_in_scope(text))
+    except Exception:
+        return None
+    if isinstance(value, bool):
+        # True == 1, but naming a flag is nobody's way of saying "one row".
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _tally_count_shows(op: str, text: str, count: int,
-                       extreme: int | None = None) -> bool:
+                       extreme: int | None = None, eval_in_scope=None) -> bool:
     """Whether the tally's count box leaves a value that many rows have on show.
 
-    Anything that isn't a whole number filters nothing, which covers both a
-    number still being typed (`-`, `1.`) and one that never arrives: an empty
-    list is a poor answer to text the box can't compare against.
+    A box with no number to compare against filters nothing: an empty list is a
+    poor answer to text the box can't read as a count.
 
     Min and Max compare against the list rather than against the box -- they
     disable it -- so they ask only whether this is one of the counts *extreme*
@@ -928,9 +962,8 @@ def _tally_count_shows(op: str, text: str, count: int,
     """
     if op in TALLY_COUNT_EXTREME_OPS:
         return extreme is not None and count == extreme
-    try:
-        threshold = int(text.strip())
-    except ValueError:
+    threshold = _tally_count_threshold(text, eval_in_scope)
+    if threshold is None:
         return True
     if op == '>=':
         return count >= threshold
@@ -964,7 +997,7 @@ def _tally_extreme(model: dict, rows) -> int | None:
 
 
 def _tally_lists(model: dict, shown: str, count: int,
-                 extreme: int | None = None) -> bool:
+                 extreme: int | None = None, eval_in_scope=None) -> bool:
     """Whether the tally's two display filters both leave a row on show.
 
     The one place they meet, so the rows the menu lists and the ones All and
@@ -973,15 +1006,16 @@ def _tally_lists(model: dict, shown: str, count: int,
     return (_tally_shows(model.get('tally_filter') or '', shown)
             and _tally_count_shows(_tally_count_op(model),
                                    model.get('tally_count_filter') or '', count,
-                                   extreme))
+                                   extreme, eval_in_scope))
 
 
-def _tally_shown(model: dict, rows) -> List[str]:
+def _tally_shown(model: dict, rows, eval_in_scope=None) -> List[str]:
     """The literals the display filters are leaving on show, which is what All
     and None act on: what the user can't see, they didn't mean to change."""
     extreme = _tally_extreme(model, rows)
     return [literal for shown, count, literal in rows
-            if literal is not None and _tally_lists(model, shown, count, extreme)]
+            if literal is not None
+            and _tally_lists(model, shown, count, extreme, eval_in_scope)]
 
 
 def _in_tally_order(literals, order) -> List[str]:
@@ -1500,6 +1534,18 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
 
 # === Matching indices for highlighting ===
 
+def _compile_predicate(predicate_expr: str, eval_in_scope=None):
+    """A caret-substituted predicate as a callable of (item, lst).
+
+    Built in the user's scope so the predicate's free names resolve to their
+    program's, which is the only place they were ever written. Without a scope
+    to build it in -- an unfocused preview, a test -- this module's globals are
+    all there is, which is enough for a predicate that names nothing.
+    """
+    code = f'(lambda _item, _lst: {predicate_expr})'
+    return eval(code) if eval_in_scope is None else eval_in_scope(code)
+
+
 def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> list:
     """Return list of row indices matching the search."""
     if not search or not lst:
@@ -1584,11 +1630,22 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
 
     predicate_expr = replace_carets_in_py_exp(predicate_with_caret, ['_item', '_lst'])
 
+    # The predicate is the user's own text, so the names in it are their
+    # program's names: `== s` has to mean the same `s` the line above defines.
+    # Compiling it as a lambda through eval_in_scope is what puts those names in
+    # reach -- evaluating it here would only ever see this module's globals, and
+    # the NameError would land in the per-row except below as "no matches".
+    # The row item and the array come in as arguments, so a caret keeps naming
+    # them whatever the surrounding scope calls its own variables.
+    try:
+        predicate = _compile_predicate(predicate_expr, eval_in_scope)
+    except Exception:
+        return []
+
     matched = []
-    _lst = lst  # bound for a predicate that names the array as ^^
-    for i, _item in enumerate(lst):
+    for i, item in enumerate(lst):
         try:
-            if eval(predicate_expr):
+            if predicate(item, lst):
                 matched.append(i)
         except Exception:
             pass
@@ -2014,7 +2071,7 @@ def _column_search_value_label(value: str) -> str:
     the empty operator has no code to show and reads as a word instead.
     """
     if value == '':
-        return '<span class="col-search-blank" data-charlen="6">(none)</span>'
+        return '<span class="col-search-blank" data-charlen="6">(code)</span>'
     return f'<span class="snc-code" data-charlen="{len(value)}">{html.escape(value)}</span>'
 
 
@@ -2082,7 +2139,8 @@ def _render_column_search_row(col, index, model) -> str:
     op_html = _render_column_search_chip(
         f'op-{index}', row['op'], COLUMN_SEARCH_OPS,
         lambda v: repr(ColumnSearchOpSelect(index=index, op=v)),
-        open_dropdown, 'col-search-op')
+        open_dropdown, 'col-search-op',
+        'Search Operation')
 
     input_event = (f"lambda e: ColumnSearchInput(index={index}, "
                    f"value=e.get('value', ''))")
@@ -2096,8 +2154,8 @@ def _render_column_search_row(col, index, model) -> str:
     # before the value rather than after it. They come after the input so they
     # paint over it, and the input reserves room for them with its left padding.
     return (
-        f'<div class="col-search-row">'
-        f'Filter ({compose_html})'
+        f'<div class="col-search-area">'
+        # f'<div class="col-search-label-row"><span>Filter</span> <span>({compose_html} with other columns)</span></div>'
         f'<div class="search-box-wrapper">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(row["text"])}" '
@@ -2107,6 +2165,7 @@ def _render_column_search_row(col, index, model) -> str:
         f'spellcheck="false" '
         f'class="col-search-input search-box" />'
         f'<span class="col-search-chips">{op_html}</span>'
+        f'<span class="col-search-chips-right">{compose_html}</span>'
         f'</div>'
         f'</div>'
     )
@@ -2177,7 +2236,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     extreme = _tally_extreme(model, tally_rows)
     rows = []
     for text, count, literal in tally_rows:
-        if not _tally_lists(model, text, count, extreme):
+        if not _tally_lists(model, text, count, extreme, eval_in_scope):
             continue
         label = html.escape(truncate_str(text, 60))
         if literal is None:
@@ -2244,18 +2303,18 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             'Order the values are listed in', _tally_sort_label)
     header = (
         f'<div class="col-tally-header">'
-        f'<span class="col-tally-link" '
+        f'<span class="col-search-chip" '
         f'data-tooltip="Select every value shown" '
         f'snc-mouse-down="{html.escape(repr(TallySelectAll(index=index)))}">'
         f'All</span>'
-        f'<span class="col-tally-link" '
+        f'<span class="col-search-chip" '
         f'data-tooltip="Select none of the values shown" '
         f'snc-mouse-down="{html.escape(repr(TallySelectNone(index=index)))}">'
         f'None</span>'
         f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
         f'data-tooltip="Filter to everything but the selected values" '
         f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(index=index)))}">'
-        f'{_render_tally_check(exclude)}Exclude</span>'
+        f'{_render_tally_check(exclude)} Exclude</span>'
         f'<div class="col-tally-sort">Sort:'
         f'{sort_html}'
         f'</div>{count_html}'
@@ -3488,7 +3547,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 rows = _column_tally_rows(col, model, value, eval_in_scope)
                 order = [lit for _text, _count, lit in rows if lit is not None]
-                shown = _tally_shown(model, rows)
+                shown = _tally_shown(model, rows, eval_in_scope)
                 kept = [lit for lit in selected if lit not in set(shown)]
                 _write_tally_selection(
                     model, col, _in_tally_order(kept + shown, order), exclude)
@@ -3499,7 +3558,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 shown = set(_tally_shown(
-                    model, _column_tally_rows(col, model, value, eval_in_scope)))
+                    model, _column_tally_rows(col, model, value, eval_in_scope),
+                    eval_in_scope))
                 _write_tally_selection(
                     model, col, [lit for lit in selected if lit not in shown],
                     exclude)

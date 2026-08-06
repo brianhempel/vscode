@@ -376,6 +376,19 @@ class TestEvalCaretExpr(unittest.TestCase):
         eis = lambda expr: eval(expr)
         self.assertEqual(eval_caret_expr('^[0]', [42], eval_in_scope=eis), 42)
 
+    def test_the_expression_can_name_the_programs_variables(self):
+        # A caret expression is written where the user is looking, so the
+        # names beside the caret are their program's names. The scope stands
+        # in for a user module that defined `factor`; passing the `eval`
+        # builtin instead would resolve against this test module.
+        eis = lambda expr: eval(expr, {'factor': 10})
+        self.assertEqual(eval_caret_expr('^ * factor', 3, eval_in_scope=eis),
+                         30)
+
+    def test_the_expression_can_call_the_programs_functions(self):
+        eis = lambda expr: eval(expr, {'twice': lambda n: n * 2})
+        self.assertEqual(eval_caret_expr('twice(^)', 5, eval_in_scope=eis), 10)
+
     def test_error_propagates(self):
         with self.assertRaises(Exception):
             eval_caret_expr('^.nonexistent', 42)

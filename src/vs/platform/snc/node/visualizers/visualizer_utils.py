@@ -463,10 +463,14 @@ def strip_leading_caret(name: str) -> str:
 def eval_caret_expr(field_expr: str, value, eval_in_scope=None):
     """Evaluate a ^-prefixed field expression against a value.
 
-    Uses local eval with the value bound directly.
+    The value comes in as an argument and the expression is compiled in the
+    user's scope, so a column like `^ * factor` can name their program's
+    variables alongside the caret. Without a scope to compile it in -- an
+    unfocused preview, a test -- this module's globals are all there is, which
+    is enough for an expression that only reaches through the caret.
     """
-    _v = value
-    return eval(replace_carets_in_py_exp(field_expr, ['_v']))
+    code = f'(lambda _v: {replace_carets_in_py_exp(field_expr, ["_v"])})'
+    return (eval(code) if eval_in_scope is None else eval_in_scope(code))(value)
 
 
 @dataclass(frozen=True, slots=True)
