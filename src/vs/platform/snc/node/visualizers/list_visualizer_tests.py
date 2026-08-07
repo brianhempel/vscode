@@ -8302,5 +8302,683 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
         self.assertNotIn('snc-py-exp', tally)
 
 
+# === Column compute tests ===
+
+from list_visualizer import (
+    COMPUTE_AGGS, NO_ANSWER,
+    _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports,
+    _agg_value, _agg_code, _agg_label, _format_agg_value,
+)
+
+
+# A column with a repeat in it, so #Unique has something to say, and no order
+# to it, so Min Idx and Max Idx aren't both the last row.
+COMPUTE_LIST = [3, 1, 4, 1, 5]
+
+
+def agg_named(label):
+    """The catalog's expression for the row reading *label*, e.g. 'Mean'.
+
+    Percentile names two rows, so it takes the first; the tests that care about
+    which one say so by writing the expression out.
+    """
+    for row_label, template in COMPUTE_AGGS:
+        if row_label == label:
+            return template
+    raise AssertionError(f'no aggregation named {label}')
+
+
+class TestAggHoles(unittest.TestCase):
+    """A {{...}} in an aggregation is a text box, and what's typed in it is
+    part of the expression rather than a setting stored beside it."""
+
+    def test_reading_the_holes_out_of_a_template(self):
+        self.assertEqual(_agg_holes('np.percentile($, {{10}})'), ['10'])
+        self.assertEqual(_agg_holes('min($)'), [])
+
+    def test_filling_a_template_drops_the_braces(self):
+        self.assertEqual(_agg_fill('np.percentile($, {{10}})'),
+                         'np.percentile($, 10)')
+        self.assertEqual(_agg_fill('min($)'), 'min($)')
+
+    def test_the_shape_is_the_template_with_its_holes_emptied(self):
+        # What tells a percentile from a mean, without saying which percentile.
+        self.assertEqual(_agg_shape('np.percentile($, {{10}})'),
+                         _agg_shape('np.percentile($, {{90}})'))
+        self.assertNotEqual(_agg_shape('np.percentile($, {{10}})'),
+                            _agg_shape('np.median($)'))
+
+    def test_writing_a_hole_leaves_the_rest_of_the_template_alone(self):
+        self.assertEqual(_agg_set_hole('np.percentile($, {{10}})', 0, '25'),
+                         'np.percentile($, {{25}})')
+
+    def test_a_hole_that_is_not_there_changes_nothing(self):
+        self.assertEqual(_agg_set_hole('min($)', 0, '25'), 'min($)')
+
+    def test_braces_typed_into_a_box_cannot_close_it(self):
+        # Otherwise the template stops being one hole and starts being two.
+        self.assertEqual(_agg_holes(_agg_set_hole('np.percentile($, {{10}})',
+                                                  0, '2}}5')),
+                         ['25'])
+
+
+class TestAggImports(unittest.TestCase):
+    """An expression says which import it needs, so the front end can decide
+    whether the file already has it -- the way the tally's do."""
+
+    def test_numpy_is_declared_by_the_expressions_that_use_it(self):
+        self.assertEqual(_agg_imports('np.mean($)'), ('import numpy as np',))
+
+    def test_a_builtin_needs_nothing(self):
+        self.assertEqual(_agg_imports('min($)'), ())
+        self.assertEqual(_agg_imports('len(set($))'), ())
+
+
+class TestAggValues(unittest.TestCase):
+    """Every aggregation in the catalog, over one small column."""
+
+    def value(self, label_or_expr, values=None):
+        expr = (label_or_expr if '$' in label_or_expr
+                else agg_named(label_or_expr))
+        return _agg_value(expr, COMPUTE_LIST if values is None else values)
+
+    def test_the_catalog_reads_the_way_the_todo_lists_it(self):
+        self.assertEqual([label for label, _ in COMPUTE_AGGS],
+                         ['#Unique', '#Present', '#Missing', 'Min', 'Min Idx',
+                          'Mean', 'Median', 'Percentile', 'Percentile',
+                          'Max', 'Max Idx'])
+
+    def test_each_aggregation_answers(self):
+        for label, expected in [('#Unique', 4), ('#Present', 5), ('#Missing', 0),
+                                ('Min', 1), ('Min Idx', 1), ('Mean', 2.8),
+                                ('Median', 3), ('Max', 5), ('Max Idx', 4)]:
+            with self.subTest(label):
+                self.assertEqual(self.value(label), expected)
+
+    def test_the_two_percentiles_ask_for_different_levels(self):
+        self.assertEqual(self.value('np.percentile($, {{10}})'), 1.0)
+        self.assertEqual(self.value('np.percentile($, {{90}})'), 4.6)
+
+    def test_a_percentile_of_0_or_100_is_the_min_and_the_max(self):
+        self.assertEqual(self.value('np.percentile($, {{0}})'), 1)
+        self.assertEqual(self.value('np.percentile($, {{100}})'), 5)
+
+    def test_present_and_missing_count_the_nones(self):
+        values = [1, None, 3, None]
+        self.assertEqual(self.value('#Present', values), 2)
+        self.assertEqual(self.value('#Missing', values), 2)
+
+    def test_a_column_of_strings_still_has_a_min_and_a_count(self):
+        values = ['pear', 'apple', 'pear']
+        self.assertEqual(self.value('Min', values), 'apple')
+        self.assertEqual(self.value('#Unique', values), 2)
+
+    def test_numpy_resolves_without_the_file_importing_it(self):
+        # The user's own program has no numpy in it; the preview still answers.
+        self.assertEqual(_agg_value('np.mean($)', [1, 2, 3],
+                                    lambda code: eval(code, {}, {})), 3 - 1)
+
+
+class TestAggNonAnswers(unittest.TestCase):
+    """A question this column can't answer is a row with nothing to show, never
+    an exception out of a render."""
+
+    def no_answer(self, label, values):
+        self.assertIs(_agg_value(agg_named(label), values), NO_ANSWER)
+
+    def test_an_empty_column_has_no_min(self):
+        self.no_answer('Min', [])
+        self.no_answer('Mean', [])
+
+    def test_values_of_mixed_types_have_no_order(self):
+        self.no_answer('Min', [1, 'a'])
+
+    def test_strings_have_no_mean(self):
+        self.no_answer('Mean', ['a', 'b'])
+
+    def test_unhashable_values_cannot_be_counted_distinctly(self):
+        self.no_answer('#Unique', [{'a': 1}, {'a': 2}])
+
+    def test_a_column_of_nothing_but_none_has_no_min(self):
+        self.no_answer('Min', [None, None])
+
+    def test_a_hole_holding_something_other_than_a_number(self):
+        # Half-typed, or never finished. Nothing to compute, and nothing said
+        # about it either.
+        self.assertIs(_agg_value('np.percentile($, {{}})', COMPUTE_LIST),
+                      NO_ANSWER)
+        self.assertIs(_agg_value('np.percentile($, {{abc}})', COMPUTE_LIST),
+                      NO_ANSWER)
+
+    def test_an_expression_that_does_not_parse(self):
+        self.assertIs(_agg_value('min($', COMPUTE_LIST), NO_ANSWER)
+
+
+class TestAggCode(unittest.TestCase):
+    """What an aggregation hands over is itself, with $ bound to the same
+    column expression the header already drags out."""
+
+    def test_the_column_is_bound_where_the_dollar_was(self):
+        self.assertEqual(_agg_code('np.mean($)', '[item["p"] for item in data]'),
+                         'np.mean([item["p"] for item in data])')
+
+    def test_the_item_column_hands_over_the_list_itself(self):
+        self.assertEqual(_agg_code('min($)', 'data'), 'min(data)')
+
+    def test_a_hole_is_filled_in_before_it_is_handed_over(self):
+        self.assertEqual(_agg_code('np.percentile($, {{25}})', 'data'),
+                         'np.percentile(data, 25)')
+
+    def test_what_it_hands_over_is_what_it_computed(self):
+        # The preview and the code have to be the same question, or the number
+        # on screen isn't the one the user drags into the file.
+        data = COMPUTE_LIST
+        for _, template in COMPUTE_AGGS:
+            with self.subTest(template):
+                code = _agg_code(template, 'data')
+                self.assertEqual(eval(code, {'np': __import__('numpy')},
+                                      {'data': data}),
+                                 _agg_value(template, data))
+
+
+class TestAggLabel(unittest.TestCase):
+    """What a row and its cell read, which is the catalog's name plus whatever
+    is in its boxes."""
+
+    def test_a_plain_aggregation_reads_as_its_name(self):
+        self.assertEqual(_agg_label('np.mean($)'), 'Mean')
+
+    def test_a_hole_reads_after_the_name(self):
+        self.assertEqual(_agg_label('np.percentile($, {{25}})'),
+                         'Percentile 25')
+
+    def test_an_aggregation_the_catalog_does_not_know_reads_as_its_code(self):
+        self.assertEqual(_agg_label('sum($) / 2'), 'sum($) / 2')
+
+
+class TestFormatAggValue(unittest.TestCase):
+    """A number in a cell is read, not computed against, so it is rounded --
+    the expression the cell hands over stays exact."""
+
+    def test_a_long_float_is_cut_down_to_something_readable(self):
+        self.assertEqual(_format_agg_value(1 / 3), '0.333333')
+
+    def test_a_whole_number_keeps_no_decimal_point(self):
+        self.assertEqual(_format_agg_value(3.0), '3')
+        self.assertEqual(_format_agg_value(3), '3')
+
+    def test_a_numpy_scalar_reads_as_the_number_it_is(self):
+        import numpy as np
+        self.assertEqual(_format_agg_value(np.int64(2)), '2')
+        self.assertEqual(_format_agg_value(np.float64(2.5)), '2.5')
+
+    def test_other_values_read_as_python(self):
+        self.assertEqual(_format_agg_value('ab'), "&#x27;ab&#x27;")
+
+    def test_a_value_too_long_for_a_cell_is_elided(self):
+        self.assertIn('…', _format_agg_value('x' * 200))
+
+
+from list_visualizer import (
+    ComputeToggle, ComputeHoleInput,
+    _column_computes, _set_column_computes, _compute_rows,
+)
+
+P10 = 'np.percentile($, {{10}})'
+P90 = 'np.percentile($, {{90}})'
+
+
+def make_compute_hole_event(index, expr, hole, value):
+    """Create a ComputeHoleInput event for one of a row's boxes."""
+    return {
+        'pythonEventStr': (f"lambda e: ComputeHoleInput(index={index}, "
+                           f"expr={expr!r}, hole={hole}, "
+                           f"value=e.get('value', ''))"),
+        'eventJSON': {'type': 'input', 'value': value},
+    }
+
+
+class TestComputeEvents(unittest.TestCase):
+    """Checking a row writes its expression into the column's list, which is
+    the only record of what is checked."""
+
+    def click(self, model, lst, event):
+        return update(make_column_mouse_event(repr(event)), None, model, lst,
+                      mock_get_visualizer, eval_in_scope=eval)
+
+    def toggle(self, model, lst, expr, index=0):
+        model, _ = self.click(model, lst, ComputeToggle(index=index, expr=expr))
+        return model
+
+    def test_checking_a_row_stores_its_expression(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, 'min($)')
+        self.assertEqual(_column_computes(model, '$'), ['min($)'])
+
+    def test_checking_it_again_takes_it_away(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, 'min($)')
+        model = self.toggle(model, lst, 'min($)')
+        self.assertEqual(_column_computes(model, '$'), [])
+
+    def test_a_column_with_nothing_checked_is_not_stored_at_all(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, 'min($)')
+        model = self.toggle(model, lst, 'min($)')
+        self.assertIsNone(model['column_computes'])
+
+    def test_they_are_kept_in_the_order_the_menu_lists_them(self):
+        # However the user clicked their way to them.
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, 'max($)')
+        model = self.toggle(model, lst, 'np.mean($)')
+        model = self.toggle(model, lst, 'min($)')
+        self.assertEqual(_column_computes(model, '$'),
+                         ['min($)', 'np.mean($)', 'max($)'])
+
+    def test_the_two_percentiles_keep_the_order_they_were_asked_for(self):
+        # They are the same shape, so nothing else distinguishes them.
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, P90)
+        model = self.toggle(model, lst, P10)
+        self.assertEqual(_column_computes(model, '$'), [P90, P10])
+
+    def test_each_column_is_asked_separately(self):
+        lst = [{'a': 1, 'b': 2}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        model = self.toggle(model, lst, 'min($)', index=0)
+        model = self.toggle(model, lst, 'max($)', index=1)
+        self.assertEqual(_column_computes(model, "$['a']"), ['min($)'])
+        self.assertEqual(_column_computes(model, "$['b']"), ['max($)'])
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, 'min($)', index=7)
+        self.assertIsNone(model['column_computes'])
+
+    def test_the_menu_stays_open_across_a_click(self):
+        # The whole point is checking several in a row.
+        lst, model = tally_model(COMPUTE_LIST)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = 'compute-0'
+        model = self.toggle(model, lst, 'min($)')
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+
+    def test_the_aggregations_follow_a_renamed_column(self):
+        lst = [{'a': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']"]
+        model = self.toggle(model, lst, 'min($)')
+        model, _ = update(
+            make_column_mouse_event(repr(ColumnClick(index=0)), detail=2),
+            None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model['column_input_value'] = "$['b']"
+        model, _ = update(make_column_key_event('Enter'), None, model, lst,
+                          mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['columns'], ["$['b']"])
+        self.assertEqual(_column_computes(model, "$['b']"), ['min($)'])
+
+    def test_a_removed_column_takes_its_aggregations_with_it(self):
+        lst = [{'a': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']"]
+        model = self.toggle(model, lst, 'min($)')
+        model, _ = update(
+            make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+            None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertIsNone(model['column_computes'])
+
+
+class TestComputeHoleEvents(unittest.TestCase):
+    """Typing in a box edits the expression, because the box is part of it."""
+
+    def input(self, model, lst, expr, value, hole=0, index=0):
+        model, _ = update(make_compute_hole_event(index, expr, hole, value),
+                          None, model, lst, mock_get_visualizer,
+                          eval_in_scope=eval)
+        return model
+
+    def test_typing_in_a_checked_row_rewrites_its_expression_in_place(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', P10, 'max($)'])
+        model = self.input(model, lst, P10, '25')
+        self.assertEqual(_column_computes(model, '$'),
+                         ['min($)', 'np.percentile($, {{25}})', 'max($)'])
+
+    def test_typing_in_an_unchecked_row_asks_for_that_percentile(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, P10, '25')
+        self.assertEqual(_column_computes(model, '$'),
+                         ['np.percentile($, {{25}})'])
+
+    def test_a_half_typed_number_is_kept_so_the_box_keeps_its_place(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', [P10])
+        model = self.input(model, lst, P10, '')
+        self.assertEqual(_column_computes(model, '$'),
+                         ['np.percentile($, {{}})'])
+
+    def test_asking_twice_for_the_same_percentile_asks_once(self):
+        # Editing 10 up to 90 with 90 already checked is one aggregation, not
+        # two cells reading the same number.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', [P10, P90])
+        model = self.input(model, lst, P10, '90')
+        self.assertEqual(_column_computes(model, '$'), [P90])
+
+    def test_typing_at_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, P10, '25', index=7)
+        self.assertIsNone(model['column_computes'])
+
+
+class TestComputeRows(unittest.TestCase):
+    """What the submenu shows, all of it read back out of the column's list."""
+
+    def rows(self, model, col='$'):
+        return _compute_rows(model, col)
+
+    def checked(self, model, col='$'):
+        return [template for _, template, checked in self.rows(model, col)
+                if checked]
+
+    def test_nothing_checked_shows_the_catalog_as_written(self):
+        _, model = tally_model(COMPUTE_LIST)
+        self.assertEqual([(label, template) for label, template, _
+                          in self.rows(model)], list(COMPUTE_AGGS))
+        self.assertEqual(self.checked(model), [])
+
+    def test_a_stored_expression_checks_its_row(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        self.assertEqual(self.checked(model), ['np.mean($)'])
+
+    def test_a_percentile_claims_the_row_it_matches_exactly(self):
+        # Not the first percentile row: 90 is written on the second one.
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', [P90])
+        rows = [(template, checked) for _, template, checked in self.rows(model)]
+        self.assertIn((P10, False), rows)
+        self.assertIn((P90, True), rows)
+
+    def test_an_edited_percentile_claims_a_row_of_the_same_shape(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.percentile($, {{25}})'])
+        rows = [(template, checked) for _, template, checked in self.rows(model)]
+        self.assertIn(('np.percentile($, {{25}})', True), rows)
+        # The other percentile row is still there, reading as it always did.
+        self.assertIn((P90, False), rows)
+
+    def test_two_edited_percentiles_claim_both_rows(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.percentile($, {{25}})',
+                                          'np.percentile($, {{75}})'])
+        self.assertEqual(self.checked(model), ['np.percentile($, {{25}})',
+                                               'np.percentile($, {{75}})'])
+
+    def test_unchecking_an_edited_row_leaves_the_row_reading_its_default(self):
+        # The row doesn't vanish just because the number in it was the user's.
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.percentile($, {{25}})'])
+        _set_column_computes(model, '$', [])
+        rows = [(template, checked) for _, template, checked in self.rows(model)]
+        self.assertIn((P10, False), rows)
+        self.assertIn((P90, False), rows)
+
+    def test_the_rows_are_always_the_catalog_in_its_own_order(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['max($)', 'min($)'])
+        self.assertEqual([label for label, _, _ in self.rows(model)],
+                         [label for label, _ in COMPUTE_AGGS])
+
+
+class TestComputeMenuRendering(unittest.TestCase):
+    """The Compute submenu: a row per aggregation, each previewing its answer
+    so reading one costs no more than opening the menu."""
+
+    def header(self, model, lst, column=0, open_submenu=True, source=None):
+        model = dict(model, openDropdown={'id': f'col-menu-{column}'})
+        if open_submenu:
+            model['col_search_dropdown'] = f'compute-{column}'
+        if source:
+            model['_source_expr'] = source
+        return _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      (lambda code: eval(code, {}, {'data': lst}))
+                      if source else None))
+
+    def panel(self, model, lst, **kwargs):
+        th = self.header(model, lst, **kwargs)
+        self.assertIn('col-compute-panel', th)
+        return th[th.index('col-compute-panel'):]
+
+    def rows(self, panel):
+        return re.findall(r'<div class="col-compute-row[^"]*".*?(?=<div '
+                          r'class="col-compute-row|$)', panel, re.DOTALL)
+
+    def previews(self, panel):
+        return re.findall(r'col-compute-preview"[^>]*>([^<]*)<', panel)
+
+    def test_the_menu_offers_compute_without_being_asked_twice(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertIn('col-compute-trigger',
+                      self.header(model, lst, open_submenu=False))
+
+    def test_the_rows_are_only_there_when_the_submenu_is_open(self):
+        # Nothing is computed for a menu the user hasn't opened.
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertNotIn('col-compute-panel',
+                         self.header(model, lst, open_submenu=False))
+
+    def test_a_closed_column_menu_computes_nothing(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertNotIn('col-compute',
+                         visualize(lst, model, mock_get_visualizer, None))
+
+    def test_every_aggregation_is_listed_in_the_catalog_order(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst)
+        self.assertEqual(re.findall(r'col-compute-name">([^<]*)<', panel),
+                         [label for label, _ in COMPUTE_AGGS])
+
+    def test_each_row_previews_its_answer(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        previews = self.previews(self.panel(model, lst))
+        self.assertEqual(previews,
+                         ['4', '5', '0', '1', '1', '2.8', '3', '1', '4.6',
+                          '5', '4'])
+
+    def test_a_checked_row_says_so(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        rows = self.rows(self.panel(model, lst))
+        checked = [i for i, row in enumerate(rows) if 'checked' in row]
+        self.assertEqual(checked, [5])
+        self.assertIn('checked', rows[5][:rows[5].index('col-compute-name')])
+
+    def test_a_question_this_column_cannot_answer_cannot_be_checked(self):
+        lst = ['pear', 'apple']
+        _, model = tally_model(lst)
+        rows = self.rows(self.panel(model, lst))
+        mean = rows[5]
+        self.assertIn('unselectable', mean)
+        self.assertIn('disabled', mean)
+        self.assertNotIn('snc-mouse-down', mean)
+        # Min still answers for strings, so it stays clickable.
+        self.assertIn('snc-mouse-down', rows[3])
+
+    def test_a_checked_row_stays_clickable_once_it_stops_answering(self):
+        # Otherwise there is no way to uncheck it.
+        lst = ['pear', 'apple']
+        _, model = tally_model(lst)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        self.assertIn('snc-mouse-down', self.rows(self.panel(model, lst))[5])
+
+    def test_a_hole_is_a_box_holding_what_the_expression_says(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst)
+        self.assertEqual(re.findall(r'col-compute-hole[^>]*value="([^"]*)"',
+                                    panel), ['10', '90'])
+
+    def test_an_edited_level_is_what_its_box_reads(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.percentile($, {{50}})'])
+        panel = self.panel(model, lst)
+        self.assertEqual(re.findall(r'col-compute-hole[^>]*value="([^"]*)"',
+                                    panel), ['50', '90'])
+        self.assertEqual(self.previews(panel)[7], '3')
+
+    def test_a_row_hands_over_the_code_behind_its_preview(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst, source='data')
+        self.assertIn('snc-py-exp="np.mean(data)"', panel)
+        self.assertIn('snc-py-exp="min(data)"', panel)
+        self.assertIn('snc-py-exp="np.percentile(data, 90)"', panel)
+
+    def test_the_expressions_say_which_import_they_need(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst, source='data')
+        mean = panel[panel.index('snc-py-exp="np.mean(data)"'):]
+        imports = re.search(r'snc-py-exp-imports="([^"]*)"', mean)
+        self.assertIsNotNone(imports)
+        self.assertEqual(json.loads(html.unescape(imports.group(1))),
+                         ['import numpy as np'])
+        # min is a builtin and needs nothing said about it.
+        after_min = panel[panel.index('snc-py-exp="min(data)"'):]
+        self.assertNotIn('snc-py-exp-imports',
+                         after_min[:after_min.index('</div>')])
+
+    def test_a_column_with_no_source_hands_over_nothing(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertNotIn('snc-py-exp', self.panel(model, lst))
+
+    def test_a_preview_tooltip_stays_inside_the_menu(self):
+        # It sits at the panel's right edge, so it reads leftwards.
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertIn('snc-py-exp-align="right"',
+                      self.panel(model, lst, source='data'))
+
+
+class TestComputeCellRendering(unittest.TestCase):
+    """A checked aggregation is a cell under its column, labelled with what it
+    asked."""
+
+    def table(self, model, lst, source=None):
+        if source:
+            model = dict(model, _source_expr=source)
+        return visualize(lst, model, mock_get_visualizer,
+                         (lambda code: eval(code, {}, {'data': lst}))
+                         if source else None)
+
+    def rows(self, model, lst, **kwargs):
+        out = self.table(model, lst, **kwargs)
+        self.assertIn('col-agg-row', out)
+        return re.findall(r'<tr class="col-agg-row">(.*?)</tr>',
+                          out[out.index('<tr class="col-agg-row">'):],
+                          re.DOTALL)
+
+    def cells(self, row):
+        return re.findall(r'<td class="col-agg-cell"[^>]*>(.*?)</td>', row,
+                          re.DOTALL)
+
+    def test_nothing_checked_is_no_row_at_all(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertNotIn('col-agg-row', self.table(model, lst))
+
+    def test_a_checked_aggregation_reads_under_its_column(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        rows = self.rows(model, lst)
+        self.assertEqual(len(rows), 1)
+        cell = self.cells(rows[0])[0]
+        self.assertIn('>Mean<', cell)
+        self.assertIn('>2.8<', cell)
+
+    def test_each_one_is_a_cell_of_its_own_under_the_last(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['max($)', 'min($)'])
+        rows = self.rows(model, lst)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([re.search(r'col-agg-label">([^<]*)<', row).group(1)
+                          for row in rows], ['Min', 'Max'])
+        self.assertEqual([re.search(r'col-agg-value">([^<]*)<', row).group(1)
+                          for row in rows], ['1', '5'])
+
+    def test_a_column_with_none_of_its_own_gets_a_blank_that_stays_put(self):
+        # The cell has to be there to keep the columns lined up, but a column
+        # with no answer has nothing to pin over the rows it would cover.
+        lst = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        _set_column_computes(model, "$['b']", ['max($)'])
+        row = self.rows(model, lst)[0]
+        self.assertEqual(row.count('<td'), 3)  # row index, blank, answer
+        self.assertIn('<td class="col-agg-blank"></td>', row)
+        self.assertIn('>Max<', self.cells(row)[0])
+
+    def test_a_column_that_runs_out_first_blanks_the_rows_below_it(self):
+        lst = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        _set_column_computes(model, "$['a']", ['min($)'])
+        _set_column_computes(model, "$['b']", ['min($)', 'max($)'])
+        rows = self.rows(model, lst)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].count('col-agg-blank'), 0)
+        self.assertEqual(rows[1].count('col-agg-blank'), 1)
+
+    def test_every_row_but_the_lowest_is_pinned_above_the_one_below_it(self):
+        # Sticky can't stack itself, so each row is told where to stop.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'np.mean($)', 'max($)'])
+        rows = self.rows(model, lst)
+        self.assertIn('style="bottom: calc(2 * var(--snc-agg-row-height))"',
+                      rows[0])
+        self.assertIn('style="bottom: calc(1 * var(--snc-agg-row-height))"',
+                      rows[1])
+        self.assertNotIn('style=', rows[2])
+
+    def test_a_cell_reads_what_is_in_its_boxes(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.percentile($, {{25}})'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('>Percentile 25<', cell)
+
+    def test_an_aggregation_this_column_can_no_longer_answer_reads_empty(self):
+        # The column's values changed under it; the cell says nothing rather
+        # than disappearing and taking the row's layout with it.
+        lst = ['pear', 'apple']
+        _, model = tally_model(lst)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('>Mean<', cell)
+        self.assertEqual(re.findall(r'col-agg-value">([^<]*)<', cell), [''])
+
+    def test_a_cell_hands_over_the_code_behind_it(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        cell = self.cells(self.rows(model, lst, source='data')[0])[0]
+        self.assertIn('snc-py-exp="np.mean(data)"', cell)
+        self.assertIn('draggable="true"', cell)
+
+    def test_a_computed_column_hands_over_the_column_too(self):
+        lst = [{'a': 1}, {'a': 3}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']"]
+        _set_column_computes(model, "$['a']", ['max($)'])
+        cell = self.cells(self.rows(model, lst, source='data')[0])[0]
+        self.assertIn(html.escape("max([item['a'] for item in data])"), cell)
+
+    def test_the_cells_are_not_a_row_of_the_list(self):
+        # No row index, and nothing to pick out of it in pick mode.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['max($)'])
+        row = self.rows(model, lst)[0]
+        self.assertNotIn('pick-region', row)
+        self.assertIn('<td class="row-index"></td>', row)
+
+
 if __name__ == '__main__':
     unittest.main()

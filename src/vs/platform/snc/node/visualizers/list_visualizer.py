@@ -44,6 +44,7 @@ import html
 import keyword
 import random
 import re
+import warnings
 from dataclasses import dataclass
 from math import sqrt
 from typing import Any, List, Tuple, Optional
@@ -201,6 +202,25 @@ class TallyCountOpSelect:
     """User picked how a column tally's count box compares."""
     index: int
     op: str
+
+@dataclass(frozen=True, slots=True)
+class ComputeToggle:
+    """User checked or unchecked one of a column's Compute rows.
+
+    Identified by the expression it is showing rather than by a name for it, so
+    an aggregation the user wrote themselves needs no event of its own.
+    """
+    index: int
+    expr: str
+
+@dataclass(frozen=True, slots=True)
+class ComputeHoleInput:
+    """User typed in one of the boxes inside a Compute row's expression, e.g.
+    the level of a percentile."""
+    index: int
+    expr: str
+    hole: int
+    value: str
 
 @dataclass(frozen=True, slots=True)
 class SearchBoxInput:
@@ -614,6 +634,43 @@ def _rename_column_search(model: dict, old_name: str, new_name: str) -> None:
     if old_name in searches:
         searches[new_name] = searches.pop(old_name)
         model['column_searches'] = searches or None
+
+
+def _column_computes(model: dict, col: str) -> List[str]:
+    """The aggregations a column is showing, as the expressions they are."""
+    return list((model.get('column_computes') or {}).get(col) or [])
+
+
+def _set_column_computes(model: dict, col: str, exprs) -> None:
+    """Write a column's aggregations, keeping them in the order the menu lists
+    them so the cells under the column read the same way it does.
+
+    A column showing none of them is dropped rather than stored empty, the way
+    a search back at its default is.
+    """
+    computes = dict(model.get('column_computes') or {})
+    # fromkeys rather than a set: asking for the same aggregation twice is one
+    # cell, and the ones the ordering can't tell apart -- two percentiles --
+    # keep the order they were asked in.
+    ordered = sorted(dict.fromkeys(exprs), key=_agg_order)
+    if ordered:
+        computes[col] = ordered
+    else:
+        computes.pop(col, None)
+    model['column_computes'] = computes or None
+
+
+def _remove_column_compute(model: dict, col: str) -> None:
+    computes = dict(model.get('column_computes') or {})
+    computes.pop(col, None)
+    model['column_computes'] = computes or None
+
+
+def _rename_column_compute(model: dict, old_name: str, new_name: str) -> None:
+    computes = dict(model.get('column_computes') or {})
+    if old_name in computes:
+        computes[new_name] = computes.pop(old_name)
+        model['column_computes'] = computes or None
 
 
 def _reset_tally_view(model: dict) -> None:
@@ -1229,6 +1286,224 @@ def _tally_exprs(col, model: dict, tally, source_expr,
     if conditions:
         body += f' if {" and ".join(conditions)}'
     return (f'{{v: c {body}}}', f'[v {body}]', f'[c {body}]')
+
+
+# =============================================================================
+# Column compute
+# =============================================================================
+#
+# The Compute submenu of a column's ▾ menu asks questions about the column as a
+# whole: how many distinct values, the mean, the largest and which row holds it.
+# Every row previews its answer, so reading one costs nothing; checking it keeps
+# the answer on screen as a cell under the column.
+#
+# An aggregation IS its expression, written with `$` for the column -- the same
+# `$` an arbitrary user-written aggregation will use. That one string is what is
+# stored, what the preview evaluates, and what a drag hands to the file, so
+# there is no way for the number on screen and the code in the file to drift.
+
+# The aggregations the submenu lists, in the order it lists them. A `{{...}}` is
+# a text box, and what's typed in it is part of the expression.
+#
+# min and max stay builtins: shorter than numpy's, and they answer for strings
+# and dates too. The rest borrow numpy, which is the shorter and more familiar
+# way to write them down.
+COMPUTE_AGGS = (
+    ('#Unique',    'len(set($))'),
+    ('#Present',   'sum(x is not None for x in $)'),
+    ('#Missing',   'sum(x is None for x in $)'),
+    ('Min',        'min($)'),
+    ('Min Idx',    'np.argmin($)'),
+    ('Mean',       'np.mean($)'),
+    ('Median',     'np.median($)'),
+    ('Percentile', 'np.percentile($, {{10}})'),
+    ('Percentile', 'np.percentile($, {{90}})'),
+    ('Max',        'max($)'),
+    ('Max Idx',    'np.argmax($)'),
+)
+
+COMPUTE_IMPORTS = ('import numpy as np',)
+
+# A question this column can't answer -- an empty column, a mean of strings, a
+# box holding something that isn't a number. Its own object rather than None,
+# which an aggregation is free to return, or a string, which `min` of a column
+# of strings is free to return.
+NO_ANSWER = object()
+
+_HOLE_RE = re.compile(r'\{\{(.*?)\}\}')
+
+
+def _agg_holes(template: str) -> List[str]:
+    """What's in an expression's boxes, in the order they read."""
+    return _HOLE_RE.findall(template)
+
+
+def _agg_fill(template: str) -> str:
+    """The expression itself, with the braces around each box dropped."""
+    return _HOLE_RE.sub(lambda m: m.group(1), template)
+
+
+def _agg_shape(template: str) -> str:
+    """An expression with its boxes emptied: what tells a percentile from a
+    median without saying which percentile."""
+    return _HOLE_RE.sub('{{}}', template)
+
+
+def _agg_set_hole(template: str, hole: int, value: str) -> str:
+    """The expression with one box rewritten.
+
+    Braces typed into a box are dropped: they would close the box early and
+    leave the template holding two of them.
+    """
+    value = value.replace('{', '').replace('}', '')
+    index = [-1]
+
+    def replace(match):
+        index[0] += 1
+        return f'{{{{{value}}}}}' if index[0] == hole else match.group(0)
+
+    return _HOLE_RE.sub(replace, template)
+
+
+def _agg_imports(template: str) -> Tuple[str, ...]:
+    """The imports an expression needs, declared where it's written, the way
+    TALLY_IMPORTS is."""
+    return COMPUTE_IMPORTS if 'np.' in _agg_fill(template) else ()
+
+
+def _agg_label(template: str) -> str:
+    """What a row and its cell read: the catalog's name for the expression,
+    with whatever is in its boxes after it (`Percentile 25`).
+
+    An expression the catalog doesn't know -- one the user wrote -- has no name
+    but itself.
+    """
+    shape = _agg_shape(template)
+    for label, known in COMPUTE_AGGS:
+        if _agg_shape(known) == shape:
+            return ' '.join([label] + _agg_holes(template))
+    return _agg_fill(template)
+
+
+def _agg_order(template: str) -> int:
+    """Where an expression sits in the menu, so a column's cells read down in
+    the order its rows read.
+
+    By shape, so a percentile of any level sorts where percentiles do -- and so
+    the two of them, which no shape can tell apart, are left in the order they
+    were asked for. An expression the catalog doesn't know goes last.
+    """
+    shape = _agg_shape(template)
+    for i, (_, known) in enumerate(COMPUTE_AGGS):
+        if _agg_shape(known) == shape:
+            return i
+    return len(COMPUTE_AGGS)
+
+
+def _compute_rows(model: dict, col: str) -> List[Tuple[str, str, bool]]:
+    """The Compute submenu's rows: a name, the expression the row is showing,
+    and whether it's checked.
+
+    All of it read back out of the column's list of aggregations, which is the
+    only record of what is checked -- the way the tally reads its checkboxes
+    back out of the search.
+
+    A row pairs with a stored expression it matches exactly, and failing that
+    with the first one of its shape nothing else has claimed. So `{{90}}` ticks
+    the row that reads 90 rather than the one that reads 10, and a percentile
+    edited to 25 ticks the first percentile row instead of adding a twelfth one
+    -- and unchecking it leaves that row reading 10 again rather than taking it
+    away while the user is looking at it.
+    """
+    stored = _column_computes(model, col)
+    claimed = [False] * len(stored)
+    paired: List[Optional[str]] = [None] * len(COMPUTE_AGGS)
+
+    def claim(matches):
+        for ri, (_, template) in enumerate(COMPUTE_AGGS):
+            if paired[ri] is not None:
+                continue
+            for si, expr in enumerate(stored):
+                if not claimed[si] and matches(template, expr):
+                    claimed[si], paired[ri] = True, expr
+                    break
+
+    claim(lambda template, expr: template == expr)
+    claim(lambda template, expr: _agg_shape(template) == _agg_shape(expr))
+
+    rows = []
+    for ri, (label, template) in enumerate(COMPUTE_AGGS):
+        expr = paired[ri]
+        rows.append((label, template if expr is None else expr,
+                     expr is not None))
+    return rows
+
+
+_numpy_module = None
+
+
+def _numpy():
+    """numpy, imported the first time something actually needs it.
+
+    Never at module import: every run pays for that one, and most of them never
+    open a Compute menu. numpy_visualizer.py avoids it for the same reason.
+    """
+    global _numpy_module
+    if _numpy_module is None:
+        import numpy
+        _numpy_module = numpy
+    return _numpy_module
+
+
+def _agg_value(template: str, values: list, eval_in_scope=None):
+    """An aggregation's answer for a column's values, or NO_ANSWER.
+
+    Evaluated in the user's scope, so a column expression that named the
+    program's own values has already been read by the time we get here -- but
+    `np` is handed in rather than looked up, so the answer doesn't depend on
+    the file having imported numpy (or on what it called it if it did).
+
+    Anything at all can go wrong here -- an expression that doesn't parse, a
+    mean of strings, a numpy that isn't installed -- and none of it is worth
+    more than a row with nothing to show.
+
+    A warning counts as going wrong, for two reasons: numpy warns rather than
+    raises where it has no answer (the mean of an empty column is a warning and
+    a nan), and a warning would otherwise be printed into the output of the
+    user's own program by a menu they only opened to look at.
+    """
+    try:
+        code = (f'lambda np, _v: '
+                f'{replace_dollars_in_py_exp(_agg_fill(template), ["_v"])}')
+        agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            return agg(_numpy(), values)
+    except Exception:
+        return NO_ANSWER
+
+
+def _agg_code(template: str, values_expr: str) -> str:
+    """The expression itself, with `$` bound to the column -- the same list
+    expression the column header already hands to a drag."""
+    return replace_dollars_in_py_exp(_agg_fill(template), [values_expr])
+
+
+def _format_agg_value(value) -> str:
+    """An answer as cell text.
+
+    Floats are rounded: a cell is read rather than computed against, and
+    2.8000000000000003 says nothing 2.8 doesn't. What the cell hands over stays
+    exact. A numpy scalar is unwrapped first -- `np.int64(2)` is how numpy
+    writes itself down, not how a number reads.
+    """
+    if hasattr(value, 'item') and getattr(value, 'shape', None) == ():
+        value = value.item()
+    if isinstance(value, float):
+        text = f'{value:.6g}'
+    else:
+        text = repr(value)
+    return html.escape(truncate_str(text, 40))
 
 
 def _is_list_of_ints(val) -> bool:
@@ -2155,6 +2430,10 @@ _COLUMN_MGMT_DEFAULTS = {
     # than {} so this shared defaults dict never hands the same dict to two
     # models; always read it as `model.get('column_searches') or {}`.
     'column_searches': None,
+    # Per-column aggregations, keyed by column expression like the searches
+    # above, and each stored as the expression it is. Nothing records which of
+    # the menu's rows are checked: that is read back out of these.
+    'column_computes': None,
     # Which chip menu is open on the visible column search row ('op-3' /
     # 'compose-3'). Deliberately not `openDropdown`: those panels are nested
     # inside the column menu, which that single slot is already holding open.
@@ -2577,6 +2856,88 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             f'</div>')
 
 
+def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
+    """Render the Compute row of a column's ▾ menu, and its submenu when open.
+
+    A flyout out of an already-hoisted panel, like the chip menus on the search
+    row, and sharing their one open slot -- so opening this puts those away, and
+    Escape and every way of leaving the column menu already close it.
+
+    Only computed while the submenu is open, which is the one time the whole
+    column is worth evaluating for an answer nobody has asked to keep.
+    """
+    dropdown_id = f'compute-{index}'
+    is_open = model.get('col_search_dropdown') == dropdown_id
+    toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
+    panel_html = (_render_compute_panel(col, index, model, lst, eval_in_scope)
+                  if is_open else '')
+    return (
+        f'<div class="snc-dropdown-trigger col-compute">'
+        f'<div class="snc-dropdown-option col-compute-trigger'
+        f'{" open" if is_open else ""}" '
+        f'data-tooltip="Summarize this column" '
+        f'snc-mouse-down="{html.escape(toggle_event)}">'
+        f'<span class="snc-dropdown-option-label col-compute-title">Compute</span>'
+        f'<span class="col-compute-arrow">▸</span>'
+        f'</div>{panel_html}</div>'
+    )
+
+
+def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
+    """One row per aggregation: a checkbox, its name, a box for each hole in
+    its expression, and the answer.
+
+    The answer is there whether or not the row is checked -- glancing at the
+    mean is the common case, and checking the box is only for keeping it.
+    """
+    values = _column_values(col, lst, model, eval_in_scope)
+    source_expr = model.get('_source_expr')
+    values_expr = (None if source_expr is None
+                   else _column_values_expr(col, source_expr))
+
+    rows = []
+    for label, template, checked in _compute_rows(model, col):
+        answer = _agg_value(template, values, eval_in_scope)
+        # A question this column can't answer isn't worth checking -- but one
+        # already checked stays clickable, or there'd be no way to uncheck it.
+        unanswered = answer is NO_ANSWER
+        inert = unanswered and not checked
+        classes = ('col-compute-row' + (' checked' if checked else '')
+                   + (' unselectable' if inert else ''))
+        toggle_attr = '' if inert else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
+        # The boxes and the answer sit outside the part that toggles: typing a
+        # level, or dragging the answer out, is not a way of checking the row.
+        holes = ''.join(
+            f'<input type="text" class="col-compute-hole search-box" '
+            f'snc-input="{html.escape(_compute_hole_event(index, template, i))}" '
+            f'value="{html.escape(text)}" spellcheck="false" />'
+            for i, text in enumerate(_agg_holes(template)))
+        # Nothing to hand over when there is no answer, and nothing to name the
+        # column by when the list has no source.
+        code = (None if unanswered or values_expr is None
+                else _agg_code(template, values_expr))
+        rows.append(
+            f'<div class="{classes}">'
+            f'<span class="col-compute-toggle"{toggle_attr}>'
+            f'{_render_tally_check(checked, disabled=inert)}'
+            f'<span class="col-compute-name">{html.escape(label)}</span>'
+            f'</span>{holes}'
+            f'<span class="col-compute-preview"'
+            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
+            f'>{"" if unanswered else _format_agg_value(answer)}</span>'
+            f'</div>')
+
+    return (f'<div class="snc-dropdown-panel flyout col-compute-panel" '
+            f'snc-dropdown-align="flyout">{"".join(rows)}</div>')
+
+
+def _compute_hole_event(index: int, template: str, hole: int) -> str:
+    return (f"lambda e: ComputeHoleInput(index={index}, expr={template!r}, "
+            f"hole={hole}, value=e.get('value', ''))")
+
+
 def _render_column_menu(col, index, model, lst, eval_in_scope=None):
     """Render the rows of the per-column ▾ menu.
 
@@ -2592,6 +2953,7 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove Column</span>'
         f'</div>',
+        _render_column_compute(col, index, model, lst, eval_in_scope),
         _render_column_search_row(col, index, model),
         _render_column_tally(col, index, model, lst, eval_in_scope),
     ]
@@ -3294,6 +3656,69 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False):
     )
 
 
+def _render_agg_cell(expr, values, values_expr, style_attr,
+                     eval_in_scope=None) -> str:
+    """One answer, in a cell of its own."""
+    answer = _agg_value(expr, values, eval_in_scope)
+    # A column whose values have changed out from under an aggregation says
+    # nothing rather than dropping the cell the user put there.
+    code = (None if answer is NO_ANSWER or values_expr is None
+            else _agg_code(expr, values_expr))
+    return (
+        f'<td class="col-agg-cell"{style_attr}>'
+        f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
+        f'<span class="col-agg-label">{html.escape(_agg_label(expr))}</span>'
+        f'<span class="col-agg-value">'
+        f'{"" if answer is NO_ANSWER else _format_agg_value(answer)}</span>'
+        f'</div></td>')
+
+
+def _render_agg_rows(columns, model, lst, eval_in_scope=None,
+                     source_expr=None) -> str:
+    """The rows of answers under the table, one row per aggregation deep, or
+    nothing when no column has asked for one.
+
+    Real rows of the table, because that is what keeps a cell the same width as
+    the column it belongs to. Not rows of the list, though: no index, and
+    nothing in them to pick.
+
+    They pin to the bottom of the scrollport the way the header pins to the
+    top, and sticky can't stack itself, so each row is told how far above the
+    bottom to stop. A column with fewer answers than the deepest one blanks the
+    rows below its last: an empty cell has nothing to pin over the rows it
+    would otherwise cover.
+    """
+    stacks = [_column_computes(model, col) for col in columns]
+    depth = max((len(stack) for stack in stacks), default=0)
+    if depth == 0:
+        return ''
+
+    # Once per column, however many answers are asked of it.
+    reads = [(_column_values(col, lst, model, eval_in_scope),
+              None if source_expr is None else _column_values_expr(col,
+                                                                   source_expr))
+             if stack else (None, None)
+             for col, stack in zip(columns, stacks)]
+
+    rows = []
+    for level in range(depth):
+        below = depth - 1 - level
+        style_attr = ('' if below == 0 else
+                      f' style="bottom: calc({below} * '
+                      f'var(--snc-agg-row-height))"')
+        cells = []
+        for ci, stack in enumerate(stacks):
+            if level < len(stack):
+                values, values_expr = reads[ci]
+                cells.append(_render_agg_cell(stack[level], values, values_expr,
+                                              style_attr, eval_in_scope))
+            else:
+                cells.append('<td class="col-agg-blank"></td>')
+        rows.append(f'<tr class="col-agg-row">'
+                    f'<td class="row-index"></td>{"".join(cells)}</tr>')
+    return ''.join(rows)
+
+
 def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
     children = model.get('children', {})
     columns = model.get('columns', [])
@@ -3319,7 +3744,11 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             pass
 
     actual_max_height = (max_height or 400) - 32
-    actual_min_height = min(22 * (len(lst) + 1), actual_max_height)
+    # The aggregation rows are part of what the table has to show, so a short
+    # one doesn't get a scrollbar for the sake of the answers under it.
+    agg_rows = max((len(_column_computes(model, col)) for col in columns),
+                   default=0)
+    actual_min_height = min(22 * (len(lst) + 1 + agg_rows), actual_max_height)
 
     actual_max_width = f' max-width:{max_width}px;' if max_width is not None else ''
 
@@ -3451,6 +3880,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
         strs.append('</tr>')
 
+    strs.append(_render_agg_rows(columns, model, lst, eval_in_scope, source_expr))
+
     strs.append('</table>')
     strs.append('</div>')
 
@@ -3569,6 +4000,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
                         _rename_column_search(model, old_name, name)
+                        _rename_column_compute(model, old_name, name)
                         _recompose_search(model, eval_in_scope)
                 model['editing_column_index'] = None
                 model['column_input_value'] = ''
@@ -3590,6 +4022,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 removed_col = model['columns'].pop(idx)
                 _remove_column_children(model, removed_col)
                 _remove_column_search(model, removed_col)
+                _remove_column_compute(model, removed_col)
                 _recompose_search(model, eval_in_scope)
                 if model.get('editing_column_index') is not None:
                     if model['editing_column_index'] == idx:
@@ -3679,6 +4112,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
                             _rename_column_search(model, old_name, commit_val)
+                            _rename_column_compute(model, old_name, commit_val)
                             _recompose_search(model, eval_in_scope)
                         if type_key:
                             _save_slots(model)
@@ -3769,6 +4203,33 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _set_column_search(model, col, compose=compose)
                 model['col_search_dropdown'] = None
                 _recompose_search(model, eval_in_scope)
+
+        # Compute leaves the menu open for the same reason the tally does:
+        # checking several aggregations in a row is the whole point.
+        case ComputeToggle(index=idx, expr=expr):
+            col = _column_at(model, idx)
+            if col is not None:
+                exprs = _column_computes(model, col)
+                if expr in exprs:
+                    exprs.remove(expr)
+                else:
+                    exprs.append(expr)
+                _set_column_computes(model, col, exprs)
+
+        case ComputeHoleInput(index=idx, expr=expr, hole=hole, value=text):
+            col = _column_at(model, idx)
+            if col is not None:
+                exprs = _column_computes(model, col)
+                edited = _agg_set_hole(expr, hole, text)
+                if expr in exprs:
+                    # In place, so the cell the user is typing at stays where
+                    # it was in the column's stack.
+                    exprs[exprs.index(expr)] = edited
+                else:
+                    # Typing a level into a row that isn't checked is a way of
+                    # asking for that percentile.
+                    exprs.append(edited)
+                _set_column_computes(model, col, exprs)
 
         # The tally leaves the column menu open: picking several values in a row
         # is the whole point of it.

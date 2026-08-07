@@ -1142,17 +1142,6 @@
 		}
 	}
 
-	/* The row owns the click (see _render_tally_check), so the box itself takes
-	   none: letting it toggle on its own would flip it out from under the model
-	   until the next render put it back. */
-	.col-tally-check {
-		pointer-events: none;
-		flex: none;
-		width: 12px;
-		height: 12px;
-		margin: 0;
-	}
-
 	/* Names the two columns of .col-tally-list below, so each heading is laid
 	   out like the cell it heads. */
 	.col-tally-list-header {
@@ -1189,10 +1178,180 @@
 	}
 }
 
+/* The row owns the click (see _render_tally_check), so the box itself takes
+   none: letting it toggle on its own would flip it out from under the model
+   until the next render put it back.
+
+   Out here rather than inside .col-menu-panel because the Compute submenu is
+   hoisted out of that panel and uses the same box. */
+.col-tally-check {
+	pointer-events: none;
+	flex: none;
+	width: 12px;
+	height: 12px;
+	margin: 0;
+}
+
 /* One short token per option, so this one shouldn't hold the shared 100px floor
    open the way a menu of labels does. */
 .col-search-chip-panel {
 	min-width: 0;
+}
+
+/* --- Compute: what the column adds up to ---
+   The row in the column ▾ menu, and the submenu it opens. The submenu is
+   hoisted a second time, out of the panel the row lives in, so its styles hang
+   off nothing (see the note above .col-menu-panel). */
+
+.col-menu-panel .col-compute {
+	/* .snc-dropdown-trigger is inline-flex, which would leave the row as wide
+	   as its text instead of as wide as the menu. */
+	display: block;
+}
+
+.col-menu-panel .col-compute-trigger.open {
+	background: var(--snc-hover-bg);
+}
+
+.col-compute-arrow {
+	flex: none;
+	color: var(--snc-text-muted);
+	font-size: 9px;
+}
+
+.col-compute-panel {
+	font-size: 9px;
+	line-height: 1.5;
+	padding: 2px;
+
+	.col-compute-row {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		padding: 0 2px;
+		border-radius: 3px;
+
+		/* Only the name and its box highlight: the level box and the answer
+		   are not ways of checking the row. */
+		&:has(.col-compute-toggle:hover) {
+			background: var(--snc-hover-bg);
+		}
+
+		/* A question this column has no answer to is a row to read past. */
+		&.unselectable {
+			color: var(--snc-text-muted);
+
+			&:has(.col-compute-toggle:hover) {
+				background: none;
+			}
+		}
+	}
+
+	.col-compute-toggle {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		flex: 1;
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.col-compute-row.unselectable .col-compute-toggle {
+		cursor: default;
+	}
+
+	.col-compute-name {
+		white-space: nowrap;
+	}
+
+	/* The level of a percentile, sized for three digits and no more: it is part
+	   of the row's name rather than a box to write in. */
+	.col-compute-hole {
+		flex: none;
+		box-sizing: border-box;
+		width: 4ch;
+		font-size: 9px;
+		padding: 0 2px;
+		border-color: transparent;
+		border-radius: 3px;
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+
+		&:hover,
+		&:focus {
+			border-color: var(--snc-border-color);
+		}
+	}
+
+	.col-compute-preview {
+		flex: none;
+		padding-left: 8px;
+		color: var(--snc-text-muted);
+		font-variant-numeric: tabular-nums;
+		max-width: 140px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+}
+
+/* --- The answers, under the columns they are about ---
+   Ordinary table cells, so each stays the width of its column and reads like
+   the rows above it -- but pinned to the bottom of the scrollport the way the
+   header is pinned to the top. A column with no answer at this depth gets a
+   blank that stays where it is: there is nothing there worth covering the rows
+   it would float over. */
+.list-visualizer tr.col-agg-row {
+	/* How far each row of answers sits above the one below it. Sticky can't
+	   stack itself, so the rows carry the offset (see _render_agg_rows); the
+	   +1px is the cell border between them. */
+	--snc-agg-row-height: calc(1lh + 1px);
+}
+
+.list-visualizer > .list-table-scroll > table tr.col-agg-row > td.col-agg-cell {
+	position: sticky;
+	bottom: 0;
+	z-index: 1;
+	background: var(--snc-bg);
+	/* border-collapse won't stick a cell's own borders, so the edges are drawn
+	   inside the cell -- the same trick the sticky header uses for its bottom. */
+	box-shadow: inset 0 1px 0 var(--snc-table-cell-border-color),
+	            inset -1px 0 0 var(--snc-table-cell-border-color);
+}
+
+/* Nested lists opt out, like the sticky header: their scrollport often doesn't
+   overflow, and the cells would stick to the parent's and float over it. */
+.list-visualizer .list-visualizer > .list-table-scroll > table tr.col-agg-row > td.col-agg-cell {
+	position: static;
+	z-index: auto;
+	box-shadow: none;
+}
+
+/* Nothing in it, so it draws nothing: the table simply stops under that
+   column. */
+.list-visualizer td.col-agg-blank {
+	border-width: 0;
+}
+
+.list-visualizer .col-agg {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+}
+
+.list-visualizer .col-agg-label {
+	flex: none;
+	color: var(--snc-text-muted);
+	white-space: nowrap;
+}
+
+.list-visualizer .col-agg-value {
+	flex: 1;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 /* The (code) operator. Muted only in the option list, where the other options

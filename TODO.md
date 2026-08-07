@@ -38,7 +38,10 @@
 - [x] tooltips (and maybe dropdowns too) shouldn't disappear before the mouse enters them
 - [x] expression tooltips: add + button that makes a new var with the expression
 - [x] make a pick segment mode for lists: can pick indices, whole rows, or just selected columns
-- [ ] figure out what table widgets should be per column
+- [x] figure out what table widgets should be per column
+- [x] column tally
+- [ ] aggregations
+- [ ] col add button: show on visualizer focus rather than on hover
 - [ ] list visualizer search: be smart so that simple var uses are == rather than treated as simple truthy predicates
 - [ ] dictionary visualizer
 - [ ] group by (i.e. dictionaries of lists)
