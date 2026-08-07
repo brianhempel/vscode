@@ -8308,7 +8308,7 @@ from list_visualizer import (
     COMPUTE_AGGS, HISTOGRAM_AGG, NO_ANSWER,
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
     _agg_value, _agg_code, _agg_label, _format_agg_value,
-    _agg_row_index, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
+    _agg_row_index_code, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
 )
 
 
@@ -8387,33 +8387,46 @@ class TestAggExpr(unittest.TestCase):
 
 
 class TestAggRowIndex(unittest.TestCase):
-    """An aggregation that subscripts the list itself ($$) answers with a row of
-    it rather than a value of its own, and the index it reads the list at is
-    read back off the expression instead of stored beside it."""
-
-    def test_a_row_aggregation_names_the_index_inside_it(self):
-        self.assertEqual(_agg_row_index('$$[np.argmin($)]'), 'np.argmin($)')
-        self.assertEqual(_agg_row_index('$$[np.argmax($)]'), 'np.argmax($)')
-
-    def test_an_aggregation_that_answers_with_a_value_names_no_row(self):
-        self.assertIsNone(_agg_row_index('min($)'))
-        # The index by itself is a number, not the row it names.
-        self.assertIsNone(_agg_row_index('np.argmin($)'))
-
-    def test_something_that_subscripts_the_column_is_not_a_row_of_the_list(self):
-        self.assertIsNone(_agg_row_index('$[0]'))
-
-    def test_an_expression_that_does_not_parse_names_no_row(self):
-        self.assertIsNone(_agg_row_index('$$[np.argmin($)'))
+    """Min Item and Max Item answer with a row of the list rather than a value
+    of its own. They ask row by row -- `min(lst, key=...)` -- so `$` in them is
+    the column read off the row the key is handed."""
 
     def test_the_catalog_offers_min_item_and_max_item(self):
         self.assertEqual([label for label, template in COMPUTE_AGGS
                           if _agg_is_row(template)],
                          ['Min Item', 'Max Item'])
 
+    def test_they_order_the_list_by_the_column_rather_than_index_into_it(self):
+        self.assertEqual([template for _, template in COMPUTE_AGGS
+                          if _agg_is_row(template)],
+                         ['min($$, key=lambda item: $)',
+                          'max($$, key=lambda item: $)'])
+
+    def test_an_aggregation_that_answers_with_a_value_is_not_one(self):
+        self.assertFalse(_agg_is_row('min($)'))
+        # The index by itself is a number, not the row it names.
+        self.assertFalse(_agg_is_row('np.argmin($)'))
+
+    def test_an_aggregation_the_user_wrote_keeps_the_column_it_was_promised(self):
+        # The free-form box says `$` is the whole column and `$$` the list, so
+        # naming the list is not what makes an aggregation a row aggregation --
+        # being one of these two is.
+        self.assertFalse(_agg_is_row('$$[np.argmin($)]'))
+        self.assertFalse(_agg_is_row('len($$) - len($)'))
+
+    def test_the_index_is_the_list_own_index_of_the_row_it_picked(self):
+        self.assertEqual(
+            _agg_row_index_code("min(data, key=lambda item: item['b'])",
+                                'data'),
+            "data.index(min(data, key=lambda item: item['b']))")
+
     def test_a_row_aggregation_reads_as_its_name(self):
-        self.assertEqual(_agg_label('$$[np.argmin($)]'), 'Min Item')
-        self.assertEqual(_agg_label('$$[np.argmax($)]'), 'Max Item')
+        self.assertEqual(_agg_label('min($$, key=lambda item: $)'), 'Min Item')
+        self.assertEqual(_agg_label('max($$, key=lambda item: $)'), 'Max Item')
+
+    def test_they_need_nothing_imported(self):
+        # min and max are builtins; the row costs no numpy at all.
+        self.assertEqual(_agg_imports('min($$, key=lambda item: $)'), ())
 
 
 class TestAggImports(unittest.TestCase):
@@ -8474,16 +8487,26 @@ class TestAggValues(unittest.TestCase):
                                     lambda code: eval(code, {}, {})), 3 - 1)
 
     def test_a_row_aggregation_answers_with_the_row_the_column_picked(self):
-        # The column is not the list here: the answer is the item the least of
-        # those values belongs to, not the least value.
-        lst = ['a', 'b', 'c']
-        self.assertEqual(_agg_value(agg_named('Min Item'), [30, 10, 20],
-                                    None, lst), 'b')
-        self.assertEqual(_agg_value(agg_named('Max Item'), [30, 10, 20],
-                                    None, lst), 'a')
+        # The column is not the list here: the answer is the row the least of
+        # those values belongs to, not the least value. `$` is bound to the
+        # column read off one row, since that is what the key is handed.
+        lst = [{'v': 30}, {'v': 10}, {'v': 20}]
+        self.assertEqual(_agg_value(agg_named('Min Item'), None, None, lst,
+                                    "item['v']"), {'v': 10})
+        self.assertEqual(_agg_value(agg_named('Max Item'), None, None, lst,
+                                    "item['v']"), {'v': 30})
+
+    def test_the_item_column_orders_the_list_by_the_rows_themselves(self):
+        self.assertEqual(_agg_value(agg_named('Min Item'), None, None,
+                                    COMPUTE_LIST), 1)
 
     def test_a_row_aggregation_with_no_list_to_read_has_no_answer(self):
         self.assertIs(_agg_value(agg_named('Min Item'), [30, 10, 20]),
+                      NO_ANSWER)
+
+    def test_rows_that_cannot_be_compared_pick_none(self):
+        # min raises rather than coercing, which np.argmin would not have.
+        self.assertIs(_agg_value(agg_named('Min Item'), None, None, [1, 'a']),
                       NO_ANSWER)
 
     def test_a_histogram_answers_past_the_names_it_writes_into(self):
@@ -8561,9 +8584,19 @@ class TestAggCode(unittest.TestCase):
                          'np.percentile(data, 25)')
 
     def test_the_list_is_bound_where_the_second_dollar_was(self):
-        self.assertEqual(_agg_code('$$[np.argmin($)]',
+        self.assertEqual(_agg_code('len($$) - len($)',
                                    "[item['p'] for item in data]", 'data'),
-                         "data[np.argmin([item['p'] for item in data])]")
+                         "len(data) - len([item['p'] for item in data])")
+
+    def test_a_row_aggregation_orders_the_list_by_one_rows_column(self):
+        # `$` is bound to the column read off a row, which is what the caller
+        # hands it, because that is the question a row aggregation asks.
+        self.assertEqual(_agg_code(agg_named('Min Item'), "item['p']", 'data'),
+                         "min(data, key=lambda item: item['p'])")
+
+    def test_the_item_column_orders_the_list_by_its_own_rows(self):
+        self.assertEqual(_agg_code(agg_named('Min Item'), 'item', 'data'),
+                         'min(data, key=lambda item: item)')
 
     def test_a_histogram_hands_over_the_line_it_writes(self):
         # Not the question alone: `np.histogram` answers with a pair, and the
@@ -8578,8 +8611,11 @@ class TestAggCode(unittest.TestCase):
         data = COMPUTE_LIST
         for _, template in COMPUTE_AGGS:
             with self.subTest(template):
-                code = _agg_code(template, 'data', 'data')
-                answer = _agg_value(template, data, None, data)
+                # What `$` stands for: every value the column has, or -- for a
+                # row aggregation -- the column read off one row.
+                column = 'item' if _agg_is_row(template) else 'data'
+                code = _agg_code(template, column, 'data')
+                answer = _agg_value(template, data, None, data, column)
                 if _agg_is_histogram(template):
                     # A line rather than an expression, so it is run rather than
                     # evaluated -- and it answers with arrays, which compare
@@ -9037,7 +9073,7 @@ class TestComputeMenuRendering(unittest.TestCase):
         self.assertIn('snc-py-exp="np.mean(data)"', panel)
         self.assertIn('snc-py-exp="min(data)"', panel)
         self.assertIn('snc-py-exp="np.percentile(data, 90)"', panel)
-        self.assertIn('snc-py-exp="data[np.argmin(data)]"', panel)
+        self.assertIn('snc-py-exp="min(data, key=lambda item: item)"', panel)
 
     def test_the_expressions_say_which_import_they_need(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -9210,8 +9246,8 @@ class TestComputeCellRendering(unittest.TestCase):
         self.assertIn('<td class="row-index"></td>', row)
 
 
-MIN_ITEM = '$$[np.argmin($)]'
-MAX_ITEM = '$$[np.argmax($)]'
+MIN_ITEM = 'min($$, key=lambda item: $)'
+MAX_ITEM = 'max($$, key=lambda item: $)'
 
 
 class TestComputeItemRowRendering(unittest.TestCase):
@@ -9221,7 +9257,7 @@ class TestComputeItemRowRendering(unittest.TestCase):
     # Least by 'b' is the middle row, which is neither least nor greatest by
     # 'a': a cell that read the wrong row would show it.
     LST = [{'a': 10, 'b': 2}, {'a': 30, 'b': 1}, {'a': 20, 'b': 3}]
-    COLUMN_B = "[item['b'] for item in data]"
+    LEAST_BY_B = "min(data, key=lambda item: item['b'])"
 
     def model(self, computes, lst=None, columns=None):
         lst = self.LST if lst is None else lst
@@ -9270,20 +9306,20 @@ class TestComputeItemRowRendering(unittest.TestCase):
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         row = self.item_rows(model, lst, source='data')[0]
         index_cell = row[:row.index('</td>')]
-        self.assertIn(html.escape(f'np.argmin({self.COLUMN_B})'), index_cell)
+        self.assertIn(html.escape(f'data.index({self.LEAST_BY_B})'), index_cell)
         self.assertIn('draggable="true"', index_cell)
 
     def test_each_cell_hands_over_its_own_column_of_that_row(self):
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         row = self.item_rows(model, lst, source='data')[0]
-        item = f'data[np.argmin({self.COLUMN_B})]'
-        self.assertIn(html.escape(f"{item}['a']"), row)
-        self.assertIn(html.escape(f"{item}['b']"), row)
+        self.assertIn(html.escape(f"{self.LEAST_BY_B}['a']"), row)
+        self.assertIn(html.escape(f"{self.LEAST_BY_B}['b']"), row)
 
-    def test_the_expressions_say_they_need_numpy(self):
+    def test_the_row_costs_no_imports(self):
+        # min and max are builtins, so nothing has to be added to the file.
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         row = self.item_rows(model, lst, source='data')[0]
-        self.assertEqual(row.count('snc-py-exp-imports'), 3)
+        self.assertNotIn('snc-py-exp-imports', row)
 
     def test_only_the_column_that_asked_is_labelled(self):
         # The other cells are that row's values, not minima of their own.
@@ -9332,7 +9368,7 @@ class TestComputeItemRowRendering(unittest.TestCase):
         lst, model = self.model({'$': [MIN_ITEM]}, lst=[3, 1, 4],
                                 columns=['$'])
         row = self.item_rows(model, lst, source='data')[0]
-        self.assertIn(html.escape('data[np.argmin(data)]'), row)
+        self.assertIn(html.escape('min(data, key=lambda item: item)'), row)
         self.assertEqual(self.values(row), ['1'])
 
     def test_a_row_aggregation_is_not_a_row_of_the_list(self):

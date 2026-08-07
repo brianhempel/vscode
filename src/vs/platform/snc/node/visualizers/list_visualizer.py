@@ -798,6 +798,12 @@ def _column_item_expr(col: str) -> str | None:
     return None if col.strip() == '$' else replace_dollars_in_py_exp(col, ['item'])
 
 
+def _column_key_expr(col: str) -> str:
+    """The same, as a key to order the list by: `item` itself when the column
+    is the row, which is what `min(lst, key=lambda item: item)` reads."""
+    return _column_item_expr(col) or 'item'
+
+
 def _column_values_clause(col: str, source_expr: str) -> str | None:
     """A column's values as a comprehension body, `<value> for item in <source>`,
     for a caller that brackets it itself -- or None when the column is the item
@@ -1338,9 +1344,10 @@ def _tally_exprs(col, model: dict, tally, source_expr,
 # a text box, and what's typed in it is part of the expression.
 #
 # `$` is the column, as everywhere else; `$$` is the list the column was read
-# out of. An aggregation that names `$$` answers with a row of the list rather
-# than a value of its own, and is drawn as a whole row of the table -- see
-# _agg_row_index.
+# out of. Min Item and Max Item answer with a row of that list rather than a
+# value of their own, and are drawn as a whole row of the table -- see
+# _agg_is_row. They ask their question row by row, so the `$` in them is the
+# column read off the row their key is handed rather than every value at once.
 #
 # An aggregation may carry the whole line it writes rather than the question
 # alone, when the line is what everyone types by hand. np.histogram answers with
@@ -1351,6 +1358,13 @@ def _tally_exprs(col, model: dict, tally, source_expr,
 # and dates too. The rest borrow numpy, which is the shorter and more familiar
 # way to write them down.
 HISTOGRAM_AGG = 'counts, edges = np.histogram($, bins={{10}})'
+
+# The two that answer with a row of the list. `min`/`max` with a key, which is
+# how anyone picks a row out of a list by hand: no numpy to import, no coercing
+# a column of mixed types into an order it doesn't have, and the row itself
+# rather than a number to look it up by. `$` is the key's own row -- these are
+# the only aggregations that read the column one row at a time.
+ROW_AGGS = ('min($$, key=lambda item: $)', 'max($$, key=lambda item: $)')
 
 COMPUTE_AGGS = (
     ('#Unique',    'len(set($))'),
@@ -1364,8 +1378,8 @@ COMPUTE_AGGS = (
     ('Percentile', 'np.percentile($, {{90}})'),
     ('Max',        'max($)'),
     ('Max Idx',    'np.argmax($)'),
-    ('Min Item',   '$$[np.argmin($)]'),
-    ('Max Item',   '$$[np.argmax($)]'),
+    ('Min Item',   ROW_AGGS[0]),
+    ('Max Item',   ROW_AGGS[1]),
     ('Histogram',  HISTOGRAM_AGG),
 )
 
@@ -1444,42 +1458,40 @@ def _agg_set_hole(template: str, hole: int, value: str) -> str:
     return _HOLE_RE.sub(replace, template)
 
 
-_DOLLAR_NAME = '_%ddlr_'
-_DOLLAR_NAME_RE = re.compile(r'_(\d+)dlr_')
-
-
-def _agg_row_index(template: str) -> Optional[str]:
-    """The index a row aggregation reads the list at -- `np.argmin($)` out of
-    `$$[np.argmin($)]` -- or None for an aggregation that answers with a value
-    of its own.
-
-    An aggregation that subscripts the list itself answers with a row of it, so
-    it is drawn as a whole row of the table rather than as one cell under its
-    column. That row's cells are the row's own values, and its index cell hands
-    over this number.
-
-    Read back off the expression rather than stored beside it, so the row on
-    screen, the index the user drags out and the code every cell hands over
-    cannot disagree about which row is meant.
-    """
-    source = DOLLARS_RE.sub(lambda m: _DOLLAR_NAME % len(m[0]),
-                            _agg_fill(template))
-    try:
-        node = ast.parse(source, mode='eval').body
-    except SyntaxError:
-        return None
-    if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
-            and node.value.id == _DOLLAR_NAME % 2):
-        return None
-    index = ast.get_source_segment(source, node.slice)
-    if index is None:
-        return None
-    return _DOLLAR_NAME_RE.sub(lambda m: '$' * int(m[1]), index)
-
-
 def _agg_is_row(template: str) -> bool:
-    """Whether an aggregation answers with a row of the list."""
-    return _agg_row_index(template) is not None
+    """Whether an aggregation answers with a row of the list rather than a
+    value of its own, and so is drawn as a whole row of the table.
+
+    By shape against ROW_AGGS, the way _agg_is_histogram knows a histogram --
+    not by anything structural about the expression. The free-form box promises
+    that `$` is the whole column and `$$` the list, so an aggregation the user
+    wrote that happens to name the list is still asked of the column at once;
+    only these two ask row by row, and only because the catalog says so.
+    """
+    shape = _agg_shape(template)
+    return any(_agg_shape(known) == shape for known in ROW_AGGS)
+
+
+def _agg_row_index_code(item_code: str, source_expr: str) -> str:
+    """The index of the row a row aggregation picked: the list's own index of
+    it, written around the code that picked it.
+
+    `data.index(min(data, key=lambda item: item['b']))`. Around rather than
+    beside, so the row the cells read and the number the index cell hands over
+    cannot name different rows. `.index` finds the first row equal to it, which
+    is the row `min` returned -- an earlier equal row has an equal key, so
+    `min` would have stopped there.
+    """
+    return f'{source_expr}.index({item_code})'
+
+
+def _agg_row_index(lst, item):
+    """Where a row aggregation's row sits in the list, or NO_ANSWER -- the same
+    question _agg_row_index_code writes down, asked here."""
+    try:
+        return lst.index(item)
+    except Exception:
+        return NO_ANSWER
 
 
 def _agg_imports(template: str) -> Tuple[str, ...]:
@@ -1607,12 +1619,18 @@ def _numpy():
     return _numpy_module
 
 
-def _agg_value(template: str, values: list, eval_in_scope=None, lst=None):
+def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
+               item_expr: str = 'item'):
     """An aggregation's answer for a column's values, or NO_ANSWER.
 
     *lst* is the list the column was read out of, which is what a row
-    aggregation subscripts; one that isn't handed a list has nothing to answer
+    aggregation orders; one that isn't handed a list has nothing to answer
     with, which is NO_ANSWER like any other question it can't answer.
+
+    *item_expr* is the column read off one row, against a row bound to `item`,
+    which is what `$` stands for in a row aggregation -- it asks its question
+    row by row rather than of every value at once. Defaulted to `item` itself,
+    the column that is the row.
 
     Evaluated in the user's scope, so a column expression that named the
     program's own values has already been read by the time we get here -- but
@@ -1629,8 +1647,9 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None):
     user's own program by a menu they only opened to look at.
     """
     try:
+        column = item_expr if _agg_is_row(template) else '_v'
         body = replace_dollars_in_py_exp(_agg_expr(_agg_fill(template)),
-                                         ['_v', '_lst'])
+                                         [column, '_lst'])
         code = f'lambda np, _v, _lst: {body}'
         agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
         with warnings.catch_warnings():
@@ -1640,13 +1659,26 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None):
         return NO_ANSWER
 
 
-def _agg_code(template: str, values_expr: str, source_expr: str = None) -> str:
-    """The expression itself, with `$` bound to the column -- the same list
-    expression the column header already hands to a drag -- and `$$` to the
-    list the column was read out of."""
-    replacements = ([values_expr] if source_expr is None
-                    else [values_expr, source_expr])
+def _agg_code(template: str, column_expr: str, source_expr: str = None) -> str:
+    """The expression itself, with `$` bound to the column and `$$` to the list
+    the column was read out of.
+
+    *column_expr* is what `$` stands for, which the caller knows because it
+    knows the column: every value the column has -- the same list expression
+    the column header hands to a drag -- or, for a row aggregation, the column
+    read off one row. _agg_column_expr is where that choice is made.
+    """
+    replacements = ([column_expr] if source_expr is None
+                    else [column_expr, source_expr])
     return replace_dollars_in_py_exp(_agg_fill(template), replacements)
+
+
+def _agg_column_expr(template: str, col: str, source_expr: str) -> str:
+    """What `$` stands for in an aggregation over *col*: every value the column
+    has, or -- for a row aggregation, which asks row by row -- the column read
+    off the row its key is handed."""
+    return (_column_key_expr(col) if _agg_is_row(template)
+            else _column_values_expr(col, source_expr))
 
 
 def _format_agg_value(value) -> str:
@@ -3145,9 +3177,11 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
     values_expr = (None if source_expr is None
                    else _column_values_expr(col, source_expr))
 
+    item_expr = _column_key_expr(col)
+
     rows = []
     for label, template, checked in _compute_rows(model, col):
-        answer = _agg_value(template, values, eval_in_scope, lst)
+        answer = _agg_value(template, values, eval_in_scope, lst, item_expr)
         # A question this column can't answer isn't worth checking -- but one
         # already checked stays clickable, or there'd be no way to uncheck it.
         unanswered = answer is NO_ANSWER
@@ -3166,8 +3200,10 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             for i, text in enumerate(_agg_holes(template)))
         # Nothing to hand over when there is no answer, and nothing to name the
         # column by when the list has no source.
-        code = (None if unanswered or values_expr is None
-                else _agg_code(template, values_expr, source_expr))
+        code = (None if unanswered or source_expr is None
+                else _agg_code(template,
+                               _agg_column_expr(template, col, source_expr),
+                               source_expr))
         rows.append(
             f'<div class="{classes}">'
             f'<span class="col-compute-toggle"{toggle_attr}>'
@@ -3203,10 +3239,14 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
     # again by its place in the list of everything focusable would lose the
     # typing to it.
     for i, template in enumerate(_compute_free_rows(model, col)):
-        answer = _agg_value(template, values, eval_in_scope, lst)
+        answer = _agg_value(template, values, eval_in_scope, lst, item_expr)
         unanswered = answer is NO_ANSWER
-        code = (None if unanswered or values_expr is None
-                else _agg_code(template, values_expr, source_expr))
+        # Through _agg_column_expr like the catalog's rows, so a box holding
+        # something written the way Min Item is hands over what it computed.
+        code = (None if unanswered or source_expr is None
+                else _agg_code(template,
+                               _agg_column_expr(template, col, source_expr),
+                               source_expr))
         # A row of theirs is checked by being there at all, and unchecking is
         # how it is taken away: the expression is the only record of it, so
         # there would be nothing left to keep. The empty one is checking
@@ -4017,32 +4057,32 @@ def _column_cell_value(col: str, item, eval_in_scope=None):
         return NO_ANSWER
 
 
-def _render_agg_item_row(expr, ci, level, columns, lst, values, values_expr,
-                         style_attr, eval_in_scope=None,
-                         source_expr=None) -> str:
+def _render_agg_item_row(expr, ci, level, columns, lst, style_attr,
+                         eval_in_scope=None, source_expr=None) -> str:
     """A row aggregation's row: the row of the list a column's Min Item or Max
     Item picked out, drawn across every column with its index beside it.
 
-    Both the row and its index come out of the aggregation's own expression --
-    the index is the one written inside it -- so the values on screen and the
-    code each cell hands over name the same row of the list.
+    The row comes out of the aggregation's own expression and its index out of
+    the list's own `.index` of that row, so the values on screen and the code
+    each cell hands over name the same row of the list. The column's values are
+    never gathered at all: `min` with a key reads them one row at a time.
 
     Only the column that asked is labelled. The other cells are that row's
     values, and a "Min Item" over each of them would read as a claim that each
     was least in its own column.
     """
-    index_expr = _agg_row_index(expr)
-    idx = _agg_value(index_expr, values, eval_in_scope)
-    item = _agg_value(expr, values, eval_in_scope, lst)
+    item_expr = _column_key_expr(columns[ci])
+    item = _agg_value(expr, None, eval_in_scope, lst, item_expr)
+    idx = _agg_row_index(lst, item)
     # Nothing to hand over when the aggregation has no row to point at, and
     # nothing to name the list by when it has no source.
-    item_code = (None if item is NO_ANSWER or values_expr is None
-                 else _agg_code(expr, values_expr, source_expr))
-    idx_code = (None if idx is NO_ANSWER or values_expr is None
-                else _agg_code(index_expr, values_expr))
+    item_code = (None if item is NO_ANSWER or source_expr is None
+                 else _agg_code(expr, item_expr, source_expr))
+    idx_code = (None if idx is NO_ANSWER or item_code is None
+                else _agg_row_index_code(item_code, source_expr))
 
     cells = [f'<td class="row-index col-agg-cell"{style_attr}>'
-             f'<span{py_exp_attrs(idx_code, imports=_agg_imports(index_expr))}>'
+             f'<span{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
              f'</span></td>']
     for cj, col in enumerate(columns):
@@ -4105,9 +4145,9 @@ def _render_agg_rows(columns, model, lst, eval_in_scope=None,
     if not levels:
         return ''
 
-    # Once per column, however many answers are asked of it.
+    # Once per column, however many answers are asked of it -- and not at all
+    # for a column that only picks rows, since a key reads them one at a time.
     asked = [any(level[0] == 'cells' and level[1][ci] is not None
-                 or level[0] == 'item' and level[1] == ci
                  for level in levels)
              for ci in range(len(columns))]
     reads = [(_column_values(col, lst, model, eval_in_scope),
@@ -4124,10 +4164,9 @@ def _render_agg_rows(columns, model, lst, eval_in_scope=None,
                       f'var(--snc-agg-row-height))"')
         if spec[0] == 'item':
             _, ci, expr = spec
-            values, values_expr = reads[ci]
             rows.append(_render_agg_item_row(expr, ci, level, columns, lst,
-                                             values, values_expr, style_attr,
-                                             eval_in_scope, source_expr))
+                                             style_attr, eval_in_scope,
+                                             source_expr))
             continue
         cells = []
         for ci, expr in enumerate(spec[1]):
