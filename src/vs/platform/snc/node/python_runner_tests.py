@@ -5,6 +5,7 @@ Run:
     python3 -m pytest src/vs/platform/snc/node/python_runner_tests.py -v
 """
 
+import __future__
 import importlib.util
 import io
 import json
@@ -148,6 +149,42 @@ class TestReseed(unittest.TestCase):
         self.assertEqual(errors[0][0], 1)
         self.assertIn("ModuleNotFoundError", errors[0][1])
         self.assertIn("nonexistent_module_xyz", result["stderr"])
+
+
+class TestFutureFlags(unittest.TestCase):
+    """`from __future__ import ...` lands in the import half of the split, but
+    future statements apply per compilation unit — so the body has to be
+    compiled with the flags the imports declared or the feature silently
+    doesn't apply to the user's code."""
+
+    def _globals(self):
+        return {
+            "__name__": "__main__",
+            "__file__": "<string>",
+            "_log_value": lambda *args, **kwargs: None,
+            "_log_and_return": lambda line, value, *args, **kwargs: value,
+        }
+
+    def test_body_is_compiled_with_the_declared_future_flags(self):
+        import_code, body_code = split_leading_imports("from __future__ import annotations\nx = 1\n")
+        flag = __future__.annotations.compiler_flag
+        self.assertTrue(import_code.co_flags & flag)
+        self.assertTrue(body_code.co_flags & flag)
+
+    def test_body_without_future_imports_gets_no_flags(self):
+        _, body_code = split_leading_imports("import re\nx = 1\n")
+        self.assertFalse(body_code.co_flags & __future__.annotations.compiler_flag)
+
+    def test_postponed_annotations_actually_take_effect(self):
+        """With the flag the annotation is left as a string; without it,
+        resolving it raises NameError."""
+        source_code = "from __future__ import annotations\ndef f(a: Undefined) -> Undefined:\n    return a\n"
+        import_code, body_code = split_leading_imports(source_code)
+        globals_dict = self._globals()
+        exec(import_code, globals_dict)
+        exec(body_code, globals_dict)
+
+        self.assertEqual(globals_dict["f"].__annotations__, {"a": "Undefined", "return": "Undefined"})
 
 
 class TestBuildNewCodeEdits(unittest.TestCase):

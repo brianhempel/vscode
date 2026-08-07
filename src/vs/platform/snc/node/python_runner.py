@@ -23,6 +23,7 @@ import html
 import traceback
 import os
 
+import __future__  # the module, for its flag table — not a future statement
 import importlib.util
 import glob
 import random
@@ -1457,6 +1458,15 @@ def extract_error_line_from_traceback(tb_str: str) -> int:
     return 1
 
 
+# Every `from __future__ import ...` flag, so the body can be compiled with
+# whichever ones the user declared. A future statement applies to one
+# compilation unit, and the split puts it in a different unit than the code it
+# is meant to govern.
+_ALL_FUTURE_FLAGS = 0
+for _feature_name in __future__.all_feature_names:
+    _ALL_FUTURE_FLAGS |= getattr(__future__, _feature_name).compiler_flag
+
+
 def split_leading_imports(source_code: str):
     """
     Split source code into leading import statements and the remaining body.
@@ -1519,7 +1529,11 @@ def split_leading_imports(source_code: str):
         if hasattr(node, 'end_lineno') and not hasattr(node, 'end_col_offset'):
             setattr(node, 'end_col_offset', 0)
     ast.fix_missing_locations(body_module)
-    body_code = compile(body_module, filename='<string>', mode='exec')
+    # Carry over the future statements from the import half. `dont_inherit`
+    # keeps this runner's own compilation context out of the user's code, so the
+    # flags are exactly the ones they asked for.
+    future_flags = import_code.co_flags & _ALL_FUTURE_FLAGS
+    body_code = compile(body_module, filename='<string>', mode='exec', flags=future_flags, dont_inherit=True)
 
     return import_code, body_code
 
