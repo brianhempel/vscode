@@ -1294,13 +1294,19 @@
 		white-space: nowrap;
 	}
 
-	/* The rows that write a line, and the rows the user writes themselves, have
-	   no checkbox -- but they still start where the named ones do, so the menu
-	   reads as one column of rows rather than two. Sized like the checkbox it
-	   stands in for. */
+	/* The rows that write a line have no checkbox -- but they still start where
+	   the named ones do, so the menu reads as one column of rows rather than
+	   two. Sized like the checkbox it stands in for. */
 	.col-compute-nocheck {
 		flex: none;
 		width: 12px;
+	}
+
+	/* The user's own rows do have one, but the box beside it is what takes the
+	   width -- so this holds only the checkbox, unlike the named rows where the
+	   name shares the span with it. */
+	.col-compute-free .col-compute-toggle {
+		flex: none;
 	}
 
 	/* Unique and Tally: a name and nothing else, so the name reaches the full
@@ -1415,6 +1421,23 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* A histogram answers with a pair of arrays, which no cell can read as text, so
+   the cell draws the bars instead. Told its own size rather than taking one from
+   what it holds: a row of answers has to stay the height every other row of
+   answers is, since the sticky-bottom offsets in _render_agg_rows are all
+   counted off one --snc-agg-row-height.
+
+   Out here rather than inside .list-visualizer because the same drawing previews
+   the row in the Compute submenu, which is hoisted out of the column menu -- the
+   same reason .col-tally-check sits out here. */
+.col-agg-hist {
+	display: inline-block;
+	vertical-align: middle;
+	width: 4.5em;
+	height: 0.8lh;
+	fill: currentColor;
 }
 
 /* The (code) operator. Muted only in the option list, where the other options

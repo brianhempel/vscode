@@ -243,6 +243,16 @@ class ComputeExprInput:
     value: str
 
 @dataclass(frozen=True, slots=True)
+class ComputeExprKeyDown:
+    """Enter or Escape in a box holding a whole aggregation.
+
+    Its own event rather than the container's ColumnKeyDown: Enter there means
+    "filter on the search", which is not what Enter over an aggregation the user
+    has just finished writing should mean.
+    """
+    pass
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -1332,9 +1342,16 @@ def _tally_exprs(col, model: dict, tally, source_expr,
 # than a value of its own, and is drawn as a whole row of the table -- see
 # _agg_row_index.
 #
+# An aggregation may carry the whole line it writes rather than the question
+# alone, when the line is what everyone types by hand. np.histogram answers with
+# a pair, and a pair is read by giving its halves names; so the names come along,
+# and what the row computes is the question on the right of the `=` (_agg_expr).
+#
 # min and max stay builtins: shorter than numpy's, and they answer for strings
 # and dates too. The rest borrow numpy, which is the shorter and more familiar
 # way to write them down.
+HISTOGRAM_AGG = 'counts, edges = np.histogram($, bins={{10}})'
+
 COMPUTE_AGGS = (
     ('#Unique',    'len(set($))'),
     ('#Present',   'sum(x is not None for x in $)'),
@@ -1349,6 +1366,7 @@ COMPUTE_AGGS = (
     ('Max Idx',    'np.argmax($)'),
     ('Min Item',   '$$[np.argmin($)]'),
     ('Max Item',   '$$[np.argmax($)]'),
+    ('Histogram',  HISTOGRAM_AGG),
 )
 
 # The rest of the submenu: questions whose answer is a whole list rather than a
@@ -1361,6 +1379,11 @@ COMPUTE_CODES = (
 )
 
 COMPUTE_IMPORTS = ('import numpy as np',)
+
+# What a box the user writes an aggregation in says of itself, wherever it is
+# drawn. The same thing the column search box says of its own, less `$$$`: an
+# aggregation is asked of the whole column, so there is no one item to name.
+COMPUTE_EXPR_TOOLTIP = '$ is this column, $$ the list'
 
 # A question this column can't answer -- an empty column, a mean of strings, a
 # box holding something that isn't a number. Its own object rather than None,
@@ -1385,6 +1408,24 @@ def _agg_shape(template: str) -> str:
     """An expression with its boxes emptied: what tells a percentile from a
     median without saying which percentile."""
     return _HOLE_RE.sub('{{}}', template)
+
+
+# A name, or a list of them, answered into at the head of a line. The negative
+# lookahead keeps `==` out of it, and requiring the `=` to follow the names
+# directly keeps `<=`, `!=` and `+=` out too: those are questions, not answers.
+_AGG_TARGETS_RE = re.compile(r'^[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*=(?!=)')
+
+
+def _agg_expr(template: str) -> str:
+    """The question an aggregation asks, without the names it answers into.
+
+    An aggregation that carries the whole line it writes -- `counts, edges =
+    np.histogram($, bins=10)`, which is how a pair is read -- is asking what is
+    on the right of the `=`. The names are where the line puts the answer, and
+    that is the only place the code and the question differ: everything else
+    reads the template as it stands.
+    """
+    return _AGG_TARGETS_RE.sub('', template).lstrip()
 
 
 def _agg_set_hole(template: str, hole: int, value: str) -> str:
@@ -1588,7 +1629,8 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None):
     user's own program by a menu they only opened to look at.
     """
     try:
-        body = replace_dollars_in_py_exp(_agg_fill(template), ['_v', '_lst'])
+        body = replace_dollars_in_py_exp(_agg_expr(_agg_fill(template)),
+                                         ['_v', '_lst'])
         code = f'lambda np, _v, _lst: {body}'
         agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
         with warnings.catch_warnings():
@@ -1622,6 +1664,91 @@ def _format_agg_value(value) -> str:
     else:
         text = repr(value)
     return html.escape(truncate_str(text, 40))
+
+
+def _agg_is_histogram(template: str) -> bool:
+    """Whether an aggregation is the catalog's Histogram, at any bin count.
+
+    By shape, the way _agg_label knows a percentile from a median, so nothing
+    has to be stored beside the expression to say what it draws.
+    """
+    return _agg_shape(template) == _agg_shape(HISTOGRAM_AGG)
+
+
+# How the bars are laid out. The height is what a count is measured against; the
+# width is per bar, of which the bar itself takes most and the gap the rest.
+_HIST_HEIGHT = 10
+_HIST_STEP = 2
+_HIST_BAR = 1.6
+
+
+def _hist_counts(answer) -> Optional[list]:
+    """The counts out of a `(counts, edges)` pair, or None for anything else.
+
+    A bins box the user is still typing in can leave the aggregation answering
+    with something else entirely, and a cell that can't draw its answer reads it
+    instead -- so this asks rather than assumes, and never raises out of a
+    render.
+    """
+    try:
+        if isinstance(answer, str) or len(answer) != 2:
+            return None
+        counts, edges = answer
+        if isinstance(counts, str) or len(counts) + 1 != len(edges):
+            return None
+        return [float(count) for count in counts]
+    except Exception:
+        return None
+
+
+def _agg_hist_svg(answer) -> str:
+    """A histogram's answer as bars, or '' for an answer that isn't one.
+
+    `(counts, edges)` is nothing a cell can read as text, so the cell draws it.
+    Bars and no more -- no axis, no labels: at one line high there is room for
+    the shape of a column and nothing else, and the numbers are one drag away.
+
+    Scaled to the fullest bin, with a floor under any bin that has something in
+    it: one beside a hundred rounds to nothing, and a bar that isn't drawn reads
+    as an empty bin rather than a rare one.
+
+    preserveAspectRatio="none" so the drawing fills whatever box CSS gives it.
+    The bars stay in proportion to each other, which is all a histogram says.
+    """
+    counts = _hist_counts(answer)
+    if not counts:
+        return ''
+    peak = max(counts)
+    if peak <= 0:
+        return ''
+    bars = []
+    for i, count in enumerate(counts):
+        if count <= 0:
+            height = 0.0
+        else:
+            height = max(1.0, _HIST_HEIGHT * count / peak)
+        bars.append(f'<rect x="{i * _HIST_STEP:g}" y="{_HIST_HEIGHT - height:g}" '
+                    f'width="{_HIST_BAR:g}" height="{height:g}" />')
+    # Wide enough for the bars and the gaps between them, and no wider: the gap
+    # after the last one would be a margin the drawing didn't ask for.
+    width = len(counts) * _HIST_STEP - (_HIST_STEP - _HIST_BAR)
+    return (f'<svg class="col-agg-hist" '
+            f'viewBox="0 0 {width:g} {_HIST_HEIGHT:g}" '
+            f'preserveAspectRatio="none" aria-hidden="true">'
+            f'{"".join(bars)}</svg>')
+
+
+def _agg_answer_html(template: str, answer) -> str:
+    """An answer as a cell reads it -- which for a histogram is its bars.
+
+    One place for both the cell under the column and the preview in the menu,
+    so the two cannot come to draw the same answer differently.
+    """
+    if _agg_is_histogram(template):
+        drawn = _agg_hist_svg(answer)
+        if drawn:
+            return drawn
+    return _format_agg_value(answer)
 
 
 def _is_list_of_ints(val) -> bool:
@@ -3049,7 +3176,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'</span>{holes}'
             f'<span class="col-compute-preview"'
             f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
-            f'>{"" if unanswered else _format_agg_value(answer)}</span>'
+            f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
             f'</div>')
 
     rows.append('<div class="col-compute-sep"></div>')
@@ -3080,17 +3207,29 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
         unanswered = answer is NO_ANSWER
         code = (None if unanswered or values_expr is None
                 else _agg_code(template, values_expr, source_expr))
+        # A row of theirs is checked by being there at all, and unchecking is
+        # how it is taken away: the expression is the only record of it, so
+        # there would be nothing left to keep. The empty one is checking
+        # nothing yet, and has nothing to take away.
+        written = bool(template.strip())
+        toggle_attr = '' if not written else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
         rows.append(
-            f'<div class="col-compute-row col-compute-free">'
-            f'<span class="col-compute-nocheck"></span>'
+            f'<div class="col-compute-row col-compute-free'
+            f'{" checked" if written else ""}">'
+            f'<span class="col-compute-toggle"{toggle_attr}>'
+            f'{_render_tally_check(written, disabled=not written)}</span>'
             f'<input type="text" class="col-compute-expr search-box" '
             f'snc-input="{html.escape(_compute_expr_event(index, template))}" '
             f'snc-focus-key="compute-free-{index}-{i}" '
+            f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
+            f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
             f'value="{html.escape(template)}" placeholder="Add aggregation" '
             f'spellcheck="false" />'
             f'<span class="col-compute-preview"'
             f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
-            f'>{"" if unanswered else _format_agg_value(answer)}</span>'
+            f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
             f'</div>')
 
     return (f'<div class="snc-dropdown-panel flyout col-compute-panel" '
@@ -3846,6 +3985,8 @@ def _agg_label_html(expr: str, index: int, level: int) -> str:
     return (f'<input type="text" class="col-agg-label col-agg-expr" '
             f'snc-input="{html.escape(_compute_expr_event(index, expr))}" '
             f'snc-focus-key="agg-expr-{index}-{level}" '
+            f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
+            f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
             f'value="{html.escape(expr)}" size="{max(len(expr), 4)}" '
             f'draggable="false" spellcheck="false" />')
 
@@ -3863,7 +4004,7 @@ def _render_agg_cell(expr, index, level, values, values_expr, style_attr,
         f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
         f'{_agg_label_html(expr, index, level)}'
         f'<span class="col-agg-value">'
-        f'{"" if answer is NO_ANSWER else _format_agg_value(answer)}</span>'
+        f'{"" if answer is NO_ANSWER else _agg_answer_html(expr, answer)}</span>'
         f'</div></td>')
 
 
@@ -4512,6 +4653,17 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     # asking for that percentile.
                     exprs.append(edited)
                 _set_column_computes(model, col, exprs)
+
+        case ComputeExprKeyDown():
+            key = event_json.get('key', '')
+            if key == 'Enter':
+                # Written: the cell is already there, and the menu has nothing
+                # more to say about it.
+                _close_column_menus(model)
+            elif key == 'Escape':
+                # Innermost first, the way Escape reads everywhere else in the
+                # menu -- and this box is only drawn while the submenu is open.
+                model['col_search_dropdown'] = None
 
         case ComputeExprInput(index=idx, expr=expr, value=text):
             col = _column_at(model, idx)

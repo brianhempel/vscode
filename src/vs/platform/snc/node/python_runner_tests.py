@@ -5,9 +5,12 @@ Run:
     python3 -m pytest src/vs/platform/snc/node/python_runner_tests.py -v
 """
 
+import importlib.util
 import io
 import json
 import os
+import random
+import sys
 import tempfile
 import unittest
 import urllib.request
@@ -17,12 +20,15 @@ from typing import Optional
 import io_cache
 import python_runner
 from python_runner import (
+    SEED,
     GenericVisualizer,
     VisualizerOfStaticVisualizer,
     _build_new_code_edits,
     _commands_to_dicts,
+    execute_code,
     install_io_cache,
     log_value,
+    reseed,
     split_leading_imports,
     transform_code_to_ast,
 )
@@ -58,6 +64,90 @@ class TestSplitLeadingImports(unittest.TestCase):
         exec(body_code, globals_dict)
 
         self.assertEqual(logged, [(4, "hello world")])
+
+
+class TestReseed(unittest.TestCase):
+    """Every rerun is a fresh process, so unseeded randomness makes visualized
+    values jump on each keystroke and under the user's cursor mid-interaction."""
+
+    def _globals(self, logged):
+        return {
+            "__name__": "__main__",
+            "__file__": "<string>",
+            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: logged.append((line, value)),
+            "_log_and_return": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: (logged.append((line, value)), value)[1],
+        }
+
+    def _run_checkpoint1(self, source_code):
+        """Imports and body execute in one go, seeded in between."""
+        logged = []
+        import_code, body_code = split_leading_imports(source_code)
+        execute_code(body_code, self._globals(logged), import_code=import_code)
+        return logged
+
+    def _run_checkpoint2(self, source_code):
+        """Imports already ran during pre-warm; only the body executes now."""
+        logged = []
+        import_code, body_code = split_leading_imports(source_code)
+        globals_dict = self._globals(logged)
+        exec(import_code, globals_dict)
+        execute_code(body_code, globals_dict)
+        return logged
+
+    def test_reseed_makes_stdlib_random_reproducible(self):
+        reseed()
+        first = [random.random() for _ in range(5)]
+        reseed()
+        self.assertEqual([random.random() for _ in range(5)], first)
+
+    def test_reruns_of_the_same_code_agree(self):
+        source_code = "import random\nx = random.random()\n"
+        self.assertEqual(self._run_checkpoint2(source_code), self._run_checkpoint2(source_code))
+
+    def test_checkpoint1_and_checkpoint2_agree(self):
+        source_code = "import random\nx = random.random()\ny = random.randint(0, 1000)\n"
+        self.assertEqual(self._run_checkpoint1(source_code), self._run_checkpoint2(source_code))
+
+    def test_user_seed_still_wins(self):
+        """Our seed lands before the body, so an explicit seed overrides it."""
+        source_code = "import random\nrandom.seed(99)\nx = random.random()\n"
+        random.seed(99)
+        expected = random.random()
+        self.assertEqual(self._run_checkpoint1(source_code)[-1][1], expected)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy not installed")
+    def test_numpy_is_seeded_after_its_import(self):
+        """numpy isn't in sys.modules when checkpoint 1 starts, so this only
+        holds because the seed lands after the import rather than before it."""
+        source_code = "import numpy as np\nx = np.random.rand()\n"
+        self.assertEqual(self._run_checkpoint1(source_code), self._run_checkpoint2(source_code))
+
+    def test_reseed_survives_a_broken_numpy(self):
+        """A shadowing `numpy.py` on the user's path must not fail their run."""
+        sentinel = object()
+        sys.modules["numpy"] = sentinel  # type: ignore[assignment]
+        try:
+            reseed()
+        finally:
+            del sys.modules["numpy"]
+
+    def test_import_errors_still_surface_inline(self):
+        """Folding imports into execute_code must keep them inside the same
+        error handling, so a bad import stays an inline item on its own line
+        rather than taking down the run."""
+        errors = []
+        real_log_value = python_runner.log_value
+        python_runner.log_value = lambda line, value, *args, **kwargs: errors.append((line, value))
+        try:
+            import_code, body_code = split_leading_imports("import nonexistent_module_xyz\nx = 1\n")
+            result = execute_code(body_code, self._globals([]), import_code=import_code)
+        finally:
+            python_runner.log_value = real_log_value
+
+        self.assertEqual(result["exitCode"], 1)
+        self.assertEqual(errors[0][0], 1)
+        self.assertIn("ModuleNotFoundError", errors[0][1])
+        self.assertIn("nonexistent_module_xyz", result["stderr"])
 
 
 class TestBuildNewCodeEdits(unittest.TestCase):

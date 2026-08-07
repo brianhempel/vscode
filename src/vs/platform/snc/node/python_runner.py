@@ -25,6 +25,7 @@ import os
 
 import importlib.util
 import glob
+import random
 import time
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
@@ -1581,6 +1582,39 @@ def transform_code_to_ast(source_code: str) -> ast.Module:
     return new_tree
 
 
+# Fixed so that reruns of unchanged code produce unchanged values. Sculpt-n-Code
+# reruns the whole file on a 100ms debounce and again on every UI event, each in
+# a brand-new worker process, so an unseeded `random.random()` would give the
+# user a different number on every keystroke — and would reshuffle a
+# visualization mid-drag, since interactions rerun the file too.
+SEED = 1234567
+
+
+def reseed(seed: int = SEED) -> None:
+    """Put every generator the user's program might draw from at a known state.
+
+    Called after the user's imports and before their body, so that both the
+    checkpoint 1 and checkpoint 2 paths enter the body identically, and so that
+    a generator belonging to a module the user imports (numpy's) exists by the
+    time we reach for it. An explicit `random.seed(...)` in the user's own code
+    runs later still and overrides this, as it should.
+
+    Nothing here is a promise of unpredictability: `os.urandom`, `secrets`,
+    `uuid.uuid4` and `random.SystemRandom` don't route through these generators
+    and are deliberately left alone.
+    """
+    random.seed(seed)
+
+    numpy = sys.modules.get('numpy')
+    if numpy is not None:
+        try:
+            numpy.random.seed(seed)
+        except Exception:
+            # Something on the user's path is named numpy but isn't; their
+            # program shouldn't fail over our seeding it.
+            pass
+
+
 def run_with_visualization(code: str) -> Dict[str, Any]:
     """
     Run the given code with visualization logging using source-to-source translation.
@@ -1616,10 +1650,10 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
     line_emit_counter = {}   # Reset per-line item counters
     _source_code = code      # Store source code for visualizers to access
 
-    # Transform and compile
+    # Transform and compile. Split like the pool worker paths do, so this path
+    # seeds at the same point they do and produces the same values.
     try:
-        transformed_ast = transform_code_to_ast(code)
-        code_object = compile(transformed_ast, filename='<string>', mode='exec')
+        import_code, code_object = split_leading_imports(code)
     except SyntaxError as e:
         return {
             "stdout": "",
@@ -1629,10 +1663,10 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
         }
 
     # Optional: write transformed code for debugging (enable by setting SNC_WRITE_TRANSFORMED=1)
-    if True or os.environ.get('SNC_WRITE_TRANSFORMED'):
+    if False or os.environ.get('SNC_WRITE_TRANSFORMED'):
         with open('transformed.py', 'w') as f:
             try:
-                transformed_code = ast.unparse(transformed_ast)
+                transformed_code = ast.unparse(transform_code_to_ast(code))
                 print(transformed_code, file=f)
             except Exception as unparse_error:
                 print(f"Warning: Could not unparse transformed AST: {unparse_error}", file=f)
@@ -1647,37 +1681,7 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
 
     sys.argv = []  # Prevent infinite recursion when we run this on itself
 
-    # Capture user program stdout/stderr
-    out_buf = StringIO()
-    err_buf = StringIO()
-    exit_code = 0
-
-    with redirect_stdout(out_buf), redirect_stderr(err_buf):
-        try:
-            exec(code_object, globals_dict)
-        except Exception as e:
-            # Capture any errors (syntax errors, runtime exceptions, etc.)
-            tb_str = traceback.format_exc()
-
-            # Extract error information
-            error_type = type(e).__name__
-            error_message = str(e)
-            error_line = extract_error_line_from_traceback(tb_str)
-
-            # Create error visualization entry
-            error_msg_str = f"{error_type}: {error_message}"
-            log_value(error_line, error_msg_str)
-
-            # Also write traceback to captured stderr
-            print(tb_str, file=sys.stderr)
-            exit_code = 1
-
-    return {
-        "stdout": out_buf.getvalue(),
-        "stderr": err_buf.getvalue(),
-        "exitCode": exit_code,
-        "syntaxError": False
-    }
+    return execute_code(code_object, globals_dict, import_code=import_code)
 
 
 # ============================================================================
@@ -1685,8 +1689,15 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
 # ============================================================================
 
 
-def execute_code(code_object: Any, globals_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute compiled code and return result with stdout/stderr/exitCode."""
+def execute_code(code_object: Any, globals_dict: Dict[str, Any], import_code: Any = None) -> Dict[str, Any]:
+    """Execute compiled code and return result with stdout/stderr/exitCode.
+
+    `import_code` is the user's leading imports, when they haven't been run
+    already (the checkpoint 1 path). They execute inside the same try as the
+    body so that a failing import stays an inline error item on its own line,
+    and they execute before `reseed` so that generators owned by the modules
+    they pull in are seeded too.
+    """
     out_buf = StringIO()
     err_buf = StringIO()
     exit_code = 0
@@ -1694,6 +1705,9 @@ def execute_code(code_object: Any, globals_dict: Dict[str, Any]) -> Dict[str, An
     with redirect_stdout(out_buf), redirect_stderr(err_buf):
         emit_meta('exec-start')
         try:
+            if import_code is not None:
+                exec(import_code, globals_dict)
+            reseed()
             exec(code_object, globals_dict)
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -1713,11 +1727,14 @@ def execute_code(code_object: Any, globals_dict: Dict[str, Any]) -> Dict[str, An
     }
 
 
-def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None) -> None:
+def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None) -> None:
     """Execute a run with the given code object and models/events.
 
     If globals_dict is provided (e.g. pre-populated with imports for checkpoint 2),
     it is used directly. Otherwise a fresh globals dict is created.
+
+    `import_code` is passed through to `execute_code` on the checkpoint 1 path,
+    where the imports haven't been run yet.
     """
     global models_and_events, execution_step, line_emit_counter, _current_run_id, _focused_line
 
@@ -1743,7 +1760,7 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
         }
     sys.argv = []
 
-    result = execute_code(code_object, globals_dict)
+    result = execute_code(code_object, globals_dict, import_code=import_code)
     _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")
     _stream_out.flush()
 
@@ -1885,17 +1902,18 @@ def run_pool_worker_mode(working_directory: str) -> None:
 
         emit_meta('transform-start')
         try:
-            transformed_ast = transform_code_to_ast(code)
+            # Split the same way checkpoint 2 does, so the two paths compile the
+            # user's code identically and `reseed` gets its seam between the
+            # imports and the body. The imports are executed by `execute_code`.
+            import_code, code_object = split_leading_imports(code)
         except SyntaxError as e:
             result = {"stdout": "", "stderr": str(e), "exitCode": 1, "syntaxError": True}
             _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")
             _stream_out.flush()
             sys.exit(0)
 
-        emit_meta('transform-done')
-        code_object = compile(transformed_ast, filename='<string>', mode='exec')
-        emit_meta('compile-done')
-        _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line)
+        emit_meta('compile-done')  # split_leading_imports transforms and compiles in one step
+        _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line, import_code=import_code)
         sys.exit(0)
 
     else:

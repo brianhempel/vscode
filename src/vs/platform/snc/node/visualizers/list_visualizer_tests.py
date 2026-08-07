@@ -8305,10 +8305,10 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 # === Column compute tests ===
 
 from list_visualizer import (
-    COMPUTE_AGGS, NO_ANSWER,
-    _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports,
+    COMPUTE_AGGS, HISTOGRAM_AGG, NO_ANSWER,
+    _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
     _agg_value, _agg_code, _agg_label, _format_agg_value,
-    _agg_row_index, _agg_is_row,
+    _agg_row_index, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
 )
 
 
@@ -8361,6 +8361,29 @@ class TestAggHoles(unittest.TestCase):
         self.assertEqual(_agg_holes(_agg_set_hole('np.percentile($, {{10}})',
                                                   0, '2}}5')),
                          ['25'])
+
+
+class TestAggExpr(unittest.TestCase):
+    """An aggregation that carries the line it writes is asking the question on
+    the right of the `=`; the names on the left are where the line puts the
+    answer, not part of it."""
+
+    def test_the_names_a_line_answers_into_are_not_the_question(self):
+        self.assertEqual(_agg_expr('counts, edges = np.histogram($, bins=10)'),
+                         'np.histogram($, bins=10)')
+
+    def test_one_name_reads_the_same_way(self):
+        self.assertEqual(_agg_expr('total = sum($)'), 'sum($)')
+
+    def test_an_expression_with_no_names_is_left_alone(self):
+        self.assertEqual(_agg_expr('np.mean($)'), 'np.mean($)')
+
+    def test_a_comparison_is_not_an_assignment(self):
+        # `==` and `<=` open no left-hand side, and neither does `+=`, which
+        # answers into a name that has to already hold something.
+        for expr in ('min($) == 1', 'x <= 2', 'x != 2', 'x += 1'):
+            with self.subTest(expr):
+                self.assertEqual(_agg_expr(expr), expr)
 
 
 class TestAggRowIndex(unittest.TestCase):
@@ -8417,7 +8440,8 @@ class TestAggValues(unittest.TestCase):
         self.assertEqual([label for label, _ in COMPUTE_AGGS],
                          ['#Unique', '#Present', '#Missing', 'Min', 'Min Idx',
                           'Mean', 'Median', 'Percentile', 'Percentile',
-                          'Max', 'Max Idx', 'Min Item', 'Max Item'])
+                          'Max', 'Max Idx', 'Min Item', 'Max Item',
+                          'Histogram'])
 
     def test_each_aggregation_answers(self):
         for label, expected in [('#Unique', 4), ('#Present', 5), ('#Missing', 0),
@@ -8462,6 +8486,19 @@ class TestAggValues(unittest.TestCase):
         self.assertIs(_agg_value(agg_named('Min Item'), [30, 10, 20]),
                       NO_ANSWER)
 
+    def test_a_histogram_answers_past_the_names_it_writes_into(self):
+        # The aggregation carries the line everyone types by hand, so what it
+        # computes is the right of the `=` and what it hands over is all of it.
+        counts, edges = _agg_value(HISTOGRAM_AGG, COMPUTE_LIST)
+        self.assertEqual(sum(counts), len(COMPUTE_LIST))
+        self.assertEqual(len(counts), 10)
+        self.assertEqual(len(edges), 11)
+
+    def test_the_bins_box_says_how_many_bars(self):
+        counts, _edges = _agg_value(
+            'counts, edges = np.histogram($, bins={{4}})', COMPUTE_LIST)
+        self.assertEqual(len(counts), 4)
+
 
 class TestAggNonAnswers(unittest.TestCase):
     """A question this column can't answer is a row with nothing to show, never
@@ -8497,6 +8534,16 @@ class TestAggNonAnswers(unittest.TestCase):
     def test_an_expression_that_does_not_parse(self):
         self.assertIs(_agg_value('min($', COMPUTE_LIST), NO_ANSWER)
 
+    def test_a_bins_box_holding_something_other_than_a_count(self):
+        for template in ('counts, edges = np.histogram($, bins={{}})',
+                         'counts, edges = np.histogram($, bins={{abc}})',
+                         'counts, edges = np.histogram($, bins={{0}})'):
+            with self.subTest(template):
+                self.assertIs(_agg_value(template, COMPUTE_LIST), NO_ANSWER)
+
+    def test_a_column_of_strings_has_no_histogram(self):
+        self.assertIs(_agg_value(HISTOGRAM_AGG, ['pear', 'apple']), NO_ANSWER)
+
 
 class TestAggCode(unittest.TestCase):
     """What an aggregation hands over is itself, with $ bound to the same
@@ -8518,16 +8565,33 @@ class TestAggCode(unittest.TestCase):
                                    "[item['p'] for item in data]", 'data'),
                          "data[np.argmin([item['p'] for item in data])]")
 
+    def test_a_histogram_hands_over_the_line_it_writes(self):
+        # Not the question alone: `np.histogram` answers with a pair, and the
+        # line everyone types by hand is the one that gives the pair names.
+        self.assertEqual(_agg_code(HISTOGRAM_AGG, 'data'),
+                         'counts, edges = np.histogram(data, bins=10)')
+
     def test_what_it_hands_over_is_what_it_computed(self):
         # The preview and the code have to be the same question, or the number
         # on screen isn't the one the user drags into the file.
+        np = __import__('numpy')
         data = COMPUTE_LIST
         for _, template in COMPUTE_AGGS:
             with self.subTest(template):
                 code = _agg_code(template, 'data', 'data')
-                self.assertEqual(eval(code, {'np': __import__('numpy')},
-                                      {'data': data}),
-                                 _agg_value(template, data, None, data))
+                answer = _agg_value(template, data, None, data)
+                if _agg_is_histogram(template):
+                    # A line rather than an expression, so it is run rather than
+                    # evaluated -- and it answers with arrays, which compare
+                    # element by element rather than to a yes or a no.
+                    scope = {'np': np, 'data': data}
+                    exec(code, scope)
+                    self.assertEqual(len(answer), 2)
+                    for written, computed in zip(('counts', 'edges'), answer):
+                        self.assertTrue(np.array_equal(scope[written], computed))
+                else:
+                    self.assertEqual(eval(code, {'np': np}, {'data': data}),
+                                     answer)
 
 
 class TestAggLabel(unittest.TestCase):
@@ -8543,6 +8607,61 @@ class TestAggLabel(unittest.TestCase):
 
     def test_an_aggregation_the_catalog_does_not_know_reads_as_its_code(self):
         self.assertEqual(_agg_label('sum($) / 2'), 'sum($) / 2')
+
+    def test_a_histogram_reads_by_how_many_bins_it_asked_for(self):
+        self.assertEqual(
+            _agg_label('counts, edges = np.histogram($, bins={{20}})'),
+            'Histogram 20')
+
+
+class TestAggHistogramSvg(unittest.TestCase):
+    """A histogram answers with a pair of arrays, which no cell can read as
+    text, so the cell draws the bars instead."""
+
+    def bars(self, svg):
+        """Each bar's height, in the order they read."""
+        return [float(h) for h in re.findall(r'<rect [^>]*height="([^"]*)"', svg)]
+
+    def svg(self, values, bins=4):
+        answer = _agg_value(
+            f'counts, edges = np.histogram($, bins={{{{{bins}}}}})', values)
+        return _agg_hist_svg(answer)
+
+    def test_the_catalog_row_is_a_histogram_at_any_bin_count(self):
+        self.assertTrue(_agg_is_histogram(HISTOGRAM_AGG))
+        self.assertTrue(_agg_is_histogram(
+            'counts, edges = np.histogram($, bins={{20}})'))
+        self.assertFalse(_agg_is_histogram('np.mean($)'))
+
+    def test_one_bar_per_bin(self):
+        self.assertEqual(len(self.bars(self.svg([1, 2, 3, 4], bins=4))), 4)
+
+    def test_the_bars_stand_in_proportion_to_the_fullest_bin(self):
+        # Two in the first bin and one in the last: half the height.
+        bars = self.bars(self.svg([0, 0, 10], bins=2))
+        self.assertEqual(bars[0], 2 * bars[1])
+
+    def test_a_bin_with_something_in_it_is_never_too_short_to_see(self):
+        # One beside a hundred rounds to nothing, and a bar that isn't drawn
+        # reads as an empty bin rather than a rare one.
+        bars = self.bars(self.svg([0] * 100 + [10], bins=2))
+        self.assertGreaterEqual(bars[1], bars[0] / 10)
+
+    def test_an_empty_bin_draws_nothing(self):
+        bars = self.bars(self.svg([0, 0, 10, 10], bins=3))
+        self.assertEqual(bars[1], 0)
+
+    def test_the_drawing_fills_whatever_box_it_is_given(self):
+        svg = self.svg(COMPUTE_LIST)
+        self.assertIn('preserveAspectRatio="none"', svg)
+        self.assertIn('class="col-agg-hist"', svg)
+
+    def test_an_answer_that_is_not_a_pair_of_arrays_draws_nothing(self):
+        # A cell that can't draw its answer reads it, rather than raising out
+        # of a render.
+        for answer in (2.8, None, NO_ANSWER, ('a', 'b'), (1, 2, 3)):
+            with self.subTest(repr(answer)):
+                self.assertEqual(_agg_hist_svg(answer), '')
 
 
 class TestFormatAggValue(unittest.TestCase):
@@ -8834,21 +8953,43 @@ class TestComputeMenuRendering(unittest.TestCase):
                          + [label for label, _, _ in COMPUTE_CODES])
 
     def test_each_row_previews_its_answer(self):
-        # The last is the empty box at the foot of the menu, which has no
-        # expression in it yet to answer with.
+        # Histogram draws its answer rather than reading it, so it previews as
+        # no text at all; the last is the empty box at the foot of the menu,
+        # which has no expression in it yet to answer with.
         lst, model = tally_model(COMPUTE_LIST)
         previews = self.previews(self.panel(model, lst))
         self.assertEqual(previews,
                          ['4', '5', '0', '1', '1', '2.8', '3', '1', '4.6',
-                          '5', '4', '1', '5', ''])
+                          '5', '4', '1', '5', '', ''])
 
     def test_a_row_aggregation_previews_the_row_it_picked(self):
         lst = [{'a': 1}, {'a': 3}]
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ["$['a']"]
         previews = self.previews(self.panel(model, lst))
-        self.assertEqual(previews[len(COMPUTE_AGGS) - 2:len(COMPUTE_AGGS)],
+        self.assertEqual(previews[len(COMPUTE_AGGS) - 3:len(COMPUTE_AGGS) - 1],
                          [html.escape("{'a': 1}"), html.escape("{'a': 3}")])
+
+    def test_the_histogram_row_previews_its_bars_rather_than_its_pair(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        row = self.rows(self.panel(model, lst))[len(COMPUTE_AGGS) - 1]
+        self.assertIn('>Histogram<', row)
+        self.assertIn('col-agg-hist', row)
+        self.assertNotIn('array(', row)
+
+    def test_the_histogram_row_is_checkable_and_asks_for_its_bins(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        row = self.rows(self.panel(model, lst))[len(COMPUTE_AGGS) - 1]
+        self.assertIn('col-tally-check', row)
+        self.assertIn('col-compute-hole', row)
+        self.assertIn('value="10"', row)
+
+    def test_the_histogram_row_hands_over_the_line_it_writes(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst, source='data')
+        self.assertIn(
+            f'snc-py-exp="{html.escape("counts, edges = np.histogram(data, bins=10)")}"',
+            panel)
 
     def test_a_checked_row_says_so(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -8880,14 +9021,14 @@ class TestComputeMenuRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst)
         self.assertEqual(re.findall(r'col-compute-hole[^>]*value="([^"]*)"',
-                                    panel), ['10', '90'])
+                                    panel), ['10', '90', '10'])
 
     def test_an_edited_level_is_what_its_box_reads(self):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['np.percentile($, {{50}})'])
         panel = self.panel(model, lst)
         self.assertEqual(re.findall(r'col-compute-hole[^>]*value="([^"]*)"',
-                                    panel), ['50', '90'])
+                                    panel), ['50', '90', '10'])
         self.assertEqual(self.previews(panel)[7], '3')
 
     def test_a_row_hands_over_the_code_behind_its_preview(self):
@@ -9023,6 +9164,34 @@ class TestComputeCellRendering(unittest.TestCase):
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
         self.assertIn('snc-py-exp="np.mean(data)"', cell)
         self.assertIn('draggable="true"', cell)
+
+    def test_a_histogram_cell_draws_its_answer_and_names_its_bins(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', [HISTOGRAM_AGG])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('>Histogram 10<', cell)
+        self.assertIn('col-agg-hist', cell)
+        self.assertNotIn('array(', cell)
+
+    def test_a_histogram_cell_hands_over_the_line_it_writes(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', [HISTOGRAM_AGG])
+        cell = self.cells(self.rows(model, lst, source='data')[0])[0]
+        self.assertIn(
+            f'snc-py-exp="{html.escape("counts, edges = np.histogram(data, bins=10)")}"',
+            cell)
+        self.assertIn('snc-py-exp-imports', cell)
+
+    def test_a_histogram_is_a_cell_rather_than_a_row_of_the_list(self):
+        # It reads `$` and never `$$`, so it answers about the column rather
+        # than picking a row out of the list the way Min Item does.
+        self.assertFalse(_agg_is_row(HISTOGRAM_AGG))
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)', HISTOGRAM_AGG])
+        rows = self.rows(model, lst)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([re.search(r'col-agg-label">([^<]*)<', row).group(1)
+                          for row in rows], ['Mean', 'Histogram 10'])
 
     def test_a_computed_column_hands_over_the_column_too(self):
         lst = [{'a': 1}, {'a': 3}]
@@ -9173,8 +9342,8 @@ class TestComputeItemRowRendering(unittest.TestCase):
 
 
 from list_visualizer import (
-    COMPUTE_CODES, TALLY_IMPORTS,
-    ComputeCodeClick, ComputeExprInput,
+    COMPUTE_CODES, COMPUTE_EXPR_TOOLTIP, TALLY_IMPORTS,
+    ComputeCodeClick, ComputeExprInput, ComputeExprKeyDown,
     _agg_is_free, _compute_free_rows,
 )
 
@@ -9456,6 +9625,39 @@ class TestFreeAggregationRendering(ComputePanelCase):
         lst, model = tally_model(COMPUTE_LIST)
         self.assertIn('placeholder="Add aggregation"', self.panel(model, lst))
 
+    def test_the_box_says_what_the_dollars_mean(self):
+        # The same thing the column search box says of its own.
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertIn(f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}"',
+                      self.panel(model, lst))
+
+    def free_rows(self, panel):
+        return re.findall(r'<div class="col-compute-row col-compute-free[^"]*">'
+                          r'.*?col-compute-preview.*?</span></div>', panel,
+                          re.DOTALL)
+
+    def test_an_aggregation_of_theirs_is_checked_and_can_be_unchecked(self):
+        # Unchecking is how one is taken away: the expression is the only record
+        # that it is there at all.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        row = self.free_rows(self.panel(model, lst))[0]
+        self.assertIn('checked', row)
+        self.assertIn(html.escape("ComputeToggle(index=0, expr='sorted($)[2]')"),
+                      row)
+
+    def test_the_empty_row_has_nothing_to_uncheck(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        row = self.free_rows(self.panel(model, lst))[-1]
+        self.assertIn('disabled', row)
+        self.assertNotIn('snc-mouse-down', row)
+
+    def test_the_box_takes_its_own_enter_and_escape(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        row = self.free_rows(self.panel(model, lst))[-1]
+        self.assertIn(f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}"',
+                      row)
+
 
 class TestFreeAggregationCell(unittest.TestCase):
     """The cell a free-form aggregation makes is labelled with a box holding the
@@ -9504,6 +9706,98 @@ class TestFreeAggregationCell(unittest.TestCase):
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
         self.assertIn('col-agg-value">3<', cell)
         self.assertIn('snc-py-exp="sorted(data)[2]"', cell)
+
+    def test_the_box_says_what_the_dollars_mean_here_too(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn(f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}"',
+                      cell)
+
+
+def make_compute_expr_key_event(key):
+    """Create a ComputeExprKeyDown event for a free-form aggregation's box."""
+    return {
+        'pythonEventStr': repr(ComputeExprKeyDown()),
+        'eventJSON': {
+            'type': 'keydown',
+            'key': key,
+            'metaKey': False,
+            'shiftKey': False,
+            'ctrlKey': False,
+            'altKey': False,
+        },
+    }
+
+
+class TestFreeAggregationKeys(unittest.TestCase):
+    """Enter in the box says the aggregation is written: the cell is already
+    there, and the menu has nothing more to say about it."""
+
+    def open_menu(self, lst=None):
+        lst, model = tally_model(COMPUTE_LIST if lst is None else lst)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = 'compute-0'
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        return lst, model
+
+    def press(self, model, lst, key):
+        return update(make_compute_expr_key_event(key), ('data', 'data'), model,
+                      lst, mock_get_visualizer, eval_in_scope=eval)
+
+    def test_enter_closes_the_column_menu(self):
+        lst, model = self.open_menu()
+        model, _ = self.press(model, lst, 'Enter')
+        self.assertIsNone(model['openDropdown'])
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_enter_leaves_the_aggregation_alone(self):
+        lst, model = self.open_menu()
+        model, commands = self.press(model, lst, 'Enter')
+        self.assertEqual(_column_computes(model, '$'), ['sorted($)[2]'])
+        # And writes no line: Enter over a search is what does that.
+        self.assertEqual(commands, [])
+
+    def test_escape_closes_only_the_submenu(self):
+        # Innermost first, the way Escape reads everywhere else in the menu.
+        lst, model = self.open_menu()
+        model, _ = self.press(model, lst, 'Escape')
+        self.assertIsNone(model['col_search_dropdown'])
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+
+    def test_any_other_key_is_just_typing(self):
+        lst, model = self.open_menu()
+        model, _ = self.press(model, lst, 'a')
+        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+
+
+class TestFreeAggregationRemoval(unittest.TestCase):
+    """Unchecking a free-form row takes the aggregation away -- the expression
+    is the only record that it was there, so there is nothing left to keep."""
+
+    def toggle(self, model, lst, expr, index=0):
+        model, _ = update(make_column_mouse_event(
+            repr(ComputeToggle(index=index, expr=expr))), None, model, lst,
+            mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def test_unchecking_one_removes_it(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        model = self.toggle(model, lst, 'sorted($)[2]')
+        self.assertIsNone(model['column_computes'])
+
+    def test_the_others_stay_where_they_were(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'sorted($)[2]',
+                                          'sum($) / 2'])
+        model = self.toggle(model, lst, 'sorted($)[2]')
+        self.assertEqual(_column_computes(model, '$'), ['min($)', 'sum($) / 2'])
+
+    def test_the_empty_row_has_nothing_to_toggle(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.toggle(model, lst, '')
+        self.assertIsNone(model['column_computes'])
 
 
 if __name__ == '__main__':

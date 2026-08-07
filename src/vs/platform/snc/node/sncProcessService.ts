@@ -122,8 +122,13 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 */
 	private spawnWorker(workingDirectory: string): PoolWorker | null {
 		try {
+			// PYTHONHASHSEED pins string hashing, which sets the iteration order
+			// of sets. Every rerun is a fresh process, so without it a
+			// `set(words)` reshuffles on each keystroke — the same instability
+			// python_runner's reseed() fixes for random numbers, but it can only
+			// be set at interpreter start, not from inside the runner.
 			const child = spawn(this.pythonExecutable, [this.runnerPath, '--pool-worker', workingDirectory], {
-				env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+				env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONHASHSEED: '1234567' }
 			});
 
 			const worker: PoolWorker = {
