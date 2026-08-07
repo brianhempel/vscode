@@ -1266,6 +1266,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// from the DOM would cause the browser to lose focus on any input inside it).
 		const activeElement = document.activeElement;
 		let focusedIndex = -1;
+		// An input that names itself is found again by that name rather than by
+		// its place in the list. The list is shared between the widget and the
+		// hoisted panels, so an input the render adds or drops anywhere ahead of
+		// the focused one shifts it -- which is exactly what a box whose typing
+		// adds a cell to the table does to itself.
+		let savedFocusKey: string | null = null;
 		let savedSelectionStart: number | null = null;
 		let savedSelectionEnd: number | null = null;
 		const savedWidgetScrollTop = this.domNode.scrollTop;
@@ -1297,6 +1303,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					break;
 				}
 			}
+			savedFocusKey = activeElement.getAttribute('snc-focus-key');
 			// Save cursor position for input/textarea elements
 			if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement) {
 				savedSelectionStart = activeElement.selectionStart;
@@ -1401,12 +1408,22 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						}
 					}
 				} else if (focusedIndex >= 0) {
-					// Restore focus to the same nth focusable element
+					// The element that named itself, wherever it has ended up;
+					// failing that, the same nth focusable element.
 					// Look in both the widget and any hoisted dropdowns
+					const keySelector = savedFocusKey
+						? `[snc-focus-key="${CSS.escape(savedFocusKey)}"]`
+						: null;
+					const keyed = keySelector
+						? (this.domNode.querySelector(keySelector)
+							|| this.queryHoistedDropdowns(keySelector))
+						: null;
 					const widgetFocusable = Array.from(this.domNode.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR));
 					const allFocusable = [...widgetFocusable, ...this.hoistedFocusable()];
-					if (focusedIndex < allFocusable.length) {
-						const el = allFocusable[focusedIndex] as HTMLElement;
+					const el = (keyed
+						?? (focusedIndex < allFocusable.length ? allFocusable[focusedIndex] : null)
+					) as HTMLElement | null;
+					if (el) {
 						el.focus({ preventScroll: true });
 						// Restore cursor position for input/textarea elements
 						if (savedSelectionStart !== null && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {

@@ -8830,20 +8830,24 @@ class TestComputeMenuRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst)
         self.assertEqual(re.findall(r'col-compute-name">([^<]*)<', panel),
-                         [label for label, _ in COMPUTE_AGGS])
+                         [label for label, _ in COMPUTE_AGGS]
+                         + [label for label, _, _ in COMPUTE_CODES])
 
     def test_each_row_previews_its_answer(self):
+        # The last is the empty box at the foot of the menu, which has no
+        # expression in it yet to answer with.
         lst, model = tally_model(COMPUTE_LIST)
         previews = self.previews(self.panel(model, lst))
         self.assertEqual(previews,
                          ['4', '5', '0', '1', '1', '2.8', '3', '1', '4.6',
-                          '5', '4', '1', '5'])
+                          '5', '4', '1', '5', ''])
 
     def test_a_row_aggregation_previews_the_row_it_picked(self):
         lst = [{'a': 1}, {'a': 3}]
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ["$['a']"]
-        self.assertEqual(self.previews(self.panel(model, lst))[-2:],
+        previews = self.previews(self.panel(model, lst))
+        self.assertEqual(previews[len(COMPUTE_AGGS) - 2:len(COMPUTE_AGGS)],
                          [html.escape("{'a': 1}"), html.escape("{'a': 3}")])
 
     def test_a_checked_row_says_so(self):
@@ -9166,6 +9170,340 @@ class TestComputeItemRowRendering(unittest.TestCase):
         # It reads like one, but there is nothing in it to pick.
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         self.assertNotIn('pick-region', self.item_rows(model, lst)[0])
+
+
+from list_visualizer import (
+    COMPUTE_CODES, TALLY_IMPORTS,
+    ComputeCodeClick, ComputeExprInput,
+    _agg_is_free, _compute_free_rows,
+)
+
+
+class TestComputeCodeCatalog(unittest.TestCase):
+    """Unique and Tally answer with a whole list rather than a number, so they
+    go in the file instead of into a cell under the column."""
+
+    def test_the_catalog_reads_the_way_the_todo_lists_it(self):
+        self.assertEqual([label for label, _, _ in COMPUTE_CODES],
+                         ['Unique', 'Tally'])
+
+    def test_they_are_written_with_the_same_dollar_every_aggregation_is(self):
+        self.assertEqual([template for _, template, _ in COMPUTE_CODES],
+                         ['set($)', 'Counter($)'])
+
+    def test_the_column_goes_in_where_the_dollar_is(self):
+        self.assertEqual(_agg_code('set($)', 'data'), 'set(data)')
+        self.assertEqual(_agg_code('Counter($)', "[item['a'] for item in data]"),
+                         "Counter([item['a'] for item in data])")
+
+    def test_counter_says_which_import_it_needs(self):
+        self.assertEqual(_agg_imports('Counter($)'), TALLY_IMPORTS)
+
+    def test_a_builtin_needs_nothing(self):
+        self.assertEqual(_agg_imports('set($)'), ())
+
+
+class ComputePanelCase(unittest.TestCase):
+    """The Compute submenu, opened over a one-column table."""
+
+    def panel(self, model, lst, column=0, source=None):
+        model = dict(model, openDropdown={'id': f'col-menu-{column}'},
+                     col_search_dropdown=f'compute-{column}')
+        if source:
+            model['_source_expr'] = source
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      (lambda code: eval(code, {}, {'data': lst}))
+                      if source else None))
+        self.assertIn('col-compute-panel', th)
+        return th[th.index('col-compute-panel'):]
+
+    def previews(self, panel):
+        return re.findall(r'col-compute-preview"[^>]*>([^<]*)<', panel)
+
+
+class TestComputeCodeRendering(ComputePanelCase):
+    """The code rows sit under the aggregations: a name and nothing else, since
+    there is no cell for them to preview."""
+
+    def code_rows(self, panel):
+        return re.findall(r'<div class="col-compute-row col-compute-code[^"]*".'
+                          r'*?(?=<div class="col-compute-row|$)', panel,
+                          re.DOTALL)
+
+    def test_both_are_listed_after_the_aggregations(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst)
+        names = re.findall(r'col-compute-name">([^<]*)<', panel)
+        self.assertEqual(names[-2:], ['Unique', 'Tally'])
+
+    def test_a_code_row_has_neither_a_checkbox_nor_a_preview(self):
+        # Nothing to check -- it writes a line rather than keeping an answer on
+        # screen -- and nothing to preview, since a whole list wouldn't fit.
+        lst, model = tally_model(COMPUTE_LIST)
+        for row in self.code_rows(self.panel(model, lst)):
+            self.assertNotIn('col-tally-check', row)
+            self.assertNotIn('col-compute-preview', row)
+
+    def test_a_code_row_hands_over_the_line_it_would_write(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst, source='data')
+        self.assertIn('snc-py-exp="set(data)"', panel)
+        self.assertIn('snc-py-exp="Counter(data)"', panel)
+
+    def test_the_tally_row_says_it_needs_counter(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        panel = self.panel(model, lst, source='data')
+        after = panel[panel.index('snc-py-exp="Counter(data)"'):]
+        imports = re.search(r'snc-py-exp-imports="([^"]*)"', after)
+        self.assertIsNotNone(imports)
+        self.assertEqual(json.loads(html.unescape(imports.group(1))),
+                         list(TALLY_IMPORTS))
+
+    def test_with_no_source_there_is_no_line_to_write(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        for row in self.code_rows(self.panel(model, lst)):
+            self.assertIn('unselectable', row)
+            self.assertNotIn('snc-mouse-down', row)
+
+
+class TestComputeCodeEvents(unittest.TestCase):
+    """Clicking a code row writes the line, the way an action button does."""
+
+    def click(self, lst, expr, index=0, source='data', columns=None):
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['$'] if columns is None else columns
+        model['_source_expr'] = source
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = 'compute-0'
+        return update(make_column_mouse_event(
+            repr(ComputeCodeClick(index=index, expr=expr))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=(lambda code: eval(code, {}, {'data': lst})))
+
+    def test_unique_writes_the_set_of_the_column(self):
+        _, commands = self.click(COMPUTE_LIST, 'set($)')
+        self.assertEqual(commands[0][:2], ('data_unique', 'set(data)'))
+
+    def test_tally_writes_the_counter_and_says_it_needs_the_import(self):
+        _, commands = self.click(COMPUTE_LIST, 'Counter($)')
+        self.assertEqual(commands[0],
+                         ('data_tally', 'Counter(data)', TALLY_IMPORTS))
+
+    def test_a_computed_column_goes_in_as_the_column(self):
+        lst = [{'a': 1}, {'a': 3}]
+        _, commands = self.click(lst, 'set($)', columns=["$['a']"])
+        self.assertEqual(commands[0][1], "set([item['a'] for item in data])")
+
+    def test_the_name_falls_back_when_the_list_has_no_name(self):
+        _, commands = self.click(COMPUTE_LIST, 'set($)', source='data[0]')
+        self.assertEqual(commands[0][0], 'result_unique')
+
+    def test_the_menu_closes_behind_it(self):
+        # One line written, unlike checking a box, which invites the next.
+        model, _ = self.click(COMPUTE_LIST, 'set($)')
+        self.assertIsNone(model['openDropdown'])
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_a_list_with_no_source_writes_nothing(self):
+        _, commands = self.click(COMPUTE_LIST, 'set($)', source=None)
+        self.assertEqual(commands, [])
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        _, commands = self.click(COMPUTE_LIST, 'set($)', index=7)
+        self.assertEqual(commands, [])
+
+
+class TestFreeAggregations(unittest.TestCase):
+    """An aggregation the user writes themselves is simply an expression the
+    catalog has no row for, so nothing marks it as theirs."""
+
+    def test_an_expression_the_catalog_does_not_know_is_the_users_own(self):
+        self.assertTrue(_agg_is_free('sorted($)[2]'))
+
+    def test_a_catalog_expression_is_not(self):
+        self.assertFalse(_agg_is_free('min($)'))
+        self.assertFalse(_agg_is_free('np.percentile($, {{25}})'))
+
+    def test_an_empty_box_is_nobodys_expression_yet(self):
+        self.assertTrue(_agg_is_free(''))
+
+    def test_it_reads_as_the_code_it_is(self):
+        self.assertEqual(_agg_label('sorted($)[2]'), 'sorted($)[2]')
+
+    def test_it_answers_like_any_other_aggregation(self):
+        self.assertEqual(_agg_value('sorted($)[2]', COMPUTE_LIST), 3)
+
+    def test_it_hands_over_the_same_code_it_computed(self):
+        self.assertEqual(_agg_code('sorted($)[2]', 'data'), 'sorted(data)[2]')
+
+    def test_the_rows_are_the_users_own_and_an_empty_one_after_them(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'sorted($)[2]'])
+        self.assertEqual(_compute_free_rows(model, '$'), ['sorted($)[2]', ''])
+
+    def test_a_column_with_none_still_offers_a_box_to_write_one_in(self):
+        _, model = tally_model(COMPUTE_LIST)
+        self.assertEqual(_compute_free_rows(model, '$'), [''])
+
+    def test_they_stack_under_the_catalogs_own(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]', 'min($)'])
+        self.assertEqual(_column_computes(model, '$'),
+                         ['min($)', 'sorted($)[2]'])
+
+    def test_an_empty_one_is_not_an_aggregation(self):
+        _, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['   '])
+        self.assertIsNone(model['column_computes'])
+
+
+def make_compute_expr_event(index, expr, value):
+    """Create a ComputeExprInput event for a free-form aggregation's box."""
+    return {
+        'pythonEventStr': (f"lambda e: ComputeExprInput(index={index}, "
+                           f"expr={expr!r}, value=e.get('value', ''))"),
+        'eventJSON': {'type': 'input', 'value': value},
+    }
+
+
+class TestFreeAggregationEvents(unittest.TestCase):
+    """The box is the aggregation: what is typed in it is the expression."""
+
+    def input(self, model, lst, expr, value, index=0):
+        model, _ = update(make_compute_expr_event(index, expr, value), None,
+                          model, lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def test_typing_in_the_empty_box_adds_the_aggregation(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, '', 'sorted($)[2]')
+        self.assertEqual(_column_computes(model, '$'), ['sorted($)[2]'])
+
+    def test_typing_in_one_already_there_rewrites_it_in_place(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        model = self.input(model, lst, 'sorted($)[2]', 'sorted($)[1]')
+        self.assertEqual(_column_computes(model, '$'), ['sorted($)[1]'])
+
+    def test_emptying_the_box_takes_the_aggregation_away(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        model = self.input(model, lst, 'sorted($)[2]', '')
+        self.assertIsNone(model['column_computes'])
+
+    def test_an_empty_box_left_empty_adds_nothing(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, '', '  ')
+        self.assertIsNone(model['column_computes'])
+
+    def test_a_half_typed_expression_is_kept_so_the_box_keeps_its_place(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, '', 'sorted(')
+        self.assertEqual(_column_computes(model, '$'), ['sorted('])
+
+    def test_the_menu_stays_open_while_it_is_typed(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = 'compute-0'
+        model = self.input(model, lst, '', 'sorted($)[2]')
+        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+
+    def test_typing_at_a_column_that_is_gone_is_a_noop(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, '', 'sorted($)[2]', index=7)
+        self.assertIsNone(model['column_computes'])
+
+    def test_writing_the_catalogs_own_expression_checks_its_row(self):
+        # It is Min, whoever typed it.
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, '', 'min($)')
+        self.assertEqual(_column_computes(model, '$'), ['min($)'])
+        self.assertEqual(_compute_free_rows(model, '$'), [''])
+
+
+class TestFreeAggregationRendering(ComputePanelCase):
+    """A free-form row is a box holding the expression, previewing its answer
+    the way every other row does."""
+
+    def boxes(self, panel):
+        return re.findall(r'col-compute-expr[^>]*value="([^"]*)"', panel)
+
+    def test_the_menu_ends_with_an_empty_box(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertEqual(self.boxes(self.panel(model, lst)), [''])
+
+    def test_each_of_the_users_own_gets_a_box_and_an_empty_one_follows(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]', 'sum($) / 2'])
+        self.assertEqual(self.boxes(self.panel(model, lst)),
+                         [html.escape('sorted($)[2]'), html.escape('sum($) / 2'),
+                          ''])
+
+    def test_a_free_row_previews_its_answer(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        # The last preview belongs to the empty box that follows it.
+        self.assertEqual(self.previews(self.panel(model, lst))[-2:], ['3', ''])
+
+    def test_a_free_row_hands_over_its_code(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        self.assertIn('snc-py-exp="sorted(data)[2]"',
+                      self.panel(model, lst, source='data'))
+
+    def test_the_empty_row_says_what_it_is_for(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertIn('placeholder="Add aggregation"', self.panel(model, lst))
+
+
+class TestFreeAggregationCell(unittest.TestCase):
+    """The cell a free-form aggregation makes is labelled with a box holding the
+    expression -- there is no name for it but itself, so the place it reads is
+    the place to edit it."""
+
+    def rows(self, model, lst, source=None):
+        if source:
+            model = dict(model, _source_expr=source)
+        out = visualize(lst, model, mock_get_visualizer,
+                        (lambda code: eval(code, {}, {'data': lst}))
+                        if source else None)
+        self.assertIn('col-agg-row', out)
+        return re.findall(r'<tr class="col-agg-row">(.*?)</tr>',
+                          out[out.index('<tr class="col-agg-row">'):],
+                          re.DOTALL)
+
+    def cells(self, row):
+        return re.findall(r'<td class="col-agg-cell"[^>]*>(.*?)</td>', row,
+                          re.DOTALL)
+
+    def test_the_label_is_a_box_holding_the_expression(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('class="col-agg-label col-agg-expr"', cell)
+        self.assertIn(f'value="{html.escape("sorted($)[2]")}"', cell)
+
+    def test_the_box_edits_the_aggregation_it_labels(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn(html.escape('ComputeExprInput(index=0'), cell)
+        self.assertIn(html.escape("expr='sorted($)[2]'"), cell)
+
+    def test_a_named_aggregation_keeps_its_name(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('<span class="col-agg-label">Mean</span>', cell)
+        self.assertNotIn('col-agg-expr', cell)
+
+    def test_the_cell_still_shows_and_hands_over_its_answer(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        cell = self.cells(self.rows(model, lst, source='data')[0])[0]
+        self.assertIn('col-agg-value">3<', cell)
+        self.assertIn('snc-py-exp="sorted(data)[2]"', cell)
 
 
 if __name__ == '__main__':

@@ -1293,6 +1293,44 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+
+	/* The rows that write a line, and the rows the user writes themselves, have
+	   no checkbox -- but they still start where the named ones do, so the menu
+	   reads as one column of rows rather than two. Sized like the checkbox it
+	   stands in for. */
+	.col-compute-nocheck {
+		flex: none;
+		width: 12px;
+	}
+
+	/* Unique and Tally: a name and nothing else, so the name reaches the full
+	   width of the row and the row is the drag handle for the line it writes. */
+	.col-compute-code .col-compute-name {
+		flex: 1;
+	}
+
+	/* An aggregation of the user's own is a whole expression rather than a level
+	   inside one, so its box takes the width the name and its box would. */
+	.col-compute-expr {
+		flex: 1;
+		min-width: 0;
+		width: 12ch;
+		box-sizing: border-box;
+		font-size: 9px;
+		padding: 0 2px;
+		border-color: transparent;
+		border-radius: 3px;
+
+		&:hover,
+		&:focus {
+			border-color: var(--snc-border-color);
+		}
+	}
+
+	.col-compute-sep {
+		margin: 2px 0;
+		border-top: 1px solid var(--snc-border-color);
+	}
 }
 
 /* --- The answers, under the columns they are about ---
@@ -1349,6 +1387,25 @@
 	flex: none;
 	color: var(--snc-text-muted);
 	white-space: nowrap;
+}
+
+/* An aggregation the user wrote has no name but itself, so the label is a box
+   holding the expression -- read where a name would be, and edited there too.
+   Sized by its `size` attribute so a long expression isn't hidden behind a
+   width the cell chose. */
+.list-visualizer input.col-agg-expr {
+	box-sizing: content-box;
+	font-family: inherit;
+	font-size: inherit;
+	padding: 0 2px;
+	border-color: transparent;
+	background: none;
+	color: var(--snc-text-muted);
+
+	&:hover,
+	&:focus {
+		border-color: var(--snc-border-color);
+	}
 }
 
 .list-visualizer .col-agg-value {

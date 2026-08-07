@@ -223,6 +223,26 @@ class ComputeHoleInput:
     value: str
 
 @dataclass(frozen=True, slots=True)
+class ComputeCodeClick:
+    """User clicked one of the Compute submenu's code rows -- Unique, Tally --
+    which answer with a whole list, so they write a line rather than keep a cell
+    on screen."""
+    index: int
+    expr: str
+
+@dataclass(frozen=True, slots=True)
+class ComputeExprInput:
+    """User typed an aggregation of their own: into the empty box at the foot of
+    the Compute submenu, or into the box that labels the cell it made.
+
+    Both boxes hold the whole expression rather than part of one, which is what
+    tells this from ComputeHoleInput.
+    """
+    index: int
+    expr: str
+    value: str
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -651,8 +671,10 @@ def _set_column_computes(model: dict, col: str, exprs) -> None:
     computes = dict(model.get('column_computes') or {})
     # fromkeys rather than a set: asking for the same aggregation twice is one
     # cell, and the ones the ordering can't tell apart -- two percentiles --
-    # keep the order they were asked in.
-    ordered = sorted(dict.fromkeys(exprs), key=_agg_order)
+    # keep the order they were asked in. An empty box is not an aggregation, so
+    # it is dropped here rather than kept as a cell with nothing in it.
+    ordered = sorted((expr for expr in dict.fromkeys(exprs) if expr.strip()),
+                     key=_agg_order)
     if ordered:
         computes[col] = ordered
     else:
@@ -1329,6 +1351,15 @@ COMPUTE_AGGS = (
     ('Max Item',   '$$[np.argmax($)]'),
 )
 
+# The rest of the submenu: questions whose answer is a whole list rather than a
+# value, so there is no cell small enough to keep one in. Clicking writes the
+# line, the way an action button does; each is a name, the expression it is, and
+# what to call the line it writes.
+COMPUTE_CODES = (
+    ('Unique', 'set($)',     'unique'),
+    ('Tally',  'Counter($)', 'tally'),
+)
+
 COMPUTE_IMPORTS = ('import numpy as np',)
 
 # A question this column can't answer -- an empty column, a mean of strings, a
@@ -1413,7 +1444,9 @@ def _agg_is_row(template: str) -> bool:
 def _agg_imports(template: str) -> Tuple[str, ...]:
     """The imports an expression needs, declared where it's written, the way
     TALLY_IMPORTS is."""
-    return COMPUTE_IMPORTS if 'np.' in _agg_fill(template) else ()
+    code = _agg_fill(template)
+    return ((COMPUTE_IMPORTS if 'np.' in code else ())
+            + (TALLY_IMPORTS if 'Counter(' in code else ()))
 
 
 def _agg_label(template: str) -> str:
@@ -1428,6 +1461,18 @@ def _agg_label(template: str) -> str:
         if _agg_shape(known) == shape:
             return ' '.join([label] + _agg_holes(template))
     return _agg_fill(template)
+
+
+def _agg_is_free(template: str) -> bool:
+    """Whether an expression is one the user wrote themselves.
+
+    Nothing marks it as theirs: a free-form aggregation is simply an expression
+    no row of the catalog already reads, which is why one that happens to be
+    written the same way as Min *is* Min and ticks that row. An empty box has
+    written nothing yet, and counts as theirs until it does.
+    """
+    shape = _agg_shape(template)
+    return not any(_agg_shape(known) == shape for _, known in COMPUTE_AGGS)
 
 
 def _agg_order(template: str) -> int:
@@ -1482,6 +1527,27 @@ def _compute_rows(model: dict, col: str) -> List[Tuple[str, str, bool]]:
         rows.append((label, template if expr is None else expr,
                      expr is not None))
     return rows
+
+
+def _compute_free_rows(model: dict, col: str) -> List[str]:
+    """The submenu's last rows: the aggregations the user wrote themselves, and
+    an empty box after them to write another in.
+
+    In the order their cells read, since the box is the aggregation and the cell
+    it made carries the same box.
+    """
+    return [expr for expr in _column_computes(model, col)
+            if _agg_is_free(expr)] + ['']
+
+
+def _compute_code_name(template: str, source_expr: str) -> str:
+    """What to call the line a code row writes -- `data_tally` for a Tally of
+    `data`, the way the action buttons name what they write."""
+    _has_var, base = _name_context_for_source(source_expr)
+    for _label, known, suffix in COMPUTE_CODES:
+        if known == template:
+            return f'{base}_{suffix}'
+    return base
 
 
 _numpy_module = None
@@ -2941,6 +3007,11 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
 
     The answer is there whether or not the row is checked -- glancing at the
     mean is the common case, and checking the box is only for keeping it.
+
+    Under those, the rows that answer with a whole list (Unique, Tally), which
+    write a line rather than keep a cell; and under those, the user's own
+    aggregations, each a box holding the expression it is, with an empty one at
+    the foot to write another in.
     """
     values = _column_values(col, lst, model, eval_in_scope)
     source_expr = model.get('_source_expr')
@@ -2981,6 +3052,47 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'>{"" if unanswered else _format_agg_value(answer)}</span>'
             f'</div>')
 
+    rows.append('<div class="col-compute-sep"></div>')
+    for label, template, _suffix in COMPUTE_CODES:
+        # The row itself is the handle, there being no answer beside it to hang
+        # one off. Without a source there is no line to write and none to drag.
+        code = (None if values_expr is None
+                else _agg_code(template, values_expr, source_expr))
+        click_attr = '' if code is None else (
+            f' snc-mouse-down='
+            f'"{html.escape(repr(ComputeCodeClick(index=index, expr=template)))}"')
+        rows.append(
+            f'<div class="col-compute-row col-compute-code'
+            f'{"" if code else " unselectable"}"'
+            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
+            f'<span class="col-compute-toggle"{click_attr}>'
+            f'<span class="col-compute-nocheck"></span>'
+            f'<span class="col-compute-name">{html.escape(label)}</span>'
+            f'</span></div>')
+
+    rows.append('<div class="col-compute-sep"></div>')
+    # A box names itself by where it sits rather than by what it says: the first
+    # thing typed into the empty one adds a cell to the table, and a box found
+    # again by its place in the list of everything focusable would lose the
+    # typing to it.
+    for i, template in enumerate(_compute_free_rows(model, col)):
+        answer = _agg_value(template, values, eval_in_scope, lst)
+        unanswered = answer is NO_ANSWER
+        code = (None if unanswered or values_expr is None
+                else _agg_code(template, values_expr, source_expr))
+        rows.append(
+            f'<div class="col-compute-row col-compute-free">'
+            f'<span class="col-compute-nocheck"></span>'
+            f'<input type="text" class="col-compute-expr search-box" '
+            f'snc-input="{html.escape(_compute_expr_event(index, template))}" '
+            f'snc-focus-key="compute-free-{index}-{i}" '
+            f'value="{html.escape(template)}" placeholder="Add aggregation" '
+            f'spellcheck="false" />'
+            f'<span class="col-compute-preview"'
+            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
+            f'>{"" if unanswered else _format_agg_value(answer)}</span>'
+            f'</div>')
+
     return (f'<div class="snc-dropdown-panel flyout col-compute-panel" '
             f'snc-dropdown-align="flyout">{"".join(rows)}</div>')
 
@@ -2988,6 +3100,13 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
 def _compute_hole_event(index: int, template: str, hole: int) -> str:
     return (f"lambda e: ComputeHoleInput(index={index}, expr={template!r}, "
             f"hole={hole}, value=e.get('value', ''))")
+
+
+def _compute_expr_event(index: int, template: str) -> str:
+    """The box that holds a whole aggregation, wherever it is drawn: at the foot
+    of the submenu, or as the label of the cell it made."""
+    return (f"lambda e: ComputeExprInput(index={index}, expr={template!r}, "
+            f"value=e.get('value', ''))")
 
 
 def _render_column_menu(col, index, model, lst, eval_in_scope=None):
@@ -3708,7 +3827,30 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False):
     )
 
 
-def _render_agg_cell(expr, values, values_expr, style_attr,
+def _agg_label_html(expr: str, index: int, level: int) -> str:
+    """What names a cell: the catalog's word for the aggregation, or a box
+    holding the expression when the aggregation is the user's own.
+
+    There is no name for one of theirs but the expression itself, so the place
+    it reads is the place to edit it -- the same box the submenu offers, and the
+    same event behind it.
+
+    It names itself by where it sits rather than by what it says, so that typing
+    in it -- which rewrites what it says -- doesn't cost it the focus it is
+    being typed into.
+    """
+    if not _agg_is_free(expr):
+        return f'<span class="col-agg-label">{html.escape(_agg_label(expr))}</span>'
+    # The cell around it is a drag handle, and a drag beginning inside the box
+    # would take the selection the user was making with it.
+    return (f'<input type="text" class="col-agg-label col-agg-expr" '
+            f'snc-input="{html.escape(_compute_expr_event(index, expr))}" '
+            f'snc-focus-key="agg-expr-{index}-{level}" '
+            f'value="{html.escape(expr)}" size="{max(len(expr), 4)}" '
+            f'draggable="false" spellcheck="false" />')
+
+
+def _render_agg_cell(expr, index, level, values, values_expr, style_attr,
                      eval_in_scope=None) -> str:
     """One answer, in a cell of its own."""
     answer = _agg_value(expr, values, eval_in_scope)
@@ -3719,7 +3861,7 @@ def _render_agg_cell(expr, values, values_expr, style_attr,
     return (
         f'<td class="col-agg-cell"{style_attr}>'
         f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
-        f'<span class="col-agg-label">{html.escape(_agg_label(expr))}</span>'
+        f'{_agg_label_html(expr, index, level)}'
         f'<span class="col-agg-value">'
         f'{"" if answer is NO_ANSWER else _format_agg_value(answer)}</span>'
         f'</div></td>')
@@ -3734,7 +3876,7 @@ def _column_cell_value(col: str, item, eval_in_scope=None):
         return NO_ANSWER
 
 
-def _render_agg_item_row(expr, ci, columns, lst, values, values_expr,
+def _render_agg_item_row(expr, ci, level, columns, lst, values, values_expr,
                          style_attr, eval_in_scope=None,
                          source_expr=None) -> str:
     """A row aggregation's row: the row of the list a column's Min Item or Max
@@ -3767,9 +3909,7 @@ def _render_agg_item_row(expr, ci, columns, lst, values, values_expr,
                  else _column_cell_value(col, item, eval_in_scope))
         code = (None if item_code is None or value is NO_ANSWER
                 else replace_dollars_in_py_exp(col, [item_code]))
-        label = ('' if cj != ci else
-                 f'<span class="col-agg-label">'
-                 f'{html.escape(_agg_label(expr))}</span>')
+        label = '' if cj != ci else _agg_label_html(expr, ci, level)
         cells.append(
             f'<td class="col-agg-cell"{style_attr}>'
             f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
@@ -3844,8 +3984,8 @@ def _render_agg_rows(columns, model, lst, eval_in_scope=None,
         if spec[0] == 'item':
             _, ci, expr = spec
             values, values_expr = reads[ci]
-            rows.append(_render_agg_item_row(expr, ci, columns, lst, values,
-                                             values_expr, style_attr,
+            rows.append(_render_agg_item_row(expr, ci, level, columns, lst,
+                                             values, values_expr, style_attr,
                                              eval_in_scope, source_expr))
             continue
         cells = []
@@ -3854,8 +3994,9 @@ def _render_agg_rows(columns, model, lst, eval_in_scope=None,
                 cells.append('<td class="col-agg-blank"></td>')
             else:
                 values, values_expr = reads[ci]
-                cells.append(_render_agg_cell(expr, values, values_expr,
-                                              style_attr, eval_in_scope))
+                cells.append(_render_agg_cell(expr, ci, level, values,
+                                              values_expr, style_attr,
+                                              eval_in_scope))
         rows.append(f'<tr class="col-agg-row">'
                     f'<td class="row-index"></td>{"".join(cells)}</tr>')
     return ''.join(rows)
@@ -4371,6 +4512,34 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     # asking for that percentile.
                     exprs.append(edited)
                 _set_column_computes(model, col, exprs)
+
+        case ComputeExprInput(index=idx, expr=expr, value=text):
+            col = _column_at(model, idx)
+            if col is not None:
+                exprs = _column_computes(model, col)
+                if expr in exprs:
+                    # In place, so the cell the user is typing at stays where it
+                    # was in the column's stack. Emptying the box drops it,
+                    # since _set_column_computes keeps no blank aggregations.
+                    exprs[exprs.index(expr)] = text
+                else:
+                    exprs.append(text)
+                _set_column_computes(model, col, exprs)
+
+        # One line written, unlike checking a box, which invites the next -- so
+        # this closes the menu the way an action button's dropdown closes.
+        case ComputeCodeClick(index=idx, expr=expr):
+            col = _column_at(model, idx)
+            source_expr = model.get('_source_expr')
+            if col is not None and source_expr is not None:
+                _close_column_menus(model)
+                code = _agg_code(expr, _column_values_expr(col, source_expr))
+                # What the line needs imported is the expression's own, declared
+                # where every other aggregation declares it rather than read back
+                # out of the text.
+                commands.append(new_code_command(
+                    (_compute_code_name(expr, source_expr), code),
+                    lambda _code: _agg_imports(expr)))
 
         # The tally leaves the column menu open: picking several values in a row
         # is the whole point of it.
