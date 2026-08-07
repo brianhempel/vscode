@@ -1333,6 +1333,12 @@
 	border-width: 0;
 }
 
+/* Min Item / Max Item answer with a row of the list rather than a value, so
+   they get a whole row -- index cell included, which is a .col-agg-cell too so
+   it pins with the rest of its row instead of scrolling out from under it. The
+   cells otherwise read like any other answer; only the column that picked the
+   row is labelled. */
+
 .list-visualizer .col-agg {
 	display: flex;
 	align-items: baseline;

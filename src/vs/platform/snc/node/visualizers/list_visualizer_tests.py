@@ -8308,6 +8308,7 @@ from list_visualizer import (
     COMPUTE_AGGS, NO_ANSWER,
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports,
     _agg_value, _agg_code, _agg_label, _format_agg_value,
+    _agg_row_index, _agg_is_row,
 )
 
 
@@ -8362,6 +8363,36 @@ class TestAggHoles(unittest.TestCase):
                          ['25'])
 
 
+class TestAggRowIndex(unittest.TestCase):
+    """An aggregation that subscripts the list itself ($$) answers with a row of
+    it rather than a value of its own, and the index it reads the list at is
+    read back off the expression instead of stored beside it."""
+
+    def test_a_row_aggregation_names_the_index_inside_it(self):
+        self.assertEqual(_agg_row_index('$$[np.argmin($)]'), 'np.argmin($)')
+        self.assertEqual(_agg_row_index('$$[np.argmax($)]'), 'np.argmax($)')
+
+    def test_an_aggregation_that_answers_with_a_value_names_no_row(self):
+        self.assertIsNone(_agg_row_index('min($)'))
+        # The index by itself is a number, not the row it names.
+        self.assertIsNone(_agg_row_index('np.argmin($)'))
+
+    def test_something_that_subscripts_the_column_is_not_a_row_of_the_list(self):
+        self.assertIsNone(_agg_row_index('$[0]'))
+
+    def test_an_expression_that_does_not_parse_names_no_row(self):
+        self.assertIsNone(_agg_row_index('$$[np.argmin($)'))
+
+    def test_the_catalog_offers_min_item_and_max_item(self):
+        self.assertEqual([label for label, template in COMPUTE_AGGS
+                          if _agg_is_row(template)],
+                         ['Min Item', 'Max Item'])
+
+    def test_a_row_aggregation_reads_as_its_name(self):
+        self.assertEqual(_agg_label('$$[np.argmin($)]'), 'Min Item')
+        self.assertEqual(_agg_label('$$[np.argmax($)]'), 'Max Item')
+
+
 class TestAggImports(unittest.TestCase):
     """An expression says which import it needs, so the front end can decide
     whether the file already has it -- the way the tally's do."""
@@ -8386,7 +8417,7 @@ class TestAggValues(unittest.TestCase):
         self.assertEqual([label for label, _ in COMPUTE_AGGS],
                          ['#Unique', '#Present', '#Missing', 'Min', 'Min Idx',
                           'Mean', 'Median', 'Percentile', 'Percentile',
-                          'Max', 'Max Idx'])
+                          'Max', 'Max Idx', 'Min Item', 'Max Item'])
 
     def test_each_aggregation_answers(self):
         for label, expected in [('#Unique', 4), ('#Present', 5), ('#Missing', 0),
@@ -8417,6 +8448,19 @@ class TestAggValues(unittest.TestCase):
         # The user's own program has no numpy in it; the preview still answers.
         self.assertEqual(_agg_value('np.mean($)', [1, 2, 3],
                                     lambda code: eval(code, {}, {})), 3 - 1)
+
+    def test_a_row_aggregation_answers_with_the_row_the_column_picked(self):
+        # The column is not the list here: the answer is the item the least of
+        # those values belongs to, not the least value.
+        lst = ['a', 'b', 'c']
+        self.assertEqual(_agg_value(agg_named('Min Item'), [30, 10, 20],
+                                    None, lst), 'b')
+        self.assertEqual(_agg_value(agg_named('Max Item'), [30, 10, 20],
+                                    None, lst), 'a')
+
+    def test_a_row_aggregation_with_no_list_to_read_has_no_answer(self):
+        self.assertIs(_agg_value(agg_named('Min Item'), [30, 10, 20]),
+                      NO_ANSWER)
 
 
 class TestAggNonAnswers(unittest.TestCase):
@@ -8469,16 +8513,21 @@ class TestAggCode(unittest.TestCase):
         self.assertEqual(_agg_code('np.percentile($, {{25}})', 'data'),
                          'np.percentile(data, 25)')
 
+    def test_the_list_is_bound_where_the_second_dollar_was(self):
+        self.assertEqual(_agg_code('$$[np.argmin($)]',
+                                   "[item['p'] for item in data]", 'data'),
+                         "data[np.argmin([item['p'] for item in data])]")
+
     def test_what_it_hands_over_is_what_it_computed(self):
         # The preview and the code have to be the same question, or the number
         # on screen isn't the one the user drags into the file.
         data = COMPUTE_LIST
         for _, template in COMPUTE_AGGS:
             with self.subTest(template):
-                code = _agg_code(template, 'data')
+                code = _agg_code(template, 'data', 'data')
                 self.assertEqual(eval(code, {'np': __import__('numpy')},
                                       {'data': data}),
-                                 _agg_value(template, data))
+                                 _agg_value(template, data, None, data))
 
 
 class TestAggLabel(unittest.TestCase):
@@ -8788,7 +8837,14 @@ class TestComputeMenuRendering(unittest.TestCase):
         previews = self.previews(self.panel(model, lst))
         self.assertEqual(previews,
                          ['4', '5', '0', '1', '1', '2.8', '3', '1', '4.6',
-                          '5', '4'])
+                          '5', '4', '1', '5'])
+
+    def test_a_row_aggregation_previews_the_row_it_picked(self):
+        lst = [{'a': 1}, {'a': 3}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']"]
+        self.assertEqual(self.previews(self.panel(model, lst))[-2:],
+                         [html.escape("{'a': 1}"), html.escape("{'a': 3}")])
 
     def test_a_checked_row_says_so(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -8836,6 +8892,7 @@ class TestComputeMenuRendering(unittest.TestCase):
         self.assertIn('snc-py-exp="np.mean(data)"', panel)
         self.assertIn('snc-py-exp="min(data)"', panel)
         self.assertIn('snc-py-exp="np.percentile(data, 90)"', panel)
+        self.assertIn('snc-py-exp="data[np.argmin(data)]"', panel)
 
     def test_the_expressions_say_which_import_they_need(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -8978,6 +9035,137 @@ class TestComputeCellRendering(unittest.TestCase):
         row = self.rows(model, lst)[0]
         self.assertNotIn('pick-region', row)
         self.assertIn('<td class="row-index"></td>', row)
+
+
+MIN_ITEM = '$$[np.argmin($)]'
+MAX_ITEM = '$$[np.argmax($)]'
+
+
+class TestComputeItemRowRendering(unittest.TestCase):
+    """Min Item and Max Item answer with a row of the list, so they are drawn as
+    a whole row of the table -- index cell included -- rather than one cell."""
+
+    # Least by 'b' is the middle row, which is neither least nor greatest by
+    # 'a': a cell that read the wrong row would show it.
+    LST = [{'a': 10, 'b': 2}, {'a': 30, 'b': 1}, {'a': 20, 'b': 3}]
+    COLUMN_B = "[item['b'] for item in data]"
+
+    def model(self, computes, lst=None, columns=None):
+        lst = self.LST if lst is None else lst
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"] if columns is None else columns
+        for col, exprs in computes.items():
+            _set_column_computes(model, col, exprs)
+        return lst, model
+
+    def table(self, model, lst, source=None):
+        if source:
+            model = dict(model, _source_expr=source)
+        return visualize(lst, model, mock_get_visualizer,
+                         (lambda code: eval(code, {}, {'data': lst}))
+                         if source else None)
+
+    def rows(self, model, lst, **kwargs):
+        return re.findall(r'<tr class="col-agg-row[^"]*">(.*?)</tr>',
+                          self.table(model, lst, **kwargs), re.DOTALL)
+
+    def item_rows(self, model, lst, **kwargs):
+        found = re.findall(
+            r'<tr class="col-agg-row col-agg-item-row">(.*?)</tr>',
+            self.table(model, lst, **kwargs), re.DOTALL)
+        self.assertTrue(found, 'no item row rendered')
+        return found
+
+    def values(self, row):
+        return re.findall(r'col-agg-value">([^<]*)<', row)
+
+    def test_a_row_aggregation_draws_the_whole_row(self):
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst)[0]
+        # Index cell plus one cell per column, all of them that row's.
+        self.assertIn('<td class="row-index col-agg-cell"', row)
+        self.assertEqual(self.values(row), ['30', '1'])
+
+    def test_the_index_cell_reads_the_index(self):
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst)[0]
+        index_cell = row[:row.index('</td>')]
+        self.assertIn('>1<', index_cell)
+
+    def test_the_index_cell_hands_over_the_index_itself(self):
+        # The point of the row: pick the index out of it and use the number.
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst, source='data')[0]
+        index_cell = row[:row.index('</td>')]
+        self.assertIn(html.escape(f'np.argmin({self.COLUMN_B})'), index_cell)
+        self.assertIn('draggable="true"', index_cell)
+
+    def test_each_cell_hands_over_its_own_column_of_that_row(self):
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst, source='data')[0]
+        item = f'data[np.argmin({self.COLUMN_B})]'
+        self.assertIn(html.escape(f"{item}['a']"), row)
+        self.assertIn(html.escape(f"{item}['b']"), row)
+
+    def test_the_expressions_say_they_need_numpy(self):
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst, source='data')[0]
+        self.assertEqual(row.count('snc-py-exp-imports'), 3)
+
+    def test_only_the_column_that_asked_is_labelled(self):
+        # The other cells are that row's values, not minima of their own.
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst)[0]
+        self.assertEqual(re.findall(r'col-agg-label">([^<]*)<', row),
+                         ['Min Item'])
+        labelled = row[row.index('Min Item'):]
+        self.assertIn('>1<', labelled)
+
+    def test_min_item_and_max_item_are_a_row_each(self):
+        lst, model = self.model({"$['b']": [MIN_ITEM, MAX_ITEM]})
+        rows = self.item_rows(model, lst)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([self.values(row) for row in rows],
+                         [['30', '1'], ['20', '3']])
+
+    def test_a_row_aggregation_sits_under_the_cells(self):
+        lst, model = self.model({"$['a']": ['min($)'], "$['b']": [MIN_ITEM]})
+        rows = self.rows(model, lst)
+        self.assertEqual(len(rows), 2)
+        self.assertIn('>Min<', rows[0])
+        self.assertIn('>Min Item<', rows[1])
+
+    def test_every_row_but_the_lowest_is_pinned_above_the_one_below_it(self):
+        lst, model = self.model({"$['a']": ['min($)'], "$['b']": [MIN_ITEM]})
+        rows = self.rows(model, lst)
+        self.assertIn('style="bottom: calc(1 * var(--snc-agg-row-height))"',
+                      rows[0])
+        self.assertNotIn('style=', rows[1])
+
+    def test_a_column_that_cannot_pick_a_row_still_keeps_its_row(self):
+        # There is no least row of no rows; the row says nothing rather than
+        # disappearing and taking the table's layout with it.
+        lst, model = self.model({'$': [MIN_ITEM]}, lst=[], columns=['$'])
+        row = self.item_rows(model, lst)[0]
+        self.assertEqual(self.values(row), [''])
+        self.assertIn('>Min Item<', row)
+        self.assertNotIn('snc-py-exp', row)
+
+    def test_a_list_with_no_source_hands_over_nothing(self):
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        self.assertNotIn('snc-py-exp', self.item_rows(model, lst)[0])
+
+    def test_the_item_column_hands_over_the_row_itself(self):
+        lst, model = self.model({'$': [MIN_ITEM]}, lst=[3, 1, 4],
+                                columns=['$'])
+        row = self.item_rows(model, lst, source='data')[0]
+        self.assertIn(html.escape('data[np.argmin(data)]'), row)
+        self.assertEqual(self.values(row), ['1'])
+
+    def test_a_row_aggregation_is_not_a_row_of_the_list(self):
+        # It reads like one, but there is nothing in it to pick.
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        self.assertNotIn('pick-region', self.item_rows(model, lst)[0])
 
 
 if __name__ == '__main__':
