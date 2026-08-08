@@ -8321,7 +8321,7 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 from list_visualizer import (
     COMPUTE_AGGS, HISTOGRAM_AGG, HISTOGRAM_BINS_TOOLTIP, NO_ANSWER,
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
-    _agg_value, _agg_code, _agg_label, _format_agg_value,
+    _agg_value, _agg_code, _agg_name, _format_agg_value,
     _agg_row_index_code, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
     _table_child_value_getter, _agg_child_expr,
 )
@@ -8459,8 +8459,8 @@ class TestAggRowIndex(unittest.TestCase):
             "data.index(min(data, key=lambda item: item['b']))")
 
     def test_a_row_aggregation_reads_as_its_name(self):
-        self.assertEqual(_agg_label('min($$, key=lambda item: $)'), 'Min Item')
-        self.assertEqual(_agg_label('max($$, key=lambda item: $)'), 'Max Item')
+        self.assertEqual(_agg_name('min($$, key=lambda item: $)'), 'Min Item')
+        self.assertEqual(_agg_name('max($$, key=lambda item: $)'), 'Max Item')
 
     def test_they_need_nothing_imported(self):
         # min and max are builtins; the row costs no numpy at all.
@@ -8668,24 +8668,25 @@ class TestAggCode(unittest.TestCase):
                                      answer)
 
 
-class TestAggLabel(unittest.TestCase):
-    """What a row and its cell read, which is the catalog's name plus whatever
-    is in its boxes."""
+class TestAggName(unittest.TestCase):
+    """What a row and its cell read an aggregation as: the catalog's word for
+    it, with what is in its boxes left to the boxes."""
 
     def test_a_plain_aggregation_reads_as_its_name(self):
-        self.assertEqual(_agg_label('np.mean($)'), 'Mean')
+        self.assertEqual(_agg_name('np.mean($)'), 'Mean')
 
-    def test_a_hole_reads_after_the_name(self):
-        self.assertEqual(_agg_label('np.percentile($, {{25}})'),
-                         'Percentile 25')
+    def test_a_percentile_of_any_level_is_named_percentile(self):
+        # The number is what the box beside the name reads, not part of it.
+        self.assertEqual(_agg_name('np.percentile($, {{25}})'), 'Percentile')
+        self.assertEqual(_agg_name('np.percentile($, {{}})'), 'Percentile')
 
-    def test_an_aggregation_the_catalog_does_not_know_reads_as_its_code(self):
-        self.assertEqual(_agg_label('sum($) / 2'), 'sum($) / 2')
+    def test_an_aggregation_the_catalog_does_not_know_has_no_name(self):
+        self.assertIsNone(_agg_name('sum($) / 2'))
 
-    def test_a_histogram_reads_by_how_many_bins_it_asked_for(self):
+    def test_a_histogram_is_named_however_many_bins_it_asked_for(self):
         self.assertEqual(
-            _agg_label('counts, edges = np.histogram($, bins={{20}})'),
-            'Histogram 20')
+            _agg_name('counts, edges = np.histogram($, bins={{20}})'),
+            'Histogram')
 
 
 class TestAggHistogramSvg(unittest.TestCase):
@@ -9289,10 +9290,14 @@ class TestComputeCellRendering(unittest.TestCase):
         self.assertNotIn('<tfoot', self.table(model, lst))
 
     def test_a_cell_reads_what_is_in_its_boxes(self):
+        # In boxes here too -- see TestAggregationCellHoles -- so the name is
+        # the label's own text and the number is what the box beside it reads.
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['np.percentile($, {{25}})'])
         cell = self.cells(self.rows(model, lst)[0])[0]
-        self.assertIn('>Percentile 25<', cell)
+        self.assertIn('>Percentile <', cell)
+        self.assertIn('col-agg-hole', cell)
+        self.assertIn('value="25"', cell)
 
     def test_an_aggregation_this_column_can_no_longer_answer_reads_empty(self):
         # The column's values changed under it; the cell says nothing rather
@@ -9409,7 +9414,9 @@ class TestComputeCellRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', [HISTOGRAM_AGG])
         cell = self.cells(self.rows(model, lst)[0])[0]
-        self.assertIn('>Histogram 10<', cell)
+        self.assertIn('>Histogram <', cell)
+        self.assertIn('col-agg-hole', cell)
+        self.assertIn('value="10"', cell)
         self.assertIn('col-agg-hist', cell)
         self.assertNotIn('array(', cell)
 
@@ -9430,8 +9437,9 @@ class TestComputeCellRendering(unittest.TestCase):
         _set_column_computes(model, '$', ['np.mean($)', HISTOGRAM_AGG])
         rows = self.rows(model, lst)
         self.assertEqual(len(rows), 2)
-        self.assertEqual([re.search(r'col-agg-label">([^<]*)<', row).group(1)
-                          for row in rows], ['Mean', 'Histogram 10'])
+        self.assertEqual([re.search(r'col-agg-label">([^<]*)<',
+                                    row).group(1).strip()
+                          for row in rows], ['Mean', 'Histogram'])
 
     def test_a_computed_column_hands_over_the_column_too(self):
         lst = [{'a': 1}, {'a': 3}]
@@ -9448,6 +9456,69 @@ class TestComputeCellRendering(unittest.TestCase):
         row = self.rows(model, lst)[0]
         self.assertNotIn('pick-region', row)
         self.assertIn('<td class="row-index col-agg-blank"></td>', row)
+
+
+class TestAggCellHandsTheAnswerOverOnce(unittest.TestCase):
+    """The cell is what carries the expression, not the answer inside it.
+
+    An answer whose visualizer wraps itself in a handle -- the generic ones,
+    which have no content of their own to hover -- would be given the same
+    expression the cell around it already offers. Two handles, one inside the
+    other, both saying the same thing: the inner one's tooltip is drawn above
+    the answer, which is where the cell's label is, so hovering the answer
+    covers up the name of the aggregation being read.
+
+    The answer stays a handle to look at and to drag, though. It keeps the
+    grab wrapper and the cell's own handle answers for it, which is what
+    hovering it and dragging it find on the way up.
+    """
+
+    def cell(self, lst, expr, get_vis=None, source='data'):
+        get_vis = get_vis or mock_get_visualizer
+        _, model = tally_model(lst)
+        _set_column_computes(model, '$', [expr])
+        model['_source_expr'] = source
+        out = visualize(lst, model, get_vis,
+                        lambda code: eval(code, {}, {'data': lst}))
+        row = re.search(r'<tr class="col-agg-row">(.*?)</tr>',
+                        out[out.index('<tfoot'):], re.DOTALL).group(1)
+        return re.search(r'<td class="col-agg-cell[^"]*"[^>]*>(.*?)</td>',
+                         row, re.DOTALL).group(1)
+
+    def test_the_answer_does_not_repeat_the_cells_expression(self):
+        # MockStringVisualizer self-wraps when it is small, the way the generic
+        # visualizer does.
+        cell = self.cell(['b', 'a', 'c'], 'min($)')
+        self.assertEqual(cell.count(f'snc-py-exp="{html.escape("min(data)")}"'),
+                         1)
+
+    def test_the_answer_is_still_a_handle_to_look_at_and_to_drag(self):
+        # No expression of its own to say, but the wrapper is what draws the
+        # grab cursor and the border, and a drag on it finds the cell's.
+        cell = self.cell(['b', 'a', 'c'], 'min($)')
+        self.assertIn('<span class="py-exp-grab">', cell)
+        self.assertNotIn('draggable="false"', cell.split('col-agg-value')[1])
+
+    def test_the_cell_is_the_one_that_keeps_it(self):
+        cell = self.cell(['b', 'a', 'c'], 'min($)')
+        self.assertIn(f'<div class="col-agg" snc-py-exp='
+                      f'"{html.escape("min(data)")}" draggable="true">', cell)
+
+    def test_the_answer_itself_is_still_drawn(self):
+        cell = self.cell(['b', 'a', 'c'], 'min($)')
+        self.assertEqual(agg_answers(cell), ['a'])
+
+    def test_the_answer_is_still_handed_its_expression(self):
+        # Taking the wrapper off is not the same as keeping the expression from
+        # the child: one with handles of its own builds them out of it.
+        # MockIntVisualizer echoes what it was given.
+        cell = self.cell(COMPUTE_LIST, 'min($)', get_vis=lambda v: _mock_int_vis)
+        self.assertIn('child-expr=min(data)', cell)
+
+    def test_a_cell_with_nothing_to_hand_over_still_draws_its_answer(self):
+        cell = self.cell(['b', 'a', 'c'], 'min($)', source=None)
+        self.assertNotIn('snc-py-exp', cell)
+        self.assertEqual(agg_answers(cell), ['a'])
 
 
 class TestComputeCellChildEvents(unittest.TestCase):
@@ -9594,6 +9665,18 @@ class TestComputeItemRowRendering(unittest.TestCase):
         row = self.item_rows(model, lst, source='data')[0]
         self.assertIn(html.escape(f"{self.LEAST_BY_B}['a']"), row)
         self.assertIn(html.escape(f"{self.LEAST_BY_B}['b']"), row)
+
+    def test_no_cell_repeats_the_expression_its_answer_was_handed(self):
+        # Same as any other answer: the cell is the handle, so a child that
+        # would wrap itself in one has it taken back off. Strings here because
+        # the mock string visualizer self-wraps when small.
+        lst, model = self.model({"$['b']": [MIN_ITEM]},
+                                lst=[{'a': 'x', 'b': 2}, {'a': 'y', 'b': 1}])
+        row = self.item_rows(model, lst, source='data')[0]
+        self.assertIn('<span class="py-exp-grab">', row)
+        self.assertEqual(
+            row.count(f'snc-py-exp="{html.escape(self.LEAST_BY_B)}[&#x27;a&#x27;]"'),
+            1)
 
     def test_the_row_costs_no_imports(self):
         # min and max are builtins, so nothing has to be added to the file.
@@ -9837,8 +9920,8 @@ class TestFreeAggregations(unittest.TestCase):
     def test_an_empty_box_is_nobodys_expression_yet(self):
         self.assertTrue(_agg_is_free(''))
 
-    def test_it_reads_as_the_code_it_is(self):
-        self.assertEqual(_agg_label('sorted($)[2]'), 'sorted($)[2]')
+    def test_it_has_no_name_but_the_code_it_is(self):
+        self.assertIsNone(_agg_name('sorted($)[2]'))
 
     def test_it_answers_like_any_other_aggregation(self):
         self.assertEqual(_agg_value('sorted($)[2]', COMPUTE_LIST), 3)
@@ -10055,6 +10138,116 @@ class TestFreeAggregationCell(unittest.TestCase):
         cell = self.cells(self.rows(model, lst)[0])[0]
         self.assertIn(f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}"',
                       cell)
+
+
+class TestAggregationCellHoles(unittest.TestCase):
+    """A cell whose aggregation has a box in it -- a percentile's level, a
+    histogram's bin count -- carries that box in its own label, the way a
+    free-form one carries the whole expression: the place the number reads is
+    the place to edit it."""
+
+    def rows(self, model, lst, source=None):
+        if source:
+            model = dict(model, _source_expr=source)
+        out = visualize(lst, model, mock_get_visualizer,
+                        (lambda code: eval(code, {}, {'data': lst}))
+                        if source else None)
+        self.assertIn('col-agg-row', out)
+        return re.findall(r'<tr class="col-agg-row">(.*?)</tr>',
+                          out[out.index('<tr class="col-agg-row">'):],
+                          re.DOTALL)
+
+    def cells(self, row):
+        return re.findall(r'<td class="col-agg-cell[^"]*"[^>]*>(.*?)</td>', row,
+                          re.DOTALL)
+
+    def cell(self, computes, lst=None, col='$', **kwargs):
+        lst, model = tally_model(COMPUTE_LIST if lst is None else lst)
+        _set_column_computes(model, col, computes)
+        return self.cells(self.rows(model, lst, **kwargs)[0])[0]
+
+    def boxes(self, cell):
+        """What each of the cell's boxes reads, in the order they are drawn."""
+        return re.findall(r'col-agg-hole[^>]*value="([^"]*)"', cell)
+
+    def test_the_level_is_a_box_the_cell_carries(self):
+        cell = self.cell([P10])
+        self.assertIn('class="col-agg-label"', cell)
+        self.assertIn('Percentile', cell)
+        self.assertEqual(self.boxes(cell), ['10'])
+
+    def test_an_edited_level_is_what_the_box_reads(self):
+        self.assertEqual(self.boxes(self.cell(['np.percentile($, {{25}})'])),
+                         ['25'])
+
+    def test_the_box_edits_the_aggregation_it_labels(self):
+        cell = self.cell([P10])
+        self.assertIn(html.escape('ComputeHoleInput(index=0'), cell)
+        self.assertIn(html.escape(f'expr={P10!r}'), cell)
+        self.assertIn(html.escape('hole=0'), cell)
+
+    def test_typing_in_it_rewrites_the_cell_in_place(self):
+        # Through the event the cell really offers, so a number typed at the
+        # table asks what a number typed in the submenu asks.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', P10, 'max($)'])
+        cell = self.cells(self.rows(model, lst)[1])[0]
+        event = html.unescape(
+            re.search(r'col-agg-hole[^>]*snc-input="([^"]*)"', cell).group(1))
+        model, _ = update({'pythonEventStr': event,
+                           'eventJSON': {'type': 'input', 'value': '25'}},
+                          None, model, lst, mock_get_visualizer,
+                          eval_in_scope=eval)
+        self.assertEqual(_column_computes(model, '$'),
+                         ['min($)', 'np.percentile($, {{25}})', 'max($)'])
+
+    def test_the_cell_still_shows_and_hands_over_its_answer(self):
+        cell = self.cell([P10], source='data')
+        self.assertEqual(agg_answers(cell), ['1.0'])
+        self.assertIn(html.escape('np.percentile(data, 10)'), cell)
+
+    def test_an_aggregation_with_no_box_is_the_name_alone(self):
+        cell = self.cell(['np.mean($)'])
+        self.assertIn('<div class="col-agg-label">Mean</div>', cell)
+        self.assertNotIn('col-agg-hole', cell)
+
+    def test_the_histogram_cell_carries_its_bin_count_too(self):
+        # A histogram's box is the percentile's under another name.
+        cell = self.cell([HISTOGRAM_AGG])
+        self.assertIn('Histogram', cell)
+        self.assertEqual(self.boxes(cell), ['10'])
+
+    def box_html(self, cell):
+        return re.search(r'<input[^>]*col-agg-hole[^>]*>', cell).group(0)
+
+    def test_the_bins_box_says_what_the_number_in_it_counts(self):
+        # The same thing it says in the submenu; a percentile's box reads off
+        # the name beside it, so only this one has anything to add.
+        self.assertIn(f'data-tooltip="{HISTOGRAM_BINS_TOOLTIP}"',
+                      self.box_html(self.cell([HISTOGRAM_AGG])))
+        self.assertNotIn('data-tooltip', self.box_html(self.cell([P10])))
+
+    def test_the_box_names_itself_by_where_it_sits(self):
+        # Typing in it rewrites what it says, so a box found again by what it
+        # says would lose the typing to it -- and no two boxes may share a name.
+        lst = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        _set_column_computes(model, "$['a']", [P10, P90])
+        _set_column_computes(model, "$['b']", [P10])
+        keys = re.findall(r'col-agg-hole[^>]*snc-focus-key="([^"]*)"',
+                          ''.join(self.rows(model, lst)))
+        self.assertEqual(len(keys), 3)
+        self.assertEqual(len(set(keys)), 3)
+
+    def test_the_box_is_not_a_drag_handle(self):
+        # The cell around it is one, and a drag begun inside the box would take
+        # the selection the user was making with it.
+        self.assertIn('draggable="false"', self.box_html(self.cell([P10])))
+
+    def test_the_cell_can_still_be_taken_away(self):
+        self.assertEqual(agg_x_events(self.cell([P10])),
+                         [ComputeToggle(index=0, expr=P10)])
 
 
 def make_compute_expr_key_event(key):

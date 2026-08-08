@@ -1431,6 +1431,30 @@
 	}
 }
 
+/* A number an aggregation asks for -- a percentile's level, a histogram's bin
+   count -- edited where it reads, the same box the Compute submenu offers. It
+   is part of the cell's name, so it is drawn as part of the name until the
+   pointer or the focus is on it: a row of cells reads as labels, not as a form. */
+.list-visualizer input.col-agg-hole {
+	font: inherit;
+	color: inherit;
+	background: none;
+	border: none;
+	border-radius: 3px;
+	padding: 0;
+	height: 8px;
+	line-height: 1;
+	text-align: left;
+	font-variant-numeric: tabular-nums;
+
+	&:hover,
+	&:focus {
+		border: solid 1px var(--snc-border-color);
+		margin: -1px;
+		background-color: white;
+	}
+}
+
 .list-visualizer .col-agg-x {
 	position: absolute;
 	right: 0px;

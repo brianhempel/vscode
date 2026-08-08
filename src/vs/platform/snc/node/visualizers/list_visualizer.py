@@ -55,7 +55,7 @@ from visualizer_utils import (
     route_child_event, aggregate_handled_keys,
     with_pass_body,
     LinkConfig, handle_relink,
-    wrap_child_prefix, wrap_child_suffix,
+    wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
     DOLLARS_RE,
     strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs,
@@ -1510,18 +1510,20 @@ def _agg_imports(template: str) -> Tuple[str, ...]:
             + (TALLY_IMPORTS if 'Counter(' in code else ()))
 
 
-def _agg_label(template: str) -> str:
-    """What a row and its cell read: the catalog's name for the expression,
-    with whatever is in its boxes after it (`Percentile 25`).
+def _agg_name(template: str) -> Optional[str]:
+    """What a row and its cell read an expression as: the catalog's word for it
+    -- `Percentile` -- or None when the catalog has no word for it, an
+    expression the user wrote having no name but itself.
 
-    An expression the catalog doesn't know -- one the user wrote -- has no name
-    but itself.
+    By shape, so a percentile of any level is named Percentile. The number is
+    what the box beside the name reads, not part of the name: it is the user's,
+    and everything of theirs is a box wherever it is drawn.
     """
     shape = _agg_shape(template)
     for label, known in COMPUTE_AGGS:
         if _agg_shape(known) == shape:
-            return ' '.join([label] + _agg_holes(template))
-    return _agg_fill(template)
+            return label
+    return None
 
 
 def _agg_is_free(template: str) -> bool:
@@ -1532,8 +1534,7 @@ def _agg_is_free(template: str) -> bool:
     written the same way as Min *is* Min and ticks that row. An empty box has
     written nothing yet, and counts as theirs until it does.
     """
-    shape = _agg_shape(template)
-    return not any(_agg_shape(known) == shape for _, known in COMPUTE_AGGS)
+    return _agg_name(template) is None
 
 
 def _agg_order(template: str) -> int:
@@ -1709,7 +1710,7 @@ def _format_agg_value(value) -> str:
 def _agg_is_histogram(template: str) -> bool:
     """Whether an aggregation is the catalog's Histogram, at any bin count.
 
-    By shape, the way _agg_label knows a percentile from a median, so nothing
+    By shape, the way _agg_name knows a percentile from a median, so nothing
     has to be stored beside the expression to say what it draws.
     """
     return _agg_shape(template) == _agg_shape(HISTOGRAM_AGG)
@@ -3201,12 +3202,10 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
         # The boxes and the answer sit outside the part that toggles: typing a
         # level, or dragging the answer out, is not a way of checking the row.
-        hole_tooltip = (f'data-tooltip="{html.escape(HISTOGRAM_BINS_TOOLTIP)}" '
-                        if _agg_is_histogram(template) else '')
         holes = ''.join(
             f'<input type="text" class="col-compute-hole search-box" '
             f'snc-input="{html.escape(_compute_hole_event(index, template, i))}" '
-            f'{hole_tooltip}'
+            f'{_agg_hole_tooltip(template)}'
             f'value="{html.escape(text)}" spellcheck="false" />'
             for i, text in enumerate(_agg_holes(template)))
         # Nothing to hand over when there is no answer, and nothing to name the
@@ -3290,6 +3289,18 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
 def _compute_hole_event(index: int, template: str, hole: int) -> str:
     return (f"lambda e: ComputeHoleInput(index={index}, expr={template!r}, "
             f"hole={hole}, value=e.get('value', ''))")
+
+
+def _agg_hole_tooltip(template: str) -> str:
+    """What a box inside an expression says of itself, wherever it is drawn.
+
+    Nothing, for most of them: the number in Percentile's box reads off the name
+    beside it. Only the histogram's has anything to add, since "Histogram 10"
+    doesn't say what the 10 counts.
+    """
+    if _agg_is_histogram(template):
+        return f'data-tooltip="{html.escape(HISTOGRAM_BINS_TOOLTIP)}" '
+    return ''
 
 
 def _compute_expr_event(index: int, template: str) -> str:
@@ -4109,6 +4120,12 @@ def _render_agg_answer(template, answer, key, code, model, get_visualizer,
     Handed its own expression rather than wrapped in one, so a child with
     handles of its own keeps them, and drawn small until the user pins it --
     both the way a cell does it.
+
+    A child that answers the expression with a handle around its whole self
+    stops carrying it: the cell already is that handle, and the inner one's
+    tooltip would be drawn above the answer, over the cell's label. The wrapper
+    stays, so the value still reads as a handle and still drags -- the cell's
+    is what a hover or a drag on it finds.
     """
     if answer is NO_ANSWER:
         return ''
@@ -4134,32 +4151,44 @@ def _render_agg_answer(template, answer, key, code, model, get_visualizer,
                                eval_in_scope, max_width=max_width,
                                max_height=80, small=small,
                                var_and_exp=var_and_exp)]
-    return f'{wrap_child_prefix(key)}{"".join(htmls)}{wrap_child_suffix}'
+    drawn = ''.join(defer_drag_grab(child_html, code) for child_html in htmls)
+    return f'{wrap_child_prefix(key)}{drawn}{wrap_child_suffix}'
 
 
 def _agg_label_html(expr: str, index: int, level: int) -> str:
     """What names a cell: the catalog's word for the aggregation, or a box
     holding the expression when the aggregation is the user's own.
 
-    There is no name for one of theirs but the expression itself, so the place
-    it reads is the place to edit it -- the same box the submenu offers, and the
-    same event behind it.
+    Either way, what the user wrote is a box wherever it is read. There is no
+    name for one of theirs but the expression itself, and the number in a
+    percentile's name is theirs too -- so the label carries the same boxes the
+    submenu offers, with the same events behind them, and a level can be
+    changed where it is read rather than by finding the row that set it.
 
-    It names itself by where it sits rather than by what it says, so that typing
-    in it -- which rewrites what it says -- doesn't cost it the focus it is
-    being typed into.
+    They name themselves by where they sit rather than by what they say, so that
+    typing in one -- which rewrites what it says -- doesn't cost it the focus it
+    is being typed into.
     """
-    if not _agg_is_free(expr):
-        return f'<div class="col-agg-label">{html.escape(_agg_label(expr))}</div>'
-    # The cell around it is a drag handle, and a drag beginning inside the box
+    # The cell around them is a drag handle, and a drag beginning inside a box
     # would take the selection the user was making with it.
-    return (f'<input type="text" class="col-agg-label col-agg-expr" '
-            f'snc-input="{html.escape(_compute_expr_event(index, expr))}" '
-            f'snc-focus-key="agg-expr-{index}-{level}" '
-            f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
-            f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
-            f'value="{html.escape(expr)}" size="{max(len(expr), 4)}" '
-            f'draggable="false" spellcheck="false" />')
+    name = _agg_name(expr)
+    if name is None:
+        return (f'<input type="text" class="col-agg-label col-agg-expr" '
+                f'snc-input="{html.escape(_compute_expr_event(index, expr))}" '
+                f'snc-focus-key="agg-expr-{index}-{level}" '
+                f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
+                f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
+                f'value="{html.escape(expr)}" size="{max(len(expr), 4)}" '
+                f'draggable="false" spellcheck="false" />')
+    holes = ''.join(
+        f' <input type="text" class="col-agg-hole" '
+        f'snc-input="{html.escape(_compute_hole_event(index, expr, i))}" '
+        f'snc-focus-key="agg-hole-{index}-{level}-{i}" '
+        f'{_agg_hole_tooltip(expr)}'
+        f'value="{html.escape(text)}" size="{max(len(text), 1)}" '
+        f'draggable="false" spellcheck="false" />'
+        for i, text in enumerate(_agg_holes(expr)))
+    return f'<div class="col-agg-label">{html.escape(name)}{holes}</div>'
 
 
 def _agg_remove_x_html(expr: str, index: int) -> str:

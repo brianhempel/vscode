@@ -770,6 +770,43 @@ def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
             f'class="py-exp-grab">{inner_html}</span>')
 
 
+def defer_drag_grab(child_html: str, expr: str) -> str:
+    """Let a parent's handle answer for a child's whole-value one, when the two
+    would say the same expression.
+
+    A parent that is a handle itself -- an aggregation cell, whose label and
+    answer are one thing to drag -- still passes the expression down, because a
+    child with handles of its own builds the more specific ones out of it. The
+    generic visualizers, having nothing of their own to hover, wrap the whole
+    answer in the same handle instead, and two handles saying the same thing is
+    one too many: the inner tooltip is drawn above the answer, over the label
+    that says which aggregation is being read.
+
+    So the expression comes off the wrapper and the wrapper stays: it is what
+    draws the grab cursor and the border around the value, and hovering it or
+    dragging it walks up to the parent's handle -- the same expression, from the
+    one place that has room to show it.
+
+    Only the exact wrapper `wrap_drag_grab` writes for *expr* is rewritten, and
+    only when it is the whole of what the child drew -- handles the child drew
+    inside its own content are its own and keep their expressions.
+    """
+    prefix = f'<span{py_exp_attrs(expr)} class="py-exp-grab">'
+    if not expr or not child_html.startswith(prefix):
+        return child_html
+    # Where the wrapper closes, which has to be the end of what the child drew:
+    # one that drew two wrapped things side by side opens and closes the same
+    # way, and rewriting the first tag would speak for the last as well.
+    depth = 0
+    for tag in re.finditer(r'</?span\b', child_html):
+        depth += 1 if tag.group() == '<span' else -1
+        if depth == 0:
+            if child_html[tag.start():] != '</span>':
+                return child_html
+            return f'<span class="py-exp-grab">{child_html[len(prefix):]}'
+    return child_html
+
+
 def wrap_child_prefix(child_key: str) -> str:
     return f'<span snc-child-key="{html.escape(repr(child_key))}">'
 

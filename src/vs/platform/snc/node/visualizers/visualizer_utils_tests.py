@@ -18,6 +18,7 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               aggregate_handled_keys, eval_dollar_expr,
                               replace_dollars_in_py_exp, dollar_expr_parses,
                               py_exp_attrs, nest_child_command,
+                              wrap_drag_grab, defer_drag_grab,
                               CHILD_SOURCE_BINDER)
 from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
@@ -746,6 +747,48 @@ class TestPyExpAttrs(unittest.TestCase):
     def test_no_expression_means_no_attributes_at_all(self):
         self.assertEqual(py_exp_attrs(''), '')
         self.assertEqual(py_exp_attrs(None), '')
+
+
+class TestDeferDragGrab(unittest.TestCase):
+    """Letting a parent's handle answer for a child's whole-value one, which
+    stays a handle to look at and to drag."""
+
+    GRAB = '<span class="py-exp-grab">'
+
+    def test_a_handle_the_parent_repeats_stops_carrying_the_expression(self):
+        wrapped = wrap_drag_grab('<span>5</span>', (None, 'min(data)'))
+        self.assertEqual(defer_drag_grab(wrapped, 'min(data)'),
+                         f'{self.GRAB}<span>5</span></span>')
+
+    def test_an_expression_needing_escaping_is_still_recognised(self):
+        wrapped = wrap_drag_grab('<span>5</span>', (None, 'd["<k>"]'))
+        self.assertEqual(defer_drag_grab(wrapped, 'd["<k>"]'),
+                         f'{self.GRAB}<span>5</span></span>')
+
+    def test_a_handle_over_something_else_stays_as_it_is(self):
+        # Not the parent's expression, so not the parent's to answer for.
+        wrapped = wrap_drag_grab('<span>5</span>', (None, 'data[0]'))
+        self.assertEqual(defer_drag_grab(wrapped, 'min(data)'), wrapped)
+
+    def test_handles_inside_the_child_are_left_alone(self):
+        # A child that draws its own handles keeps every one of them: only a
+        # wrapper around the whole thing is what the parent duplicates.
+        html_str = ('<div><span snc-py-exp="min(data)" draggable="true" '
+                    'class="py-exp-grab">5</span></div>')
+        self.assertEqual(defer_drag_grab(html_str, 'min(data)'), html_str)
+
+    def test_two_wrapped_things_side_by_side_are_left_alone(self):
+        # Starts with a handle and ends with a close, but the close isn't that
+        # handle's -- rewriting the first tag would speak for the last too.
+        both = (wrap_drag_grab('<span>5</span>', (None, 'min(data)'))
+                + wrap_drag_grab('<span>6</span>', (None, 'min(data)')))
+        self.assertEqual(defer_drag_grab(both, 'min(data)'), both)
+
+    def test_nothing_to_repeat_means_nothing_to_defer(self):
+        self.assertEqual(defer_drag_grab('<span>5</span>', None),
+                         '<span>5</span>')
+        self.assertEqual(defer_drag_grab('<span>5</span>', ''),
+                         '<span>5</span>')
 
 
 if __name__ == '__main__':
