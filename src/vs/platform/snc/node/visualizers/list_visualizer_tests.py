@@ -178,10 +178,24 @@ class ListVisualizerAdapter:
         return list_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
 
+class MockCodeVisualizer:
+    """A child that answers every event with a line of generated code, so tests
+    can watch where the parent sends one."""
+    def can_visualize(self, value):
+        return True
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        return {'handledKeys': []}
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        return f'<span>{html.escape(repr(value))}</span>'
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        return (model, [('x', CHILD_SOURCE_BINDER)])
+
+
 _mock_string_vis = MockStringVisualizer()
 _mock_int_vis = MockIntVisualizer()
 _mock_dict_vis = MockDictVisualizer()
 _mock_obj_vis = MockObjectVisualizer()
+_mock_code_vis = MockCodeVisualizer()
 _mock_list_vis = ListVisualizerAdapter()
 
 
@@ -8305,16 +8319,40 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 # === Column compute tests ===
 
 from list_visualizer import (
-    COMPUTE_AGGS, HISTOGRAM_AGG, NO_ANSWER,
+    COMPUTE_AGGS, HISTOGRAM_AGG, HISTOGRAM_BINS_TOOLTIP, NO_ANSWER,
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
     _agg_value, _agg_code, _agg_label, _format_agg_value,
     _agg_row_index_code, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
+    _table_child_value_getter, _agg_child_expr,
 )
 
 
 # A column with a repeat in it, so #Unique has something to say, and no order
 # to it, so Min Idx and Max Idx aren't both the last row.
 COMPUTE_LIST = [3, 1, 4, 1, 5]
+
+
+def agg_answers(html_str):
+    """The text each answer's own visualizer drew, in order.
+
+    An answer is a child now, so it isn't the .col-agg-value div's own text:
+    this walks to the </div> that closes each one and takes the markup back
+    out of what was inside it.
+
+    Divs are what it counts because a div is the one tag here that always comes
+    in a pair -- the answer's own visualizer is free to draw an <input>, an
+    <svg> or a table of its own inside, and none of those can throw the count.
+    """
+    out = []
+    for m in re.finditer(r'class="col-agg-value">', html_str):
+        depth, end = 1, m.end()
+        for tag in re.finditer(r'</?div\b', html_str[m.end():]):
+            depth += 1 if tag.group() == '<div' else -1
+            if depth == 0:
+                end = m.end() + tag.start()
+                break
+        out.append(re.sub(r'<[^>]*>', '', html_str[m.end():end]))
+    return out
 
 
 def agg_named(label):
@@ -8732,6 +8770,16 @@ P10 = 'np.percentile($, {{10}})'
 P90 = 'np.percentile($, {{90}})'
 
 
+def agg_x_events(html_str):
+    """The event behind each aggregation cell's ✕, in the order they are drawn.
+
+    Read back out of the markup, so a click in a test is the click the cell
+    really offers.
+    """
+    return [eval(html.unescape(m)) for m in re.findall(
+        r'<span class="col-agg-x[^>]*snc-mouse-down="([^"]*)"', html_str)]
+
+
 def make_compute_hole_event(index, expr, hole, value):
     """Create a ComputeHoleInput event for one of a row's boxes."""
     return {
@@ -8809,6 +8857,35 @@ class TestComputeEvents(unittest.TestCase):
         model = self.toggle(model, lst, 'min($)')
         self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
         self.assertEqual(model['col_search_dropdown'], 'compute-0')
+
+    def test_the_x_on_a_cell_takes_that_aggregation_away(self):
+        # Clicked as the cell wrote it, so the ✕ is tested against the event it
+        # really carries rather than one the test made up.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        model, _ = self.click(model, lst,
+                              agg_x_events(visualize(lst, model,
+                                                     mock_get_visualizer,
+                                                     None))[0])
+        self.assertIsNone(model['column_computes'])
+
+    def test_the_x_takes_away_only_the_cell_it_is_on(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'np.mean($)', 'max($)'])
+        xs = agg_x_events(visualize(lst, model, mock_get_visualizer, None))
+        model, _ = self.click(model, lst, xs[1])
+        self.assertEqual(_column_computes(model, '$'), ['min($)', 'max($)'])
+
+    def test_the_x_names_the_column_it_is_under(self):
+        lst = [{'a': 1, 'b': 2}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        _set_column_computes(model, "$['a']", ['min($)'])
+        _set_column_computes(model, "$['b']", ['max($)'])
+        xs = agg_x_events(visualize(lst, model, mock_get_visualizer, None))
+        model, _ = self.click(model, lst, xs[1])
+        self.assertEqual(_column_computes(model, "$['a']"), ['min($)'])
+        self.assertEqual(_column_computes(model, "$['b']"), [])
 
     def test_the_aggregations_follow_a_renamed_column(self):
         lst = [{'a': 1}]
@@ -9020,6 +9097,18 @@ class TestComputeMenuRendering(unittest.TestCase):
         self.assertIn('col-compute-hole', row)
         self.assertIn('value="10"', row)
 
+    def test_the_bins_box_says_what_the_number_in_it_counts(self):
+        # "Histogram 10" doesn't say what the 10 is; a percentile's box reads
+        # off the name beside it, so only this one has anything to add.
+        lst, model = tally_model(COMPUTE_LIST)
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn(f'data-tooltip="{HISTOGRAM_BINS_TOOLTIP}"',
+                      rows[len(COMPUTE_AGGS) - 1])
+        percentile = rows[[label for label, _ in COMPUTE_AGGS]
+                          .index('Percentile')]
+        self.assertIn('col-compute-hole', percentile)
+        self.assertNotIn('data-tooltip', percentile)
+
     def test_the_histogram_row_hands_over_the_line_it_writes(self):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst, source='data')
@@ -9118,8 +9207,15 @@ class TestComputeCellRendering(unittest.TestCase):
                           re.DOTALL)
 
     def cells(self, row):
-        return re.findall(r'<td class="col-agg-cell"[^>]*>(.*?)</td>', row,
+        # The cell carries classes past the first one (it is the hover parent
+        # its ✕ hides behind), so the class list is read open-endedly.
+        return re.findall(r'<td class="col-agg-cell[^"]*"[^>]*>(.*?)</td>', row,
                           re.DOTALL)
+
+    def child_keys(self, model, lst, **kwargs):
+        out = self.table(model, lst, **kwargs)
+        return [eval(html.unescape(m)) for m in
+                re.findall(r'snc-child-key="([^"]*)"', out[out.index('<tfoot'):])]
 
     def test_nothing_checked_is_no_row_at_all(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -9141,8 +9237,7 @@ class TestComputeCellRendering(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual([re.search(r'col-agg-label">([^<]*)<', row).group(1)
                           for row in rows], ['Min', 'Max'])
-        self.assertEqual([re.search(r'col-agg-value">([^<]*)<', row).group(1)
-                          for row in rows], ['1', '5'])
+        self.assertEqual([agg_answers(row)[0] for row in rows], ['1', '5'])
 
     def test_a_column_with_none_of_its_own_gets_a_blank_that_stays_put(self):
         # The cell has to be there to keep the columns lined up, but a column
@@ -9164,19 +9259,34 @@ class TestComputeCellRendering(unittest.TestCase):
         _set_column_computes(model, "$['b']", ['min($)', 'max($)'])
         rows = self.rows(model, lst)
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0].count('col-agg-blank'), 0)
-        self.assertEqual(rows[1].count('col-agg-blank'), 1)
+        # The index cell is blank in every row, so it is the blank *column*
+        # cells that are counted here.
+        self.assertEqual(rows[0].count('<td class="col-agg-blank">'), 0)
+        self.assertEqual(rows[1].count('<td class="col-agg-blank">'), 1)
 
-    def test_every_row_but_the_lowest_is_pinned_above_the_one_below_it(self):
-        # Sticky can't stack itself, so each row is told where to stop.
+    def test_the_rows_go_in_a_foot_that_pins_itself(self):
+        # The foot sticks as one block, so no row has to be told where to stop
+        # -- and no row has to be the height every other row is.
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['min($)', 'np.mean($)', 'max($)'])
-        rows = self.rows(model, lst)
-        self.assertIn('style="bottom: calc(2 * var(--snc-agg-row-height))"',
-                      rows[0])
-        self.assertIn('style="bottom: calc(1 * var(--snc-agg-row-height))"',
-                      rows[1])
-        self.assertNotIn('style=', rows[2])
+        out = self.table(model, lst)
+        self.assertIn('<tfoot class="col-agg-rows">', out)
+        self.assertNotIn('--snc-agg-row-height', out)
+        for row in self.rows(model, lst):
+            self.assertNotIn('style=', row)
+
+    def test_the_foot_holds_every_row_and_nothing_else(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'max($)'])
+        foot = re.search(r'<tfoot class="col-agg-rows">(.*?)</tfoot>',
+                         self.table(model, lst), re.DOTALL).group(1)
+        self.assertEqual(foot.count('<tr class="col-agg-row"'), 2)
+        self.assertTrue(foot.startswith('<tr class="col-agg-row"'))
+        self.assertTrue(foot.endswith('</tr>'))
+
+    def test_nothing_checked_is_no_foot_at_all(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertNotIn('<tfoot', self.table(model, lst))
 
     def test_a_cell_reads_what_is_in_its_boxes(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -9192,7 +9302,7 @@ class TestComputeCellRendering(unittest.TestCase):
         _set_column_computes(model, '$', ['np.mean($)'])
         cell = self.cells(self.rows(model, lst)[0])[0]
         self.assertIn('>Mean<', cell)
-        self.assertEqual(re.findall(r'col-agg-value">([^<]*)<', cell), [''])
+        self.assertEqual(agg_answers(cell), [''])
 
     def test_a_cell_hands_over_the_code_behind_it(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -9200,6 +9310,100 @@ class TestComputeCellRendering(unittest.TestCase):
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
         self.assertIn('snc-py-exp="np.mean(data)"', cell)
         self.assertIn('draggable="true"', cell)
+
+    # --- The ✕ that takes an aggregation away ---
+
+    def test_every_cell_carries_an_x_for_its_own_aggregation(self):
+        # It is the submenu's own checkbox event: an aggregation is checked by
+        # being in the column's list, so there is nothing else to unchecking it.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'max($)'])
+        self.assertEqual(agg_x_events(self.table(model, lst)),
+                         [ComputeToggle(index=0, expr='min($)'),
+                          ComputeToggle(index=0, expr='max($)')])
+
+    def test_the_x_asks_for_the_expression_the_cell_is_showing(self):
+        # Boxes and all, since that is what the column has stored.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.percentile($, {{25}})'])
+        self.assertEqual(agg_x_events(self.table(model, lst)),
+                         [ComputeToggle(index=0, expr='np.percentile($, {{25}})')])
+
+    def test_a_drag_off_the_x_hands_over_nothing(self):
+        # The cell around it is a drag handle, and a drag begun on the ✕ is a
+        # click the user slipped on rather than an ask for the code.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        x = re.search(r'<span class="col-agg-x[^>]*>',
+                      self.table(model, lst, source='data')).group()
+        self.assertIn('draggable="false"', x)
+
+    # --- The answer is drawn by whichever visualizer reads its type ---
+
+    def test_the_answer_is_drawn_by_the_visualizer_for_its_type(self):
+        # A number is the number visualizer's business, the same as it is in
+        # any other cell of the table -- not text this table formatted.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['max($)'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('child-expr', cell)  # only MockIntVisualizer writes this
+        self.assertIn('>5<', cell)
+
+    def test_an_answer_that_is_a_list_reads_as_a_list(self):
+        # The point of handing it over: an answer no line of text can show.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)'])
+        # A nested table has cells of its own, so read the row: self.cells
+        # would stop at the first </td> inside it.
+        self.assertIn('list-visualizer', self.rows(model, lst)[0])
+
+    def test_each_answer_is_a_child_under_a_key_of_its_own(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['min($)', 'max($)'])
+        keys = self.child_keys(model, lst)
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(len(set(keys)), 2)
+
+    def test_an_answer_with_nothing_in_it_is_no_child_at_all(self):
+        # Nothing to hand to a visualizer, so nothing is handed over.
+        lst = ['pear', 'apple']
+        _, model = tally_model(lst)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        self.assertEqual(self.child_keys(model, lst), [])
+
+    def test_the_answer_is_handed_the_expression_behind_it(self):
+        # Like a table cell, the child is handed its access path and decides
+        # for itself what to do with it.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['max($)'])
+        cell = self.cells(self.rows(model, lst, source='data')[0])[0]
+        self.assertIn('child-expr=max(data)', cell)
+
+    def test_a_number_still_reads_the_way_a_cell_reads_it(self):
+        # numpy writes a scalar down as np.float64(2.8000000000000003); the
+        # cell is read rather than computed against, so it gets the number.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['np.mean($)'])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('>2.8<', cell)
+        self.assertNotIn('np.float64', cell)
+
+    def test_the_answer_is_small_until_it_is_picked(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)'])
+        self.assertIn('list-visualizer small', self.table(model, lst))
+        model['focused_child'] = self.child_keys(model, lst)[0]
+        self.assertNotIn('list-visualizer small', self.table(model, lst))
+
+    def test_a_histogram_is_still_drawn_rather_than_handed_over(self):
+        # A pair of arrays reads as bars or as nothing; no visualizer of its
+        # own would draw it better than the cell does.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', [HISTOGRAM_AGG])
+        cell = self.cells(self.rows(model, lst)[0])[0]
+        self.assertIn('col-agg-hist', cell)
+        self.assertNotIn('snc-child-key', cell)
+
 
     def test_a_histogram_cell_draws_its_answer_and_names_its_bins(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -9243,7 +9447,83 @@ class TestComputeCellRendering(unittest.TestCase):
         _set_column_computes(model, '$', ['max($)'])
         row = self.rows(model, lst)[0]
         self.assertNotIn('pick-region', row)
-        self.assertIn('<td class="row-index"></td>', row)
+        self.assertIn('<td class="row-index col-agg-blank"></td>', row)
+
+
+class TestComputeCellChildEvents(unittest.TestCase):
+    """An answer is a child like any other, so it takes focus and events -- but
+    it is not a row of the list, so its key has to say enough to work the value
+    out again when one comes back for it."""
+
+    def setup(self, expr='sorted($)', source=None, get_vis=None):
+        get_vis = get_vis or mock_get_visualizer
+        lst = list(COMPUTE_LIST)
+        _, model = tally_model(lst)
+        _set_column_computes(model, '$', [expr])
+        if source:
+            model['_source_expr'] = source
+        out = visualize(lst, model, get_vis,
+                        (lambda code: eval(code, {}, {'data': lst}))
+                        if source else None)
+        keys = [eval(html.unescape(m)) for m in
+                re.findall(r'snc-child-key="([^"]*)"',
+                           out[out.index('<tfoot'):])]
+        return lst, model, keys[0]
+
+    def test_the_first_click_pins_the_answer(self):
+        lst, model, key = self.setup()
+        new_model, _ = update(make_child_mouse_event(key, 'None'), None,
+                              model, lst, mock_get_visualizer)
+        self.assertEqual(new_model.get('focused_child'), key)
+
+    def test_the_key_is_enough_to_work_the_answer_out_again(self):
+        lst, model, key = self.setup()
+        self.assertEqual(
+            _table_child_value_getter(key, lst, model), sorted(COMPUTE_LIST))
+
+    def test_the_key_survives_a_column_being_renamed(self):
+        # The column part of the key is what the rename walks, the same as a
+        # cell's -- so a pinned answer stays pinned.
+        lst = [{'a': 1}, {'a': 3}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']"]
+        _set_column_computes(model, "$['a']", ['max($)'])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        key = eval(html.unescape(re.findall(
+            r'snc-child-key="([^"]*)"', out[out.index('<tfoot'):])[0]))
+        self.assertTrue(key.endswith(f"{CELL_KEY_SEP}$['a']"))
+
+    def test_an_answer_of_a_row_aggregation_is_worked_out_too(self):
+        lst = [{'a': 10, 'b': 2}, {'a': 30, 'b': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        _set_column_computes(model, "$['b']", [MIN_ITEM])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        keys = [eval(html.unescape(m)) for m in re.findall(
+            r'snc-child-key="([^"]*)"', out[out.index('<tfoot'):])]
+        # One per column of the picked row: its 'a' and its 'b'.
+        self.assertEqual([_table_child_value_getter(k, lst, model)
+                          for k in keys], [30, 1])
+
+    def test_code_out_of_an_answer_goes_up_rather_than_into_a_column(self):
+        # Code out of a cell becomes a column, since a cell's expression is one
+        # every row answers. An answer's is one value the aggregation worked
+        # out, so a column of it would be the same number n times.
+        get_vis = lambda v: _mock_code_vis
+        lst, model, key = self.setup(source='data', get_vis=get_vis)
+        model['focused_child'] = key
+        new_model, commands = update(
+            make_child_mouse_event(key, 'None'), None, model, lst, get_vis,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+        self.assertEqual(new_model['columns'], ['$'])
+        self.assertEqual(commands, [('x', '(sorted(data))')])
+
+    def test_an_answer_binds_the_code_the_same_way_wherever_it_goes(self):
+        # There is no row-generic form of an answer to keep a column in, so the
+        # expression bound for the editor is the one bound for the code.
+        lst, model, key = self.setup(source='data')
+        self.assertEqual(_agg_child_expr(key, 'data'), 'sorted(data)')
+        self.assertIsNone(_agg_child_expr(key, None))
 
 
 MIN_ITEM = 'min($$, key=lambda item: $)'
@@ -9286,7 +9566,7 @@ class TestComputeItemRowRendering(unittest.TestCase):
         return found
 
     def values(self, row):
-        return re.findall(r'col-agg-value">([^<]*)<', row)
+        return agg_answers(row)
 
     def test_a_row_aggregation_draws_the_whole_row(self):
         lst, model = self.model({"$['b']": [MIN_ITEM]})
@@ -9325,10 +9605,19 @@ class TestComputeItemRowRendering(unittest.TestCase):
         # The other cells are that row's values, not minima of their own.
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         row = self.item_rows(model, lst)[0]
+        # The index cell and the column that didn't ask keep an empty label for
+        # spacing, so the one with anything in it is the one that asked.
         self.assertEqual(re.findall(r'col-agg-label">([^<]*)<', row),
-                         ['Min Item'])
+                         ['', '', 'Min Item'])
         labelled = row[row.index('Min Item'):]
         self.assertIn('>1<', labelled)
+
+    def test_only_the_labelled_cell_offers_the_x(self):
+        # The other cells are that row's values, so there is no aggregation of
+        # theirs for an ✕ to take away.
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        self.assertEqual(agg_x_events(self.item_rows(model, lst)[0]),
+                         [ComputeToggle(index=1, expr=MIN_ITEM)])
 
     def test_min_item_and_max_item_are_a_row_each(self):
         lst, model = self.model({"$['b']": [MIN_ITEM, MAX_ITEM]})
@@ -9344,12 +9633,16 @@ class TestComputeItemRowRendering(unittest.TestCase):
         self.assertIn('>Min<', rows[0])
         self.assertIn('>Min Item<', rows[1])
 
-    def test_every_row_but_the_lowest_is_pinned_above_the_one_below_it(self):
+    def test_it_goes_in_the_same_foot_the_cells_do(self):
+        # One block that pins itself, so a row of the list is free to be
+        # whatever height it is.
         lst, model = self.model({"$['a']": ['min($)'], "$['b']": [MIN_ITEM]})
-        rows = self.rows(model, lst)
-        self.assertIn('style="bottom: calc(1 * var(--snc-agg-row-height))"',
-                      rows[0])
-        self.assertNotIn('style=', rows[1])
+        foot = re.search(r'<tfoot class="col-agg-rows">(.*?)</tfoot>',
+                         self.table(model, lst), re.DOTALL).group(1)
+        self.assertEqual(foot.count('<tr class="col-agg-row'), 2)
+        self.assertIn('col-agg-item-row', foot)
+        for row in self.rows(model, lst):
+            self.assertNotIn('style=', row)
 
     def test_a_column_that_cannot_pick_a_row_still_keeps_its_row(self):
         # There is no least row of no rows; the row says nothing rather than
@@ -9375,6 +9668,17 @@ class TestComputeItemRowRendering(unittest.TestCase):
         # It reads like one, but there is nothing in it to pick.
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         self.assertNotIn('pick-region', self.item_rows(model, lst)[0])
+
+    def test_every_cell_of_the_row_is_a_child_like_any_other(self):
+        # The values are the row's, so each is drawn by whichever visualizer
+        # reads it -- but the index beside them is the table's own, and reads
+        # like the index cells above it.
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst)[0]
+        keys = re.findall(r'snc-child-key="([^"]*)"', row)
+        self.assertEqual(len(set(keys)), 2)  # one per column, not the index
+        index_cell = row[:row.index('</td>')]
+        self.assertNotIn('snc-child-key', index_cell)
 
 
 from list_visualizer import (
@@ -9712,7 +10016,9 @@ class TestFreeAggregationCell(unittest.TestCase):
                           re.DOTALL)
 
     def cells(self, row):
-        return re.findall(r'<td class="col-agg-cell"[^>]*>(.*?)</td>', row,
+        # The cell carries classes past the first one (it is the hover parent
+        # its ✕ hides behind), so the class list is read open-endedly.
+        return re.findall(r'<td class="col-agg-cell[^"]*"[^>]*>(.*?)</td>', row,
                           re.DOTALL)
 
     def test_the_label_is_a_box_holding_the_expression(self):
@@ -9733,14 +10039,14 @@ class TestFreeAggregationCell(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['np.mean($)'])
         cell = self.cells(self.rows(model, lst)[0])[0]
-        self.assertIn('<span class="col-agg-label">Mean</span>', cell)
+        self.assertIn('<div class="col-agg-label">Mean</div>', cell)
         self.assertNotIn('col-agg-expr', cell)
 
     def test_the_cell_still_shows_and_hands_over_its_answer(self):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)[2]'])
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
-        self.assertIn('col-agg-value">3<', cell)
+        self.assertEqual(agg_answers(cell), ['3'])
         self.assertIn('snc-py-exp="sorted(data)[2]"', cell)
 
     def test_the_box_says_what_the_dollars_mean_here_too(self):

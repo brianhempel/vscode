@@ -42,6 +42,7 @@
 - [x] column tally
 - [ ] aggregations
 - [ ] col add button: show on visualizer focus rather than on hover
+- [ ] close column menu when un-focusing
 - [ ] list visualizer search: be smart so that simple var uses are == rather than treated as simple truthy predicates
 - [ ] dictionary visualizer
 - [ ] group by (i.e. dictionaries of lists)

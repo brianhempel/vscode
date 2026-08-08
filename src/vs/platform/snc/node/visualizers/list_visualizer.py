@@ -76,6 +76,9 @@ SUPPORTS_NESTED_CONFIG = True
 
 CELL_KEY_SEP = '\x00'
 
+# Inside the row half of an aggregation answer's child key; see _agg_child_key.
+AGG_KEY_SEP = '\x01'
+
 # === Event types ===
 
 @dataclass(frozen=True, slots=True)
@@ -1398,6 +1401,11 @@ COMPUTE_IMPORTS = ('import numpy as np',)
 # drawn. The same thing the column search box says of its own, less `$$$`: an
 # aggregation is asked of the whole column, so there is no one item to name.
 COMPUTE_EXPR_TOOLTIP = '$ is this column, $$ the list'
+
+# What the histogram's box says of itself. The other boxes in the submenu read
+# off the name beside them -- the number in Percentile's box is the percentile
+# -- but "Histogram 10" doesn't say what the 10 counts.
+HISTOGRAM_BINS_TOOLTIP = 'Bin Count'
 
 # A question this column can't answer -- an empty column, a mean of strings, a
 # box holding something that isn't a number. Its own object rather than None,
@@ -3193,9 +3201,12 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
         # The boxes and the answer sit outside the part that toggles: typing a
         # level, or dragging the answer out, is not a way of checking the row.
+        hole_tooltip = (f'data-tooltip="{html.escape(HISTOGRAM_BINS_TOOLTIP)}" '
+                        if _agg_is_histogram(template) else '')
         holes = ''.join(
             f'<input type="text" class="col-compute-hole search-box" '
             f'snc-input="{html.escape(_compute_hole_event(index, template, i))}" '
+            f'{hole_tooltip}'
             f'value="{html.escape(text)}" spellcheck="false" />'
             for i, text in enumerate(_agg_holes(template)))
         # Nothing to hand over when there is no answer, and nothing to name the
@@ -4006,6 +4017,126 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False):
     )
 
 
+def _agg_child_key(asking_col: str, template: str, shown_col: str) -> str:
+    """The key an answer is a child under.
+
+    Shaped like a cell's -- something\x00column -- so the column half really is
+    the column half, and a column being renamed or removed walks these keys
+    along with the rest of the children.
+
+    The other half says which column asked and what it asked, which is all it
+    takes to work the answer out again when an event comes back for it: an
+    answer is computed rather than looked up, so unlike a cell there is no row
+    index that would find it. A row aggregation shows one column while another
+    column asked, which is why the two are named separately.
+    """
+    return (f'agg{AGG_KEY_SEP}{asking_col}{AGG_KEY_SEP}{template}'
+            f'{CELL_KEY_SEP}{shown_col}')
+
+
+def _parse_agg_child_key(key: str):
+    """(asking column, aggregation, shown column), or None for a cell's key."""
+    head, _, shown_col = key.partition(CELL_KEY_SEP)
+    parts = head.split(AGG_KEY_SEP)
+    if len(parts) != 3 or parts[0] != 'agg':
+        return None
+    return parts[1], parts[2], shown_col
+
+
+def _agg_child_value(key: str, lst, model, eval_in_scope=None):
+    """The answer a key points at, worked out from the list again.
+
+    The one place an answer is computed for a child, so what a cell showed and
+    what an event coming back from that cell is handed are the same value.
+    """
+    asking_col, template, shown_col = _parse_agg_child_key(key)
+    if not _agg_is_row(template):
+        values = _column_values(asking_col, lst, model, eval_in_scope)
+        return _agg_display_value(_agg_value(template, values, eval_in_scope))
+    item = _agg_value(template, None, eval_in_scope, lst,
+                      _column_key_expr(asking_col))
+    if item is NO_ANSWER:
+        return NO_ANSWER
+    return _agg_display_value(_column_cell_value(shown_col, item,
+                                                 eval_in_scope))
+
+
+def _agg_child_expr(key: str, source_expr) -> str | None:
+    """The expression that names the value a key points at, or None when the
+    list has no source to name it from.
+
+    The one place that expression is written, so the code a cell hands over and
+    the code that events coming back from that cell are rebound onto cannot
+    drift apart.
+    """
+    if source_expr is None:
+        return None
+    asking_col, template, shown_col = _parse_agg_child_key(key)
+    if not _agg_is_row(template):
+        return _agg_code(template, _column_values_expr(asking_col, source_expr))
+    item_code = _agg_code(template, _column_key_expr(asking_col), source_expr)
+    return replace_dollars_in_py_exp(shown_col, [item_code])
+
+
+def _agg_display_value(answer):
+    """The answer as a cell shows it, which for a number is not quite the object
+    that came back.
+
+    `np.float64(2.8000000000000003)` is how numpy writes a number down rather
+    than how one reads, and the trailing digits belong to the arithmetic rather
+    than to the answer. A cell is read rather than computed against -- what it
+    hands over is the expression, which stays exact -- so it is handed the
+    number, rounded the way _format_agg_value has always shown it.
+    """
+    if hasattr(answer, 'item') and getattr(answer, 'shape', None) == ():
+        answer = answer.item()
+    if isinstance(answer, float):
+        return float(f'{answer:.6g}')
+    return answer
+
+
+def _render_agg_answer(template, answer, key, code, model, get_visualizer,
+                       eval_in_scope=None, max_width=None) -> str:
+    """The answer half of a cell: nothing, bars, or the answer handed to
+    whichever visualizer reads its type -- the same as any other cell of the
+    table, and for the same reason. An aggregation can answer with anything the
+    column holds, and a line of text is only the shape of some of those.
+
+    A histogram stays drawn here: it answers with a pair of arrays whose whole
+    meaning is the shape of the bars, which a visualizer of the arrays would
+    show as two lists of numbers instead.
+
+    Handed its own expression rather than wrapped in one, so a child with
+    handles of its own keeps them, and drawn small until the user pins it --
+    both the way a cell does it.
+    """
+    if answer is NO_ANSWER:
+        return ''
+    if _agg_is_histogram(template):
+        drawn = _agg_hist_svg(answer)
+        if drawn:
+            return drawn
+    value = _agg_display_value(answer)
+    vis = get_visualizer(value)
+    child_model = model.get('children', {}).get(key)
+    if child_model is None:
+        child_model = vis.init_model(value, get_visualizer,
+                                     eval_in_scope=eval_in_scope)
+    small = key != model.get('focused_child')
+    var_and_exp = (None, code) if code else None
+    if hasattr(vis, 'visualize_els'):
+        htmls = vis.visualize_els(value, child_model, get_visualizer,
+                                  eval_in_scope, max_width=max_width,
+                                  max_height=80, small=small,
+                                  var_and_exp=var_and_exp)
+    else:
+        htmls = [vis.visualize(value, child_model, get_visualizer,
+                               eval_in_scope, max_width=max_width,
+                               max_height=80, small=small,
+                               var_and_exp=var_and_exp)]
+    return f'{wrap_child_prefix(key)}{"".join(htmls)}{wrap_child_suffix}'
+
+
 def _agg_label_html(expr: str, index: int, level: int) -> str:
     """What names a cell: the catalog's word for the aggregation, or a box
     holding the expression when the aggregation is the user's own.
@@ -4019,7 +4150,7 @@ def _agg_label_html(expr: str, index: int, level: int) -> str:
     being typed into.
     """
     if not _agg_is_free(expr):
-        return f'<span class="col-agg-label">{html.escape(_agg_label(expr))}</span>'
+        return f'<div class="col-agg-label">{html.escape(_agg_label(expr))}</div>'
     # The cell around it is a drag handle, and a drag beginning inside the box
     # would take the selection the user was making with it.
     return (f'<input type="text" class="col-agg-label col-agg-expr" '
@@ -4031,20 +4162,41 @@ def _agg_label_html(expr: str, index: int, level: int) -> str:
             f'draggable="false" spellcheck="false" />')
 
 
-def _render_agg_cell(expr, index, level, values, values_expr, style_attr,
-                     eval_in_scope=None) -> str:
+def _agg_remove_x_html(expr: str, index: int) -> str:
+    """The ✕ that takes a cell's aggregation away.
+
+    The submenu's own checkbox event, because an aggregation is checked by being
+    in the column's list: unchecking it in the menu and taking it off the table
+    are one act, so the ✕ needs no event of its own -- and one the user wrote
+    themselves is taken away the same way as any other.
+
+    Not a drag handle, though it sits inside one: what the cell hands over is
+    the answer's expression, and a drag begun on the ✕ is a click the user
+    slipped on rather than an ask for the code.
+    """
+    return ('<span class="col-agg-x snc-hover-hidden" '
+            f'snc-mouse-down="{html.escape(repr(ComputeToggle(index=index, expr=expr)))}" '
+            'draggable="false" data-tooltip="Remove aggregation">✕</span>')
+
+
+def _render_agg_cell(expr, index, col, level, values, model, get_visualizer,
+                     eval_in_scope=None, source_expr=None,
+                     max_width=None) -> str:
     """One answer, in a cell of its own."""
     answer = _agg_value(expr, values, eval_in_scope)
+    key = _agg_child_key(col, expr, col)
     # A column whose values have changed out from under an aggregation says
     # nothing rather than dropping the cell the user put there.
-    code = (None if answer is NO_ANSWER or values_expr is None
-            else _agg_code(expr, values_expr))
+    code = (None if answer is NO_ANSWER
+            else _agg_child_expr(key, source_expr))
     return (
-        f'<td class="col-agg-cell"{style_attr}>'
+        f'<td class="col-agg-cell snc-hover-hidden-parent">'
         f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
         f'{_agg_label_html(expr, index, level)}'
-        f'<span class="col-agg-value">'
-        f'{"" if answer is NO_ANSWER else _agg_answer_html(expr, answer)}</span>'
+        f'{_agg_remove_x_html(expr, index)}'
+        f'<div class="col-agg-value">'
+        f'{_render_agg_answer(expr, answer, key, code, model, get_visualizer, eval_in_scope, max_width)}'
+        f'</div>'
         f'</div></td>')
 
 
@@ -4057,8 +4209,9 @@ def _column_cell_value(col: str, item, eval_in_scope=None):
         return NO_ANSWER
 
 
-def _render_agg_item_row(expr, ci, level, columns, lst, style_attr,
-                         eval_in_scope=None, source_expr=None) -> str:
+def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
+                         eval_in_scope=None, source_expr=None,
+                         max_width=None) -> str:
     """A row aggregation's row: the row of the list a column's Min Item or Max
     Item picked out, drawn across every column with its index beside it.
 
@@ -4081,21 +4234,26 @@ def _render_agg_item_row(expr, ci, level, columns, lst, style_attr,
     idx_code = (None if idx is NO_ANSWER or item_code is None
                 else _agg_row_index_code(item_code, source_expr))
 
-    cells = [f'<td class="row-index col-agg-cell"{style_attr}>'
-             f'<span{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
+    cells = [f'<td class="row-index col-agg-cell">'
+             f'<div class="col-agg"{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
+             f'<div class="col-agg-label"></div>'
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
-             f'</span></td>']
+             f'</div></td>']
     for cj, col in enumerate(columns):
         value = (NO_ANSWER if item is NO_ANSWER
                  else _column_cell_value(col, item, eval_in_scope))
-        code = (None if item_code is None or value is NO_ANSWER
-                else replace_dollars_in_py_exp(col, [item_code]))
-        label = '' if cj != ci else _agg_label_html(expr, ci, level)
+        key = _agg_child_key(columns[ci], expr, col)
+        code = (None if value is NO_ANSWER or item_code is None
+                else _agg_child_expr(key, source_expr))
+        label = ('<div class="col-agg-label"></div>' if cj != ci else
+                 f'{_agg_label_html(expr, ci, level)}'
+                 f'{_agg_remove_x_html(expr, ci)}')
         cells.append(
-            f'<td class="col-agg-cell"{style_attr}>'
+            f'<td class="col-agg-cell snc-hover-hidden-parent">'
             f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
-            f'{label}<span class="col-agg-value">'
-            f'{"" if value is NO_ANSWER else _format_agg_value(value)}</span>'
+            f'{label}<div class="col-agg-value">'
+            f'{_render_agg_answer(expr, value, key, code, model, get_visualizer, eval_in_scope, max_width)}'
+            f'</div>'
             f'</div></td>')
     return f'<tr class="col-agg-row col-agg-item-row">{"".join(cells)}</tr>'
 
@@ -4125,8 +4283,8 @@ def _agg_layout(columns, model) -> List[tuple]:
     return levels
 
 
-def _render_agg_rows(columns, model, lst, eval_in_scope=None,
-                     source_expr=None) -> str:
+def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
+                     source_expr=None, max_width=None) -> str:
     """The rows of answers under the table, or nothing when no column has asked
     for one.
 
@@ -4135,11 +4293,11 @@ def _render_agg_rows(columns, model, lst, eval_in_scope=None,
     no index, and nothing in it to pick. A row aggregation's row reads like one
     -- it is one -- but there is still nothing in it to pick.
 
-    They pin to the bottom of the scrollport the way the header pins to the
-    top, and sticky can't stack itself, so each row is told how far above the
-    bottom to stop. A column with fewer answers than the deepest one blanks the
-    rows below its last: an empty cell has nothing to pin over the rows it
-    would otherwise cover.
+    They go in a <tfoot>, which pins to the bottom of the scrollport the way
+    the header pins to the top. The whole foot pins as one block, so no row has
+    to be told where to stop above the next -- and so no cell has to be the
+    height every other cell is. A column with fewer answers than the deepest
+    one blanks the rows below its last.
     """
     levels = _agg_layout(columns, model)
     if not levels:
@@ -4150,36 +4308,31 @@ def _render_agg_rows(columns, model, lst, eval_in_scope=None,
     asked = [any(level[0] == 'cells' and level[1][ci] is not None
                  for level in levels)
              for ci in range(len(columns))]
-    reads = [(_column_values(col, lst, model, eval_in_scope),
-              None if source_expr is None else _column_values_expr(col,
-                                                                   source_expr))
-             if asked[ci] else (None, None)
+    reads = [_column_values(col, lst, model, eval_in_scope) if asked[ci]
+             else None
              for ci, col in enumerate(columns)]
 
     rows = []
     for level, spec in enumerate(levels):
-        below = len(levels) - 1 - level
-        style_attr = ('' if below == 0 else
-                      f' style="bottom: calc({below} * '
-                      f'var(--snc-agg-row-height))"')
         if spec[0] == 'item':
             _, ci, expr = spec
             rows.append(_render_agg_item_row(expr, ci, level, columns, lst,
-                                             style_attr, eval_in_scope,
-                                             source_expr))
+                                             model, get_visualizer,
+                                             eval_in_scope, source_expr,
+                                             max_width))
             continue
         cells = []
         for ci, expr in enumerate(spec[1]):
             if expr is None:
                 cells.append('<td class="col-agg-blank"></td>')
             else:
-                values, values_expr = reads[ci]
-                cells.append(_render_agg_cell(expr, ci, level, values,
-                                              values_expr, style_attr,
-                                              eval_in_scope))
+                cells.append(_render_agg_cell(expr, ci, columns[ci], level,
+                                              reads[ci], model, get_visualizer,
+                                              eval_in_scope, source_expr,
+                                              max_width))
         rows.append(f'<tr class="col-agg-row">'
-                    f'<td class="row-index"></td>{"".join(cells)}</tr>')
-    return ''.join(rows)
+                    f'<td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
+    return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
 
 def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
@@ -4342,7 +4495,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
         strs.append('</tr>')
 
-    strs.append(_render_agg_rows(columns, model, lst, eval_in_scope, source_expr))
+    strs.append(_render_agg_rows(columns, model, lst, get_visualizer,
+                                 eval_in_scope, source_expr, max_column_width))
 
     strs.append('</table>')
     strs.append('</div>')
@@ -4365,7 +4519,12 @@ def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=N
     return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
 
 
-def _table_child_value_getter(key, lst, eval_in_scope=None, source_expr=None):
+def _table_child_value_getter(key, lst, model, eval_in_scope=None):
+    # An answer under the table is computed rather than looked up, so its key
+    # carries the question instead of a row to index.
+    if _parse_agg_child_key(key) is not None:
+        return _agg_child_value(key, lst, model, eval_in_scope)
+    source_expr = model.get('_source_expr')
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
     idx = int(row_key)
     if source_expr is not None and eval_in_scope is not None:
@@ -4395,28 +4554,40 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         return (model, [])
 
     if isinstance(msg, ChildEvent):
+        is_agg = _parse_agg_child_key(msg.child_key) is not None
         row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
         new_model, commands = route_child_event(
             event, model, value,
-            child_value_getter=lambda key: _table_child_value_getter(key, value, eval_in_scope, model.get('_source_expr')),
+            child_value_getter=lambda key: _table_child_value_getter(key, value, model, eval_in_scope),
             get_visualizer=get_visualizer,
             # The cell's value is bound to a name for the child, so the code it
             # generates is dollar-free; the column expression goes back in below.
             var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
-        # A column stays row-generic (the cell_col dollar expression); anything
-        # bound for the clipboard names this row concretely, since the user
-        # pastes it into the editor as-is.
         src = model.get('_source_expr')
-        concrete_cell = (replace_dollars_in_py_exp(cell_col, [f'{src}[{row_key}]'])
-                         if src else cell_col)
-        commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
+        if is_agg:
+            # An answer is one value the aggregation worked out, not a value
+            # each row has, so there is no row-generic form of it: the same
+            # expression names it wherever it is headed.
+            agg_expr = _agg_child_expr(msg.child_key, src) or cell_col
+            commands = [nest_child_command(cmd, agg_expr, agg_expr)
+                        for cmd in commands]
+        else:
+            # A column stays row-generic (the cell_col dollar expression);
+            # anything bound for the clipboard names this row concretely, since
+            # the user pastes it into the editor as-is.
+            concrete_cell = (replace_dollars_in_py_exp(cell_col, [f'{src}[{row_key}]'])
+                             if src else cell_col)
+            commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
 
         filtered_commands: List[Any] = []
         type_key = _get_item_type_key(value) if value else None
         for cmd in commands:
-            if isinstance(cmd, tuple) and len(cmd) in (2, 3):
+            # Code out of a cell becomes a column of this table, since a cell's
+            # expression is one every row answers. An answer's isn't, so its
+            # code travels on up to whoever asked for it.
+            if isinstance(cmd, tuple) and len(cmd) in (2, 3) and not is_agg:
                 new_model['columns'].append(cmd[1])
                 if type_key:
                     _save_slots(new_model)
