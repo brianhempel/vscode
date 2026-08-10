@@ -8323,7 +8323,7 @@ from list_visualizer import (
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
     _agg_value, _agg_code, _agg_name, _format_agg_value,
     _agg_row_index_code, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
-    _table_child_value_getter, _agg_child_expr,
+    _table_child_value_getter, _agg_child_expr, _agg_layout,
 )
 
 
@@ -9252,7 +9252,9 @@ class TestComputeCellRendering(unittest.TestCase):
         self.assertIn('<td class="col-agg-blank"></td>', row)
         self.assertIn('>Max<', self.cells(row)[0])
 
-    def test_a_column_that_runs_out_first_blanks_the_rows_below_it(self):
+    def test_a_column_that_runs_out_first_blanks_the_rows_above_it(self):
+        # The stacks sit on the same floor, so a short one is padded at the top
+        # and its last answer still reads beside every other column's last.
         lst = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ["$['a']", "$['b']"]
@@ -9262,8 +9264,25 @@ class TestComputeCellRendering(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         # The index cell is blank in every row, so it is the blank *column*
         # cells that are counted here.
-        self.assertEqual(rows[0].count('<td class="col-agg-blank">'), 0)
-        self.assertEqual(rows[1].count('<td class="col-agg-blank">'), 1)
+        self.assertEqual(rows[0].count('<td class="col-agg-blank">'), 1)
+        self.assertEqual(rows[1].count('<td class="col-agg-blank">'), 0)
+        # a's only answer is Min; it sits on the bottom row, beside b's Max.
+        self.assertIn('>Min<', self.cells(rows[1])[0])
+        self.assertIn('>Max<', self.cells(rows[1])[1])
+        self.assertIn('>Min<', self.cells(rows[0])[0])
+
+    def test_the_stacks_are_bottom_aligned(self):
+        lst = [{'a': 1, 'b': 2, 'c': 3}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']", "$['c']"]
+        _set_column_computes(model, "$['a']", ['min($)', 'np.mean($)', 'max($)'])
+        _set_column_computes(model, "$['b']", ['max($)'])
+        _set_column_computes(model, "$['c']", ['np.mean($)', 'max($)'])
+        self.assertEqual(_agg_layout(model['columns'], model), [
+            ('cells', ['min($)', None, None]),
+            ('cells', ['np.mean($)', None, 'np.mean($)']),
+            ('cells', ['max($)', 'max($)', 'max($)']),
+        ])
 
     def test_the_rows_go_in_a_foot_that_pins_itself(self):
         # The foot sticks as one block, so no row has to be told where to stop

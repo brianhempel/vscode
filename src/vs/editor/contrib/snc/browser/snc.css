@@ -88,6 +88,14 @@
 		opacity: 0.8;
 		pointer-events: none;
 	}
+
+	&:has(> .visualizer-container:not(.small)) {
+		border-color: var(--vscode-focusBorder);
+	}
+
+	&:has(> .list-visualizer.small) { /* rounded corners and table borders */
+		overflow: hidden;
+	}
 }
 
 /* hide .snc-hover-hidden until .snc-hover-hidden-parent is hovered */
@@ -127,6 +135,11 @@
 	padding: 5px;
 	border-top: 1px solid var(--snc-border-color);
 	gap: 5px;
+}
+.list-visualizer > .search-div { /* avoid a thin sliver of scrolling table content showing up at certain zoom levels. because we have negative margin on the table scroller to hide the bottom table borders */
+	background-color: var(--snc-bg);
+	z-index: 1;
+	border-radius: 0 0 4px 4px;
 }
 
 .search-div-row {
@@ -815,6 +828,11 @@
 	border-bottom-width: 1px;
 	border-right-width: 1px;
 }
+/* Last row, whether or not aggregations are present */
+.small > .list-table-scroll > table:has(> tfoot > tr) > tfoot > tr:last-child td,
+.small > .list-table-scroll table:not(:has(> tfoot > tr)) > tbody > tr:last-child td {
+  border-bottom-width: 0;
+}
 /* .list-table-scroll > table > tbody > tr:first-child > th,
 .list-table-scroll > table > tbody > tr:first-child > td {
 	border-top: none;
@@ -830,8 +848,9 @@
 	scrollbar-width: var(--snc-scrollbar-width);
 	scrollbar-color: var(--snc-scrollbar-color);
 	font-family: var(--snc-code-font-family);
+}
+:not(.small) > .list-table-scroll {
 	margin-bottom: -1px; /* overlap/hide bottom table border so it doesn't double-up with the search area border */
-	/* margin-right: -1px;  overlap/hide bottom table border so it doesn't double-up with the visualizer border */
 }
 
 /* Keep column headers visible while scrolling the table body. box-shadow draws
@@ -1348,6 +1367,7 @@
    block, which leaves every row free to be whatever height its tallest cell
    wants. Nothing here fixes a row's height, and nothing should -- the cells
    size themselves and the row follows. */
+/* to get this to look good with scrolling (table cell borders don't stick!) there are a lot of funky -1px margins, borders, and backgrounds between .search-div, .col-agg, .agg-cell, and the list scroller */
 .list-visualizer > .list-table-scroll > table > tfoot.col-agg-rows {
 	position: sticky;
 	bottom: 0;
@@ -1382,6 +1402,12 @@
    row is labelled. */
 
 /* wrapper just inside the agg cell. cell border's aren't sticky, so we duplicate here */
+/* it's kind of a mess of what things get borders, transparent borders, etc */
+/* constraints: */
+/* 1. table cell borders in sticky footers arent sticky */
+/* 2. agg cells may have different heights */
+/* 3. can't make the .col-agg wrapper 100% height unless we disallow different heights */
+
 .list-visualizer .col-agg {
 	/* display: flex; */
 	/* flex-direction: column; */
@@ -1748,7 +1774,7 @@
 
 .small {
 	font-family: var(--snc-code-font-family);
-	display: inline-block;
+	/* display: inline-block; */
 
 	.name {
 		color: var(--snc-string-color);

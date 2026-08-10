@@ -4297,14 +4297,20 @@ def _agg_layout(columns, model) -> List[tuple]:
     about a column reads as part of that column while a row of the list reads
     as part of the list -- and because a column asked for its aggregations in
     menu order, where Min Item and Max Item are last anyway.
+
+    The stacks hang from the bottom rather than sitting from the top: a column
+    with fewer answers than the deepest one is blank in the rows *above* its
+    first. The floor is the edge every stack shares -- the table is right over
+    it -- so hanging from it is what keeps the cells reading as one block
+    rather than as a ragged bottom edge.
     """
     stacks = [_column_computes(model, col) for col in columns]
     cell_stacks = [[expr for expr in stack if not _agg_is_row(expr)]
                    for stack in stacks]
     depth = max((len(stack) for stack in cell_stacks), default=0)
+    hung = [[None] * (depth - len(stack)) + stack for stack in cell_stacks]
     levels: List[tuple] = [
-        ('cells', [stack[level] if level < len(stack) else None
-                   for stack in cell_stacks])
+        ('cells', [stack[level] for stack in hung])
         for level in range(depth)]
     levels += [('item', ci, expr)
                for ci, stack in enumerate(stacks) for expr in stack
@@ -4326,7 +4332,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     the header pins to the top. The whole foot pins as one block, so no row has
     to be told where to stop above the next -- and so no cell has to be the
     height every other cell is. A column with fewer answers than the deepest
-    one blanks the rows below its last.
+    one blanks the rows above its first, since the stacks hang from the floor.
     """
     levels = _agg_layout(columns, model)
     if not levels:
@@ -4392,7 +4398,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # The aggregation rows are part of what the table has to show, so a short
     # one doesn't get a scrollbar for the sake of the answers under it.
     agg_rows = len(_agg_layout(columns, model))
-    actual_min_height = min(22 * (len(lst) + 1 + agg_rows), actual_max_height)
+    actual_min_height = min(18 * (len(lst) + 1 + agg_rows), actual_max_height)
 
     actual_max_width = f' max-width:{max_width}px;' if max_width is not None else ''
 
