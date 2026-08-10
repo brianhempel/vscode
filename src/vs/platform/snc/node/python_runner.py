@@ -40,7 +40,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import io_cache
 
@@ -323,7 +323,48 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
     return cmd_dicts
 
 
-def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None) -> None:
+def _span_text(source_span) -> 'tuple | None':
+    """A source span with the text it covers put in front of it.
+
+    Column offsets from the parser count utf-8 bytes, so the slice is taken in
+    bytes; the columns handed on stay as the parser gave them, and the editor
+    converts once, where it knows the encoding of the document it is editing.
+    """
+    if not source_span or not _source_code:
+        return None
+    start_line, start_col, end_line, end_col = source_span
+    lines = _source_code.split('\n')
+    if not (1 <= start_line <= len(lines) and 1 <= end_line <= len(lines)):
+        return None
+    if start_line == end_line:
+        text = lines[start_line - 1].encode()[start_col:end_col].decode()
+    else:
+        middle = lines[start_line:end_line - 1]
+        text = '\n'.join(
+            [lines[start_line - 1].encode()[start_col:].decode()]
+            + middle
+            + [lines[end_line - 1].encode()[:end_col].decode()])
+    return (text, *source_span)
+
+
+def _source_sig(vis, var_and_exp) -> 'list | None':
+    """What counts as the same source for reusing a cached model.
+
+    The expression is in the key so that renaming x -> y rebuilds a model whose
+    cells would otherwise eval the old name and blank out. But a visualizer that
+    rewrites the expression its own line is showing -- the list visualizer's
+    Sort -- would then throw away every search and aggregation the user set up
+    on the table they were sorting. So a visualizer may say which part of its
+    expression is incidental; one that doesn't is asked nothing.
+    """
+    if var_and_exp is None:
+        return None
+    canonical = getattr(vis, 'canonical_source_expr', None)
+    expr = canonical(var_and_exp[1]) if canonical else var_and_exp[1]
+    return [var_and_exp[0], expr]
+
+
+def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None, source_span=None) -> None:
     """
     Log any runtime value for visualization using the custom visualizer system.
 
@@ -335,6 +376,10 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         var_and_exp: (var_name | None, expression_text) tuple, passed from the AST
             transformer which knows the assignment target and expression for each
             logged value.
+        source_span: (start_line, start_col, end_line, end_col) of the expression
+            this value came from, for a visualizer that can rewrite it. Only the
+            log sites where the visualized value IS an expression written on the
+            line pass one -- see ASTTransformer._node_span.
     """
     global execution_step, line_emit_counter
     execution_step += 1
@@ -358,7 +403,11 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         # Include the source expression in the cache key so renaming the
         # variable (x -> y) rebuilds the model instead of reusing one whose
         # cells eval the old name and blank out.
-        source_sig = [var_and_exp[0], var_and_exp[1]] if var_and_exp else None
+        source_sig = _source_sig(vis, var_and_exp)
+        # Reading the line's own text is only worth it for a visualizer that
+        # asked for it -- most never do, and this runs on every logged value.
+        span = (_span_text(source_span)
+                if wants_kwarg(vis.visualize, 'source_span') else None)
         cached_model = item_model_and_events.get('model')
         fingerprint_matches = (
             cached_model is not None
@@ -383,7 +432,7 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
             for ev in item_model_and_events['events']:
                 model, cmds = call_with_supported_kwargs(
                     vis.update, ev, var_and_exp, model, value, get_visualizer,
-                    eval_in_scope=eval_in_scope)
+                    eval_in_scope=eval_in_scope, source_span=span)
                 commands.extend(cmds)
 
         if isinstance(model, dict):
@@ -398,7 +447,8 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         # older 3rd-party one) just isn't handed them.
         html_content = call_with_supported_kwargs(
             vis.visualize, value, model, get_visualizer,
-            eval_in_scope=eval_in_scope, small=is_small, var_and_exp=var_and_exp)
+            eval_in_scope=eval_in_scope, small=is_small, var_and_exp=var_and_exp,
+            source_span=span)
 
         assert isinstance(html_content, str)
 
@@ -708,8 +758,27 @@ class CodeTransformer(ast.NodeTransformer):
             end_col_offset=end_col
         )
 
+    @staticmethod
+    def _node_span(node: ast.expr) -> 'tuple[int, int, int, int] | None':
+        """Where a node sits in the original source, for a visualizer that can
+        rewrite the expression it is showing (the list visualizer's Sort).
+
+        Only nodes whose value IS what gets visualized are worth a span, so this
+        is called at the three log sites where that holds -- an assignment's
+        right-hand side, a bare expression statement, a return -- and nowhere
+        else. A `for` target is bound by its statement rather than written on
+        it, and an `if` test rebinds nothing, so neither has an expression a
+        rewrite could stand on.
+        """
+        end_lineno = getattr(node, 'end_lineno', None)
+        end_col_offset = getattr(node, 'end_col_offset', None)
+        if end_lineno is None or end_col_offset is None:
+            return None
+        return (node.lineno, node.col_offset, end_lineno, end_col_offset)
+
     def _create_log_call(self, func_name: str, line: int, var_name: str, lineno: int, col_offset: int,
-                         var_and_exp: 'tuple[str | None, str] | None' = None) -> ast.Expr:
+                         var_and_exp: 'tuple[str | None, str] | None' = None,
+                         source_span: 'tuple[int, int, int, int] | None' = None) -> ast.Expr:
         """
         Helper to create a logging function call with loop context information.
 
@@ -790,6 +859,19 @@ class CodeTransformer(ast.NodeTransformer):
             )
             keywords.append(ast.keyword(
                 arg='var_and_exp', value=tuple_node,
+                lineno=lineno, col_offset=col_offset,
+                end_lineno=lineno, end_col_offset=col_offset,
+            ))
+        if source_span is not None:
+            keywords.append(ast.keyword(
+                arg='source_span',
+                value=ast.Tuple(
+                    elts=[ast.Constant(value=n, lineno=lineno, col_offset=col_offset,
+                                       end_lineno=lineno, end_col_offset=col_offset)
+                          for n in source_span],
+                    ctx=ast.Load(), lineno=lineno, col_offset=col_offset,
+                    end_lineno=lineno, end_col_offset=col_offset,
+                ),
                 lineno=lineno, col_offset=col_offset,
                 end_lineno=lineno, end_col_offset=col_offset,
             ))
@@ -893,10 +975,15 @@ class CodeTransformer(ast.NodeTransformer):
 
         # Create logging call: _log_value(line, temp_var, var_and_exp=...)
         vae = None
+        span = None
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             vn = node.targets[0].id
             vae = (vn, vn)
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
+            # A single-name assignment's right-hand side is what the visualizer
+            # is showing, so it is a thing the visualizer can rewrite. A tuple
+            # target is not: no one of its names holds the value logged here.
+            span = self._node_span(node.value)
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae, source_span=span)
 
         # Return all three statements as a list
         return [temp_assign, original_assign, log_call]
@@ -1145,8 +1232,10 @@ class CodeTransformer(ast.NodeTransformer):
         # Create assignment to temp variable: temp_var = expression
         temp_assign = self._create_assignment(temp_var, node.value, node.lineno, temp_col)
 
+        # The statement IS the expression, so the span is the same node the
+        # source segment above is read from, and no more trustworthy or less.
         vae = (None, self._source_segment(node.value))
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae, source_span=self._node_span(node.value))
 
         # Create temp variable name node for the original expression
         temp_var_node = ast.Name(
@@ -1370,8 +1459,10 @@ class CodeTransformer(ast.NodeTransformer):
         # Create assignment to temp variable: temp_var = return_expression
         temp_assign = self._create_assignment(temp_var, node.value, node.lineno, temp_col)
 
+        # The returned expression is what is visualized, and the `return`
+        # keyword sits outside the span, so a rewrite can't touch it.
         vae = (None, self._source_segment(node.value))
-        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
+        log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae, source_span=self._node_span(node.value))
 
         # Create temp variable name node for the return statement
         temp_var_node = ast.Name(

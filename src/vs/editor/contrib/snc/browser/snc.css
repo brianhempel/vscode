@@ -828,11 +828,18 @@
 	border-bottom-width: 1px;
 	border-right-width: 1px;
 }
-/* Last row, whether or not aggregations are present */
-.small > .list-table-scroll > table:has(> tfoot > tr) > tfoot > tr:last-child td,
-.small > .list-table-scroll table:not(:has(> tfoot > tr)) > tbody > tr:last-child td {
+/* Last row, whether or not aggregations are present. Avoid double-borders */
+.small > .list-table-scroll > table:not(:has(> tfoot > tr)) > tbody > tr:last-child > td,
+.small > .list-table-scroll > table:has(> tfoot > tr) > tfoot > tr:last-child > td {
   border-bottom-width: 0;
 }
+/* Last column. Avoid double-borders */
+.small > .list-table-scroll > table > tbody > tr > th:last-child,
+.small > .list-table-scroll > table > tbody > tr > td:last-child,
+.small > .list-table-scroll > table > tfoot > tr > td:last-child {
+  border-right-width: 0;
+}
+
 /* .list-table-scroll > table > tbody > tr:first-child > th,
 .list-table-scroll > table > tbody > tr:first-child > td {
 	border-top: none;
@@ -1220,7 +1227,13 @@
 /* --- Compute: what the column adds up to ---
    The row in the column ▾ menu, and the submenu it opens. The submenu is
    hoisted a second time, out of the panel the row lives in, so its styles hang
-   off nothing (see the note above .col-menu-panel). */
+   off nothing (see the note above .col-menu-panel).
+
+   Sort's submenu is the same list of rows -- a checkbox, a name, and under a
+   separator the rows that write a line -- so it carries these same classes and
+   is styled once here. It adds .col-sort, .col-sort-trigger, .col-sort-panel,
+   .col-sort-row and .col-sort-code alongside them, which style nothing today
+   and are there to hang a difference off if one ever turns up. */
 
 .col-menu-panel .col-compute {
 	/* .snc-dropdown-trigger is inline-flex, which would leave the row as wide
@@ -1232,10 +1245,11 @@
 	background: var(--snc-hover-bg);
 }
 
-.col-compute-arrow {
+.submenu-right-arrow {
 	flex: none;
 	color: var(--snc-text-muted);
-	font-size: 9px;
+	font-size: 18px;
+	transform: translateY(-1px);
 }
 
 .col-compute-panel {
@@ -1358,7 +1372,14 @@
 	}
 }
 
-/* --- The answers, under the columns they are about ---
+.list-visualizer .empty-list {
+	font-family: var(--snc-ui-widget-font-family);
+	font-size: var(--snc-menu-font-size);
+	text-align: center;
+	border: none;
+}
+
+/* --- The aggregation answers, under the columns they are about ---
    Ordinary table cells, so each stays the width of its column and reads like
    the rows above it -- but pinned to the bottom of the scrollport the way the
    header is pinned to the top.

@@ -43,7 +43,7 @@ class TestSplitLeadingImports(unittest.TestCase):
         logged = []
         globals_dict = {
             "__name__": "__main__",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: logged.append((line, value)),
+            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: logged.append((line, value)),
         }
 
         exec(import_code, globals_dict)
@@ -58,7 +58,7 @@ class TestSplitLeadingImports(unittest.TestCase):
         logged = []
         globals_dict = {
             "__name__": "__main__",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: logged.append((line, value)),
+            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: logged.append((line, value)),
         }
 
         exec(import_code, globals_dict)
@@ -75,8 +75,8 @@ class TestReseed(unittest.TestCase):
         return {
             "__name__": "__main__",
             "__file__": "<string>",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: logged.append((line, value)),
-            "_log_and_return": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None: (logged.append((line, value)), value)[1],
+            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: logged.append((line, value)),
+            "_log_and_return": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: (logged.append((line, value)), value)[1],
         }
 
     def _run_checkpoint1(self, source_code):
@@ -584,3 +584,202 @@ class TestIoCacheAcrossRuns(unittest.TestCase):
         self.assertTrue(any(f.endswith('.body') for f in os.listdir(cache_dir)))
 
 
+
+
+class TestSourceSpan(unittest.TestCase):
+    """Where the expression a visualizer is showing sits in the source, so a
+    visualizer that can rewrite it (the list visualizer's Sort) has something
+    exact to rewrite. Only the sites where the visualized value IS an
+    expression written on the line hand one over."""
+
+    def spans(self, source_code):
+        """{line: source_span} for every _log_value the transform emits."""
+        spans = {}
+
+        def record(line, value, last_line_in_containing_loop=None,
+                   eval_in_scope=None, var_and_exp=None, source_span=None):
+            spans[line] = source_span
+
+        globals_dict = {
+            '__name__': '__main__',
+            '_log_value': record,
+            '_log_and_return': (lambda line, value, *a, **k: value),
+        }
+        exec(compile(transform_code_to_ast(source_code), '<test>', 'exec'),
+             globals_dict)
+        return spans
+
+    def text_at(self, source_code, span):
+        return python_runner._span_text(span)[0]
+
+    def test_an_assignments_right_hand_side_is_rewritable(self):
+        source = 'data = [3, 1, 2]\n'
+        span = self.spans(source)[1]
+        self.assertEqual(span, (1, 7, 1, 16))
+
+    def test_a_bare_expression_statement_is(self):
+        self.assertEqual(self.spans('[3, 1, 2]\n')[1], (1, 0, 1, 9))
+
+    def test_a_return_covers_the_value_and_not_the_keyword(self):
+        source = 'def f():\n    return [3, 1, 2]\nf()\n'
+        self.assertEqual(self.spans(source)[2], (2, 11, 2, 20))
+
+    def test_a_multi_line_expression_spans_to_its_end(self):
+        source = 'data = [\n    3,\n    1,\n]\n'
+        self.assertEqual(self.spans(source)[1], (1, 7, 4, 1))
+
+    def test_a_loop_variable_has_no_expression_to_rewrite(self):
+        # It is bound by the statement rather than written on it.
+        source = 'rows = [[1], [2]]\nfor row in rows:\n    pass\n'
+        self.assertIsNone(self.spans(source)[2])
+
+    def test_an_augmented_assignment_has_none(self):
+        # `node.value` there is the increment, not the visualized value.
+        source = 'x = 1\nx += 2\n'
+        self.assertIsNone(self.spans(source)[2])
+
+    def test_an_if_test_has_none(self):
+        # Nothing is rebound, so a rewrite would change nothing downstream.
+        source = 'xs = [1]\nif xs:\n    pass\n'
+        self.assertIsNone(self.spans(source)[2])
+
+    def test_a_tuple_target_assignment_has_none(self):
+        # No one of its names holds the value logged for the line.
+        self.assertIsNone(self.spans('a, b = 1, 2\n')[1])
+
+
+class TestSpanText(unittest.TestCase):
+    """The span with the text it covers put in front of it."""
+
+    def setUp(self):
+        self.old_source = python_runner._source_code
+
+    def tearDown(self):
+        python_runner._source_code = self.old_source
+
+    def text(self, source_code, span):
+        python_runner._source_code = source_code
+        got = python_runner._span_text(span)
+        return got if got is None else got[0]
+
+    def test_it_reads_the_expression_off_the_line(self):
+        self.assertEqual(self.text('data = [3, 1, 2]\n', (1, 7, 1, 16)),
+                         '[3, 1, 2]')
+
+    def test_a_multi_line_expression_comes_back_whole(self):
+        self.assertEqual(self.text('data = [\n    3,\n]\n', (1, 7, 3, 1)),
+                         '[\n    3,\n]')
+
+    def test_the_span_rides_along_unchanged(self):
+        python_runner._source_code = 'data = [3, 1, 2]\n'
+        self.assertEqual(python_runner._span_text((1, 7, 1, 16)),
+                         ('[3, 1, 2]', 1, 7, 1, 16))
+
+    def test_offsets_count_utf8_bytes_the_way_the_parser_does(self):
+        # An accented name ahead of the expression pushes the byte offset past
+        # the character one; slicing in characters would cut mid-expression.
+        import ast
+        source = 'café = [3, 1, 2]\n'
+        span = ast.parse(source).body[0].value
+        self.assertEqual(
+            self.text(source, (span.lineno, span.col_offset,
+                               span.end_lineno, span.end_col_offset)),
+            '[3, 1, 2]')
+
+    def test_nothing_to_read_reads_nothing(self):
+        self.assertIsNone(self.text('data = 1\n', None))
+
+    def test_a_line_that_is_no_longer_there_reads_nothing(self):
+        self.assertIsNone(self.text('data = 1\n', (99, 0, 99, 3)))
+
+
+class TestSourceSig(unittest.TestCase):
+    """What counts as the same source for reusing a cached model."""
+
+    class _Plain:
+        pass
+
+    class _Canonical:
+        @staticmethod
+        def canonical_source_expr(expr):
+            return expr.removeprefix('sorted(').removesuffix(')')
+
+    def test_a_visualizer_with_nothing_to_say_keeps_the_expression(self):
+        self.assertEqual(
+            python_runner._source_sig(self._Plain(), (None, 'sorted(xs)')),
+            [None, 'sorted(xs)'])
+
+    def test_one_that_rewrites_its_own_line_says_which_part_is_incidental(self):
+        self.assertEqual(
+            python_runner._source_sig(self._Canonical(), (None, 'sorted(xs)')),
+            [None, 'xs'])
+
+    def test_a_rename_is_still_a_different_source(self):
+        self.assertNotEqual(
+            python_runner._source_sig(self._Canonical(), ('x', 'x')),
+            python_runner._source_sig(self._Canonical(), ('y', 'y')))
+
+    def test_no_expression_at_all_signs_as_nothing(self):
+        self.assertIsNone(python_runner._source_sig(self._Plain(), None))
+
+
+class TestSourceSpanReachesTheVisualizer(unittest.TestCase):
+    """Offered to the visualizers that name the parameter, and to no others."""
+
+    class _Wants:
+        def can_visualize(self, value):
+            return True
+
+        def init_model(self, value, get_visualizer, eval_in_scope=None,
+                       var_and_exp=None):
+            return {}
+
+        def visualize(self, value, model, get_visualizer, eval_in_scope,
+                      max_width=None, max_height=None, small=False,
+                      var_and_exp=None, source_span=None):
+            return f'<i>{source_span}</i>'
+
+    class _DoesNot:
+        def can_visualize(self, value):
+            return True
+
+        def init_model(self, value, get_visualizer, eval_in_scope=None,
+                       var_and_exp=None):
+            return {}
+
+        def visualize(self, value, model, get_visualizer, eval_in_scope,
+                      max_width=None, max_height=None, small=False,
+                      var_and_exp=None):
+            return '<i>no span asked for</i>'
+
+    def html(self, vis, source_span):
+        buf = io.StringIO()
+        saved = (python_runner._stream_out, python_runner.line_emit_counter,
+                 python_runner.models_and_events, python_runner._source_code,
+                 python_runner._visualizers)
+        try:
+            python_runner._stream_out = buf
+            python_runner.line_emit_counter = {}
+            python_runner.models_and_events = []
+            python_runner._source_code = 'data = [3, 1, 2]\n'
+            python_runner._visualizers = lambda: [vis]
+            log_value(1, [3, 1, 2], var_and_exp=('data', 'data'),
+                      source_span=source_span)
+        finally:
+            (python_runner._stream_out, python_runner.line_emit_counter,
+             python_runner.models_and_events, python_runner._source_code,
+             python_runner._visualizers) = saved
+        msgs = [json.loads(line) for line in buf.getvalue().splitlines()
+                if line.strip()]
+        return next(m['item'] for m in msgs if m.get('type') == 'item')['html']
+
+    def test_one_that_asks_is_handed_the_text_and_the_span(self):
+        self.assertIn("('[3, 1, 2]', 1, 7, 1, 16)",
+                      self.html(self._Wants(), (1, 7, 1, 16)))
+
+    def test_a_site_with_nothing_to_rewrite_hands_over_nothing(self):
+        self.assertIn('None', self.html(self._Wants(), None))
+
+    def test_one_that_does_not_ask_still_renders(self):
+        self.assertIn('no span asked for',
+                      self.html(self._DoesNot(), (1, 7, 1, 16)))

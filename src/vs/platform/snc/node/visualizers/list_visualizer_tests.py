@@ -10704,5 +10704,680 @@ class TestFreeAggregationRemoval(unittest.TestCase):
         self.assertIsNone(model['column_computes'])
 
 
+from list_visualizer import (
+    _parse_sorted, _sort_expr, _sort_checked, canonical_source_expr,
+)
+
+
+class TestParseSorted(unittest.TestCase):
+    """A sort is read back out of the line rather than remembered, so reading
+    one has to answer for every shape the menu can write."""
+
+    def test_a_bare_sort_has_no_key_and_no_reverse(self):
+        self.assertEqual(_parse_sorted('sorted(data)'), ('data', None, False))
+
+    def test_reverse_is_the_descending_one(self):
+        self.assertEqual(_parse_sorted('sorted(data, reverse=True)'),
+                         ('data', None, True))
+
+    def test_a_key_comes_back_as_the_body_of_its_lambda(self):
+        self.assertEqual(
+            _parse_sorted("sorted(data, key=lambda item: item['b'])"),
+            ('data', "item['b']", False))
+
+    def test_a_key_and_reverse_together(self):
+        self.assertEqual(
+            _parse_sorted(
+                "sorted(data, key=lambda item: item['b'], reverse=True)"),
+            ('data', "item['b']", True))
+
+    def test_the_inner_expression_comes_back_as_it_was_written(self):
+        # Written back verbatim on an unsort, so it has to be the user's own
+        # text rather than an unparse of it.
+        self.assertEqual(_parse_sorted('sorted(json.load( f ))')[0],
+                         'json.load( f )')
+
+    def test_something_that_is_not_a_sort_is_not_one(self):
+        self.assertIsNone(_parse_sorted('data'))
+        self.assertIsNone(_parse_sorted('[item for item in data]'))
+        self.assertIsNone(_parse_sorted('sorted'))
+
+    def test_a_sort_of_nothing_in_particular_is_not_one(self):
+        self.assertIsNone(_parse_sorted('sorted()'))
+        self.assertIsNone(_parse_sorted('sorted(a, b)'))
+
+    def test_a_keyword_it_does_not_speak_is_not_one(self):
+        self.assertIsNone(_parse_sorted('sorted(data, key=len, x=1)'))
+        self.assertIsNone(_parse_sorted('sorted(data, **kw)'))
+
+    def test_a_hand_written_key_still_reads_as_a_sort(self):
+        # So clicking a direction replaces it rather than nesting inside it.
+        # It comes back as written rather than as no key at all, so it can't be
+        # mistaken for the sort that orders on the row itself.
+        self.assertEqual(_parse_sorted('sorted(data, key=len)'),
+                         ('data', 'len', False))
+
+    def test_a_key_that_is_not_a_lambda_of_item_comes_back_as_written(self):
+        self.assertEqual(_parse_sorted('sorted(data, key=lambda x: x.n)')[1],
+                         'lambda x: x.n')
+
+    def test_syntax_that_is_not_python_is_not_a_sort(self):
+        self.assertIsNone(_parse_sorted('sorted(data'))
+        self.assertIsNone(_parse_sorted(''))
+
+
+class TestSortExpr(unittest.TestCase):
+    """What the menu writes. sorted() returns a new list in both directions,
+    so there is nothing to wrap it in."""
+
+    def test_the_row_itself_sorts_without_a_key(self):
+        self.assertEqual(_sort_expr('data', '$', 'asc'), 'sorted(data)')
+
+    def test_descending_the_row_itself(self):
+        self.assertEqual(_sort_expr('data', '$', 'desc'),
+                         'sorted(data, reverse=True)')
+
+    def test_a_column_becomes_the_key(self):
+        self.assertEqual(_sort_expr('data', "$['b']", 'asc'),
+                         "sorted(data, key=lambda item: item['b'])")
+
+    def test_a_column_descending(self):
+        self.assertEqual(_sort_expr('data', "$['b']", 'desc'),
+                         "sorted(data, key=lambda item: item['b'], reverse=True)")
+
+    def test_an_existing_sort_is_replaced_rather_than_nested(self):
+        was = "sorted(data, key=lambda item: item['b'])"
+        self.assertEqual(_sort_expr(was, "$['c']", 'desc'),
+                         "sorted(data, key=lambda item: item['c'], reverse=True)")
+
+    def test_unsorting_hands_back_the_expression_that_was_wrapped(self):
+        was = "sorted(json.load(f), key=lambda item: item['b'])"
+        self.assertEqual(_sort_expr(was, "$['b']", None), 'json.load(f)')
+
+    def test_a_computed_column_reads_the_row_through_its_expression(self):
+        self.assertEqual(_sort_expr('data', 'len($)', 'asc'),
+                         'sorted(data, key=lambda item: len(item))')
+
+
+class TestSortChecked(unittest.TestCase):
+    """Which box is ticked is the line's answer, not the model's."""
+
+    def test_the_direction_the_line_sorts_in_is_the_checked_one(self):
+        was = "sorted(data, key=lambda item: item['b'])"
+        self.assertTrue(_sort_checked(was, "$['b']", 'asc'))
+        self.assertFalse(_sort_checked(was, "$['b']", 'desc'))
+
+    def test_descending(self):
+        was = "sorted(data, key=lambda item: item['b'], reverse=True)"
+        self.assertTrue(_sort_checked(was, "$['b']", 'desc'))
+        self.assertFalse(_sort_checked(was, "$['b']", 'asc'))
+
+    def test_another_column_is_not_this_columns_sort(self):
+        was = "sorted(data, key=lambda item: item['b'])"
+        self.assertFalse(_sort_checked(was, "$['c']", 'asc'))
+
+    def test_the_row_itself_is_the_sort_with_no_key(self):
+        self.assertTrue(_sort_checked('sorted(data)', '$', 'asc'))
+        self.assertFalse(_sort_checked('sorted(data)', "$['b']", 'asc'))
+
+    def test_a_keyed_sort_is_not_the_row_itselfs(self):
+        was = "sorted(data, key=lambda item: item['b'])"
+        self.assertFalse(_sort_checked(was, '$', 'asc'))
+
+    def test_an_unsorted_line_checks_nothing(self):
+        self.assertFalse(_sort_checked('data', '$', 'asc'))
+        self.assertFalse(_sort_checked('data', '$', 'desc'))
+
+    def test_a_hand_written_key_checks_nothing(self):
+        self.assertFalse(_sort_checked('sorted(data, key=len)', '$', 'asc'))
+
+    def test_nothing_to_read_checks_nothing(self):
+        self.assertFalse(_sort_checked(None, '$', 'asc'))
+
+
+class TestCanonicalSourceExpr(unittest.TestCase):
+    """A sort wrapper is the one part of the expression that is not a change of
+    source, so a model survives one being put on or taken off."""
+
+    def test_a_sort_signs_as_the_thing_it_sorts(self):
+        self.assertEqual(canonical_source_expr('sorted([3, 1, 2])'), '[3, 1, 2]')
+        self.assertEqual(
+            canonical_source_expr(
+                "sorted([3, 1, 2], key=lambda item: item['b'], reverse=True)"),
+            '[3, 1, 2]')
+
+    def test_an_unsorted_expression_signs_as_itself(self):
+        self.assertEqual(canonical_source_expr('[3, 1, 2]'), '[3, 1, 2]')
+
+    def test_a_rename_is_still_a_different_source(self):
+        self.assertNotEqual(canonical_source_expr('sorted(x)'),
+                            canonical_source_expr('sorted(y)'))
+
+    def test_nothing_signs_as_nothing(self):
+        self.assertIsNone(canonical_source_expr(None))
+
+
+from list_visualizer import ChangeSourceExpr, SortClick, SortCodeClick
+
+SORT_LIST = [{'b': 3}, {'b': 1}, {'b': 2}]
+
+# (text, start_line, start_col, end_line, end_col) -- what the runner hands the
+# visualizer for the expression its own line is showing.
+SPAN = ('json.load(f)', 4, 7, 4, 19)
+
+
+def sort_model(lst=None, columns=None, span=SPAN, source='data'):
+    """A table model with a column menu and its Sort submenu open."""
+    lst = SORT_LIST if lst is None else lst
+    model = init_model(lst, mock_get_visualizer)
+    model['columns'] = ["$['b']"] if columns is None else columns
+    model['_source_expr'] = source
+    model['_source_span'] = span
+    model['openDropdown'] = {'id': 'col-menu-0'}
+    model['col_search_dropdown'] = 'sort-0'
+    return lst, model
+
+
+class SortPanelCase(unittest.TestCase):
+    """The Sort submenu, opened over a one-column table."""
+
+    def panel(self, model, lst):
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertIn('col-sort-panel', th)
+        panel = th[th.index('col-sort-panel'):]
+        # Sort's own trigger comes before its panel, so the next one along is
+        # Compute's -- i.e. where this panel has finished. Without cutting
+        # there the last row would run on into the rest of the column menu.
+        return panel[:panel.index('col-compute-trigger')]
+
+    def rows(self, panel):
+        return re.findall(r'<div class="col-compute-row[^"]*".*?'
+                          r'(?=<div class="col-compute-row|$)', panel,
+                          re.DOTALL)
+
+    def names(self, panel):
+        return re.findall(r'col-compute-name">([^<]*)<', panel)
+
+
+class TestSortPanelRendering(SortPanelCase):
+    """Four rows: two that rewrite the line, two that write a new one."""
+
+    def test_it_lists_the_four_rows_in_order(self):
+        lst, model = sort_model()
+        self.assertEqual(self.names(self.panel(model, lst)),
+                         ['Asc', 'Desc', 'Asc (new code)', 'Desc (new code)'])
+
+    def test_only_the_rewriting_rows_have_a_checkbox(self):
+        lst, model = sort_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertEqual([('col-tally-check' in row) for row in rows],
+                         [True, True, False, False])
+
+    def test_the_new_code_rows_hand_over_the_line_they_write(self):
+        lst, model = sort_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn("sorted(data, key=lambda item: item[&#x27;b&#x27;])",
+                      rows[2])
+        self.assertIn('reverse=True', rows[3])
+
+    def test_every_row_hands_its_expression_out_to_the_right(self):
+        # A tooltip over a menu row would otherwise cover the rows around it.
+        lst, model = sort_model()
+        for row in self.rows(self.panel(model, lst)):
+            self.assertIn('snc-py-exp-align="right"', row)
+
+    def test_the_rewriting_rows_hand_over_what_they_would_make_the_line(self):
+        lst, model = sort_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('snc-py-exp="sorted(json.load(f), '
+                      'key=lambda item: item[&#x27;b&#x27;])"', rows[0])
+        self.assertIn('reverse=True', rows[1])
+
+    def test_a_checked_row_still_names_its_own_sort(self):
+        # The row names an order, not the click; dragging Asc off a line that
+        # already sorts that way hands over the line as it reads.
+        lst, model = sort_model(
+            span=("sorted(json.load(f), key=lambda item: item['b'])",
+                  4, 7, 4, 56))
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('snc-py-exp="sorted(json.load(f), '
+                      'key=lambda item: item[&#x27;b&#x27;])"', rows[0])
+
+    def test_with_no_span_they_have_no_expression_to_hand_over(self):
+        lst, model = sort_model(span=None)
+        rows = self.rows(self.panel(model, lst))
+        self.assertNotIn('snc-py-exp', rows[0])
+        self.assertNotIn('snc-py-exp', rows[1])
+
+    def test_the_direction_the_line_sorts_in_is_the_checked_row(self):
+        lst, model = sort_model(
+            span=("sorted(json.load(f), key=lambda item: item['b'])",
+                  4, 7, 4, 56))
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('checked', rows[0])
+        self.assertNotIn('checked', rows[1])
+
+    def test_an_unsorted_line_checks_neither(self):
+        lst, model = sort_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertNotIn('checked', rows[0])
+        self.assertNotIn('checked', rows[1])
+
+    def test_with_no_span_the_rewriting_rows_are_inert(self):
+        # A loop variable is bound by its statement, not written on it, so
+        # there is no expression to wrap.
+        lst, model = sort_model(span=None)
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('unselectable', rows[0])
+        self.assertIn('unselectable', rows[1])
+        self.assertNotIn('SortClick', rows[0])
+
+    def test_the_new_code_rows_still_work_without_a_span(self):
+        lst, model = sort_model(span=None)
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('SortCodeClick', rows[2])
+        self.assertNotIn('unselectable', rows[2])
+
+    def test_a_list_with_no_source_has_no_line_to_write(self):
+        lst, model = sort_model(span=None, source=None)
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('unselectable', rows[2])
+        self.assertNotIn('SortCodeClick', rows[2])
+
+    def test_the_trigger_reads_as_a_flyout_like_compute(self):
+        lst, model = sort_model()
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertIn('>Sort<', th)
+        self.assertIn('col-sort-trigger', th)
+
+    def test_only_the_open_submenu_draws_its_panel(self):
+        lst, model = sort_model()
+        model['col_search_dropdown'] = 'compute-0'
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertNotIn('col-sort-panel', th)
+
+
+from list_visualizer import _is_pure_ref
+
+
+class TestPureRef(unittest.TestCase):
+    """Whether the table may read a cell by evaluating `<source>[i]` again, or
+    has to read it off the value it was handed."""
+
+    def test_a_name_is_free_to_evaluate_again(self):
+        self.assertTrue(_is_pure_ref('data'))
+
+    def test_so_is_a_path_of_subscripts_and_attributes(self):
+        self.assertTrue(_is_pure_ref('data[0]'))
+        self.assertTrue(_is_pure_ref("obj.rows['a'][2]"))
+
+    def test_a_call_is_not(self):
+        # Evaluating it again RUNS the user's function again -- once per cell,
+        # on top of the once their program meant.
+        self.assertFalse(_is_pure_ref('f()'))
+        self.assertFalse(_is_pure_ref('json.load(open(p))'))
+        self.assertFalse(_is_pure_ref('rows[compute()]'))
+
+    def test_nor_is_anything_that_will_not_parse(self):
+        self.assertFalse(_is_pure_ref('data['))
+        self.assertFalse(_is_pure_ref(''))
+
+
+class TestImpureSourceIsNotReEvaluated(unittest.TestCase):
+    """A list that came from a call is read off the value in hand.
+
+    Otherwise every cell re-runs the call: the user's side effects happen
+    again, and every value their function logged on the way gets another
+    visualizer stacked on the one before it.
+    """
+
+    def calls_to_build(self, source_expr, build):
+        calls = []
+
+        def counting():
+            calls.append(1)
+            return [{'b': 3}, {'b': 1}]
+
+        lst = counting()
+        del calls[:]
+        scope = lambda code: eval(code, {}, {'f': counting, 'data': lst})
+        build(lst, source_expr, scope)
+        return len(calls)
+
+    def render(self, lst, source_expr, scope):
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=(None, source_expr))
+        model['columns'] = ["$['b']"]
+        visualize(lst, model, mock_get_visualizer, scope)
+
+    def test_a_call_source_is_never_run_again(self):
+        self.assertEqual(self.calls_to_build('f()', self.render), 0)
+
+    def test_a_named_source_still_reads_through_its_name(self):
+        # Unchanged for the ordinary case: a name costs nothing to evaluate.
+        lst = [{'b': 3}, {'b': 1}]
+        seen = []
+        scope = lambda code: (seen.append(code), eval(code, {}, {'data': lst}))[1]
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=('data', 'data'))
+        model['columns'] = ["$['b']"]
+        visualize(lst, model, mock_get_visualizer, scope)
+        self.assertTrue(any('data[0]' in code for code in seen))
+
+    def test_the_cells_still_show_the_right_values(self):
+        lst = [{'b': 3}, {'b': 1}]
+        scope = lambda code: eval(code, {}, {'f': lambda: lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=(None, 'f()'))
+        model['columns'] = ["$['b']"]
+        html_out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('>3<', html_out)
+        self.assertIn('>1<', html_out)
+
+    def test_the_column_still_hands_over_code_that_names_the_call(self):
+        # Only evaluation changes: what a drag offers still says where the
+        # values came from.
+        lst = [{'b': 3}, {'b': 1}]
+        scope = lambda code: eval(code, {}, {'f': lambda: lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=(None, 'f()'))
+        model['columns'] = ["$['b']"]
+        html_out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('for item in f()', html_out)
+
+
+from list_visualizer import ColumnSubmenuDwell
+
+
+class TestColumnMenuDwell(unittest.TestCase):
+    """Resting the pointer on a row of the column ▾ menu opens the submenu it
+    names, and resting it on a row that names none puts the open one away.
+
+    A row renders the attribute only when dwelling there would change
+    something, so a pointer left lying still can never cost a re-run for a menu
+    that is already as the user wants it.
+    """
+
+    def menu(self, open_dropdown=None):
+        lst = SORT_LIST
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['b']"]
+        model['_source_expr'] = 'data'
+        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['col_search_dropdown'] = open_dropdown
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        return th[th.index('col-menu-panel'):]
+
+    def dwells(self, menu):
+        return re.findall(r'snc-dwell="([^"]*)"', menu)
+
+    def opens(self, dropdown_id):
+        return html.escape(repr(ColumnSubmenuDwell(dropdown_id=dropdown_id)))
+
+    def test_sort_and_compute_offer_to_open_themselves(self):
+        dwells = self.dwells(self.menu())
+        self.assertIn(self.opens('sort-0'), dwells)
+        self.assertIn(self.opens('compute-0'), dwells)
+
+    def test_a_submenu_already_open_offers_nothing(self):
+        dwells = self.dwells(self.menu(open_dropdown='sort-0'))
+        self.assertNotIn(self.opens('sort-0'), dwells)
+        self.assertIn(self.opens('compute-0'), dwells)
+
+    def test_the_other_rows_offer_to_close_what_is_open(self):
+        self.assertIn(self.opens(None), self.dwells(self.menu(open_dropdown='sort-0')))
+
+    def test_with_nothing_open_there_is_nothing_to_close(self):
+        self.assertNotIn(self.opens(None), self.dwells(self.menu()))
+
+    def search_row(self, menu):
+        return menu[menu.index('col-search-area'):][:200]
+
+    def test_a_row_does_not_offer_to_close_its_own_chip_menu(self):
+        # The operator chip lives in the search row; resting the pointer on the
+        # row it opened from is not a way of leaving it.
+        menu = self.menu(open_dropdown='op-0')
+        self.assertEqual(self.dwells(self.search_row(menu)), [])
+
+    def test_but_it_does_close_a_submenu_that_is_not_its_own(self):
+        menu = self.menu(open_dropdown='sort-0')
+        self.assertEqual(self.dwells(self.search_row(menu)), [self.opens(None)])
+
+    def test_and_another_row_still_closes_its_chip_menu(self):
+        menu = self.menu(open_dropdown='op-0')
+        remove_row = menu[:menu.index('col-sort')]
+        self.assertIn(self.opens(None), self.dwells(remove_row))
+
+
+from list_visualizer import ColumnMenuDismiss
+
+
+class TestColumnMenuDismiss(unittest.TestCase):
+    """A click outside the menu closes it, the way a menu anywhere else does."""
+
+    def test_the_panel_says_what_clicking_away_means(self):
+        lst, model = sort_model()
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        menu = th[th.index('col-menu-panel'):]
+        self.assertIn(f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}"',
+                      menu[:200])
+
+    def dismiss(self, **model_fields):
+        lst, model = sort_model()
+        model.update(model_fields)
+        return update(make_column_mouse_event(repr(ColumnMenuDismiss())),
+                      ('data', 'data'), model, lst, mock_get_visualizer,
+                      eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+
+    def test_it_closes_the_menu(self):
+        model, _ = self.dismiss()
+        self.assertIsNone(model['openDropdown'])
+
+    def test_it_takes_the_open_submenu_with_it(self):
+        model, _ = self.dismiss(col_search_dropdown='sort-0')
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_it_forgets_the_tally_view_like_every_other_way_out(self):
+        model, _ = self.dismiss(tally_filter='ab', tally_sort='common')
+        self.assertEqual(model['tally_filter'], '')
+
+    def test_it_writes_no_code(self):
+        _, commands = self.dismiss()
+        self.assertEqual(commands, [])
+
+    def test_it_leaves_the_column_search_alone(self):
+        # Closing the menu is not clearing what was set in it.
+        lst, model = sort_model()
+        _set_column_search(model, "$['b']", op='>=', text='2')
+        model, _ = update(
+            make_column_mouse_event(repr(ColumnMenuDismiss())),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+        self.assertEqual(_column_search_row(model, "$['b']")['text'], '2')
+
+
+class TestColumnSubmenuDwellEvent(unittest.TestCase):
+    """Setting, not toggling: dwelling says which submenu should be open."""
+
+    def dwell(self, dropdown_id, open_dropdown=None):
+        lst, model = sort_model()
+        model['col_search_dropdown'] = open_dropdown
+        model, commands = update(
+            make_column_mouse_event(repr(ColumnSubmenuDwell(dropdown_id=dropdown_id))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+        return model, commands
+
+    def test_it_opens_the_submenu_it_names(self):
+        model, _ = self.dwell('sort-0')
+        self.assertEqual(model['col_search_dropdown'], 'sort-0')
+
+    def test_it_replaces_whatever_was_open(self):
+        model, _ = self.dwell('compute-0', open_dropdown='sort-0')
+        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+
+    def test_naming_none_closes(self):
+        model, _ = self.dwell(None, open_dropdown='sort-0')
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_it_leaves_the_column_menu_itself_open(self):
+        model, _ = self.dwell('sort-0')
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+
+    def test_it_writes_no_code(self):
+        _, commands = self.dwell('sort-0')
+        self.assertEqual(commands, [])
+
+
+class SortEventCase(unittest.TestCase):
+    def click(self, event, lst=None, **kwargs):
+        lst, model = sort_model(lst, **kwargs)
+        return update(make_column_mouse_event(repr(event)),
+                      ('data', 'data'), model, lst, mock_get_visualizer,
+                      eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+
+
+class TestSortClick(SortEventCase):
+    """Clicking a direction rewrites the line the table is showing."""
+
+    def test_it_wraps_the_lines_own_expression(self):
+        _, commands = self.click(SortClick(index=0, direction='asc'))
+        self.assertEqual(
+            commands,
+            [ChangeSourceExpr(
+                expression="sorted(json.load(f), key=lambda item: item['b'])",
+                start_line=4, start_col=7, end_line=4, end_col=19)])
+
+    def test_descending_asks_for_the_reverse(self):
+        _, commands = self.click(SortClick(index=0, direction='desc'))
+        self.assertIn('reverse=True', commands[0].expression)
+
+    def test_the_row_itself_sorts_without_a_key(self):
+        _, commands = self.click(SortClick(index=0, direction='asc'),
+                                 lst=[3, 1, 2], columns=['$'])
+        self.assertEqual(commands[0].expression, 'sorted(json.load(f))')
+
+    def test_clicking_the_checked_direction_takes_the_sort_off(self):
+        span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
+        _, commands = self.click(SortClick(index=0, direction='asc'), span=span)
+        self.assertEqual(commands[0].expression, 'json.load(f)')
+
+    def test_the_other_direction_replaces_rather_than_nests(self):
+        span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
+        _, commands = self.click(SortClick(index=0, direction='desc'), span=span)
+        self.assertEqual(commands[0].expression.count('sorted('), 1)
+        self.assertIn('reverse=True', commands[0].expression)
+
+    def test_the_menu_stays_open(self):
+        # A checkbox, and flipping the direction is the common next act.
+        model, _ = self.click(SortClick(index=0, direction='asc'))
+        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['col_search_dropdown'], 'sort-0')
+
+    def test_with_no_span_there_is_nothing_to_rewrite(self):
+        _, commands = self.click(SortClick(index=0, direction='asc'), span=None)
+        self.assertEqual(commands, [])
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        _, commands = self.click(SortClick(index=7, direction='asc'))
+        self.assertEqual(commands, [])
+
+
+class TestSortCodeClick(SortEventCase):
+    """The other two rows write a line instead, the way Unique and Tally do."""
+
+    def test_it_writes_the_sorted_list_as_a_new_line(self):
+        _, commands = self.click(SortCodeClick(index=0, direction='asc'))
+        self.assertEqual(
+            commands[0][:2],
+            ('data_sorted', "sorted(data, key=lambda item: item['b'])"))
+
+    def test_descending(self):
+        _, commands = self.click(SortCodeClick(index=0, direction='desc'))
+        self.assertIn('reverse=True', commands[0][1])
+
+    def test_sorted_is_a_builtin_so_it_needs_no_import(self):
+        _, commands = self.click(SortCodeClick(index=0, direction='asc'))
+        self.assertEqual(len(commands[0]), 2)
+
+    def test_it_sorts_the_whole_list_rather_than_the_lines_expression(self):
+        # The new line names the list, the way every Compute row does; only the
+        # rewriting rows care what the line itself says.
+        span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
+        _, commands = self.click(SortCodeClick(index=0, direction='asc'),
+                                 span=span)
+        self.assertEqual(commands[0][1],
+                         "sorted(data, key=lambda item: item['b'])")
+
+    def test_the_name_falls_back_when_the_list_has_no_name(self):
+        _, commands = self.click(SortCodeClick(index=0, direction='asc'),
+                                 source='data[0]')
+        self.assertEqual(commands[0][0], 'result_sorted')
+
+    def test_the_menu_closes_behind_it(self):
+        model, _ = self.click(SortCodeClick(index=0, direction='asc'))
+        self.assertIsNone(model['openDropdown'])
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_a_list_with_no_source_writes_nothing(self):
+        _, commands = self.click(SortCodeClick(index=0, direction='asc'),
+                                 source=None)
+        self.assertEqual(commands, [])
+
+
+class TestSourceSpanAndExprRefresh(unittest.TestCase):
+    """The line can be rewritten under a model that outlives the rewrite, so
+    what the model knows about it is refreshed rather than remembered."""
+
+    def test_visualize_records_the_span_it_is_handed(self):
+        lst, model = sort_model(span=None)
+        visualize(lst, model, mock_get_visualizer,
+                  lambda code: eval(code, {}, {'data': lst}),
+                  var_and_exp=('data', 'data'), source_span=SPAN)
+        self.assertEqual(model['_source_span'], SPAN)
+
+    def test_update_records_it_too(self):
+        lst, model = sort_model(span=None)
+        model, _ = update(make_column_mouse_event(
+            repr(SortClick(index=0, direction='asc'))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda code: eval(code, {}, {'data': lst}),
+            source_span=SPAN)
+        self.assertEqual(model['_source_span'], SPAN)
+
+    def test_a_model_that_outlives_a_rewrite_reads_the_new_expression(self):
+        # A bare expression statement carries its text, so sorting it changes
+        # what the line says. The cells must follow, or the table would show
+        # the old order against the new value.
+        lst, model = sort_model(span=None, source='[3, 1, 2]')
+        visualize(lst, model, mock_get_visualizer,
+                  lambda code: eval(code, {}, {'data': lst}),
+                  var_and_exp=(None, 'sorted([3, 1, 2])'))
+        self.assertEqual(model['_source_expr'], 'sorted([3, 1, 2])')
+
+    def test_a_named_line_keeps_its_name(self):
+        lst, model = sort_model()
+        visualize(lst, model, mock_get_visualizer,
+                  lambda code: eval(code, {}, {'data': lst}),
+                  var_and_exp=('data', 'data'))
+        self.assertEqual(model['_source_expr'], 'data')
+
+    def test_nothing_to_go_on_leaves_what_the_model_had(self):
+        lst, model = sort_model()
+        visualize(lst, model, mock_get_visualizer,
+                  lambda code: eval(code, {}, {'data': lst}))
+        self.assertEqual(model['_source_expr'], 'data')
+
+
 if __name__ == '__main__':
     unittest.main()

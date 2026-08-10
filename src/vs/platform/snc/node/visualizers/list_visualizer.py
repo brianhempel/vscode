@@ -40,6 +40,7 @@ Columns shown in the table are configurable and persisted:
 """
 
 import ast
+import functools
 import html
 import keyword
 import random
@@ -202,6 +203,44 @@ class TallyCountOpSelect:
     op: str
 
 @dataclass(frozen=True, slots=True)
+class ColumnMenuDismiss:
+    """A click landed outside the column ▾ menu, so the menu is finished.
+
+    What a menu anywhere else does. The ▾ still toggles, and Escape still walks
+    out a level at a time; this is the third way out, and the one that needs no
+    aiming.
+    """
+    pass
+
+@dataclass(frozen=True, slots=True)
+class ColumnSubmenuDwell:
+    """Pointer came to rest on a row of a column's ▾ menu.
+
+    Says which submenu should be open, rather than toggling one: dwelling is
+    not a click, and the answer to "the pointer is here" can't depend on where
+    it was. None means none of them.
+    """
+    dropdown_id: Optional[str] = None
+
+@dataclass(frozen=True, slots=True)
+class SortClick:
+    """User clicked Asc or Desc in a column's Sort submenu, which sorts the
+    line the table is already showing rather than writing a new one.
+
+    Clicking the direction the line already sorts in takes the sort off, so one
+    row is both the way in and the way out.
+    """
+    index: int
+    direction: str
+
+@dataclass(frozen=True, slots=True)
+class SortCodeClick:
+    """User clicked one of the Sort submenu's `(new code)` rows, which writes
+    the sorted list as a line of its own and leaves the original alone."""
+    index: int
+    direction: str
+
+@dataclass(frozen=True, slots=True)
 class ComputeToggle:
     """User checked or unchecked one of a column's Compute rows.
 
@@ -301,6 +340,22 @@ class CopyToClipboard:
 class ChangeSelectedText:
     expression: str
     suggested_var_name: Optional[str] = None
+
+@dataclass(frozen=True, slots=True)
+class ChangeSourceExpr:
+    """Rewrite the expression the visualizer's own line is showing.
+
+    Unlike ChangeSelectedText, which edits a line this visualizer wrote and
+    tracks by decoration, this replaces an exact range of the user's own source
+    -- the span the runner handed over (see visualize). A range rather than a
+    line, so a `return xs` or an `if xs:` could never have its keyword eaten,
+    and so a multi-line expression needs no special case.
+    """
+    expression: str
+    start_line: int
+    start_col: int
+    end_line: int
+    end_col: int
 
 
 # === Dotfile operations ===
@@ -1006,6 +1061,47 @@ TALLY_COUNT_OPS = ('>=', '==', '<=') + TALLY_COUNT_EXTREME_OPS
 TALLY_COUNT_OP_DEFAULT = '>='
 
 
+@functools.lru_cache(maxsize=None)
+def _is_pure_ref(expr: 'str | None') -> bool:
+    """Whether *expr* can be evaluated again for free.
+
+    The table reads a cell by evaluating `<source>[i]` in the user's scope,
+    which is exact for a name -- and which RUNS the user's code again for a
+    source like `f()` or `json.load(open(p))`. Once per cell, on top of the
+    once their program meant: their side effects happen again, and every value
+    their function logged on the way gets another visualizer stacked on the one
+    before it.
+
+    So a source that isn't plainly a reference is not re-evaluated at all; the
+    cell is read off the value already in hand, which is the value that line
+    actually produced. Only evaluation is affected -- the code a header or a
+    cell hands over still names the call, because that is still where the
+    values came from.
+
+    Attributes and subscripts count as references. A property doing work behind
+    one is possible but not what anybody writes, whereas a call is exactly the
+    thing this is here to catch.
+    """
+    if not expr:
+        return False
+    try:
+        node = ast.parse(expr, mode='eval').body
+    except (SyntaxError, ValueError):
+        return False
+    return not any(isinstance(sub, (ast.Call, ast.Await, ast.NamedExpr,
+                                    ast.Yield, ast.YieldFrom))
+                   for sub in ast.walk(node))
+
+
+def _cell_source_expr(model: dict, eval_in_scope) -> 'str | None':
+    """The source expression the cells may be read through, or None when they
+    must be read off the rows in hand instead (see _is_pure_ref)."""
+    source_expr = model.get('_source_expr')
+    if eval_in_scope is None or not _is_pure_ref(source_expr):
+        return None
+    return source_expr
+
+
 def _column_item_expr(col: str) -> str | None:
     """One row's value for a column, written against a row bound to `item` --
     or None when the column is the item itself and there is nothing to read."""
@@ -1049,8 +1145,8 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     if col.strip() == '$':
         return list(lst)
 
-    source_expr = model.get('_source_expr')
-    if source_expr is not None and eval_in_scope is not None:
+    source_expr = _cell_source_expr(model, eval_in_scope)
+    if source_expr is not None:
         try:
             return list(eval_in_scope(_column_values_expr(col, source_expr)))
         except Exception:
@@ -1538,6 +1634,134 @@ def _tally_exprs(col, model: dict, tally, source_expr,
     if conditions:
         body += f' if {" and ".join(conditions)}'
     return (f'{{v: c {body}}}', f'[v {body}]', f'[c {body}]')
+
+
+# =============================================================================
+# Column sort
+# =============================================================================
+#
+# The Sort submenu of a column's ▾ menu writes the sort into the line the table
+# is already showing -- `data = json.load(f)` becomes `data = sorted(json.load(f),
+# key=lambda item: item['b'])` -- so the next run re-renders the table sorted
+# and everything downstream sees the sorted list. Nothing here reorders rows on
+# screen: the table draws the list in the order it receives it, and the order it
+# receives is the one the code now says.
+#
+# So the sort is not model state. Which box is ticked is read back out of the
+# line, the way a tally's checkmarks are read back out of the column search:
+# the code is the only record of it, and there is nowhere for the two to
+# disagree. A sort the user wrote by hand ticks the box that describes it.
+#
+# The line's own expression arrives as `_source_span` -- see visualize() -- and
+# is absent wherever there is nothing to rewrite (a loop variable is bound by
+# its statement, not written on it), which is what dims the two rows.
+
+# The directions the submenu offers, in the order it offers them, and what each
+# one writes. Ascending is the bare `sorted`, which is how anyone types it.
+SORT_DIRECTIONS = ('asc', 'desc')
+
+_SORT_LABELS = {'asc': 'Asc', 'desc': 'Desc'}
+
+
+def _sort_label(direction: str) -> str:
+    return _SORT_LABELS.get(direction, direction)
+
+
+def _parse_sorted(text: str | None):
+    """A `sorted(...)` call read apart, or None when the text isn't one.
+
+    Answers (what is being sorted, what it is keyed on, whether it is reversed)
+    -- the three things the menu needs to know and the three it writes. The
+    inner expression comes back as the user's own text rather than an unparse
+    of it, because taking a sort off writes it back verbatim.
+
+    The key is the body of `lambda item: ...`, which is the shape this menu
+    writes and the shape a column can be recognized in. One written any other
+    way -- `key=len` -- comes back as written instead, so it can't be mistaken
+    for the no-key sort that orders on the row itself. Either way the call is
+    still a sort, so clicking a direction replaces it rather than nesting
+    inside it.
+    """
+    if not text:
+        return None
+    try:
+        node = ast.parse(text, mode='eval').body
+    except (SyntaxError, ValueError):
+        return None
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'sorted' and len(node.args) == 1):
+        return None
+
+    key_node = None
+    reverse = False
+    for kw in node.keywords:
+        if kw.arg == 'key':
+            key_node = kw.value
+        elif kw.arg == 'reverse':
+            reverse = (isinstance(kw.value, ast.Constant)
+                       and kw.value.value is True)
+        else:
+            # A `**kwargs` (arg is None) or anything else lands here: not a
+            # shape this menu can speak about, so not one it should rewrite.
+            return None
+
+    inner = ast.get_source_segment(text, node.args[0])
+    if inner is None:
+        return None
+    if key_node is None:
+        key_expr = None
+    elif (isinstance(key_node, ast.Lambda) and len(key_node.args.args) == 1
+            and key_node.args.args[0].arg == 'item'):
+        key_expr = ast.get_source_segment(text, key_node.body)
+    else:
+        key_expr = ast.get_source_segment(text, key_node)
+    return (inner, key_expr, reverse)
+
+
+def _sort_expr(text: str, col: str, direction: 'str | None') -> str:
+    """*text* sorted by *col* -- or, with no direction, with its sort taken off.
+
+    Always unwraps first, so re-sorting by another column, or flipping the
+    direction, replaces the sort rather than nesting inside it.
+    """
+    parsed = _parse_sorted(text)
+    inner = parsed[0] if parsed else text
+    if direction is None:
+        return inner
+    key = _column_item_expr(col)
+    parts = [inner]
+    if key is not None:
+        parts.append(f'key=lambda item: {key}')
+    if direction == 'desc':
+        parts.append('reverse=True')
+    return f'sorted({", ".join(parts)})'
+
+
+def _sort_checked(text: 'str | None', col: str, direction: str) -> bool:
+    """Whether the line already sorts by this column in this direction."""
+    parsed = _parse_sorted(text)
+    if parsed is None:
+        return False
+    _inner, key_expr, reverse = parsed
+    return (key_expr == _column_item_expr(col)
+            and reverse == (direction == 'desc'))
+
+
+def canonical_source_expr(expr: 'str | None') -> 'str | None':
+    """What counts as the same source expression for reusing a cached model.
+
+    The runner keys a model on the expression it was built for, so that
+    renaming x -> y rebuilds one whose cells would otherwise eval the old name.
+    A sort wrapper is precisely the part of an expression that is NOT that kind
+    of change -- the same rows, in another order -- and a line rewritten by the
+    Sort menu would otherwise throw away the searches and aggregations the user
+    set up on the very table they were sorting.
+
+    Asked of the same _parse_sorted the checkboxes are read with, so the menu
+    and the cache can't come to different views of what a sort is.
+    """
+    parsed = _parse_sorted(expr)
+    return parsed[0] if parsed else expr
 
 
 # =============================================================================
@@ -3032,10 +3256,13 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         }
 
     children = {}
+    # False when the source can't be re-evaluated for free, and then the rows in
+    # hand are what the cells are read from -- see _is_pure_ref.
+    read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
     for i, item in enumerate(lst):
         for col in columns:
             try:
-                if source_expr is not None and eval_in_scope is not None:
+                if read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]']))
                 else:
                     cell_value = eval_dollar_expr(col, item, eval_in_scope)
@@ -3153,7 +3380,8 @@ def _render_column_search_row(col, index, model) -> str:
     # before the value rather than after it. They come after the input so they
     # paint over it, and the input reserves room for them with its left padding.
     return (
-        f'<div class="col-search-area">'
+        f'<div class="col-search-area"'
+        f'{_column_dwell_attr(model, owns=(f"op-{index}", f"compose-{index}"))}>'
         # f'<div class="col-search-label-row"><span>Filter</span> <span>({compose_html} with other columns)</span></div>'
         f'<div class="search-box-wrapper">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
@@ -3221,6 +3449,10 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
                 f'{py_exp_attrs(expr, imports=TALLY_IMPORTS)}>Tally</span></div>')
 
     source_expr = model.get('_source_expr')
+    # The two chips the tally opens itself: resting on the tally is not a way
+    # of leaving a menu the tally put there.
+    dwell = _column_dwell_attr(
+        model, owns=(f'tally-sort-{index}', f'tally-count-op-{index}'))
     tally = _tally(_column_values(col, lst, model, eval_in_scope))
     if tally is None:
         return ''
@@ -3229,7 +3461,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         # that can't be counted have no expression to give.
         note_expr = (_tally_counter_expr(col, source_expr)
                      if tally == TALLY_TOO_MANY and source_expr else None)
-        return (f'<div class="col-tally">{title_html(note_expr)}'
+        return (f'<div class="col-tally"{dwell}>{title_html(note_expr)}'
                 f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
                 f'</div>')
     tally_expr, items_expr, counts_expr = (
@@ -3354,9 +3586,96 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         )
     else:
         body = '<div class="col-tally-note">No values match</div>'
-    return (f'<div class="col-tally">{title_html(tally_expr)}'
+    return (f'<div class="col-tally"{dwell}>{title_html(tally_expr)}'
             f'{filter_html}{controls_html}{body}'
             f'</div>')
+
+
+def _render_column_sort(col, index, model) -> str:
+    """Render the Sort row of a column's ▾ menu, and its submenu when open.
+
+    A flyout out of the already-hoisted column menu, like Compute, and sharing
+    its one open slot -- so opening this puts Compute away, and Escape and every
+    way of leaving the column menu already close it.
+
+    It carries Compute's classes as well as its own: the two submenus are the
+    same list of rows and are styled once, and `col-sort-*` is only a hook for
+    what differs.
+    """
+    dropdown_id = f'sort-{index}'
+    is_open = model.get('col_search_dropdown') == dropdown_id
+    toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
+    panel_html = _render_sort_panel(col, index, model) if is_open else ''
+    return (
+        f'<div class="snc-dropdown-trigger col-compute col-sort"'
+        f'{_column_dwell_attr(model, opens=dropdown_id)}>'
+        f'<div class="snc-dropdown-option col-compute-trigger col-sort-trigger'
+        f'{" open" if is_open else ""}" '
+        f'data-tooltip="Order the rows by this column" '
+        f'snc-mouse-down="{html.escape(toggle_event)}">'
+        f'<span class="snc-dropdown-option-label col-compute-title">Sort</span>'
+        f'<span class="submenu-right-arrow">▸</span>'
+        f'</div>{panel_html}</div>'
+    )
+
+
+def _render_sort_panel(col, index, model) -> str:
+    """Two rows that sort the line the table is showing, and two that write the
+    sorted list as a line of its own.
+
+    The first two are checkboxes because a line is either sorted this way or it
+    isn't, and the box is read off the line rather than off the model. They are
+    inert where there is no expression to rewrite -- a loop variable is bound by
+    its statement, not written on it -- and the rows below still work there,
+    since writing a new line asks nothing of the old one.
+    """
+    span = model.get('_source_span')
+    text = span[0] if span else None
+    source_expr = model.get('_source_expr')
+
+    rows = []
+    for direction in SORT_DIRECTIONS:
+        checked = _sort_checked(text, col, direction)
+        inert = text is None
+        classes = ('col-compute-row col-sort-row'
+                   + (' checked' if checked else '')
+                   + (' unselectable' if inert else ''))
+        toggle_attr = '' if inert else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(SortClick(index=index, direction=direction)))}"')
+        # What the row would make the line read, which is the code it names --
+        # so a row already checked hands over the line as it stands rather than
+        # the unsort a click there would write. Rightwards, like every handle in
+        # these menus: a tooltip above one would cover the rows around it.
+        rows.append(
+            f'<div class="{classes}"'
+            f'{py_exp_attrs(None if inert else _sort_expr(text, col, direction), align="right")}>'
+            f'<span class="col-compute-toggle"{toggle_attr}>'
+            f'{_render_tally_check(checked, disabled=inert)}'
+            f'<span class="col-compute-name">{_sort_label(direction)}</span>'
+            f'</span></div>')
+
+    rows.append('<div class="col-compute-sep"></div>')
+    for direction in SORT_DIRECTIONS:
+        # The row itself is the handle, like Unique and Tally. Without a source
+        # there is no list to name and so no line to write or drag.
+        code = (None if source_expr is None
+                else _sort_expr(source_expr, col, direction))
+        click_attr = '' if code is None else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(SortCodeClick(index=index, direction=direction)))}"')
+        rows.append(
+            f'<div class="col-compute-row col-compute-code col-sort-code'
+            f'{"" if code else " unselectable"}"'
+            f'{py_exp_attrs(code, align="right")}>'
+            f'<span class="col-compute-toggle"{click_attr}>'
+            f'<span class="col-compute-nocheck"></span>'
+            f'<span class="col-compute-name">'
+            f'{_sort_label(direction)} (new code)</span>'
+            f'</span></div>')
+
+    return (f'<div class="snc-dropdown-panel flyout col-compute-panel '
+            f'col-sort-panel" snc-dropdown-align="flyout">{"".join(rows)}</div>')
 
 
 def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
@@ -3375,13 +3694,14 @@ def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
     panel_html = (_render_compute_panel(col, index, model, lst, eval_in_scope)
                   if is_open else '')
     return (
-        f'<div class="snc-dropdown-trigger col-compute">'
+        f'<div class="snc-dropdown-trigger col-compute"'
+        f'{_column_dwell_attr(model, opens=dropdown_id)}>'
         f'<div class="snc-dropdown-option col-compute-trigger'
         f'{" open" if is_open else ""}" '
         f'data-tooltip="Summarize this column" '
         f'snc-mouse-down="{html.escape(toggle_event)}">'
         f'<span class="snc-dropdown-option-label col-compute-title">Compute</span>'
-        f'<span class="col-compute-arrow">▸</span>'
+        f'<span class="submenu-right-arrow">▸</span>'
         f'</div>{panel_html}</div>'
     )
 
@@ -3527,6 +3847,28 @@ def _compute_expr_event(index: int, template: str) -> str:
             f"value=e.get('value', ''))")
 
 
+def _column_dwell_attr(model, *, opens: 'str | None' = None, owns=()) -> str:
+    """What resting the pointer on a row of the column ▾ menu should do.
+
+    A row that has a submenu offers to open it; the rest offer to put away
+    whatever is open, so moving down the menu leaves one submenu showing at a
+    time without anything having to be clicked.
+
+    Rendered only where dwelling would change something -- every event costs a
+    re-run, and a pointer left lying still on a menu that is already as the
+    user wants it should cost nothing. *owns* are the dropdowns a row opened
+    itself (the search row's two chips, the tally's): resting on the row a chip
+    menu belongs to is not a way of leaving it.
+    """
+    open_id = model.get('col_search_dropdown')
+    if opens is None and (open_id is None or open_id in owns):
+        return ''
+    if open_id == opens:
+        return ''
+    return (f' snc-dwell="'
+            f'{html.escape(repr(ColumnSubmenuDwell(dropdown_id=opens)))}"')
+
+
 def _render_column_menu(col, index, model, lst, eval_in_scope=None):
     """Render the rows of the per-column ▾ menu.
 
@@ -3538,16 +3880,23 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
     """
     remove_event = repr(RemoveColumnClick(index=index))
     rows = [
-        f'<div class="snc-dropdown-option">'
+        f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove Column</span>'
         f'</div>',
+        _render_column_sort(col, index, model),
         _render_column_compute(col, index, model, lst, eval_in_scope),
         _render_column_search_row(col, index, model),
         _render_column_tally(col, index, model, lst, eval_in_scope),
     ]
+    # Says what a click outside the menu means, so the front end doesn't have to
+    # know which of these panels is a menu or what closing one entails. The
+    # submenus are hoisted panels of their own, so "outside" is outside all of
+    # them -- clicking in Sort or Compute is not clicking away from this.
+    dismiss = repr(ColumnMenuDismiss())
     return (
-        f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout">'
+        f'<div class="snc-dropdown-panel flyout col-menu-panel" '
+        f'snc-dropdown-align="flyout" snc-dismiss="{html.escape(dismiss)}">'
         + ''.join(rows)
         + '</div>'
     )
@@ -4616,6 +4965,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # one doesn't get a scrollbar for the sake of the answers under it.
     agg_rows = len(_agg_layout(columns, model))
     actual_min_height = min(18 * (len(lst) + 1 + agg_rows), actual_max_height)
+    if not small: # room for toolbar
+        actual_min_height = max(actual_min_height, 41)
 
     actual_max_width = f' max-width:{max_width}px;' if max_width is not None else ''
 
@@ -4647,18 +4998,26 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     if model.get('adding_column'):
         strs.append(_render_column_input(lst, model, get_visualizer, is_editing=False))
 
-    add_event = repr(AddColumnClick())
-    strs.append(
-        f'<th class="snc-hover-hidden-parent col-add" '
-        f'snc-mouse-down="{html.escape(add_event)}" '
-        f'data-tooltip="Add column">'
-        f'<span class="col-add-icon snc-hover-hidden full-opacity-on-hover">+</span>'
-        f'</th>'
-    )
+    if not small:
+        add_event = repr(AddColumnClick())
+        strs.append(
+            f'<th class="col-add" '
+            f'snc-mouse-down="{html.escape(add_event)}" '
+            f'data-tooltip="Add column">'
+            f'<span class="col-add-icon full-opacity-on-hover">+</span>'
+            f'</th>'
+        )
 
     strs.append('</tr>')
 
+    if len(lst) == 0:
+        strs.append(f'<tr><td class="empty-list" colspan="{len(columns) + 1}">Empty.</td></tr>')
+
     source_expr = model.get('_source_expr')
+    # Whether a cell may be read by evaluating `<source>[i]` again, or has to be
+    # read off the row in hand -- see _is_pure_ref. The code the cells hand over
+    # still names the source either way.
+    read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
 
     scroll_to = model.get('_scroll_to_match', False)
     first_match_row = min(matched_indices) if matched_indices else None
@@ -4706,7 +5065,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         for ci, col in enumerate(columns):
             composite_key = f"{i}{CELL_KEY_SEP}{col}"
             try:
-                if source_expr is not None and eval_in_scope is not None:
+                if read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]']))
                 else:
                     cell_value = eval_dollar_expr(col, item, eval_in_scope)
@@ -4760,7 +5119,35 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     return ''.join(strs)
 
 
-def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None):
+def _adopt_source(model: dict, var_and_exp=None, source_span=None) -> None:
+    """Take in what this run says about the line the value came from.
+
+    Both are refreshed rather than remembered, because the line can be rewritten
+    under a model that outlives the rewrite -- which is exactly what the Sort
+    submenu does. A model still holding the expression from before would go on
+    evaluating its cells against it and show the old order against the new
+    value.
+
+    *source_span* is the expression the line is showing, and where it sits, for
+    the sort rows to rewrite; it is absent at a site with nothing to rewrite (a
+    loop variable is bound by its statement, not written on it) and for a nested
+    table, which has no line of its own at all.
+
+    Only visualize passes *var_and_exp*, and only it can: a child's update is
+    dispatched with the PARENT's (see update_child), so reading it there would
+    give every nested table its parent's expression to evaluate cells against.
+    Rendering hands each child its own, and visualize runs after the events in
+    every run, so it is both the safe place and a sufficient one.
+    """
+    if var_and_exp:
+        var_name, expr = var_and_exp
+        model['_source_expr'] = var_name if var_name else expr
+    if source_span is not None or '_source_span' not in model:
+        model['_source_span'] = source_span
+
+
+def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, source_span=None):
+    _adopt_source(model, var_and_exp, source_span)
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
         return f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
@@ -4776,7 +5163,7 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
     # carries the question instead of a row to index.
     if _parse_agg_child_key(key) is not None:
         return _agg_child_value(key, lst, model, eval_in_scope)
-    source_expr = model.get('_source_expr')
+    source_expr = _cell_source_expr(model, eval_in_scope)
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
     idx = int(row_key)
     if source_expr is not None and eval_in_scope is not None:
@@ -4784,7 +5171,7 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
     return eval_dollar_expr(field_key, lst[idx], eval_in_scope)
 
 
-def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_scope=None) -> Tuple[Any, List[Any]]:
+def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_scope=None, source_span=None) -> Tuple[Any, List[Any]]:
     if event is None or not isinstance(event, dict) or not event.get('pythonEventStr'):
         return (model, [])
 
@@ -4793,6 +5180,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                  '_slot_children': {}, '_config_root_type': None,
                  '_config_root_dotfile': None, '_config_path': [],
                  **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
+
+    # The span only, and only when this run brought one: see _adopt_source.
+    if source_span is not None:
+        _adopt_source(model, source_span=source_span)
 
     try:
         make_python_event = eval(event['pythonEventStr'])
@@ -5092,6 +5483,34 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['col_search_dropdown'] = None
                 _recompose_search(model, eval_in_scope)
 
+        # Sort leaves the menu open for the same reason Compute does: it is a
+        # checkbox, and flipping the direction is the common next act.
+        case SortClick(index=idx, direction=direction):
+            col = _column_at(model, idx)
+            span = model.get('_source_span')
+            if col is not None and span is not None and direction in SORT_DIRECTIONS:
+                text, *coords = span
+                # Clicking the direction the line already sorts in takes the
+                # sort off, so one row is both the way in and the way out.
+                wanted = None if _sort_checked(text, col, direction) else direction
+                expr = _sort_expr(text, col, wanted)
+                if expr != text:
+                    commands.append(ChangeSourceExpr(expr, *coords))
+
+        # One line written, unlike checking a box, which invites the next -- so
+        # this closes the menu the way the Compute code rows do.
+        case SortCodeClick(index=idx, direction=direction):
+            col = _column_at(model, idx)
+            source_expr = model.get('_source_expr')
+            if (col is not None and source_expr is not None
+                    and direction in SORT_DIRECTIONS):
+                _close_column_menus(model)
+                # The whole list, named -- not whatever the line happens to say
+                # -- the way every Compute row asks after the whole column.
+                _has_var, base = _name_context_for_source(source_expr)
+                commands.append(new_code_command(
+                    (f'{base}_sorted', _sort_expr(source_expr, col, direction))))
+
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.
         case ComputeToggle(index=idx, expr=expr):
@@ -5238,6 +5657,16 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case ColumnSearchDropdownToggle(dropdown_id=did):
             current = model.get('col_search_dropdown')
             model['col_search_dropdown'] = None if current == did else did
+
+        # Set rather than toggled: dwelling says which submenu the pointer is
+        # asking for, and that can't depend on which one it was asking for
+        # before. Only rendered where it would change something, so arriving
+        # here always does.
+        case ColumnSubmenuDwell(dropdown_id=did):
+            model['col_search_dropdown'] = did
+
+        case ColumnMenuDismiss():
+            _close_column_menus(model)
 
         case SearchBoxInput(value=val):
             model['search'] = val if val else None

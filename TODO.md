@@ -51,6 +51,6 @@
 
 ## Details
 
-- [ ] col add button: show on visualizer focus rather than on hover
-- [ ] close column menu when un-focusing
+- [x] col add button: show on visualizer focus rather than on hover
+- [x] close column menu when un-focusing
 - [ ] list visualizer search: be smart so that simple var uses are == rather than treated as simple truthy predicates

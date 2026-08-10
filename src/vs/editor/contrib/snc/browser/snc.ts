@@ -166,6 +166,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
+	// How long the pointer must rest on an [snc-dwell] element before its event
+	// is sent. Long enough that crossing a menu on the way somewhere else opens
+	// nothing, short enough to feel like the menu is following the pointer.
+	private static readonly DWELL_MS = 300;
+	private dwellTimer: any = null;
+	private dwellTarget: Element | null = null;
 	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
@@ -357,6 +363,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this._register(d);
 		}
 
+		for (const d of this.dwellListeners(this.domNode, this.domNode,
+			(raw, el) => this.wrapWithChildKeys(raw, el.parentElement, this.domNode))) {
+			this._register(d);
+		}
+
 		// Hover-to-open dropdown menus (data-hover-menu panels inside .snc-dropdown-trigger)
 		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
 			const trigger = this.findAncestorWithClass(ev.target as Node, 'snc-dropdown-trigger');
@@ -501,6 +512,52 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}
 				this.scheduleSimpleTooltipHide();
 			}),
+		];
+	}
+
+	/**
+	 * Send an element's `snc-dwell` event once the pointer has rested on it.
+	 *
+	 * What dwelling means is the renderer's to say — the column ▾ menu uses it
+	 * to open the submenu a row names, and to put away the open one over a row
+	 * that names none — so this only decides when a rest has happened. Python
+	 * renders the attribute solely where dwelling would change something, so
+	 * every event sent here is one worth the re-run it costs.
+	 *
+	 * Moving within the same dwell element does not restart the wait: a rest is
+	 * the pointer staying on a thing, not staying perfectly still on it.
+	 */
+	private dwellListeners(root: HTMLElement, stopAt: Element,
+		wrapEvent: (raw: string, el: Element) => string): IDisposable[] {
+		const cancel = () => {
+			clearTimeout(this.dwellTimer);
+			this.dwellTimer = null;
+			this.dwellTarget = null;
+		};
+		return [
+			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
+				const target = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell', stopAt);
+				if (target === this.dwellTarget) {
+					return;
+				}
+				cancel();
+				if (!target) {
+					return;
+				}
+				this.dwellTarget = target;
+				this.dwellTimer = setTimeout(() => {
+					// The render this armed against is gone if the pointer has
+					// since moved on, and its event would be describing a menu
+					// that no longer exists.
+					if (this.dwellTarget !== target) {
+						return;
+					}
+					cancel();
+					this.onPointerEvent(
+						wrapEvent(target.getAttribute('snc-dwell') ?? '', target), ev);
+				}, VisualizationWidget.DWELL_MS);
+			}),
+			dom.addDisposableListener(root, 'mouseleave', cancel),
 		];
 	}
 
@@ -1536,6 +1593,53 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hoistedDropdownListeners.push(
 			this.editor.onDidScrollChange(() => this.repositionHoistedDropdowns())
 		);
+
+		// A click away from every open panel puts the menu that says so away —
+		// the third way out of a column ▾ menu, alongside the ▾ itself and
+		// Escape, and the one that needs no aiming. `snc-dismiss` carries the
+		// event, so the front end needs to know neither which panel is a menu
+		// nor what closing one entails.
+		//
+		// "Outside" means outside them all: a submenu is a hoisted panel of its
+		// own, so clicking in Sort or Compute is not clicking away from the menu
+		// that opened them. Triggers are exempt too — they already toggle, and
+		// dismissing as well would be closing it twice.
+		const dismissable = this.hoistedDropdowns.filter(
+			(entry) => entry.panel.hasAttribute('snc-dismiss'));
+		if (dismissable.length > 0) {
+			this.hoistedDropdownListeners.push(
+				dom.addDisposableListener(this.domNode.ownerDocument, 'mousedown', (ev: MouseEvent) => {
+					const node = ev.target as Node | null;
+					if (!node) { return; }
+					for (const entry of this.hoistedDropdowns) {
+						if (entry.panel.contains(node) || entry.trigger.contains(node)) { return; }
+					}
+					for (const entry of dismissable) {
+						this.onPointerEvent(
+							this.wrapHoistedPanelEvent(
+								entry.panel.getAttribute('snc-dismiss') ?? '', entry.panel),
+							ev);
+					}
+				}, true)
+			);
+		}
+	}
+
+	/**
+	 * Bring an event written on a hoisted panel itself back into the child-key
+	 * scope the panel was rendered in. The chain its lost ancestors carried is
+	 * saved on the panel at hoist time; an attribute on the panel has no
+	 * ancestors left inside it to walk.
+	 */
+	private wrapHoistedPanelEvent(raw: string, panel: HTMLElement): string {
+		let wrapped = raw;
+		const chainStr = panel.getAttribute('snc-child-key-chain');
+		if (chainStr) {
+			for (const ck of JSON.parse(chainStr) as string[]) {
+				wrapped = `ChildEvent(${ck}, ${JSON.stringify(wrapped)})`;
+			}
+		}
+		return wrapped;
 	}
 
 	/**
@@ -1664,6 +1768,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// Handles inside the panel (the column ▾ menu's tally headers) are out of
 		// the widget root's reach now, so they need their own set too.
 		this.hoistedDropdownListeners.push(...this.pyExpListeners(panel, container));
+		// The column ▾ menu is one of these, and its rows are what dwelling on
+		// opens and closes — so this is the set that actually does the work.
+		this.hoistedDropdownListeners.push(
+			...this.dwellListeners(panel, container, wrapHoistedEvent));
 		this.hoistedDropdownListeners.push(
 			dom.addDisposableListener(panel, 'input', (ev: Event) => {
 				const target = ev.target as HTMLElement;
@@ -3731,6 +3839,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				command.triggerLine,
 				command.triggerVisIndex
 			);
+		} else if (command.type === 'ChangeSourceExpr') {
+			this.handleChangeSourceExpr(command);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
@@ -4074,6 +4184,70 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// The linked line may have moved/resized; re-anchor its arrow.
 		this.updateLinkChrome();
 
+		setTimeout(() => { this.isApplyingLinkedEdit = false; }, 0);
+	}
+
+	/**
+	 * Turn a 0-based UTF-8 byte offset into the editor's 1-based column.
+	 *
+	 * Python's parser counts bytes; the editor counts UTF-16 code units. The two
+	 * agree until a line carries a non-ASCII character ahead of the expression,
+	 * and then a byte offset used as a column would land mid-expression.
+	 */
+	private static byteOffsetToColumn(lineText: string, byteOffset: number): number {
+		if (byteOffset <= 0) {
+			return 1;
+		}
+		const encoder = new TextEncoder();
+		let bytes = 0;
+		let units = 0;
+		// By code point, not by index: indexing a string splits surrogate pairs,
+		// and half a pair encodes as the replacement character's three bytes.
+		for (const ch of lineText) {
+			if (bytes >= byteOffset) {
+				break;
+			}
+			bytes += encoder.encode(ch).length;
+			units += ch.length;
+		}
+		return units + 1;
+	}
+
+	/**
+	 * Replace the expression a visualizer's own line is showing (Sort).
+	 *
+	 * Simpler than handleChangeSelectedText: there is no assignment to split —
+	 * the range covers the expression and nothing else, so an `x = `, a
+	 * `return ` or an `if ` around it is untouched by construction — and no
+	 * decoration to re-anchor, since this line is found by number rather than
+	 * tracked. The cursor is deliberately left where it is, so the visualizer
+	 * that asked for the edit keeps focus and its menu stays open.
+	 */
+	private handleChangeSourceExpr(command: Extract<SNCCommand, { type: 'ChangeSourceExpr' }>): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel) {
+			return;
+		}
+		const lineCount = editorModel.getLineCount();
+		if (command.start_line < 1 || command.end_line > lineCount) {
+			// The file has moved on since the span was reported.
+			return;
+		}
+
+		const startColumn = SNCController.byteOffsetToColumn(
+			editorModel.getLineContent(command.start_line), command.start_col);
+		const endColumn = SNCController.byteOffsetToColumn(
+			editorModel.getLineContent(command.end_line), command.end_col);
+		const range = new Range(command.start_line, startColumn, command.end_line, endColumn);
+
+		const baseIndent = this.getLineIndentText(command.start_line);
+		const newText = SNCController.indentContinuationLines(command.expression, baseIndent);
+		if (editorModel.getValueInRange(range) === newText) {
+			return;
+		}
+
+		this.isApplyingLinkedEdit = true;
+		editorModel.pushEditOperations([], [{ range, text: newText }], () => null);
 		setTimeout(() => { this.isApplyingLinkedEdit = false; }, 0);
 	}
 

@@ -70,6 +70,26 @@ export type SNCCommand =
 		suggested_var_name?: string | null;
 		triggerLine: number;
 		triggerVisIndex: number;
+	}
+	// Rewrite the expression a visualizer's OWN line is showing, in place —
+	// what the list visualizer's Sort does. Unlike ChangeSelectedText, which
+	// edits a line the visualizer wrote and tracks by decoration, this replaces
+	// an exact range of the user's own source. A range rather than a line, so a
+	// `return xs` or `if xs:` can never have its keyword eaten and a multi-line
+	// expression needs no special case.
+	//
+	// Columns are 0-based UTF-8 byte offsets, as Python's parser reports them;
+	// the editor converts to its own 1-based columns, being the side that knows
+	// the encoding of the document it is editing.
+	| {
+		type: 'ChangeSourceExpr';
+		expression: string;
+		start_line: number;
+		start_col: number;
+		end_line: number;
+		end_col: number;
+		triggerLine: number;
+		triggerVisIndex: number;
 	};
 
 /**
