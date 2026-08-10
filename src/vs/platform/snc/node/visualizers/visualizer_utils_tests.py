@@ -24,6 +24,7 @@ from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
     opens_block, with_pass_body, without_pass_body,
+    supported_kwargs, call_with_supported_kwargs, keyword_params, wants_kwarg,
 )
 
 
@@ -595,6 +596,42 @@ class TestChildNestingKwargs(unittest.TestCase):
         kw = child_nesting_kwargs(model, 'f', 5)
         self.assertEqual(kw['config_path'], [('g', 'X'), ('f', 'builtins.int')])
 
+    def test_child_that_names_the_params_gets_them_all(self):
+        def init_model(value, get_visualizer=None, slots_config=None,
+                       config_root_type=None, config_root_dotfile=None,
+                       config_path=None):
+            pass
+        model = {'_slot_children': {'f': {'builtins.int': [{'expr': '$'}]}},
+                 '_config_root_type': 'builtins.list', '_config_path': []}
+        kw = child_nesting_kwargs(model, 'f', 5, init_model)
+        self.assertEqual(kw['slots_config'], [{'expr': '$'}])
+        self.assertEqual(kw['config_path'], [('f', 'builtins.int')])
+
+    def test_child_that_ignores_nesting_is_handed_nothing(self):
+        # And the config isn't even computed for it -- this is the hot path,
+        # once per cell of a table.
+        def init_model(value, get_visualizer=None, eval_in_scope=None):
+            pass
+        model = {'_slot_children': {'f': {'builtins.int': [{'expr': '$'}]}},
+                 '_config_path': []}
+        self.assertEqual(child_nesting_kwargs(model, 'f', 5, init_model), {})
+
+    def test_child_naming_only_some_params_gets_only_those(self):
+        def init_model(value, get_visualizer=None, slots_config=None):
+            pass
+        model = {'_slot_children': {'f': {'builtins.int': [{'expr': '$'}]}},
+                 '_config_path': []}
+        self.assertEqual(child_nesting_kwargs(model, 'f', 5, init_model),
+                         {'slots_config': [{'expr': '$'}]})
+
+    def test_child_taking_var_keyword_gets_them_all(self):
+        def init_model(value, **kwargs):
+            pass
+        model = {'_slot_children': {}, '_config_path': []}
+        self.assertEqual(set(child_nesting_kwargs(model, 'f', 5, init_model)),
+                         {'slots_config', 'config_root_type',
+                          'config_root_dotfile', 'config_path'})
+
 
 class TestTooDeep(unittest.TestCase):
     """too_deep caps nesting depth so cyclic values can't RecursionError."""
@@ -789,6 +826,129 @@ class TestDeferDragGrab(unittest.TestCase):
                          '<span>5</span>')
         self.assertEqual(defer_drag_grab('<span>5</span>', ''),
                          '<span>5</span>')
+
+
+class TestSupportedKwargs(unittest.TestCase):
+    """A visualizer asks for what it wants by naming it in its signature; the
+    caller offers everything and the extras are dropped, so no visualizer has
+    to also declare a top-level capability constant."""
+
+    def test_drops_kwargs_the_function_does_not_declare(self):
+        def init_model(value, get_visualizer=None, eval_in_scope=None):
+            pass
+        self.assertEqual(
+            supported_kwargs(init_model, eval_in_scope=1, slots_config=[{'expr': '$'}]),
+            {'eval_in_scope': 1})
+
+    def test_keeps_kwargs_the_function_declares(self):
+        def init_model(value, get_visualizer=None, eval_in_scope=None,
+                       slots_config=None, config_path=None):
+            pass
+        offered = {'eval_in_scope': 1, 'slots_config': ['s'], 'config_path': [],
+                   'nonesuch': 'x'}
+        self.assertEqual(supported_kwargs(init_model, **offered),
+                         {'eval_in_scope': 1, 'slots_config': ['s'], 'config_path': []})
+
+    def test_keyword_only_params_count_as_declared(self):
+        def init_model(value, *, slots_config=None):
+            pass
+        self.assertEqual(supported_kwargs(init_model, slots_config=['s'], other=2),
+                         {'slots_config': ['s']})
+
+    def test_var_keyword_takes_everything(self):
+        def init_model(value, get_visualizer=None, **kwargs):
+            pass
+        offered = {'eval_in_scope': 1, 'slots_config': ['s'], 'whatever': 2}
+        self.assertEqual(supported_kwargs(init_model, **offered), offered)
+
+    def test_positional_only_params_are_not_passable_by_keyword(self):
+        def init_model(value, /, slots_config=None):
+            pass
+        self.assertEqual(supported_kwargs(init_model, value=1, slots_config=['s']),
+                         {'slots_config': ['s']})
+
+    def test_bound_method_does_not_count_self(self):
+        class Vis:
+            def init_model(self, value, get_visualizer=None, slots_config=None):
+                pass
+        self.assertEqual(supported_kwargs(Vis().init_model, self='oops',
+                                          slots_config=['s'], config_path=[]),
+                         {'slots_config': ['s']})
+
+    def test_uninspectable_callable_is_offered_everything(self):
+        # Some builtins have no introspectable signature; don't silently drop
+        # arguments on them -- let the call itself be the judge.
+        self.assertEqual(supported_kwargs('abc'.find, whatever=1), {'whatever': 1})
+
+    def test_call_passes_positional_args_through(self):
+        def init_model(value, get_visualizer=None, slots_config=None):
+            return (value, get_visualizer, slots_config)
+        self.assertEqual(
+            call_with_supported_kwargs(init_model, [1, 2], 'gv', slots_config=['s'],
+                                       config_root_type='builtins.list'),
+            ([1, 2], 'gv', ['s']))
+
+    def test_wants_kwarg_reads_the_signature(self):
+        def init_model(value, get_visualizer=None, slots_config=None):
+            pass
+
+        def plain_init_model(value, get_visualizer=None):
+            pass
+
+        def anything(value, **kwargs):
+            pass
+        self.assertTrue(wants_kwarg(init_model, 'slots_config'))
+        self.assertFalse(wants_kwarg(plain_init_model, 'slots_config'))
+        self.assertTrue(wants_kwarg(anything, 'slots_config'))
+
+    def test_wants_kwarg_on_a_bound_method(self):
+        class Vis:
+            def init_model(self, value, slots_config=None):
+                pass
+
+        class PlainVis:
+            def init_model(self, value):
+                pass
+        self.assertTrue(wants_kwarg(Vis().init_model, 'slots_config'))
+        self.assertFalse(wants_kwarg(PlainVis().init_model, 'slots_config'))
+        self.assertFalse(wants_kwarg(PlainVis().init_model, 'self'))
+
+    def test_call_on_a_visualizer_that_wants_nothing_extra(self):
+        def init_model(value, get_visualizer=None):
+            return 'ok'
+        self.assertEqual(
+            call_with_supported_kwargs(init_model, [1], 'gv', slots_config=['s'],
+                                       config_path=[], config_root_type='t',
+                                       config_root_dotfile='.f'),
+            'ok')
+
+    def test_signatures_are_inspected_once_per_function(self):
+        def init_model(value, slots_config=None):
+            pass
+        supported_kwargs(init_model, slots_config=1)
+        before = keyword_params.cache_info()
+        supported_kwargs(init_model, slots_config=2)
+        self.assertEqual(keyword_params.cache_info().hits, before.hits + 1)
+
+    def test_bound_methods_of_one_class_share_a_cache_entry(self):
+        # A visualizer object hands back a fresh bound method every attribute
+        # access; caching on the underlying function keeps that from thrashing.
+        class Vis:
+            def init_model(self, value, slots_config=None):
+                pass
+        supported_kwargs(Vis().init_model, slots_config=1)
+        before = keyword_params.cache_info()
+        supported_kwargs(Vis().init_model, slots_config=2)  # different instance
+        self.assertEqual(keyword_params.cache_info().hits, before.hits + 1)
+
+    def test_keyword_params_reports_var_keyword_as_take_everything(self):
+        def takes_all(value, **kwargs):
+            pass
+
+        def takes_some(value, slots_config=None):
+            pass
+        self.assertIsNone(keyword_params(takes_all))
+        self.assertEqual(keyword_params(takes_some), frozenset({'value', 'slots_config'}))
 
 
 if __name__ == '__main__':

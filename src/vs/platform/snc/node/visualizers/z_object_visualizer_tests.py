@@ -50,7 +50,6 @@ class _GenericVis:
 
 class _ZObjectVisAdapter:
     """Adapter wrapping the z_object_visualizer module as a visualizer object."""
-    SUPPORTS_NESTED_CONFIG = True
     def can_visualize(self, value):
         return z_object_visualizer.can_visualize(value)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
@@ -63,7 +62,6 @@ class _ZObjectVisAdapter:
 
 class _ListVisAdapter:
     """Adapter wrapping the list_visualizer module (for cross-type nesting tests)."""
-    SUPPORTS_NESTED_CONFIG = True
     def can_visualize(self, value):
         return list_visualizer.can_visualize(value)
     def get_fields(self, value):

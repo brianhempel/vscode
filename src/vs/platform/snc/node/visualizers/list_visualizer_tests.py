@@ -165,7 +165,6 @@ class MockObjectVisualizer:
 
 class ListVisualizerAdapter:
     """Wraps the list_visualizer module to act like a visualizer object."""
-    SUPPORTS_NESTED_CONFIG = True
     def can_visualize(self, value):
         return list_visualizer.can_visualize(value)
     def get_fields(self, value):
@@ -4932,6 +4931,66 @@ class TestNestedSlotsConfig(unittest.TestCase):
         self.assertLessEqual(depth, MAX_NEST_DEPTH + 1)
 
 
+class TestNestedConfigIsOfferedBySignature(unittest.TestCase):
+    """Whether a cell visualizer gets the nesting kwargs is read off its
+    init_model signature -- no SUPPORTS_NESTED_CONFIG constant to also set."""
+
+    class RecordingNestedVis:
+        """Asks for the nesting kwargs by naming them, and nothing else."""
+        def __init__(self):
+            self.calls = []
+        def can_visualize(self, value):
+            return True
+        def init_model(self, value, get_visualizer=None, eval_in_scope=None,
+                       var_and_exp=None, slots_config=None, config_root_type=None,
+                       config_root_dotfile=None, config_path=None):
+            self.calls.append({'slots_config': slots_config,
+                               'config_root_type': config_root_type,
+                               'config_root_dotfile': config_root_dotfile,
+                               'config_path': config_path})
+            return {'handledKeys': []}
+        def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+            return f'<span>{html.escape(repr(value))}</span>'
+        def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+            return (model, [])
+
+    class PlainVis:
+        """An old-style visualizer that knows nothing of nested config."""
+        def can_visualize(self, value):
+            return True
+        def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+            return {'handledKeys': []}
+        def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+            return f'<span>{html.escape(repr(value))}</span>'
+        def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+            return (model, [])
+
+    def _get_visualizer_for(self, cell_vis):
+        def get_visualizer(value):
+            return _mock_list_vis if isinstance(value, list) else cell_vis
+        return get_visualizer
+
+    def test_child_naming_the_params_receives_the_nested_config(self):
+        cell_vis = self.RecordingNestedVis()
+        slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+            init_model(['ABC'], self._get_visualizer_for(cell_vis))
+        self.assertEqual(len(cell_vis.calls), 1)
+        call = cell_vis.calls[0]
+        self.assertEqual(call['slots_config'], [{'expr': '$.lower()'}])
+        self.assertEqual(call['config_root_type'], 'builtins.str')
+        self.assertEqual(call['config_root_dotfile'],
+                         list_visualizer.COLUMN_DOTFILE_NAME)
+        self.assertEqual(call['config_path'], [('$', 'builtins.str')])
+
+    def test_child_not_naming_the_params_is_not_handed_them(self):
+        # Would TypeError if the nesting kwargs were passed regardless.
+        slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
+        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+            model = init_model(['ABC'], self._get_visualizer_for(self.PlainVis()))
+        self.assertEqual(model['children'][f'0\x00$'], {'handledKeys': []})
+
+
 class TestNestedSlotsSave(unittest.TestCase):
     """Column edits persist via the path-scoped writer using the model's path."""
 
@@ -5727,7 +5786,8 @@ from list_visualizer import (
     ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
     ColumnSearchDropdownToggle, COLUMN_SEARCH_OPS, COLUMN_SEARCH_COMPOSE,
     column_search_predicate, lift_column_predicate, compose_column_searches,
-    _column_search_row, _column_search_active, _set_column_search,
+    decompose_search, _column_search_row, _column_search_active,
+    _set_column_search, _tally_selection,
 )
 
 
@@ -5942,6 +6002,190 @@ class TestComposeColumnSearches(unittest.TestCase):
         self.assertEqual(compose_column_searches(columns, searches),
                          "$['b'] == 2 and $['a'] == 1")
 
+    def test_a_lone_term_stands_as_it_was_written(self):
+        # Parens keep a join from reading a term differently; with nothing to
+        # join it to there is nothing to protect it from.
+        searches = {'$': self.row('$ == 1 or $ == 2', op='')}
+        self.assertEqual(compose_column_searches(['$'], searches),
+                         '$ == 1 or $ == 2')
+
+
+def leftover(text, index=0, compose='and'):
+    return {'compose': compose, 'text': text, 'index': index}
+
+
+class TestComposeLeftovers(unittest.TestCase):
+    """Terms of the main search that no column claimed are kept as leftovers,
+    and compose back in at the position they were written."""
+
+    row = staticmethod(TestComposeColumnSearches.row)
+
+    def test_a_leftover_alone_is_the_search_verbatim(self):
+        self.assertEqual(
+            compose_column_searches([], {}, leftovers=[leftover('$ == 1 or $ == 2')]),
+            '$ == 1 or $ == 2')
+
+    def test_a_leftover_composes_before_the_column_it_preceded(self):
+        self.assertEqual(
+            compose_column_searches(["$['a']"], {"$['a']": self.row('1')},
+                                    leftovers=[leftover('len($) > 3', index=0)]),
+            "len($) > 3 and $['a'] == 1")
+
+    def test_a_leftover_composes_after_the_column_it_followed(self):
+        self.assertEqual(
+            compose_column_searches(["$['a']"], {"$['a']": self.row('1')},
+                                    leftovers=[leftover('len($) > 3', index=1)]),
+            "$['a'] == 1 and len($) > 3")
+
+    def test_a_leftover_joins_the_group_it_was_written_in(self):
+        self.assertEqual(
+            compose_column_searches(["$['a']"], {"$['a']": self.row('1')},
+                                    leftovers=[leftover('len($) > 3', index=0,
+                                                        compose='or')]),
+            "$['a'] == 1 or len($) > 3")
+
+    def test_several_leftovers_keep_their_order(self):
+        self.assertEqual(
+            compose_column_searches(["$['a']"], {"$['a']": self.row('1')},
+                                    leftovers=[leftover('b', index=2),
+                                               leftover('a', index=0)]),
+            "a and $['a'] == 1 and b")
+
+    def test_an_index_past_the_end_lands_last(self):
+        self.assertEqual(
+            compose_column_searches(["$['a']"], {"$['a']": self.row('1')},
+                                    leftovers=[leftover('len($) > 3', index=9)]),
+            "$['a'] == 1 and len($) > 3")
+
+    def test_an_empty_leftover_is_not_a_term(self):
+        self.assertIsNone(compose_column_searches([], {}, leftovers=[leftover('  ')]))
+
+
+class TestDecomposeSearch(unittest.TestCase):
+    """The main search box reads back as per-column searches, plus whatever
+    terms no column claimed."""
+
+    def test_nothing_to_read(self):
+        self.assertEqual(decompose_search(None, ["$['a']"]), ({}, []))
+        self.assertEqual(decompose_search('', ["$['a']"]), ({}, []))
+
+    def test_an_operator_comes_back_as_the_operator_chip(self):
+        # The tally reads its checkmarks out of the operator, so `==` has to
+        # come back as `==` rather than as the whole predicate.
+        self.assertEqual(decompose_search("$['a'] == 1", ["$['a']"]),
+                         ({"$['a']": {'compose': 'and', 'op': '==', 'text': '1'}},
+                          []))
+
+    def test_every_operator_reads_back(self):
+        for op in ['>=', '>', '==', '!=', '<', '<=']:
+            with self.subTest(op=op):
+                searches, leftovers = decompose_search(f"$['a'] {op} 3", ["$['a']"])
+                self.assertEqual(searches["$['a']"]['op'], op)
+                self.assertEqual(searches["$['a']"]['text'], '3')
+                self.assertEqual(leftovers, [])
+
+    def test_membership_reads_back_with_its_collection(self):
+        searches, _ = decompose_search("$['a'] in ['x', 'y']", ["$['a']"])
+        self.assertEqual(searches["$['a']"], {'compose': 'and', 'op': 'in',
+                                              'text': "['x', 'y']"})
+
+    def test_a_predicate_that_is_not_a_comparison_keeps_the_blank_operator(self):
+        searches, _ = decompose_search("isOdd($['a'])", ["$['a']"])
+        self.assertEqual(searches["$['a']"], {'compose': 'and', 'op': '',
+                                              'text': 'isOdd($)'})
+
+    def test_a_non_atomic_column_sheds_the_parens_it_was_lifted_with(self):
+        searches, _ = decompose_search('($ + 1) > 3', ['$ + 1'])
+        self.assertEqual(searches['$ + 1'], {'compose': 'and', 'op': '>',
+                                             'text': '3'})
+
+    def test_a_deeper_dollar_run_comes_back_down_a_level(self):
+        searches, _ = decompose_search("len($['a']) == len($)", ["$['a']"])
+        self.assertEqual(searches["$['a']"], {'compose': 'and', 'op': '',
+                                              'text': 'len($) == len($$)'})
+
+    def test_two_and_columns(self):
+        columns = ["$['a']", "$['b']"]
+        searches, leftovers = decompose_search("$['a'] == 1 and $['b'] == 2",
+                                               columns)
+        self.assertEqual(searches["$['a']"]['compose'], 'and')
+        self.assertEqual(searches["$['b']"]['text'], '2')
+        self.assertEqual(leftovers, [])
+
+    def test_an_or_column_reads_back_as_or(self):
+        columns = ["$['a']", "$['b']", "$['c']"]
+        search = "($['a'] == 1 and $['b'] == 2) or $['c'] == 3"
+        searches, leftovers = decompose_search(search, columns)
+        self.assertEqual(searches["$['c']"]['compose'], 'or')
+        self.assertEqual(searches["$['a']"]['compose'], 'and')
+        self.assertEqual(leftovers, [])
+
+    def test_a_term_no_column_claims_is_a_leftover(self):
+        columns = ["$['a']"]
+        searches, leftovers = decompose_search("$['a'] == 1 and len($) > 3",
+                                               columns)
+        self.assertEqual(searches["$['a']"]['text'], '1')
+        self.assertEqual(leftovers, [leftover('len($) > 3', index=1)])
+
+    def test_a_whole_row_search_belongs_to_no_column(self):
+        # `$` is the row, not the column value: a column must actually appear in
+        # a term to claim it, or every search would land in the first column.
+        self.assertEqual(decompose_search('$ == 3', ["$['name']"]),
+                         ({}, [leftover('$ == 3')]))
+
+    def test_the_column_that_appears_claims_the_term(self):
+        searches, leftovers = decompose_search("$['a'] == 1", ['$', "$['a']"])
+        self.assertEqual(list(searches), ["$['a']"])
+        self.assertEqual(searches["$['a']"]['text'], '1')
+        self.assertEqual(leftovers, [])
+
+    def test_the_row_column_claims_a_search_written_against_the_row(self):
+        searches, _ = decompose_search('$ == 3', ['$'])
+        self.assertEqual(searches['$'], {'compose': 'and', 'op': '==',
+                                         'text': '3'})
+
+    def test_terms_written_out_of_column_order_stay_where_they_were(self):
+        # The columns compose in column order, so the second term can't be the
+        # first column's -- but the first term is still the second column's, and
+        # what is left keeps its place in the search.
+        columns = ["$['name']", "$['age']"]
+        search = "$['age'] >= 30 and $['name'] == 'a'"
+        searches, leftovers = decompose_search(search, columns)
+        self.assertEqual(list(searches), ["$['age']"])
+        self.assertEqual(leftovers, [leftover("$['name'] == 'a'", index=1)])
+
+    def test_a_search_that_does_not_parse_is_all_leftover(self):
+        self.assertEqual(decompose_search("$['a'] ==", ["$['a']"]),
+                         ({}, [leftover("$['a'] ==")]))
+
+    def test_spacing_the_columns_would_not_have_written_is_kept_as_typed(self):
+        # The operator chip only ever writes `$ == 1`, so this reads as the
+        # whole predicate instead. Either way the box is never rewritten under
+        # the user's cursor.
+        self.assertEqual(decompose_search("$['a']==1", ["$['a']"]),
+                         ({"$['a']": {'compose': 'and', 'op': '',
+                                      'text': '$==1'}}, []))
+
+    def test_what_it_reads_composes_back_to_what_it_read(self):
+        columns = ['$', "$['a']", 'len($)']
+        searches = [
+            "$['a'] == 1",
+            "$['a'] in ['x', 'y']",
+            "$['a'] == 1 and len($) > 3",
+            "$['a'] == 1 or len($) > 3",
+            "($['a'] == 1 and len($) > 3) or $ == 2",
+            "isOdd($['a'])",
+            'len($) > 3 and unclaimable(x)',
+            'nothing here for a column',
+            "$['a'] ==",
+        ]
+        for search in searches:
+            with self.subTest(search=search):
+                rows, leftovers = decompose_search(search, columns)
+                self.assertEqual(
+                    compose_column_searches(columns, rows, leftovers=leftovers),
+                    search)
+
 
 class TestColumnSearchEvents(unittest.TestCase):
     """The column search rows live in the model keyed by column expression, and
@@ -6039,18 +6283,42 @@ class TestColumnSearchEvents(unittest.TestCase):
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['search'])
 
-    def test_renaming_a_column_carries_its_search_over(self):
+    def re_express(self, model, lst, index, expr):
+        """Double-click a header and commit a new expression for the column."""
+        model['editing_column_index'] = index
+        model['column_input_value'] = expr
+        return update(make_column_key_event('Enter'), None, model, lst,
+                      mock_get_visualizer, eval_in_scope=eval)[0]
+
+    def test_re_expressing_a_column_drops_its_search(self):
+        # The search was written against the old expression, so it goes with it
+        # -- out of the menu and out of the main box both.
         lst, model = self.make_model()
-        old = model['columns'][0]
         model, _ = update(make_column_search_input_event(0, "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model['editing_column_index'] = 0
-        model['column_input_value'] = 'len($)'
-        model, _ = update(make_column_key_event('Enter'), None, model, lst,
-                          mock_get_visualizer, eval_in_scope=eval)
-        self.assertNotIn(old, model['column_searches'])
-        self.assertEqual(model['column_searches']['len($)']['text'], "'Alice'")
-        self.assertEqual(model['search'], "len($) == 'Alice'")
+        model = self.re_express(model, lst, 0, 'len($)')
+        self.assertFalse(model.get('column_searches'))
+        self.assertIsNone(model['search'])
+
+    def test_re_expressing_a_column_leaves_the_other_columns_alone(self):
+        lst, model = self.make_model()
+        second = model['columns'][1]
+        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_column_search_input_event(1, '30'),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model = self.re_express(model, lst, 0, 'len($)')
+        self.assertEqual(model['column_searches'][second]['text'], '30')
+        self.assertEqual(model['search'], f'{second} == 30')
+
+    def test_re_expressing_a_column_keeps_its_aggregations(self):
+        # An aggregation describes the column rather than filtering it, so it
+        # follows the column to its new expression.
+        lst, model = self.make_model()
+        old = model['columns'][0]
+        _set_column_computes(model, old, ['min($)'])
+        model = self.re_express(model, lst, 0, 'len($)')
+        self.assertEqual(_column_computes(model, 'len($)'), ['min($)'])
 
     def test_reordering_columns_recomposes_in_the_new_order(self):
         lst, model = self.make_model()
@@ -6082,6 +6350,88 @@ class TestColumnSearchEvents(unittest.TestCase):
         a, _ = update(make_column_search_input_event(0, "'Alice'"), None, a, lst,
                       mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(b['column_searches'])
+
+
+class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
+    """The main search box is the other end of the same filter: what is typed
+    there reads back into the column rows, and what no column claims is kept so
+    the next column edit doesn't drop it."""
+
+    def make_model(self):
+        lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bo', 'age': 20}]
+        model = init_model(lst, mock_get_visualizer)
+        return lst, model
+
+    def search(self, model, lst, text):
+        return update(make_search_input_event(text), None, model, lst,
+                      mock_get_visualizer, eval_in_scope=eval)[0]
+
+    def test_typing_a_column_search_fills_in_the_column_row(self):
+        lst, model = self.make_model()
+        age = model['columns'][1]
+        model = self.search(model, lst, f'{age} >= 30')
+        row = _column_search_row(model, age)
+        self.assertEqual((row['op'], row['text']), ('>=', '30'))
+        self.assertTrue(_column_search_active(model, age))
+
+    def test_typing_a_membership_search_checks_the_tally_rows(self):
+        lst, model = self.make_model()
+        name = model['columns'][0]
+        model = self.search(model, lst, f"{name} in ['Alice', 'Bo']")
+        self.assertEqual(_tally_selection(_column_search_row(model, name)),
+                         (["'Alice'", "'Bo'"], False))
+
+    def test_editing_the_search_re_reads_it(self):
+        lst, model = self.make_model()
+        age = model['columns'][1]
+        model = self.search(model, lst, f'{age} >= 30')
+        model = self.search(model, lst, f'{age} < 25')
+        self.assertEqual(_column_search_row(model, age)['op'], '<')
+        self.assertEqual(_column_search_row(model, age)['text'], '25')
+
+    def test_clearing_the_search_clears_the_column_rows(self):
+        lst, model = self.make_model()
+        age = model['columns'][1]
+        model = self.search(model, lst, f'{age} >= 30')
+        model = self.search(model, lst, '')
+        self.assertFalse(model.get('column_searches'))
+        self.assertFalse(model.get('search_leftovers'))
+        self.assertIsNone(model['search'])
+
+    def test_a_search_no_column_claims_leaves_the_rows_empty(self):
+        lst, model = self.make_model()
+        model = self.search(model, lst, 'len($) > 1')
+        self.assertFalse(model.get('column_searches'))
+        self.assertEqual(model['search'], 'len($) > 1')
+
+    def test_the_half_no_column_claims_survives_a_column_edit(self):
+        lst, model = self.make_model()
+        age = model['columns'][1]
+        model = self.search(model, lst, f'{age} >= 30 and len($) > 1')
+        self.assertEqual(_column_search_row(model, age)['text'], '30')
+        model, _ = update(make_column_search_input_event(1, '25'), None, model,
+                          lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['search'], f'{age} >= 25 and len($) > 1')
+
+    def test_removing_a_column_takes_the_search_that_was_typed_for_it(self):
+        # The term was the column's, however it was written, so it leaves with
+        # the column rather than lingering as a term nothing explains.
+        lst, model = self.make_model()
+        age = model['columns'][1]
+        model = self.search(model, lst, f'{age} >= 30 and len($) > 1')
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=1))),
+                          None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['search'], 'len($) > 1')
+
+    def test_relinking_from_code_fills_in_the_column_rows(self):
+        from list_visualizer import _ctx_to_model
+        lst, model = self.make_model()
+        age = model['columns'][1]
+        _ctx_to_model({'is_predicate': True,
+                       'predicate_expr': f"{age.replace('$', 'item')} >= 30"},
+                      model)
+        self.assertEqual(_column_search_row(model, age)['op'], '>=')
+        self.assertEqual(_column_search_row(model, age)['text'], '30')
 
 
 class TestColumnSearchMembershipBrackets(unittest.TestCase):

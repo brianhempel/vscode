@@ -2,12 +2,14 @@
 
 import ast
 import dataclasses
+import functools
 import html
+import inspect
 import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 
 # =============================================================================
@@ -233,22 +235,91 @@ def too_deep(config_path) -> bool:
     return len(config_path or []) >= MAX_NEST_DEPTH
 
 
-def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value) -> dict:
+@functools.lru_cache(maxsize=None)
+def keyword_params(fn: Callable, drop_first: bool = False) -> Optional[FrozenSet[str]]:
+    """The names `fn` accepts as keyword arguments, or None for "anything".
+
+    None means the signature is a blank check -- either it takes **kwargs, or
+    it can't be introspected at all (some builtins), in which case the call
+    itself is the better judge than a guess made here. `drop_first` discards
+    the leading `self` of a method being inspected through its class.
+    """
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    if drop_first:
+        params = params[1:]
+    if any(p.kind is p.VAR_KEYWORD for p in params):
+        return None
+    return frozenset(p.name for p in params
+                     if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY))
+
+
+def _keyword_params_of(fn: Callable) -> Optional[FrozenSet[str]]:
+    # Cache on the underlying function: attribute access on a visualizer object
+    # makes a fresh bound method each time, but they all share one __func__
+    # (and caching the method would pin its instance in the cache forever).
+    unbound = getattr(fn, '__func__', None)
+    if unbound is not None:
+        return keyword_params(unbound, True)
+    return keyword_params(fn)
+
+
+def wants_kwarg(fn: Callable, name: str) -> bool:
+    """True when `fn` would accept `name` as a keyword argument.
+
+    Ask before computing an argument that most callees don't want -- in a table
+    this is asked once per cell.
+    """
+    accepted = _keyword_params_of(fn)
+    return accepted is None or name in accepted
+
+
+def supported_kwargs(fn: Callable, **kwargs) -> dict:
+    """Drop the kwargs `fn` doesn't ask for by name.
+
+    Lets a caller offer every optional thing a visualizer function might want
+    (nested config, eval_in_scope, ...) while a visualizer author opts in by
+    simply naming the parameter -- no capability constant to also declare.
+    """
+    accepted = _keyword_params_of(fn)
+    if accepted is None or kwargs.keys() <= accepted:
+        return kwargs
+    return {name: value for name, value in kwargs.items() if name in accepted}
+
+
+def call_with_supported_kwargs(fn: Callable, *args, **kwargs):
+    """Call `fn`, passing only the keyword arguments it asks for."""
+    return fn(*args, **supported_kwargs(fn, **kwargs))
+
+
+def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value,
+                         child_init_model: Optional[Callable] = None) -> dict:
     """Compute the nesting kwargs to hand a child (sub-)visualizer.
 
     The child receives the slot's nested config for the cell's type (or None ->
     default), the inherited root type/dotfile, and the path extended by this
     (slot_expr, cell_type) step (so it can persist edits at its own location).
+
+    A visualizer opts into all this by naming the parameters in its init_model;
+    pass that function as `child_init_model` and a child that doesn't ask for
+    them gets {} (and pays nothing for it -- this runs once per cell).
     """
+    if child_init_model is not None and not wants_kwarg(child_init_model, 'slots_config'):
+        return {}
     children_map = (parent_model.get('_slot_children') or {}).get(slot_expr) or {}
     t2 = config_key(cell_value)
     slots_config = children_map.get(t2) if t2 is not None else None
-    return {
+    kwargs = {
         'slots_config': slots_config,
         'config_root_type': parent_model.get('_config_root_type'),
         'config_root_dotfile': parent_model.get('_config_root_dotfile'),
         'config_path': (parent_model.get('_config_path') or []) + [(slot_expr, t2)],
     }
+    if child_init_model is None:
+        return kwargs
+    return supported_kwargs(child_init_model, **kwargs)
 
 
 def load_root_slots(dotfile_name: str, root_type: 'str | None'):

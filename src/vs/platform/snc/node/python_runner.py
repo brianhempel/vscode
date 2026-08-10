@@ -40,7 +40,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import io_cache
 
@@ -373,15 +373,17 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
                 del model['_type_fingerprint']
                 del model['_source_expr_sig']
         else:
-            model = vis.init_model(value, get_visualizer,
-                                   eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
+            model = call_with_supported_kwargs(vis.init_model, value, get_visualizer,
+                                               eval_in_scope=eval_in_scope,
+                                               var_and_exp=var_and_exp)
 
         # Only replay events when the cached model was reused; if the type
         # changed the old events belong to a different visualizer.
         if fingerprint_matches and 'events' in item_model_and_events:
             for ev in item_model_and_events['events']:
-                model, cmds = vis.update(ev, var_and_exp, model, value, get_visualizer,
-                                         eval_in_scope=eval_in_scope)
+                model, cmds = call_with_supported_kwargs(
+                    vis.update, ev, var_and_exp, model, value, get_visualizer,
+                    eval_in_scope=eval_in_scope)
                 commands.extend(cmds)
 
         if isinstance(model, dict):
@@ -392,15 +394,11 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         # visualizer renders compact (search box / tool toolbar / etc. hidden).
         # Mirrors the focused_child pattern that nested visualizers already use.
         is_small = (_focused_line is not None and line != _focused_line)
-        try:
-            html_content = vis.visualize(value, model, get_visualizer,
-                                         eval_in_scope=eval_in_scope, small=is_small,
-                                         var_and_exp=var_and_exp)
-        except TypeError:
-            # Visualizer doesn't accept the `small`/`var_and_exp` kwargs (e.g.
-            # older 3rd-party visualizers); fall back so it still renders.
-            html_content = vis.visualize(value, model, get_visualizer,
-                                         eval_in_scope=eval_in_scope)
+        # A visualizer that doesn't name `small`/`var_and_exp`/... (e.g. an
+        # older 3rd-party one) just isn't handed them.
+        html_content = call_with_supported_kwargs(
+            vis.visualize, value, model, get_visualizer,
+            eval_in_scope=eval_in_scope, small=is_small, var_and_exp=var_and_exp)
 
         assert isinstance(html_content, str)
 

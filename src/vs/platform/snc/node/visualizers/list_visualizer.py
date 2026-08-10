@@ -69,11 +69,6 @@ from visualizer_utils import (
     ICONS,
 )
 
-# This visualizer participates in the shared nested-slots config (parents thread
-# per-slot config + path to it; see visualizer_utils). Used to decide whether to
-# pass nesting kwargs to a child.
-SUPPORTS_NESTED_CONFIG = True
-
 CELL_KEY_SEP = '\x00'
 
 # Inside the row half of an aggregation answer's child key; see _agg_child_key.
@@ -588,13 +583,19 @@ def _paren_if_loose(term: str) -> str:
     return term
 
 
-def compose_column_searches(columns, column_searches, eval_in_scope=None) -> str | None:
+def compose_column_searches(columns, column_searches, eval_in_scope=None,
+                            leftovers=None) -> str | None:
     """Fold every active column search into one main-search string.
 
     The `and` columns form a group in column order; the `or` columns are then
     or'd against it. Parentheses appear only where Python's precedence would
     otherwise read the result differently, so a lone column search comes out as
     exactly what the user typed.
+
+    *leftovers* are the terms of a hand-written search that no column claimed
+    (see decompose_search). Each names the group it was written in and where it
+    sat among that group's terms, so a search the columns can only half explain
+    still composes back the way it was written.
     """
     searches = column_searches or {}
     and_terms, or_terms = [], []
@@ -613,15 +614,217 @@ def compose_column_searches(columns, column_searches, eval_in_scope=None) -> str
         compose = row.get('compose') or 'and'
         (or_terms if compose.lower() == 'or' else and_terms).append(term)
 
+    # Ascending, so each index is read against the terms already in place --
+    # which is the list the index was recorded against.
+    for row in sorted(leftovers or [], key=lambda row: row.get('index') or 0):
+        # Verbatim, spacing and all: a leftover is the user's own text, and the
+        # only reason it is kept is to hand it back exactly as they wrote it.
+        term = row.get('text') or ''
+        if not term.strip():
+            continue
+        compose = row.get('compose') or 'and'
+        group = or_terms if compose.lower() == 'or' else and_terms
+        index = row.get('index')
+        group.insert(len(group) if index is None else max(0, min(index, len(group))),
+                     term)
+
     if not and_terms and not or_terms:
         return None
-    group = ' and '.join(_paren_if_loose(t) for t in and_terms)
+    # Parens only ever keep a join from reading a term differently, so a term
+    # with nothing to be joined to stands exactly as it was written.
+    if len(and_terms) > 1 or (and_terms and or_terms):
+        group = ' and '.join(_paren_if_loose(t) for t in and_terms)
+    else:
+        group = and_terms[0] if and_terms else ''
     if not or_terms:
         return group
     # `and` binds tighter than `or`, so a single-term group needs no parens.
     if len(and_terms) > 1:
         group = f'({group})'
     return ' or '.join(([group] if and_terms else []) + or_terms)
+
+
+# =============================================================================
+# Reading the main search back into the columns
+# =============================================================================
+#
+# The other direction. A search typed into the main box is read back as the
+# column rows that would have written it, so both ends of the same filter say
+# the same thing -- and so the tally, which reads its checkmarks out of those
+# rows, lights up for a search that was typed by hand.
+#
+# Nothing is rewritten to make a reading work: one is only accepted when
+# composing it back produces the search character for character. What no column
+# claims is kept as a leftover -- verbatim, and in the place it was written --
+# so the terms the columns can't express survive the next column edit instead of
+# being silently dropped. Every search therefore reads back as something, in the
+# worst case as one leftover holding the whole of it.
+
+# Underscores stand in for the dollars while the search is parsed: one per
+# dollar, so every offset the parse reports still points at the same character
+# (and the same utf-8 byte) of the search itself.
+def _underscore_dollars(text: str) -> str:
+    return DOLLARS_RE.sub(lambda m: '_' * len(m[0]), text)
+
+
+def _parse_search(text: str):
+    """The search as an expression node, or None if it isn't one."""
+    try:
+        return ast.parse(_underscore_dollars(text), mode='eval').body
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _node_source(text: str, node) -> str | None:
+    """The slice of *text* a node was parsed from, or None if it spans lines.
+
+    Column offsets count utf-8 bytes, so the slice is taken in bytes too.
+    """
+    if getattr(node, 'lineno', 1) != 1 or getattr(node, 'end_lineno', 1) != 1:
+        return None
+    return text.encode()[node.col_offset:node.end_col_offset].decode()
+
+
+def _search_readings(node, search: str) -> List[Tuple[List[str], List[str]]]:
+    """Every way the search might have been composed, as (and terms, or terms),
+    most terms first.
+
+    The coarser readings follow the finer ones rather than replacing them: an
+    `and` is as likely to be one column's search that says `and` as it is to be
+    two columns joined, and only composing a reading back settles which.
+    """
+    def terms(nodes):
+        return [_node_source(search, n) for n in nodes]
+
+    readings = []
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        first, *rest = node.values
+        # The and group leads, so only the first term can hold one.
+        if isinstance(first, ast.BoolOp) and isinstance(first.op, ast.And):
+            readings.append((terms(first.values), terms(rest)))
+        readings.append((terms([first]), terms(rest)))
+        readings.append(([], terms(node.values)))
+    elif isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        readings.append((terms(node.values), []))
+    readings.append(([search], []))
+    return [r for r in readings if all(r[0] + r[1])]
+
+
+# A character no keyboard produces, so marking with it can't collide with the
+# search's own text.
+_UNLIFT_MARK = '\x00'
+
+
+def unlift_term(term: str, col: str) -> str | None:
+    """The column-scope predicate a term of the main search would have been
+    lifted from, or None when the column has no part in it.
+
+    The inverse of lift_column_predicate: the column expression becomes $ again,
+    and every dollar already in the term gains back the level it lost.
+    """
+    atom = _atomize(col)
+    if atom not in term:
+        # A column that doesn't appear can't be what the term is about --
+        # without this, `$['name']` would read `$ == 3` as a search on the row.
+        return None
+    marked = term.replace(atom, _UNLIFT_MARK)
+    deepened = DOLLARS_RE.sub(lambda m: '$' * (len(m[0]) + 1), marked)
+    pred = deepened.replace(_UNLIFT_MARK, '$')
+    # Substituting on sight is a guess -- a column expression can turn up in a
+    # term it didn't come from -- so it only counts if it lifts back verbatim.
+    return pred if lift_column_predicate(pred, col) == term else None
+
+
+def _search_row_from_predicate(pred: str, eval_in_scope=None) -> dict | None:
+    """A column-scope predicate as the [op] + text that would have written it.
+
+    The operator form is preferred over the blank one: the tally reads its
+    checkmarks out of the operator, so a search that compares has to come back
+    as a comparison rather than as one opaque expression.
+    """
+    node = _parse_search(pred)
+    if node is None:
+        # Half-typed text is not a column's search; it belongs to the box it was
+        # typed into until it is an expression.
+        return None
+    if (isinstance(node, ast.Compare) and len(node.ops) == 1
+            and isinstance(node.left, ast.Name) and node.left.id == '_'):
+        for op in COLUMN_SEARCH_OPS:
+            # Longer operators are offered first, so `>=` is never read as `>`.
+            if op and pred.startswith(f'$ {op} '):
+                text = pred[len(op) + 3:]
+                if column_search_predicate(op, text, eval_in_scope) == pred:
+                    return {'op': op, 'text': text}
+                break
+    if column_search_predicate('', pred, eval_in_scope) == pred:
+        return {'op': '', 'text': pred}
+    return None
+
+
+def _claim_term(term: str, columns, first: int, used, eval_in_scope=None):
+    """The column a term belongs to, as (column index, column, row) -- or None
+    when no column claims it.
+
+    Only columns from *first* on are eligible: a group is composed in column
+    order, so a term can't belong to a column an earlier term already went past.
+    Among the columns that fit, the longest expression wins, which is the most
+    specific reading -- `$['a'] == 1` is the a column's search, not the row's.
+    """
+    best = None
+    for index in range(first, len(columns)):
+        col = columns[index]
+        if col in used:
+            continue
+        pred = unlift_term(term, col)
+        if pred is None:
+            continue
+        row = _search_row_from_predicate(pred, eval_in_scope)
+        if row is not None and (best is None or len(col) > len(best[1])):
+            best = (index, col, row)
+    return best
+
+
+def _read_terms(and_terms, or_terms, columns, eval_in_scope=None):
+    """Hand each term to a column, keeping the ones nothing claims."""
+    searches, leftovers, used = {}, [], set()
+    for compose, terms in (('and', and_terms), ('or', or_terms)):
+        first = 0
+        for index, term in enumerate(terms):
+            claim = _claim_term(term, columns, first, used, eval_in_scope)
+            if claim is None:
+                leftovers.append({'compose': compose, 'text': term,
+                                  'index': index})
+                continue
+            col_index, col, row = claim
+            first = col_index + 1
+            used.add(col)
+            searches[col] = {'compose': compose, **row}
+    return searches, leftovers
+
+
+def decompose_search(search: str | None, columns,
+                     eval_in_scope=None) -> Tuple[dict, List[dict]]:
+    """Read the main search box back as (column searches, leftovers).
+
+    The reading that lights up the most columns wins, among those that compose
+    back to exactly the search that was read.
+    """
+    if not search:
+        return ({}, [])
+    node = _parse_search(search)
+    readings = _search_readings(node, search) if node is not None else [([search], [])]
+    best = None
+    for and_terms, or_terms in readings:
+        searches, leftovers = _read_terms(and_terms, or_terms, columns,
+                                          eval_in_scope)
+        if compose_column_searches(columns, searches, eval_in_scope,
+                                   leftovers) != search:
+            continue
+        if best is None or len(searches) > len(best[0]):
+            best = (searches, leftovers)
+    # Whatever is left unread is one term the columns don't explain, which
+    # composes back verbatim -- the box keeps exactly what was typed into it.
+    return best or ({}, [{'compose': 'and', 'text': search, 'index': 0}])
 
 
 # The rows are keyed by column EXPRESSION, like _slot_children and the cell
@@ -660,13 +863,6 @@ def _remove_column_search(model: dict, col: str) -> None:
     searches = dict(model.get('column_searches') or {})
     searches.pop(col, None)
     model['column_searches'] = searches or None
-
-
-def _rename_column_search(model: dict, old_name: str, new_name: str) -> None:
-    searches = dict(model.get('column_searches') or {})
-    if old_name in searches:
-        searches[new_name] = searches.pop(old_name)
-        model['column_searches'] = searches or None
 
 
 def _column_computes(model: dict, col: str) -> List[str]:
@@ -735,21 +931,36 @@ def _close_column_menus(model: dict) -> None:
 def _recompose_search(model: dict, eval_in_scope=None) -> None:
     """Push the column searches into the main search box.
 
-    One-directional for now: the main box is free to hold anything the user
-    types, so when the columns have nothing to say we leave a hand-written
-    search alone rather than clearing it. `search_from_columns` records what the
-    columns last wrote, which is what tells the two apart.
+    Half of the one thing this and _apply_search_to_columns maintain between
+    them: the main search is always what the column rows and the leftovers
+    compose to, whichever end of it was edited. A search typed by hand is a
+    leftover like any other, so pushing the columns can no longer lose it.
     """
     composed = compose_column_searches(model.get('columns', []),
                                        model.get('column_searches') or {},
-                                       eval_in_scope)
-    if composed is None and model.get('search') != model.get('search_from_columns'):
-        return
+                                       eval_in_scope,
+                                       model.get('search_leftovers'))
     previous = model.get('search')
     model['search'] = composed or None
-    model['search_from_columns'] = composed
     if model['search'] != previous:
         model['_scroll_to_match'] = True
+
+
+def _apply_search_to_columns(model: dict, eval_in_scope=None) -> None:
+    """Read the main search box back into the column rows: the other half.
+
+    Exclude belongs to the tally rather than to the search text, so it stays as
+    the menu left it -- the search says which values are picked out, never
+    whether the box that picked them was ticked.
+    """
+    searches, leftovers = decompose_search(model.get('search'),
+                                           model.get('columns', []),
+                                           eval_in_scope)
+    previous = model.get('column_searches') or {}
+    for col, row in searches.items():
+        row['exclude'] = bool((previous.get(col) or {}).get('exclude'))
+    model['column_searches'] = searches or None
+    model['search_leftovers'] = leftovers or None
 
 
 # =============================================================================
@@ -1981,6 +2192,9 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     elif ctx.get('is_predicate'):
         pred = ctx.get('predicate_expr', '')
         model['search'] = re.sub(r'\bitem\b', '$', pred)
+    # A restored search is a search like any other, so the column menus and the
+    # tally light up for a filter that came back from a line of code.
+    _apply_search_to_columns(model)
     model['first_match'] = bool(ctx.get('is_first'))
 
     # A picked expression survives the round-trip through the line of code, but
@@ -2716,6 +2930,10 @@ _COLUMN_MGMT_DEFAULTS = {
     # than {} so this shared defaults dict never hands the same dict to two
     # models; always read it as `model.get('column_searches') or {}`.
     'column_searches': None,
+    # The terms of a hand-written main search that no column claimed, kept so a
+    # column edit recomposes them instead of dropping them. Stored as None when
+    # there are none, like the searches above.
+    'search_leftovers': None,
     # Per-column aggregations, keyed by column expression like the searches
     # above, and each stored as the expression it is. Nothing records which of
     # the menu's rows are checked: that is read back out of these.
@@ -2736,9 +2954,6 @@ _COLUMN_MGMT_DEFAULTS = {
 
 _SEARCH_DEFAULTS = {
     'search': None,
-    # What the column searches last composed, so a search the user typed by hand
-    # can be told from one the columns wrote (see _recompose_search).
-    'search_from_columns': None,
     'first_match': False,
     'openDropdown': None,
     'linked_action': None,
@@ -2828,8 +3043,10 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                 cell_value = None
             if cell_value is not None:
                 cell_vis = get_visualizer(cell_value)
-                extra = (child_nesting_kwargs(config_fields, col, cell_value)
-                         if getattr(cell_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
+                # A cell visualizer that doesn't name the nesting params in its
+                # init_model gets {} back and isn't handed them.
+                extra = child_nesting_kwargs(config_fields, col, cell_value,
+                                             cell_vis.init_model)
                 children[f"{i}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
                     cell_value, get_visualizer, eval_in_scope=eval_in_scope, **extra)
 
@@ -4500,8 +4717,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 cell_vis = get_visualizer(cell_value)
                 cell_model = children.get(composite_key)
                 if cell_model is None:
-                    extra = (child_nesting_kwargs(model, col, cell_value)
-                             if getattr(cell_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
+                    extra = child_nesting_kwargs(model, col, cell_value,
+                                                 cell_vis.init_model)
                     cell_model = cell_vis.init_model(cell_value, get_visualizer,
                                                      eval_in_scope=eval_in_scope, **extra)
                 child_small = (composite_key != focused_child)
@@ -4667,7 +4884,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['columns'][idx] = name
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
-                        _rename_column_search(model, old_name, name)
+                        # The search was written against the old expression, so
+                        # it goes with it. The aggregations describe the column
+                        # rather than filtering it, so they follow it over.
+                        _remove_column_search(model, old_name)
                         _rename_column_compute(model, old_name, name)
                         _recompose_search(model, eval_in_scope)
                 model['editing_column_index'] = None
@@ -4779,7 +4999,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         model['columns'][idx] = commit_val
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
-                            _rename_column_search(model, old_name, commit_val)
+                            _remove_column_search(model, old_name)
                             _rename_column_compute(model, old_name, commit_val)
                             _recompose_search(model, eval_in_scope)
                         if type_key:
@@ -5022,6 +5242,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case SearchBoxInput(value=val):
             model['search'] = val if val else None
             model['_scroll_to_match'] = True
+            # Every keystroke, so the column menus and the tally checkmarks are
+            # never describing a search that has moved on. Text that is still
+            # half typed simply reads back as one leftover.
+            _apply_search_to_columns(model, eval_in_scope)
             if not model['search'] and model.get('tool') == 'pick':
                 # Pick builds an expression out of the first match's parts, so
                 # clearing the search leaves it nothing to stand on.

@@ -57,11 +57,6 @@ from visualizer_utils import (
     child_nesting_kwargs, too_deep,
 )
 
-# This visualizer participates in the shared nested-slots config (parents thread
-# per-slot config + path to it; see visualizer_utils). Used to decide whether to
-# pass nesting kwargs to a child.
-SUPPORTS_NESTED_CONFIG = True
-
 # === Event types ===
 
 @dataclass(frozen=True, slots=True)
@@ -319,8 +314,10 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
             placeholder_args, val_str, raw_value, is_error = _eval_field(value, accessor_code, eval_in_scope)
             if not is_error and not placeholder_args and raw_value is not None:
                 child_vis = get_visualizer(raw_value)
-                extra = (child_nesting_kwargs(config_fields, accessor_code, raw_value)
-                         if getattr(child_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
+                # A child visualizer that doesn't name the nesting params in
+                # its init_model gets {} back and isn't handed them.
+                extra = child_nesting_kwargs(config_fields, accessor_code, raw_value,
+                                             child_vis.init_model)
                 children[accessor_code] = child_vis.init_model(raw_value, get_visualizer,
                                                                eval_in_scope=eval_in_scope, **extra)
 
@@ -686,8 +683,8 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 child_vis = get_visualizer(raw_value)
                 child_model = children.get(accessor_code)
                 if child_model is None:
-                    extra = (child_nesting_kwargs(model, accessor_code, raw_value)
-                             if getattr(child_vis, 'SUPPORTS_NESTED_CONFIG', False) else {})
+                    extra = child_nesting_kwargs(model, accessor_code, raw_value,
+                                                 child_vis.init_model)
                     child_model = child_vis.init_model(raw_value, get_visualizer,
                                                        eval_in_scope=eval_in_scope, **extra)
                 child_small = (accessor_code != focused_child)
