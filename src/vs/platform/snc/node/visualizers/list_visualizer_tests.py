@@ -10126,6 +10126,22 @@ class TestComputeItemRowRendering(unittest.TestCase):
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         self.assertNotIn('pick-region', self.item_rows(model, lst)[0])
 
+    def test_the_label_hands_over_the_row_itself(self):
+        # The row's own name is the one place the whole row is offered: the
+        # cells under it each hand over a column of it, and the index cell the
+        # number beside it. Only a `$` column would otherwise hand over the row.
+        lst, model = self.model({"$['b']": [MIN_ITEM]})
+        row = self.item_rows(model, lst, source='data')[0]
+        label = re.search(r'<div class="col-agg-label col-agg-item-label"([^>]*)>',
+                          row).group(1)
+        self.assertIn(f'snc-py-exp="{html.escape(self.LEAST_BY_B)}"', label)
+        self.assertIn('draggable="true"', label)
+
+    def test_the_label_hands_over_nothing_with_no_row_to_point_at(self):
+        lst, model = self.model({'$': [MIN_ITEM]}, lst=[], columns=['$'])
+        row = self.item_rows(model, lst, source='data')[0]
+        self.assertNotIn('snc-py-exp', row)
+
     def test_every_cell_of_the_row_is_a_child_like_any_other(self):
         # The values are the row's, so each is drawn by whichever visualizer
         # reads it -- but the index beside them is the table's own, and reads

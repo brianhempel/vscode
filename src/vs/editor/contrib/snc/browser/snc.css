@@ -1462,6 +1462,17 @@
 	box-sizing: border-box;
 }
 
+/* Label whole row for min item and max item, should spill across columns */
+.list-visualizer .col-agg-item-label {
+	z-index: 1;
+	position: absolute;
+	background-color: var(--snc-table-header-bg);
+}
+.list-visualizer .not-agg-col .small,
+.list-visualizer .not-agg-col .snc-generic-visualizer {
+	color: var(--snc-text-muted);
+}
+
 /* An aggregation the user wrote */
 .list-visualizer input.col-agg-expr {
 	background: none;

@@ -1810,13 +1810,13 @@ COMPUTE_AGGS = (
     ('#Missing',   'sum(x is None for x in $)'),
     ('Min',        'min($)'),
     ('Min Idx',    'np.argmin($)'),
+    ('Min Item',   ROW_AGGS[0]),
     ('Mean',       'np.mean($)'),
     ('Median',     'np.median($)'),
     ('Percentile', 'np.percentile($, {{10}})'),
     ('Percentile', 'np.percentile($, {{90}})'),
     ('Max',        'max($)'),
     ('Max Idx',    'np.argmax($)'),
-    ('Min Item',   ROW_AGGS[0]),
     ('Max Item',   ROW_AGGS[1]),
     ('Histogram',  HISTOGRAM_AGG),
 )
@@ -3756,7 +3756,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{html.escape(label)}</span>'
-            f'</span>{holes}'
+            f'{holes}</span>'
             f'<span class="col-compute-preview"'
             f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
             f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
@@ -4825,6 +4825,11 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
     Only the column that asked is labelled. The other cells are that row's
     values, and a "Min Item" over each of them would read as a claim that each
     was least in its own column.
+
+    The row's own name -- the label spilling across the row -- is what hands
+    over the row itself. Nothing else in the row does: each cell hands over a
+    column of it and the index cell the number beside it, so without the name
+    there is no handle on the row unless a `$` column happens to be drawn.
     """
     item_expr = _column_key_expr(columns[ci])
     item = _agg_value(expr, None, eval_in_scope, lst, item_expr)
@@ -4838,7 +4843,10 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
 
     cells = [f'<td class="row-index col-agg-cell">'
              f'<div class="col-agg"{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
-             f'<div class="col-agg-label"></div>'
+             f'<div class="col-agg-label col-agg-item-label"'
+             f'{py_exp_attrs(item_code, imports=_agg_imports(expr))}>'
+             f'{_agg_name(expr)} by {columns[ci]}</div>'
+             f'<div class="col-agg-label"></div>' # needed for spacing, the above is position: absolute to overflow
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
              f'</div></td>']
     for cj, col in enumerate(columns):
@@ -4850,9 +4858,10 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
         label = ('<div class="col-agg-label"></div>' if cj != ci else
                  f'{_agg_label_html(expr, ci, level)}'
                  f'{_agg_remove_x_html(expr, ci)}')
+        side_value_class = ' not-agg-col' if cj != ci else ''
         cells.append(
             f'<td class="col-agg-cell snc-hover-hidden-parent">'
-            f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
+            f'<div class="col-agg{side_value_class}"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
             f'{label}<div class="col-agg-value">'
             f'{_render_agg_answer(expr, value, key, code, model, get_visualizer, eval_in_scope, max_width)}'
             f'</div>'
