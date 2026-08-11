@@ -1908,6 +1908,16 @@ COMPUTE_CODES = (
     ('Tally',  'Counter($)', 'tally'),
 )
 
+# What a box the user writes a row expression in says of itself, wherever it is
+# drawn. The main search box and a column's code box are asked the same thing of
+# the same scope -- one row of the list, and which row it is -- so they say it
+# the same way.
+#
+# The other two boxes speak scopes of their own: a column search is written
+# inside a column's value, one level in from here, and an aggregation is asked of
+# the whole column at once.
+ITEM_EXPR_TOOLTIP = '$ is the item from the list, $i its index, $$ the whole list'
+
 # What a box the user writes an aggregation in says of itself, wherever it is
 # drawn. The same thing the column search box says of its own, less `$$$`: an
 # aggregation is asked of the whole column, so there is no one item to name.
@@ -4229,7 +4239,7 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="Column code" '
-        f'data-tooltip="$ is the item from the list, $i its index, $$ the whole list" '
+        f'data-tooltip="{html.escape(ITEM_EXPR_TOOLTIP)}" '
         f'spellcheck="false"'
         f'{extra_attrs} '
         f'class="col-input" />'
@@ -4433,6 +4443,7 @@ def _render_search_box_input(model, eval_in_scope=None):
         f' snc-input="{html.escape(search_input_event)}"'
         f' value="{html.escape(search_value)}"'
         f' placeholder="Search"'
+        f' data-tooltip="{html.escape(ITEM_EXPR_TOOLTIP)}"'
         f' spellcheck="false"'
         f' class="search-box" />'
         f'{toggles_html}'
