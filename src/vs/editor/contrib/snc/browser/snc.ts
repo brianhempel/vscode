@@ -170,7 +170,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// How long the pointer must rest on an [snc-dwell] element before its event
 	// is sent. Long enough that crossing a menu on the way somewhere else opens
 	// nothing, short enough to feel like the menu is following the pointer.
-	private static readonly DWELL_MS = 200;
+	private static readonly DWELL_MS = 150;
 
 	// How long the mouse must rest on a snc-py-exp handle before its expression
 	// tooltip appears.

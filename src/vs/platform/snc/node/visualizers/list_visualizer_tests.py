@@ -7,6 +7,7 @@ Run:
 
 import ast
 import json
+import math
 import unittest
 import html
 import os
@@ -8722,6 +8723,19 @@ def agg_named(label):
     raise AssertionError(f'no aggregation named {label}')
 
 
+def agg_row(label):
+    """Which row of the menu an aggregation is, counting from the top.
+
+    Named rather than counted to, so adding a row to the catalog doesn't move
+    every test that was looking at one below it. Percentile names two rows and
+    takes the first, the way agg_named does.
+    """
+    for i, (row_label, _) in enumerate(COMPUTE_AGGS):
+        if row_label == label:
+            return i
+    raise AssertionError(f'no aggregation named {label}')
+
+
 class TestAggHoles(unittest.TestCase):
     """A {{...}} in an aggregation is a text box, and what's typed in it is
     part of the expression rather than a setting stored beside it."""
@@ -8829,6 +8843,10 @@ class TestAggImports(unittest.TestCase):
     def test_numpy_is_declared_by_the_expressions_that_use_it(self):
         self.assertEqual(_agg_imports('np.mean($)'), ('import numpy as np',))
 
+    def test_math_is_declared_by_the_expressions_that_use_it(self):
+        self.assertEqual(_agg_imports('sum(math.isnan(x) for x in $)'),
+                         ('import math',))
+
     def test_a_builtin_needs_nothing(self):
         self.assertEqual(_agg_imports('min($)'), ())
         self.assertEqual(_agg_imports('len(set($))'), ())
@@ -8842,19 +8860,31 @@ class TestAggValues(unittest.TestCase):
                 else agg_named(label_or_expr))
         return _agg_value(expr, COMPUTE_LIST if values is None else values)
 
-    def test_the_catalog_reads_the_way_the_todo_lists_it(self):
+    def test_the_catalog_reads_the_way_the_menu_lists_it(self):
+        # Counts first, then the column read from its least to its greatest,
+        # with each row's own idea of the middle in between; Histogram last,
+        # since it is the whole column at once rather than one number out of it.
         self.assertEqual([label for label, _ in COMPUTE_AGGS],
-                         ['#Unique', '#Present', '#Missing', 'Min', 'Min Idx',
-                          'Mean', 'Median', 'Percentile', 'Percentile',
-                          'Max', 'Max Idx', 'Min Item', 'Max Item',
-                          'Histogram'])
+                         ['#Unique', '#Present', '#Missing', '#NaN',
+                          'Sum', 'Min', 'Min Idx', 'Min Item',
+                          'Mean', 'Stddev (Pop)', 'Stddev (Sample)', 'Median',
+                          'Percentile', 'Percentile', 'Max', 'Max Idx',
+                          'Max Item', 'Histogram'])
 
     def test_each_aggregation_answers(self):
         for label, expected in [('#Unique', 4), ('#Present', 5), ('#Missing', 0),
+                                ('#NaN', 0), ('Sum', 14),
                                 ('Min', 1), ('Min Idx', 1), ('Mean', 2.8),
                                 ('Median', 3), ('Max', 5), ('Max Idx', 4)]:
             with self.subTest(label):
                 self.assertEqual(self.value(label), expected)
+
+    def test_the_two_stddevs_divide_by_different_counts(self):
+        # The same 12.8 of squared deviation, over the 5 values themselves and
+        # over the 4 degrees of freedom a sample of them has.
+        self.assertAlmostEqual(self.value('Stddev (Pop)'), math.sqrt(12.8 / 5))
+        self.assertAlmostEqual(self.value('Stddev (Sample)'),
+                               math.sqrt(12.8 / 4))
 
     def test_the_two_percentiles_ask_for_different_levels(self):
         self.assertEqual(self.value('np.percentile($, {{10}})'), 1.0)
@@ -8878,6 +8908,16 @@ class TestAggValues(unittest.TestCase):
         # The user's own program has no numpy in it; the preview still answers.
         self.assertEqual(_agg_value('np.mean($)', [1, 2, 3],
                                     lambda code: eval(code, {}, {})), 3 - 1)
+
+    def test_math_resolves_without_the_file_importing_it(self):
+        # Nor any math, and #NaN is written with math.isnan.
+        self.assertEqual(_agg_value('sum(math.isnan(x) for x in $)',
+                                    [1.0, float('nan'), 3.0],
+                                    lambda code: eval(code, {}, {})), 1)
+
+    def test_nan_counts_the_nans(self):
+        self.assertEqual(self.value('#NaN', [1.0, float('nan'), 3.0]), 1)
+        self.assertEqual(self.value('#NaN', [1.0, 2.0]), 0)
 
     def test_a_row_aggregation_answers_with_the_row_the_column_picked(self):
         # The column is not the list here: the answer is the row the least of
@@ -9001,6 +9041,8 @@ class TestAggCode(unittest.TestCase):
         # The preview and the code have to be the same question, or the number
         # on screen isn't the one the user drags into the file.
         np = __import__('numpy')
+        # The file the code is dragged into has the imports the row declares.
+        math = __import__('math')
         data = COMPUTE_LIST
         for _, template in COMPUTE_AGGS:
             with self.subTest(template):
@@ -9019,8 +9061,9 @@ class TestAggCode(unittest.TestCase):
                     for written, computed in zip(('counts', 'edges'), answer):
                         self.assertTrue(np.array_equal(scope[written], computed))
                 else:
-                    self.assertEqual(eval(code, {'np': np}, {'data': data}),
-                                     answer)
+                    self.assertEqual(
+                        eval(code, {'np': np, 'math': math}, {'data': data}),
+                        answer)
 
 
 class TestAggName(unittest.TestCase):
@@ -9428,15 +9471,17 @@ class TestComputeMenuRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         previews = self.previews(self.panel(model, lst))
         self.assertEqual(previews,
-                         ['4', '5', '0', '1', '1', '2.8', '3', '1', '4.6',
-                          '5', '4', '1', '5', '', ''])
+                         ['4', '5', '0', '0', '14', '1', '1', '1',
+                          '2.8', '1.6', '1.78885', '3', '1', '4.6',
+                          '5', '4', '5', '', ''])
 
     def test_a_row_aggregation_previews_the_row_it_picked(self):
         lst = [{'a': 1}, {'a': 3}]
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ["$['a']"]
         previews = self.previews(self.panel(model, lst))
-        self.assertEqual(previews[len(COMPUTE_AGGS) - 3:len(COMPUTE_AGGS) - 1],
+        self.assertEqual([previews[agg_row('Min Item')],
+                          previews[agg_row('Max Item')]],
                          [html.escape("{'a': 1}"), html.escape("{'a': 3}")])
 
     def test_the_histogram_row_previews_its_bars_rather_than_its_pair(self):
@@ -9476,27 +9521,30 @@ class TestComputeMenuRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['np.mean($)'])
         rows = self.rows(self.panel(model, lst))
+        mean = agg_row('Mean')
         checked = [i for i, row in enumerate(rows) if 'checked' in row]
-        self.assertEqual(checked, [5])
-        self.assertIn('checked', rows[5][:rows[5].index('col-compute-name')])
+        self.assertEqual(checked, [mean])
+        self.assertIn('checked',
+                      rows[mean][:rows[mean].index('col-compute-name')])
 
     def test_a_question_this_column_cannot_answer_cannot_be_checked(self):
         lst = ['pear', 'apple']
         _, model = tally_model(lst)
         rows = self.rows(self.panel(model, lst))
-        mean = rows[5]
+        mean = rows[agg_row('Mean')]
         self.assertIn('unselectable', mean)
         self.assertIn('disabled', mean)
         self.assertNotIn('snc-mouse-down', mean)
         # Min still answers for strings, so it stays clickable.
-        self.assertIn('snc-mouse-down', rows[3])
+        self.assertIn('snc-mouse-down', rows[agg_row('Min')])
 
     def test_a_checked_row_stays_clickable_once_it_stops_answering(self):
         # Otherwise there is no way to uncheck it.
         lst = ['pear', 'apple']
         _, model = tally_model(lst)
         _set_column_computes(model, '$', ['np.mean($)'])
-        self.assertIn('snc-mouse-down', self.rows(self.panel(model, lst))[5])
+        self.assertIn('snc-mouse-down',
+                      self.rows(self.panel(model, lst))[agg_row('Mean')])
 
     def test_a_hole_is_a_box_holding_what_the_expression_says(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -9510,7 +9558,7 @@ class TestComputeMenuRendering(unittest.TestCase):
         panel = self.panel(model, lst)
         self.assertEqual(re.findall(r'col-compute-hole[^>]*value="([^"]*)"',
                                     panel), ['50', '90', '10'])
-        self.assertEqual(self.previews(panel)[7], '3')
+        self.assertEqual(self.previews(panel)[agg_row('Percentile')], '3')
 
     def test_a_row_hands_over_the_code_behind_its_preview(self):
         lst, model = tally_model(COMPUTE_LIST)

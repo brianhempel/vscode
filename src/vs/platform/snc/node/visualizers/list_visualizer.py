@@ -43,11 +43,11 @@ import ast
 import functools
 import html
 import keyword
+import math
 import random
 import re
 import warnings
 from dataclasses import dataclass
-from math import sqrt
 from typing import Any, List, Tuple, Optional
 
 from list_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
@@ -1805,20 +1805,24 @@ HISTOGRAM_AGG = 'counts, edges = np.histogram($, bins={{10}})'
 ROW_AGGS = ('min($$, key=lambda item: $)', 'max($$, key=lambda item: $)')
 
 COMPUTE_AGGS = (
-    ('#Unique',    'len(set($))'),
-    ('#Present',   'sum(x is not None for x in $)'),
-    ('#Missing',   'sum(x is None for x in $)'),
-    ('Min',        'min($)'),
-    ('Min Idx',    'np.argmin($)'),
-    ('Min Item',   ROW_AGGS[0]),
-    ('Mean',       'np.mean($)'),
-    ('Median',     'np.median($)'),
-    ('Percentile', 'np.percentile($, {{10}})'),
-    ('Percentile', 'np.percentile($, {{90}})'),
-    ('Max',        'max($)'),
-    ('Max Idx',    'np.argmax($)'),
-    ('Max Item',   ROW_AGGS[1]),
-    ('Histogram',  HISTOGRAM_AGG),
+    ('#Unique',         'len(set($))'),
+    ('#Present',        'sum(x is not None for x in $)'),
+    ('#Missing',        'sum(x is None for x in $)'),
+    ('#NaN',            'sum(math.isnan(x) for x in $)'),
+    ('Sum',             'sum($)'),
+    ('Min',             'min($)'),
+    ('Min Idx',         'np.argmin($)'),
+    ('Min Item',        ROW_AGGS[0]),
+    ('Mean',            'np.mean($)'),
+    ('Stddev (Pop)',    'np.std($)'),
+    ('Stddev (Sample)', 'np.std($, ddof=1)'),
+    ('Median',          'np.median($)'),
+    ('Percentile',      'np.percentile($, {{10}})'),
+    ('Percentile',      'np.percentile($, {{90}})'),
+    ('Max',             'max($)'),
+    ('Max Idx',         'np.argmax($)'),
+    ('Max Item',        ROW_AGGS[1]),
+    ('Histogram',       HISTOGRAM_AGG),
 )
 
 # The rest of the submenu: questions whose answer is a whole list rather than a
@@ -1829,8 +1833,6 @@ COMPUTE_CODES = (
     ('Unique', 'set($)',     'unique'),
     ('Tally',  'Counter($)', 'tally'),
 )
-
-COMPUTE_IMPORTS = ('import numpy as np',)
 
 # What a box the user writes an aggregation in says of itself, wherever it is
 # drawn. The same thing the column search box says of its own, less `$$$`: an
@@ -1937,11 +1939,15 @@ def _agg_row_index(lst, item):
         return NO_ANSWER
 
 
+
+
+
 def _agg_imports(template: str) -> Tuple[str, ...]:
     """The imports an expression needs, declared where it's written, the way
     TALLY_IMPORTS is."""
     code = _agg_fill(template)
-    return ((COMPUTE_IMPORTS if 'np.' in code else ())
+    return ((('import numpy as np',) if 'np.' in code else ())
+            + (('import math',) if 'math.' in code else ())
             + (TALLY_IMPORTS if 'Counter(' in code else ()))
 
 
@@ -2078,8 +2084,9 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
 
     Evaluated in the user's scope, so a column expression that named the
     program's own values has already been read by the time we get here -- but
-    `np` is handed in rather than looked up, so the answer doesn't depend on
-    the file having imported numpy (or on what it called it if it did).
+    `np` and `math` are handed in rather than looked up, so the answer doesn't
+    depend on the file having imported them (or on what it called numpy if it
+    did) -- the same two names _agg_imports writes an import for.
 
     Anything at all can go wrong here -- an expression that doesn't parse, a
     mean of strings, a numpy that isn't installed -- and none of it is worth
@@ -2094,11 +2101,11 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
         column = item_expr if _agg_is_row(template) else '_v'
         body = replace_dollars_in_py_exp(_agg_expr(_agg_fill(template)),
                                          [column, '_lst'])
-        code = f'lambda np, _v, _lst: {body}'
+        code = f'lambda np, math, _v, _lst: {body}'
         agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            return agg(_numpy(), values, lst)
+            return agg(_numpy(), math, values, lst)
     except Exception:
         return NO_ANSWER
 
@@ -3752,13 +3759,12 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
                                _agg_column_expr(template, col, source_expr),
                                source_expr))
         rows.append(
-            f'<div class="{classes}">'
+            f'<div class="{classes}"{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{html.escape(label)}</span>'
             f'{holes}</span>'
             f'<span class="col-compute-preview"'
-            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
             f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
             f'</div>')
 
@@ -3803,8 +3809,9 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f' snc-mouse-down="'
             f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
         rows.append(
-            f'<div class="col-compute-row col-compute-free'
-            f'{" checked" if written else ""}">'
+            f'<div class="col-compute-row col-compute-free{" checked" if written else ""}"'
+            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right") if written else ""}'
+            f'>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(written, disabled=not written)}</span>'
             f'<input type="text" class="col-compute-expr search-box" '
@@ -4957,7 +4964,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     columns = model.get('columns', [])
     focused_child = model.get('focused_child')
 
-    max_column_width = round(800 / sqrt(max(len(columns), 1)))
+    max_column_width = round(800 / math.sqrt(max(len(columns), 1)))
 
     search = model.get('search')
     has_search = search is not None and search != ''
