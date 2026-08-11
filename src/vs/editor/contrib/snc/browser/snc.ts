@@ -166,10 +166,20 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
+
 	// How long the pointer must rest on an [snc-dwell] element before its event
 	// is sent. Long enough that crossing a menu on the way somewhere else opens
 	// nothing, short enough to feel like the menu is following the pointer.
-	private static readonly DWELL_MS = 300;
+	private static readonly DWELL_MS = 200;
+
+	// How long the mouse must rest on a snc-py-exp handle before its expression
+	// tooltip appears.
+	private static readonly PY_EXP_TOOLTIP_SHOW_DELAY_MS = 100;
+
+	// How long the mouse must rest on an action button or a data-tooltip element
+	// before its tooltip appears.
+	private static readonly TOOLTIP_SHOW_DELAY_MS = 300;
+
 	private dwellTimer: any = null;
 	private dwellTarget: Element | null = null;
 	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
@@ -339,7 +349,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					this.actionTooltipTarget = btn;
 					this.actionTooltipTimer = setTimeout(() => {
 						this.showActionTooltip(btn);
-					}, 200);
+					}, VisualizationWidget.TOOLTIP_SHOW_DELAY_MS);
 				}
 			} else if (this.actionTooltipTarget) {
 				this.scheduleActionTooltipHide();
@@ -449,7 +459,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						clearTimeout(this.pyExpTooltipTimer);
 						this.pyExpTooltipTimer = setTimeout(() => {
 							this.showPyExpTooltip(pyExpEl!);
-						}, 100);
+						}, VisualizationWidget.PY_EXP_TOOLTIP_SHOW_DELAY_MS);
 					}
 				} else if (this.pyExpCurrentTarget) {
 					this.pyExpCurrentTarget.classList.remove('snc-py-exp-drag-hover');
@@ -496,7 +506,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						this.simpleTooltipTarget = target;
 						this.simpleTooltipTimer = setTimeout(() => {
 							this.showSimpleTooltip(target);
-						}, 200);
+						}, VisualizationWidget.TOOLTIP_SHOW_DELAY_MS);
 					}
 				} else if (this.simpleTooltipTarget) {
 					this.scheduleSimpleTooltipHide();
@@ -993,7 +1003,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					clearTimeout(this.pyExpTooltipTimer);
 					this.pyExpTooltipTimer = setTimeout(() => {
 						this.showPyExpTooltip(pyExpEl);
-					}, 100);
+					}, VisualizationWidget.PY_EXP_TOOLTIP_SHOW_DELAY_MS);
 				}
 			} else if (this.pyExpCurrentTarget) {
 				this.pyExpCurrentTarget = null;
