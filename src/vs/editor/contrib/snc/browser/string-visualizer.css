@@ -19,46 +19,12 @@
 	scrollbar-width: var(--snc-scrollbar-width);
 }
 
-/* Expanded pane: the expand toggle (only rendered for strings >4 lines tall)
-   lifts the 80px clip to 600px. */
+/* Expanded pane: the expand/collapse bar (only rendered for strings >4 lines
+   tall; the bar itself is styled in snc.css) lifts the 80px clip to 600px.
+   Kept in step with visualizer_utils.EXPANDED_PANE_MAX_HEIGHT, which is where
+   the list visualizer reads the same ceiling from. */
 .visualizer-container.expanded .string-visualizer {
 	max-height: 600px;
-}
-
-/* Full-width toggle bar sitting just below the string-visualizer pane. Rendered
-   only for strings taller than 4 lines (see string_visualizer.py). Clicking it
-   flips the container's .expanded class. Also offered in the non-focused (small)
-   preview via snc-unfocused-clickable, so a tall string can be peeked at without
-   pinning focus to its line. */
-.expand-toggle {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	height: 8px;
-	cursor: pointer;
-	user-select: none;
-	color: var(--snc-text-color);
-	border-top: 1px solid var(--snc-border-color);
-	line-height: 8px;
-}
-
-.expand-toggle:hover {
-	background: var(--snc-hover-bg);
-	color: black;
-}
-
-.expand-toggle .chevron {
-	font-size: 10px;
-	display: inline-block;
-	position: absolute;
-	pointer-events: none;
-	transition: transform 0.1s ease;
-	transform: translateY(-2.5px);
-}
-
-/* Point the chevron up once the pane is expanded (collapse affordance). */
-.visualizer-container.expanded .expand-toggle .chevron {
-	transform: translateY(3px) rotate(180deg);
 }
 
 .string-visualizer-overlay {

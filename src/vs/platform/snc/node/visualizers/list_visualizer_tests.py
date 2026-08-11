@@ -61,7 +61,7 @@ from list_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
-    ColumnKeyDown, COLUMN_DOTFILE_NAME, CELL_KEY_SEP,
+    ColumnKeyDown, ExpandToggle, COLUMN_DOTFILE_NAME, CELL_KEY_SEP,
     CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_item_type_key, _get_column_suggestions, _get_all_possible_columns,
@@ -11880,6 +11880,103 @@ class TestColumnDollarIIsTheRowIndex(unittest.TestCase):
         model['_source_span'] = ('data', 0, 4)
         panel = _render_sort_panel('$', 0, model)
         self.assertIn('snc-mouse-down', panel)
+
+
+# === Expand/collapse bar ===
+
+def make_expand_toggle_event() -> dict:
+    """Create an ExpandToggle event dict (a click on the expand/collapse bar)."""
+    return {'pythonEventStr': repr(ExpandToggle()), 'eventJSON': {}}
+
+
+def _pane_max_height(output: str) -> int:
+    """How tall the table's scroll pane was allowed to get, in px."""
+    style = re.search(r'<div class="list-table-scroll" style="([^"]*)"', output)[1]
+    return int(re.search(r'max-height: (\d+)px', style)[1])
+
+
+class TestExpandToggle(unittest.TestCase):
+    """The bar under a table the pane is too short to show all of."""
+
+    # 30 rows at 18px each want more than the 368px a top-level table gets.
+    TALL = list(range(30))
+    SHORT = [1, 2, 3]
+
+    def table(self, lst, model=None, **kwargs):
+        if model is None:
+            model = init_model(lst, mock_get_visualizer)
+        return visualize(lst, model, mock_get_visualizer, None, **kwargs)
+
+    def test_bar_is_offered_when_the_pane_clips_the_table(self):
+        output = self.table(self.TALL)
+        self.assertIn('expand-toggle', output)
+        self.assertIn('ExpandToggle()', output)
+
+    def test_no_bar_when_the_whole_table_already_fits(self):
+        output = self.table(self.SHORT)
+        self.assertNotIn('expand-toggle', output)
+        self.assertNotIn('ExpandToggle', output)
+
+    def test_the_bar_reports_a_click_that_flips_the_state(self):
+        model = init_model(self.TALL, mock_get_visualizer)
+        model, _ = update(make_expand_toggle_event(), None, model, self.TALL,
+                          mock_get_visualizer)
+        self.assertTrue(model['expanded'])
+        model, _ = update(make_expand_toggle_event(), None, model, self.TALL,
+                          mock_get_visualizer)
+        self.assertFalse(model['expanded'])
+
+    def test_expanding_lifts_the_panes_ceiling(self):
+        model = init_model(self.TALL, mock_get_visualizer)
+        collapsed = _pane_max_height(self.table(self.TALL, model))
+        model['expanded'] = True
+        self.assertGreater(_pane_max_height(self.table(self.TALL, model)), collapsed)
+
+    def test_the_bar_says_which_way_it_goes(self):
+        model = init_model(self.TALL, mock_get_visualizer)
+        self.assertIn('data-tooltip="Expand"', self.table(self.TALL, model))
+        model['expanded'] = True
+        self.assertIn('data-tooltip="Collapse"', self.table(self.TALL, model))
+
+    def test_an_open_bar_carries_the_class_that_turns_its_chevron(self):
+        model = init_model(self.TALL, mock_get_visualizer)
+        model['expanded'] = True
+        self.assertIn('class="expand-toggle expanded"', self.table(self.TALL, model))
+
+    def test_a_state_left_over_from_a_longer_list_doesnt_stretch_a_short_one(self):
+        # Without a bar there is nothing to collapse it back with, so a table
+        # that fits ignores the flag rather than sitting open on it.
+        model = init_model(self.SHORT, mock_get_visualizer)
+        model['expanded'] = True
+        output = self.table(self.SHORT, model)
+        self.assertNotIn('expand-toggle', output)
+        self.assertEqual(_pane_max_height(output),
+                         _pane_max_height(self.table(self.SHORT)))
+
+    def test_the_bar_is_offered_in_the_unfocused_preview_too(self):
+        # Marked so the frontend toggles in place instead of pinning focus to
+        # the line, and so a slipped drag isn't read as a drag of the cell.
+        output = self.table(self.TALL, small=True)
+        self.assertIn('expand-toggle', output)
+        self.assertIn('snc-unfocused-clickable', output)
+        self.assertIn('draggable="false"', output)
+
+    def test_the_focused_bar_is_a_plain_control(self):
+        # The focused visualizer dispatches its own clicks already; opting out
+        # of click-to-focus there would only take a click away from the line.
+        self.assertNotIn('snc-unfocused-clickable', self.table(self.TALL))
+
+    def test_the_bar_sits_between_the_table_and_the_search_area(self):
+        output = self.table(self.TALL)
+        self.assertLess(output.index('</table>'), output.index('expand-toggle'))
+        self.assertLess(output.index('expand-toggle'), output.index('search-div'))
+
+    def test_a_nested_table_gets_its_own_bar_against_its_own_ceiling(self):
+        # A cell is handed 80px, so a list far shorter than a top-level one is
+        # already clipped there.
+        lst = [{'xs': [1, 2, 3]}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIn('expand-toggle', self.table(lst, model))
 
 
 if __name__ == '__main__':

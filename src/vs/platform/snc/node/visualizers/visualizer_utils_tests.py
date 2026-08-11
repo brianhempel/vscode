@@ -26,6 +26,7 @@ from visualizer_utils import (
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
     opens_block, with_pass_body, without_pass_body,
     supported_kwargs, call_with_supported_kwargs, keyword_params, wants_kwarg,
+    render_expand_toggle,
 )
 
 
@@ -1051,6 +1052,42 @@ class TestSupportedKwargs(unittest.TestCase):
             pass
         self.assertIsNone(keyword_params(takes_all))
         self.assertEqual(keyword_params(takes_some), frozenset({'value', 'slots_config'}))
+
+
+class TestRenderExpandToggle(unittest.TestCase):
+    """The expand/collapse bar the string and list visualizers share."""
+
+    def test_it_reports_the_event_the_caller_named(self):
+        bar = render_expand_toggle(False, 'ExpandToggle()')
+        self.assertIn('snc-mouse-down="ExpandToggle()"', bar)
+
+    def test_an_event_with_markup_in_it_is_escaped(self):
+        bar = render_expand_toggle(False, "ExpandToggle(tag='<b>')")
+        self.assertNotIn('<b>', bar)
+        self.assertIn('&lt;b&gt;', bar)
+
+    def test_a_closed_bar_offers_to_open(self):
+        bar = render_expand_toggle(False, 'ExpandToggle()')
+        self.assertIn('data-tooltip="Expand"', bar)
+        self.assertIn('class="expand-toggle"', bar)
+
+    def test_an_open_bar_offers_to_close_and_says_so_in_its_class(self):
+        # The class is what turns the chevron over, and it sits on the bar
+        # rather than on the container: the container of a table holds the
+        # cells too, and their own panes are not what this opened.
+        bar = render_expand_toggle(True, 'ExpandToggle()')
+        self.assertIn('data-tooltip="Collapse"', bar)
+        self.assertIn('class="expand-toggle expanded"', bar)
+
+    def test_a_focused_bar_is_a_plain_control(self):
+        bar = render_expand_toggle(False, 'ExpandToggle()')
+        self.assertNotIn('snc-unfocused-clickable', bar)
+        self.assertNotIn('draggable', bar)
+
+    def test_a_bar_in_the_unfocused_preview_acts_without_taking_focus(self):
+        bar = render_expand_toggle(False, 'ExpandToggle()', small=True)
+        self.assertIn('snc-unfocused-clickable', bar)
+        self.assertIn('draggable="false"', bar)
 
 
 if __name__ == '__main__':

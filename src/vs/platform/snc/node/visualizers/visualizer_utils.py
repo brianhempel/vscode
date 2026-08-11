@@ -129,6 +129,46 @@ def render_tool_toolbar(tools, current: str, make_event, *, disabled=()) -> str:
     return f'<div class="tool-toolbar">{"".join(btns)}</div>'
 
 
+# How tall a pane opened by the expand toggle is allowed to get. The string
+# visualizer sizes its pane in CSS (.visualizer-container.expanded
+# .string-visualizer, in string-visualizer.css) and repeats the number there;
+# the table works its height out here, so it reads it from Python.
+EXPANDED_PANE_MAX_HEIGHT = 600
+
+
+def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> str:
+    """Render the full-width bar under a pane that is clipping its content.
+
+    Offered by the string and list visualizers when the collapsed pane doesn't
+    show everything. What opening one costs is each visualizer's own business
+    (the string lifts a CSS max-height, the table recomputes its inline one);
+    this draws the bar, points the chevron, and reports the click.
+
+    The open/closed class sits on the bar rather than on the visualizer's
+    container, so a container holding children -- a table's cells -- doesn't
+    hand their panes a state that isn't theirs.
+
+    Args:
+      expanded: whether the pane is open, which picks the tooltip and turns
+        the chevron over.
+      event: the repr'd event string for snc-mouse-down. Taken as a string
+        because each visualizer defines its own ExpandToggle type, and it is
+        eval'd in that module's namespace.
+      small: whether this is the non-focused preview, where the bar is the one
+        control still offered. There it opts out of click-to-focus
+        (snc-unfocused-clickable, see snc.ts) so a tall value can be peeked at
+        without pinning focus to its line, and out of dragging, so a click the
+        user slipped on isn't read as a drag of the cell around it.
+    """
+    preview_attrs = ' draggable="false" snc-unfocused-clickable' if small else ''
+    return (
+        f'<div class="expand-toggle{" expanded" if expanded else ""}"{preview_attrs}'
+        f' snc-mouse-down="{html.escape(event)}"'
+        f' data-tooltip="{"Collapse" if expanded else "Expand"}">'
+        f'<span class="chevron">⌄</span></div>'
+    )
+
+
 # =============================================================================
 # Dotfile persistence (generic JSON key→list storage)
 # =============================================================================

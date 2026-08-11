@@ -136,11 +136,6 @@
 	border-top: 1px solid var(--snc-border-color);
 	gap: 5px;
 }
-.list-visualizer > .search-div { /* avoid a thin sliver of scrolling table content showing up at certain zoom levels. because we have negative margin on the table scroller to hide the bottom table borders */
-	background-color: var(--snc-bg);
-	z-index: 1;
-	border-radius: 0 0 4px 4px;
-}
 
 .search-div-row {
 	display: flex;
@@ -216,6 +211,56 @@
 .tool-button.dimmed:hover {
 	background: transparent;
 	color: var(--snc-text-color);
+}
+
+/* === Expand/collapse bar ===
+   Full-width bar sitting just below a pane that is clipping its content,
+   rendered by visualizer_utils.render_expand_toggle. Shared by the string
+   visualizer (strings taller than 4 lines) and the list visualizer (tables
+   taller than their pane). How far the pane then opens is the visualizer's
+   own business and lives with it: the string's in string-visualizer.css, the
+   table's inline (see _visualize_table).
+
+   The .expanded state is on the bar, not on the visualizer container, so a
+   container that also holds children -- a table's cells -- doesn't hand their
+   panes a state that isn't theirs. */
+
+.expand-toggle {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 8px;
+	cursor: pointer;
+	user-select: none;
+	color: var(--snc-text-color);
+	border-top: 1px solid var(--snc-border-color);
+	line-height: 8px;
+	/* avoid a thin sliver of scrolling table content showing up at certain zoom levels. because we have negative margin on the table scroller to hide the bottom table borders */
+	background-color: var(--snc-bg);
+	z-index: 1;
+	&:last-child {
+		/* make bg not cut off the corners of the visualizer */
+		border-radius: 0 0 4px 4px;
+	}
+}
+
+.expand-toggle:hover {
+	background: var(--snc-hover-bg);
+	color: black;
+}
+
+.expand-toggle .chevron {
+	font-size: 10px;
+	display: inline-block;
+	position: absolute;
+	pointer-events: none;
+	transition: transform 0.1s ease;
+	transform: translateY(-2.5px);
+}
+
+/* Point the chevron up once the pane is open (collapse affordance). */
+.expand-toggle.expanded .chevron {
+	transform: translateY(3px) rotate(180deg);
 }
 
 .search-toggles-container {

@@ -132,7 +132,8 @@ from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncat
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
                               dollar_expr_parses, is_nested,
-                              nerd_font_icon, render_tool_toolbar)
+                              nerd_font_icon, render_tool_toolbar,
+                              render_expand_toggle)
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -3696,11 +3697,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     expanded_class = ' expanded' if expanded else ''
     expand_toggle_html = ''
     if line_count > 4:
-        expand_toggle_html = (
-            f'<div class="expand-toggle" snc-mouse-down="{html.escape(repr(ExpandToggle()))}"'
-            f' data-tooltip="{"Collapse" if expanded else "Expand"}">'
-            f'<span class="chevron">⌄</span></div>'
-        )
+        expand_toggle_html = render_expand_toggle(expanded, repr(ExpandToggle()))
 
     # Add tabindex to make div focusable for keyboard events, and snc-key-down handler
     # doing it like this to try to make less string garbage. Small mode returned

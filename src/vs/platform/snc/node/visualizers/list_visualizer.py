@@ -67,6 +67,7 @@ from visualizer_utils import (
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
     nerd_font_icon, render_tool_toolbar,
+    render_expand_toggle, EXPANDED_PANE_MAX_HEIGHT,
     ICONS,
 )
 
@@ -309,6 +310,11 @@ class ActionButtonClick:
 class DropdownToggle:
     """User toggled a dropdown menu (e.g. the ? menu)."""
     dropdown_id: str
+
+@dataclass(frozen=True, slots=True)
+class ExpandToggle:
+    """Expand/collapse the table pane (only offered when the pane clips it)."""
+    pass
 
 @dataclass(frozen=True, slots=True)
 class JoinSeparatorInput:
@@ -5209,11 +5215,21 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         except Exception:
             pass
 
-    actual_max_height = (max_height or 400) - 32
+    collapsed_max_height = (max_height or 144) - 32
     # The aggregation rows are part of what the table has to show, so a short
-    # one doesn't get a scrollbar for the sake of the answers under it.
+    # one doesn't get a scrollbar for the sake of the answers under it. 18px is
+    # the height of a row of plain cells; one holding a nested visualizer is
+    # taller, so this is a floor on how tall the table wants to be.
     agg_rows = len(_agg_layout(columns, model))
-    actual_min_height = min(18 * (len(lst) + 1 + agg_rows), actual_max_height)
+    wanted_height = 18 * (len(lst) + 1 + agg_rows)
+    # The expand/collapse bar is only offered when the pane is actually keeping
+    # rows out of sight -- and a state left over from a longer list is ignored
+    # for the same reason, since there'd be no bar left to collapse it with.
+    can_expand = wanted_height > collapsed_max_height
+    expanded = can_expand and bool(model.get('expanded', False))
+    actual_max_height = (max(EXPANDED_PANE_MAX_HEIGHT, collapsed_max_height)
+                         if expanded else collapsed_max_height)
+    actual_min_height = min(wanted_height, actual_max_height)
     if not small: # room for toolbar
         actual_min_height = max(actual_min_height, 41)
 
@@ -5361,6 +5377,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     strs.append('</table>')
     strs.append('</div>')
+
+    # Under the pane and above the search area, where the string visualizer
+    # puts its own. Nothing marks the container: the pane's ceiling is written
+    # inline above, and a class here would reach the cells' panes too.
+    if can_expand:
+        strs.append(render_expand_toggle(expanded, repr(ExpandToggle()), small=small))
 
     if not small:
         strs.append(_render_search_box(model, lst, eval_in_scope, small=False))
@@ -5973,6 +5995,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # the click order the user happened to use doesn't leak out.
                 model['pick_expr'] = _build_pick_expr(
                     model, _pick_source_expr(model, var_and_exp) or 'result')
+
+        case ExpandToggle():
+            # The one bit the bar owns. Undeclared in the defaults above: it is
+            # false until the bar is there to be clicked, and the render reads
+            # it back the same way.
+            model['expanded'] = not model.get('expanded', False)
 
         case DropdownToggle(dropdown_id=did):
             current = model.get('openDropdown')
