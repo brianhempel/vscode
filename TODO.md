@@ -39,7 +39,7 @@
 - [x] make a pick segment mode for lists: can pick indices, whole rows, or just selected columns
 - [x] figure out what table widgets should be per column
 - [x] column tally
-- [ ] aggregations
+- [x] aggregations
 - [ ] dictionary visualizer
 - [ ] tuple visualizer
 - [ ] list of tuples

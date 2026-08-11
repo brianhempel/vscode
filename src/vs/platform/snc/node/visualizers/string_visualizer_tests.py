@@ -5292,27 +5292,24 @@ class TestHoverPreview(unittest.TestCase):
 
     # --- Model state tests ---
 
-    def test_mousemove_no_buttons_with_literal_tool_sets_literal_hover(self):
-        """MouseMove with buttons=0 and the 'literal' tool active sets hoverType='literal'."""
-        # Top/bottom half no longer determines hoverType; the active tool does.
+    def test_mousemove_no_buttons_with_literal_tool_sets_hover(self):
+        """MouseMove with buttons=0 and the 'literal' tool active sets hoverIdx."""
         # The default tool is 'literal'.
         event = make_mouse_move_event(5, buttons=0, top_half=True)
         model, _ = update(event, self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['hoverIdx'], _legacy_internal_index(5))
-        self.assertEqual(model['hoverType'], 'literal')
 
-    def test_mousemove_no_buttons_with_fuzzy_tool_sets_fuzzy_hover(self):
-        """MouseMove with buttons=0 and the 'fuzzy' tool active sets hoverType='fuzzy'."""
+    def test_mousemove_no_buttons_with_fuzzy_tool_sets_hover(self):
+        """MouseMove with buttons=0 and the 'fuzzy' tool active sets hoverIdx."""
         self.model['tool'] = 'fuzzy'
         event = make_mouse_move_event(5, buttons=0, top_half=False)
         model, _ = update(event, self.var_and_exp, self.model, self.value)
 
         self.assertEqual(model['hoverIdx'], _legacy_internal_index(5))
-        self.assertEqual(model['hoverType'], 'fuzzy')
 
     def test_mousedown_clears_hover_state(self):
-        """MouseDown clears hoverIdx and hoverType."""
+        """MouseDown clears hoverIdx."""
         # First set hover state
         event = make_mouse_move_event(5, buttons=0, top_half=True)
         model, _ = update(event, self.var_and_exp, self.model, self.value)
@@ -5323,7 +5320,6 @@ class TestHoverPreview(unittest.TestCase):
         model, _ = update(event, self.var_and_exp, model, self.value)
 
         self.assertIsNone(model['hoverIdx'])
-        self.assertIsNone(model['hoverType'])
 
     def test_hover_not_set_while_dragging(self):
         """MouseMove with buttons=1 (dragging) does not set hover state."""
@@ -5336,7 +5332,6 @@ class TestHoverPreview(unittest.TestCase):
         model, _ = update(event, self.var_and_exp, model, self.value)
 
         self.assertIsNone(model.get('hoverIdx'))
-        self.assertIsNone(model.get('hoverType'))
 
     # --- Rendering tests ---
 
@@ -5344,7 +5339,6 @@ class TestHoverPreview(unittest.TestCase):
         """visualize() adds the 'hover' CSS class to the hovered char-span (CSS supplies the border)."""
         model = init_model(self.value)
         model['hoverIdx'] = 4  # 'l' in "hello" (new internal index)
-        model['hoverType'] = 'literal'
 
         html_output = visualize(self.value, model, None, None)
 
@@ -5353,24 +5347,12 @@ class TestHoverPreview(unittest.TestCase):
         # Border styling is now done in CSS, not inline.
         self.assertNotIn('border-top', html_output)
 
-    def test_visualize_shows_hover_class_for_fuzzy(self):
-        """Hover for fuzzy uses the same 'hover' class (CSS distinguishes via hoverType state)."""
-        model = init_model(self.value)
-        model['hoverIdx'] = 4
-        model['hoverType'] = 'fuzzy'
-
-        html_output = visualize(self.value, model, None, None)
-
-        self.assertIn('class="char-span hover"', html_output)
-        self.assertNotIn('border-bottom', html_output)
-
     def test_hover_does_not_affect_highlighted_char(self):
         """If a char is already in a selected segment, the .hover class is not applied to it."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)'"
         # Hover on index 3 which is inside the 'hello' literal segment (new index space).
         model['hoverIdx'] = 3
-        model['hoverType'] = 'fuzzy'
 
         html_output = visualize(self.value, model, None, None)
 
@@ -5389,7 +5371,6 @@ class TestHoverPreview(unittest.TestCase):
         """
         model = init_model(self.value)
         model['hoverIdx'] = 4
-        model['hoverType'] = 'literal'
 
         html_output = visualize(self.value, model, None, None)
 
@@ -5639,11 +5620,11 @@ class TestSmallParameter(unittest.TestCase):
         self.assertNotIn('char-span', output)
 
     def test_small_mode_prints_raw_string(self):
-        """Small mode prints the string as a single text group (wrapped in quotes)."""
+        """Small mode prints the string as one plain text node (wrapped in quotes),
+        with no per-character elements and no index wrapper around it."""
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True)
-        self.assertIn('string-visualizer-text-group', output)
-        self.assertIn('&#x27;hello&#x27;</span>', output)
+        self.assertIn('<div>&#x27;hello&#x27;</div>', output)
 
     def test_small_mode_escapes_html(self):
         """Small mode still HTML-escapes the string content."""
@@ -5694,6 +5675,50 @@ class TestSmallModeQuotes(unittest.TestCase):
         output = visualize("abc", model, None, None, small=True)
         self.assertIn("&#x27;abc&#x27;", output)
         self.assertNotIn("&#x27; abc", output)
+
+
+class TestSmallModeIsNotCharAddressable(unittest.TestCase):
+    """The non-focused preview carries no per-character addressing at all.
+
+    snc-text-start is the front-end's hook for turning a caret offset into an
+    internal index, and the preview cannot honour it: a newline prints one
+    character but spends three internal indices ($, the \\n display, ^), so
+    every character after one would name the wrong index. Nothing needs those
+    indices either -- a non-focused child only ever acts on the mousedown that
+    pins its focus, and that ignores the payload -- so the preview drops the
+    addressing and keeps one container-level mousedown."""
+
+    def test_no_text_start_index_single_line(self):
+        model = init_model("abc")
+        self.assertNotIn('snc-text-start', visualize("abc", model, None, None, small=True))
+
+    def test_no_text_start_index_multiline(self):
+        model = init_model("ab\ncd\nef")
+        self.assertNotIn('snc-text-start',
+                         visualize("ab\ncd\nef", model, None, None, small=True))
+
+    def test_no_per_character_mouse_listeners(self):
+        """The whole point of the preview is to stay cheap: one text node, not
+        one element per character."""
+        output = visualize("abcdef", init_model("abcdef"), None, None, small=True)
+        self.assertNotIn('snc-mouse=', output)
+
+    def test_multiline_preview_is_still_one_text_node(self):
+        """Newlines must not split the string into a span per line."""
+        output = visualize("a\nb\nc\nd", init_model("a\nb\nc\nd"), None, None, small=True)
+        self.assertEqual(output.count('<span'), 0)
+
+    def test_container_carries_a_mousedown_so_it_can_be_focused(self):
+        """A nested preview is focused by clicking it (route_child_event pins
+        focus on the first mousedown), so something has to dispatch one."""
+        output = visualize("abc", init_model("abc"), None, None, small=True)
+        self.assertIn('snc-mouse-down=', output)
+
+    def test_focused_render_still_groups_text(self):
+        """Only the preview drops the addressing; the focused render batches
+        plain characters into indexed groups exactly as before."""
+        output = visualize("abcdef", init_model("abcdef"), None, None, small=False)
+        self.assertIn('snc-text-start', output)
 
 
 class TestTextGrouping(unittest.TestCase):
@@ -5752,7 +5777,6 @@ class TestTextGrouping(unittest.TestCase):
         and the surrounding chars are in separate groups."""
         model = init_model("hello")
         model['hoverIdx'] = 4
-        model['hoverType'] = 'literal'
         output = visualize("hello", model, None, None)
         self.assertIn('snc-mouse="4"', output)
         self.assertIn('snc-text-start="1"', output)

@@ -168,6 +168,17 @@ class KeyDown:
     pass
 
 @dataclass(frozen=True, slots=True)
+class PinFocus:
+    """A click on the non-focused preview, which exists only to be one.
+
+    A nested preview is focused by clicking it: route_child_event pins focus on
+    the first mousedown a non-focused child receives and drops the payload
+    unread. So this event has no case in `update` on purpose - by the time a
+    string visualizer would handle its own events it is focused, and a focused
+    visualizer no longer renders the preview that sends this."""
+    pass
+
+@dataclass(frozen=True, slots=True)
 class DropdownToggle:
     dropdown_id: str
 
@@ -3408,28 +3419,33 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         display = "'" + raw.replace("\n", "\n ") + "'"
         size_styling = f'style="max-width:{max_width}px"' if max_width is not None else ''
 
+        # Plain text, no per-character addressing. snc-text-start would let the
+        # front-end turn a caret offset into an internal index, but the preview
+        # cannot honour it: a newline prints one character while spending three
+        # internal indices ($, the \n display, ^), so everything past one would
+        # name the wrong character. Splitting per line would fix the arithmetic
+        # at the cost of an element per line, which is what the grouping exists
+        # to avoid. Nothing wants those indices anyway -- see PinFocus.
+        display_html = html.escape(display)
+
         # Expand/collapse toggle is offered even in the non-focused (small)
         # preview so a tall string can be peeked at without pinning focus to
         # its line. Mirrors the focused-mode behavior below: only tall strings
         # (>4 lines) get it, since shorter ones aren't clipped by the 80px pane.
-        # The toggle is marked snc-unfocused-clickable so the frontend routes
-        # its mousedown through as an ExpandToggle event instead of swallowing
-        # it as a click-to-focus (see snc.ts).
         expanded = bool(model.get('expanded', False)) if model else False
         expanded_class = ' expanded' if expanded else ''
         line_count = (raw.count('\n') + 1) if raw else 1
         expand_toggle_html = ''
         if line_count > 4:
-            expand_toggle_html = (
-                f'<div class="expand-toggle" draggable="false" snc-unfocused-clickable'
-                f' snc-mouse-down="{html.escape(repr(ExpandToggle()))}"'
-                f' data-tooltip="{"Collapse" if expanded else "Expand"}">'
-                f'<span class="chevron">⌄</span></div>'
-            )
+            expand_toggle_html = render_expand_toggle(
+                expanded, repr(ExpandToggle()), small=True)
 
+        # One mousedown for the whole preview, standing in for the per-character
+        # ones the focused render has. A nested preview is focused by clicking
+        # it, and that is all this has to carry.
         small_html = (
-            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container literal-tool-selected small{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
-            f'{text_group_span(list(display), 0)}'
+            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" class="visualizer-container literal-tool-selected small{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'{display_html}'
             f'</div></div>{expand_toggle_html}</div>'
         )
         return [small_html]
@@ -4081,7 +4097,6 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "redoHistory": [],        # Stack for redo
         "handledKeys": ["Escape", "Enter", "cmd Backspace", "cmd r", "cmd z", "cmd shift z"],  # Keys to intercept from VS Code
         "hoverIdx": None,         # Internal index of the character currently hovered
-        "hoverType": None,        # "literal" or "fuzzy" based on mouse position in top/bottom half
         "replace_visible": False, # Whether the replace input box is visible
         "expanded": False,        # Whether the (tall) string-visualizer pane is expanded
         "replace_text": None,     # The replacement text (a Python string literal, e.g., "'world'")
@@ -5290,7 +5305,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             model['handleDrag'] = None
             # Clear hover preview (actual selection takes over)
             model['hoverIdx'] = None
-            model['hoverType'] = None
 
             # Determine selection type from active tool + modifier overrides
             anchor_type = _resolve_selection_type(model, event_json)
@@ -5388,13 +5402,10 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model = finalize_segment(model, value)
                 # Update hover preview state from active tool + modifier overrides.
                 # Index tool: no hover preview since clicking does nothing.
-                hover_type = _resolve_selection_type(model, event_json)
-                if hover_type == 'index':
+                if _resolve_selection_type(model, event_json) == 'index':
                     model['hoverIdx'] = None
-                    model['hoverType'] = None
                 else:
                     model['hoverIdx'] = idx
-                    model['hoverType'] = hover_type
             elif model.get('dragging'):
                 model['cursorIdx'] = idx
 
@@ -5702,7 +5713,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 _commit_open_dropdown_edit(model)
                 model['openDropdown'] = None
                 model['hoverIdx'] = None
-                model['hoverType'] = None
                 # Selections are scoped to a single pick-mode session; clear
                 # them whenever the tool changes (entering or leaving pick).
                 if t == 'pick' or old_tool == 'pick':

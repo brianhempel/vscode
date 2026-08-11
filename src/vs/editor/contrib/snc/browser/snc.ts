@@ -1099,6 +1099,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		let node = ev.target as Node;
 		let el: Element | null = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node.parentElement);
 
+		// A visualizer rendered small is a non-focused preview, and Python drops
+		// every event on a non-focused child except the mousedown that pins focus
+		// (route_child_event). Mouse moves over one can therefore only ever cost a
+		// full program re-run, so they never leave the front-end. Down/up still
+		// dispatch, since that mousedown is how the preview gets focused.
+		if (attr_name === 'snc-mouse-move' && el?.closest('.visualizer-container.small')) {
+			return;
+		}
+
 		while (el && el != this.domNode) {
 			if (el.hasAttribute(attr_name) || el.hasAttribute(`snc-mouse`)) {
 				let pythonEventStr: string;
@@ -2349,6 +2358,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private topSpacerZoneId: string | null = null;
 	private topSpacerHeight = 0;
 	private isAdjustingTopSpacer = false;
+	/**
+	 * Height in px of each line's view zone, kept in step with `viewZones`.
+	 * A zone can only be resized by removing and re-adding it, which relays out
+	 * everything below; knowing the current height lets us skip that when the
+	 * new height is the same (the common case on a hover re-render).
+	 */
+	private viewZoneHeights: Map<number, number> = new Map();
 	private debounceTimer: any = null;
 	private readonly debounceDelay = 100; // ms
 
@@ -3326,6 +3342,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		});
 		this.viewZones.clear();
+		this.viewZoneHeights.clear();
 		this.topSpacerHeight = 0;
 	}
 
@@ -3496,6 +3513,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		}
 
+		// Set when a view zone is added, removed, or resized. Such a change moves
+		// every widget below it, including widgets whose own content did not
+		// change, so they all have to be repositioned rather than just the ones
+		// in `widgetsToReposition`.
+		let zonesChanged = false;
+
 		this.editor.changeViewZones((accessor) => {
 			// Remove widgets/view zones for lines no longer present
 			for (const [line, widgets] of Array.from(this.visualizationWidgets.entries())) {
@@ -3504,7 +3527,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 					for (const w of widgets) { w.dispose(); }
 					this.visualizationWidgets.delete(line);
 					const vz = this.viewZones.get(line);
-					if (vz) { accessor.removeZone(vz); this.viewZones.delete(line); }
+					if (vz) {
+						accessor.removeZone(vz);
+						this.viewZones.delete(line);
+						this.viewZoneHeights.delete(line);
+						zonesChanged = true;
+					}
 				}
 			}
 
@@ -3547,20 +3575,30 @@ export class SNCController extends Disposable implements IEditorContribution {
 						const viewZoneHeightInPx = getViewZoneHeightInPx(existing);
 						const existingZoneId = this.viewZones.get(lineNumber);
 						if (viewZoneHeightInPx > 0) {
-							if (existingZoneId) {
-								accessor.removeZone(existingZoneId);
+							// A zone's height can only be changed by replacing it, and that
+							// relays out every line below. Content re-renders that leave the
+							// widget the same height (a hover repaint, say) must not pay for
+							// that, so an unchanged height is left strictly alone.
+							if (!existingZoneId || this.viewZoneHeights.get(lineNumber) !== viewZoneHeightInPx) {
+								if (existingZoneId) {
+									accessor.removeZone(existingZoneId);
+								}
+								const viewZone: IViewZone = {
+									afterLineNumber: lineNumber,
+									heightInPx: viewZoneHeightInPx,
+									domNode: document.createElement('div'),
+									suppressMouseDown: false
+								};
+								const viewZoneId = accessor.addZone(viewZone);
+								this.viewZones.set(lineNumber, viewZoneId);
+								this.viewZoneHeights.set(lineNumber, viewZoneHeightInPx);
+								zonesChanged = true;
 							}
-							const viewZone: IViewZone = {
-								afterLineNumber: lineNumber,
-								heightInPx: viewZoneHeightInPx,
-								domNode: document.createElement('div'),
-								suppressMouseDown: false
-							};
-							const viewZoneId = accessor.addZone(viewZone);
-							this.viewZones.set(lineNumber, viewZoneId);
 						} else if (existingZoneId) {
 							accessor.removeZone(existingZoneId);
 							this.viewZones.delete(lineNumber);
+							this.viewZoneHeights.delete(lineNumber);
+							zonesChanged = true;
 						}
 					}
 				} else {
@@ -3569,7 +3607,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 						for (const w of existing) { w.dispose(); }
 						this.visualizationWidgets.delete(lineNumber);
 						const oldZone = this.viewZones.get(lineNumber);
-						if (oldZone) { accessor.removeZone(oldZone); this.viewZones.delete(lineNumber); }
+						if (oldZone) {
+							accessor.removeZone(oldZone);
+							this.viewZones.delete(lineNumber);
+							this.viewZoneHeights.delete(lineNumber);
+							zonesChanged = true;
+						}
 					}
 
 					const widgets: VisualizationWidget[] = [];
@@ -3607,6 +3650,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 						};
 						const viewZoneId = accessor.addZone(viewZone);
 						this.viewZones.set(lineNumber, viewZoneId);
+						this.viewZoneHeights.set(lineNumber, viewZoneHeightInPx);
+						zonesChanged = true;
 					}
 				}
 			}
@@ -3631,7 +3676,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		}
 
-		for (const widget of widgetsToReposition) {
+		// A zone that was added, removed, or resized shifted every line below it,
+		// so widgets whose own content never changed are now sitting at a stale
+		// `top`. Monaco keeps the last position it was handed rather than asking
+		// for a fresh one, so nothing corrects them until the next scroll event.
+		const repositionTargets = zonesChanged
+			? Array.from(this.visualizationWidgets.values()).flat()
+			: widgetsToReposition;
+		for (const widget of repositionTargets) {
 			widget.updatePosition();
 		}
 		this.applySyntaxErrorClassToWidgets();

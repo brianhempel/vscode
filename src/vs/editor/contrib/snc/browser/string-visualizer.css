@@ -97,10 +97,6 @@
 }
 
 .char-span {
-	/* &.hover {
-		background: rgba(0, 0, 0, 0.1);
-	} */
-
 	&.is-special {
 		color: #a5a5a5;
 	}
@@ -670,12 +666,7 @@ body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-se
 	}
 }
 
-/* In pick-tool mode, suppress the literal/fuzzy hover affordances and the
-   resize handles - the only interaction in this mode is chip-click. */
-.visualizer-container.pick-tool-selected .char-span.hover {
-	background: transparent;
-}
-
+/* In pick-tool mode, suppress the resize handles - the only interaction in this mode is chip-click. */
 .visualizer-container.pick-tool-selected .char-span-resize-handle {
 	display: none;
 }
