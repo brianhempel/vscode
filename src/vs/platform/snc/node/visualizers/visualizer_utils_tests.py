@@ -17,6 +17,7 @@ import tempfile
 from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               aggregate_handled_keys, eval_dollar_expr,
                               replace_dollars_in_py_exp, dollar_expr_parses,
+                              dollar_expr_names_index,
                               py_exp_attrs, nest_child_command,
                               wrap_drag_grab, defer_drag_grab,
                               CHILD_SOURCE_BINDER)
@@ -454,6 +455,91 @@ class TestReplaceDollarsInPyExp(unittest.TestCase):
         self.assertEqual(
             replace_dollars_in_py_exp('$.upper()', ['rows[0].name']),
             'rows[0].name.upper()')
+
+
+class TestDollarIIsOneTokenOfItsOwn(unittest.TestCase):
+    """`$i` names the index of the value, not a scope. A run of dollars says how
+    far out to look; `$i` says which one of them we are at, so it is bound on its
+    own rather than by run length."""
+
+    def test_it_binds_to_the_index_it_is_given(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('$ * $i', ['item'], index_exp='i'),
+            'item * i')
+
+    def test_a_caller_with_no_index_leaves_it_as_written(self):
+        # Which is not Python, so it lands in the caller's except as "no value"
+        # -- the same answer as a dollar run with no scope behind it.
+        self.assertEqual(replace_dollars_in_py_exp('$ * $i', ['item']),
+                         'item * $i')
+
+    def test_the_i_has_to_be_the_whole_of_the_name(self):
+        # $item is a dollar beside a variable the program might have, not an
+        # index. Only a bare i is the index.
+        self.assertEqual(
+            replace_dollars_in_py_exp('$item', ['_v'], index_exp='_i'), '_vitem')
+        self.assertEqual(
+            replace_dollars_in_py_exp('$i2', ['_v'], index_exp='_i'), '_vi2')
+
+    def test_only_the_innermost_scope_has_an_index(self):
+        # A list has one index to give, so $$i names nothing and is left alone.
+        self.assertEqual(
+            replace_dollars_in_py_exp('$$i', ['item', 'lst'], index_exp='i'),
+            '$$i')
+
+    def test_an_i_in_a_string_literal_is_string_content(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('"$i" + str($i)', ['item'], index_exp='i'),
+            '"$i" + str(i)')
+
+    def test_dollar_expr_parses_reads_it_as_a_value(self):
+        self.assertEqual([dollar_expr_parses(s) for s in ('$i', '$ * $i', '$i(')],
+                         [True, True, False])
+
+    def test_eval_binds_the_index_beside_the_value(self):
+        self.assertEqual(eval_dollar_expr('$ * $i', 5, index=3), 15)
+
+    def test_eval_binds_it_beside_the_enclosing_scopes_too(self):
+        lst = [3, 1, 5]
+        self.assertEqual(
+            eval_dollar_expr('($, $i, len($$))', 1, outer=(lst,), index=0),
+            (1, 0, 3))
+
+    def test_eval_without_an_index_is_an_error(self):
+        with self.assertRaises(Exception):
+            eval_dollar_expr('$ * $i', 5)
+
+    def test_an_index_of_zero_still_counts_as_one(self):
+        # Falsy, and bound all the same -- row 0 is a row like any other.
+        self.assertEqual(eval_dollar_expr('$i', 'a', index=0), 0)
+
+
+class TestDollarExprNamesIndex(unittest.TestCase):
+    """Whether an expression asks for the index, which is what every caller
+    choosing between `for item in lst` and `for i, item in enumerate(lst)` has to
+    know. Asked through the substitution itself, so it tells code from string
+    content the same way binding does."""
+
+    def test_it_sees_the_index(self):
+        self.assertTrue(dollar_expr_names_index('$ * $i'))
+        self.assertTrue(dollar_expr_names_index('$i'))
+
+    def test_a_column_that_doesnt_ask_for_it_says_so(self):
+        self.assertFalse(dollar_expr_names_index('$'))
+        self.assertFalse(dollar_expr_names_index("$['name'] + $item"))
+
+    def test_a_literal_dollar_i_is_not_asking_for_it(self):
+        self.assertFalse(dollar_expr_names_index('"$i"'))
+
+    def test_a_literal_one_beside_a_real_dollar_is_still_string_content(self):
+        # The scopes are bound to a stand-in before the question is asked, so a
+        # run left as written can't make the text after it look like code.
+        self.assertFalse(dollar_expr_names_index('$ + "$i"'))
+
+    def test_half_typed_text_is_read_as_code_like_anywhere_else(self):
+        # Not an expression yet, but the $i in it is one the user is writing
+        # rather than one they quoted -- and asking must not crash on the way.
+        self.assertTrue(dollar_expr_names_index('$i('))
 
 
 class TestConfigKey(unittest.TestCase):

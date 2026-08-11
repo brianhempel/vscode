@@ -11572,5 +11572,315 @@ class TestColumnDollarDollarIsTheList(unittest.TestCase):
                          '($ / max($$)) > 2')
 
 
+from list_visualizer import (_column_cell_expr, _column_values_clause,
+                             _pick_range_expr, _render_sort_panel,
+                             _agg_column_expr, _agg_col_code, _agg_row_index,
+                             _pick_standalone_exprs, _ctx_to_model, unlift_term)
+from list_visualizer_grammar import parse_generated_code_or_assignment
+
+
+class TestColumnDollarIIsTheRowIndex(unittest.TestCase):
+    """The column box says `$i` is the row's index, so `$ * $i` is a column --
+    and every place that reads a column or writes code for one has to bind it.
+
+    Unlike a dollar run, `$i` names no scope: a list has one index to give, so
+    it means the same row number wherever it is written.
+    """
+
+    def named_source(self, lst):
+        """A table over `data`, whose cells are read through the name."""
+        scope = lambda code: eval(code, {}, {'data': lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=('data', 'data'))
+        return model, scope
+
+    # --- the four ways a cell gets read ---
+
+    def test_a_cell_read_through_the_source_knows_its_row(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        model['columns'] = ['$ * $i']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('>0<', out)
+        self.assertIn('>2<', out)
+        self.assertIn('>6<', out)
+
+    def test_a_cell_read_off_the_row_in_hand_knows_it_too(self):
+        # An impure source is never re-evaluated (see _is_pure_ref), so this
+        # goes through eval_dollar_expr rather than through the source name.
+        lst = [1, 2, 3]
+        scope = lambda code: eval(code, {}, {'f': lambda: lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=(None, 'f()'))
+        model['columns'] = ['$ * $i']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('>2<', out)
+        self.assertIn('>6<', out)
+
+    def test_with_no_scope_at_all_the_row_number_is_still_in_reach(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['$ * $i']
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('>6<', out)
+
+    def test_the_columns_values_are_gathered_over_the_list(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        self.assertEqual(_column_values('$ * $i', lst, model, scope), [0, 2, 6])
+
+    def test_gathered_without_a_scope_too(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertEqual(_column_values('$ * $i', lst, model), [0, 2, 6])
+
+    def test_a_column_that_is_only_the_index_reads_as_the_row_numbers(self):
+        lst = ['a', 'b', 'c']
+        model, scope = self.named_source(lst)
+        self.assertEqual(_column_values('$i', lst, model, scope), [0, 1, 2])
+
+    # --- what it hands over ---
+
+    def test_the_column_hands_over_code_that_counts_the_rows(self):
+        self.assertEqual(_column_values_clause('$ * $i', 'data'),
+                         'item * i for i, item in enumerate(data)')
+        self.assertEqual(_column_values_expr('$ * $i', 'data'),
+                         '[item * i for i, item in enumerate(data)]')
+
+    def test_a_column_that_never_asks_hands_over_what_it_always_did(self):
+        # The enumerate is only ever there because the column asked for it.
+        self.assertEqual(_column_values_expr("$['p']", 'data'),
+                         "[item['p'] for item in data]")
+
+    def test_a_cell_names_its_own_row_number(self):
+        # A cell is one row, so the index is that row's number rather than a
+        # variable -- which is what makes the expression stand on its own.
+        self.assertEqual(_column_cell_expr('$ * $i', 'data', 2), 'data[2] * 2')
+        self.assertEqual(_column_cell_expr('$ * $i', 'data', 0), 'data[0] * 0')
+
+    def test_a_cell_hands_over_the_code_it_was_read_through(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        model['columns'] = ['$ * $i']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('child-expr=data[1] * 1', html.unescape(out))
+
+    def test_the_row_expression_counts_the_rows_off(self):
+        self.assertEqual(_column_item_expr('$ * $i', 'data'), 'item * i')
+
+    # --- the search ---
+
+    def test_a_search_on_the_index_matches_by_row_number(self):
+        self.assertEqual(_get_matching_indices('$ > $i', [5, 0, 9], eval),
+                         [0, 2])
+
+    def test_a_search_without_one_is_unchanged(self):
+        self.assertEqual(_get_matching_indices('$ > 1', [5, 0, 9], eval),
+                         [0, 2])
+
+    def test_a_column_search_lifts_the_index_across_untouched(self):
+        # In column scope $ is the value and $$ the row, and lifting shifts
+        # those out by one. The index is at neither level: it is the row number,
+        # which is the same number on both sides of the lift.
+        self.assertEqual(lift_column_predicate('$ > $i', "$['p']"),
+                         "$['p'] > $i")
+
+    def test_and_unlifts_back_to_exactly_what_was_written(self):
+        # unlift_term only accepts a reading that lifts back verbatim, so a
+        # term coming back at all is the round-trip holding.
+        self.assertEqual(unlift_term("$['p'] > $i", "$['p']"), '$ > $i')
+
+    # --- generated code ---
+
+    def test_filtering_on_the_index_counts_the_rows_off(self):
+        model = {'search': '$ > $i', 'columns': ['$']}
+        ctx = _get_search_context(model, var_and_exp=('data', 'data'),
+                                  eval_in_scope=eval)
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         '[item for i, item in enumerate(data) if item > i]')
+
+    def test_counting_on_the_index_does_too(self):
+        model = {'search': '$ > $i', 'columns': ['$']}
+        ctx = _get_search_context(model, var_and_exp=('data', 'data'),
+                                  eval_in_scope=eval)
+        self.assertEqual(generate_action('count', ctx)[1],
+                         'sum(1 for i, item in enumerate(data) if item > i)')
+
+    def test_a_search_that_never_asks_generates_what_it_always_did(self):
+        model = {'search': '$ > 1', 'columns': ['$']}
+        ctx = _get_search_context(model, var_and_exp=('data', 'data'),
+                                  eval_in_scope=eval)
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         '[item for item in data if item > 1]')
+
+    def picked_match(self, columns, search):
+        """What one picked cell of the match row hands over, standalone."""
+        data = [5, 0, 9]
+        model = {'columns': columns, 'search': search, 'first_match': True,
+                 'tool': 'pick', 'picked': ['match_col_0']}
+        exprs = _pick_standalone_exprs(model, 'data', lambda c: eval(c, {'data': data}),
+                                       ['match_col_0'])
+        return exprs['match_col_0'], data
+
+    def test_a_picked_region_binds_the_index_its_column_asked_for(self):
+        # A region expression is written against the names the next(...) around
+        # it binds, and the row's number is one of them.
+        code, data = self.picked_match(['$ * $i'], '$ > 1')
+        self.assertEqual(
+            code, 'next((item * i for i, item in enumerate(data) if item > 1), None)')
+        self.assertEqual(eval(code, {'data': data}), 0)
+
+    def test_a_picked_region_counts_the_rows_off_when_the_search_asked(self):
+        # The region says nothing about the index, but the predicate beside it
+        # does -- and one binding serves both sides of the next(...).
+        code, data = self.picked_match(['$'], '$ > $i')
+        self.assertEqual(
+            code, 'next((item for i, item in enumerate(data) if item > i), None)')
+        self.assertEqual(eval(code, {'data': data}), 5)
+
+    def test_a_pick_that_asks_for_neither_is_unchanged(self):
+        code, _data = self.picked_match(['$'], '$ > 1')
+        self.assertEqual(code, 'next((item for item in data if item > 1), None)')
+
+    def test_a_pick_band_keeps_counting_from_where_the_band_starts(self):
+        # `$i` is the row's number in the list, not its place in the band, so
+        # the count starts at the band's first row.
+        self.assertEqual(_pick_range_expr('col_0', ['$ * $i'], 'data', '3', None),
+                         '[x * i for i, x in enumerate(data[3:], 3)]')
+        self.assertEqual(_pick_range_expr('col_0', ['$ * $i'], 'data', None, '2'),
+                         '[x * i for i, x in enumerate(data[:2])]')
+
+    # --- reading the line back ---
+
+    def read_back(self, code):
+        """The search a generated line comes back as."""
+        ctx, _prefix = parse_generated_code_or_assignment(code)
+        self.assertIsNotNone(ctx, f'did not parse: {code}')
+        model = {'columns': ['$'], 'search': None, 'pick_expr': None}
+        _ctx_to_model(ctx, model)
+        return model['search']
+
+    ACTIONS = ('filter', 'count', 'any', 'all', 'if_any', 'if_all', 'delete',
+               'find_indices', 'loop_no_idx', 'loop_orig_idx', 'loop_new_idx')
+
+    def test_every_action_writes_a_line_that_reads_back_as_its_search(self):
+        # The whole round trip, for a search that names the row's number and one
+        # that doesn't: the second is what every line looked like before `$i`
+        # existed, and has to still.
+        data = [5, 0, 9]
+        for search in ('$ > $i', '$ > 1'):
+            for action in self.ACTIONS:
+                for first in (False, True):
+                    with self.subTest(search=search, action=action, first=first):
+                        model = {'columns': ['$'], 'search': search,
+                                 'first_match': first}
+                        ctx = _get_search_context(
+                            model, var_and_exp=('data', 'data'),
+                            eval_in_scope=lambda c: eval(c, {'data': data}))
+                        result = generate_action(action, ctx)
+                        self.assertIsNotNone(result)
+                        self.assertEqual(self.read_back(result[1]), search)
+
+    def test_and_that_line_runs(self):
+        data = [5, 0, 9]
+        for action, want in [('filter', [5, 9]), ('count', 2),
+                             ('find_indices', [0, 2]), ('any', True),
+                             ('all', False), ('delete', [0])]:
+            with self.subTest(action=action):
+                model = {'columns': ['$'], 'search': '$ > $i',
+                         'first_match': False}
+                ctx = _get_search_context(
+                    model, var_and_exp=('data', 'data'),
+                    eval_in_scope=lambda c: eval(c, {'data': data}))
+                code = generate_action(action, ctx)[1]
+                self.assertEqual(eval(code, {'data': data}), want)
+
+    def test_a_line_that_never_bound_a_row_number_keeps_its_own_i(self):
+        # `i` here is a name from the user's program -- the comprehension binds
+        # only the row -- so reading it as the row's number would quietly change
+        # what the search asks.
+        self.assertEqual(self.read_back('[item for item in data if item > i]'),
+                         '$ > i')
+
+    def test_a_line_that_does_bind_one_reads_it_as_the_row_number(self):
+        self.assertEqual(
+            self.read_back('[i for i, item in enumerate(data) if item > i]'),
+            '$ > $i')
+
+    # --- aggregations ---
+
+    def test_a_column_aggregation_reads_the_column_it_always_did(self):
+        self.assertEqual(_agg_column_expr('sum($)', '$ * $i', 'data'),
+                         '[item * i for i, item in enumerate(data)]')
+
+    def test_a_row_aggregation_orders_by_index_when_the_column_asks(self):
+        # `lambda item:` has no row number in it, so the key runs over the row
+        # numbers instead -- and the row is read back out, because an
+        # aggregation answers with a row whichever way it found one.
+        self.assertEqual(
+            _agg_col_code(agg_named('Min Item'), '$ * $i', 'data'),
+            'data[min(range(len(data)), key=lambda i: data[i] * i)]')
+        self.assertEqual(_agg_column_expr(agg_named('Min Item'), '$ * $i',
+                                          'data'),
+                         'data[i] * i')
+
+    def test_a_row_aggregation_over_a_plain_column_is_unchanged(self):
+        self.assertEqual(_agg_column_expr(agg_named('Min Item'), "$['p']",
+                                          'data'),
+                         "item['p']")
+        self.assertEqual(_agg_col_code(agg_named('Min Item'), "$['p']", 'data'),
+                         "min(data, key=lambda item: item['p'])")
+
+    def test_a_row_aggregation_finds_the_row_the_index_picked_out(self):
+        # 3*0, 1*1, 4*2, 1*3, 5*4 -- least is row 0, greatest is row 4.
+        lst = [3, 1, 4, 1, 5]
+        self.assertEqual(_agg_value(agg_named('Min Item'), None, None, lst,
+                                    '$ * $i'), 3)
+        self.assertEqual(_agg_value(agg_named('Max Item'), None, None, lst,
+                                    '$ * $i'), 5)
+
+    def test_and_says_which_row_that_was_rather_than_the_first_equal_one(self):
+        # `.index` of the row would answer with the first row equal to it, which
+        # is a different row as soon as the number is part of what was compared:
+        # here 1, 5, 1 keyed by $ - $i is 1, 4, -1, so the row picked is the last
+        # of them and `data.index(1)` would say 0.
+        lst = [1, 5, 1]
+        template = agg_named('Min Item')
+        self.assertEqual(_agg_row_index(lst, 1, template, '$ - $i'), 2)
+        code = _agg_row_index_code(_agg_col_code(template, '$ - $i', 'data'),
+                                   'data', template, '$ - $i')
+        self.assertEqual(code,
+                         'min(range(len(data)), key=lambda i: data[i] - i)')
+        self.assertEqual(eval(code, {'data': lst}), 2)
+
+    def test_a_plain_column_still_looks_its_row_up_the_way_it_did(self):
+        lst = [{'v': 30}, {'v': 10}]
+        template = agg_named('Min Item')
+        self.assertEqual(_agg_row_index(lst, {'v': 10}, template, "$['v']"), 1)
+        self.assertEqual(
+            _agg_row_index_code("min(data, key=lambda item: item['v'])", 'data',
+                                template, "$['v']"),
+            "data.index(min(data, key=lambda item: item['v']))")
+
+    # --- the one thing it can't do ---
+
+    def test_sorting_by_such_a_column_is_not_offered(self):
+        # sorted() takes a key over rows, and there is no row number inside one.
+        # Rather than hand over code that won't run, the rows go inert.
+        lst = [1, 2, 3]
+        model, _scope = self.named_source(lst)
+        model['_source_span'] = ('data', 0, 4)
+        panel = _render_sort_panel('$ * $i', 0, model)
+        self.assertNotIn('snc-mouse-down', panel)
+        self.assertEqual(panel.count('unselectable'), 4)
+
+    def test_sorting_by_a_plain_column_still_is(self):
+        lst = [1, 2, 3]
+        model, _scope = self.named_source(lst)
+        model['_source_span'] = ('data', 0, 4)
+        panel = _render_sort_panel('$', 0, model)
+        self.assertIn('snc-mouse-down', panel)
+
+
 if __name__ == '__main__':
     unittest.main()
