@@ -399,6 +399,22 @@ class TestEvalDollarExpr(unittest.TestCase):
         with self.assertRaises(Exception):
             eval_dollar_expr('$.nonexistent', 42)
 
+    def test_an_enclosing_scope_is_what_the_longer_run_names(self):
+        # A list column is written against a row, but the box it is typed into
+        # says $$ is the whole list.
+        lst = [3, 1, 5]
+        self.assertEqual(eval_dollar_expr('$ / max($$)', 5, outer=(lst,)), 1.0)
+
+    def test_scopes_are_bound_outwards_one_run_at_a_time(self):
+        self.assertEqual(eval_dollar_expr('($, $$, $$$)', 1, outer=(2, 3)),
+                         (1, 2, 3))
+
+    def test_a_run_with_no_scope_to_bind_it_is_an_error(self):
+        # Left as written, which is not Python -- the same answer as naming a
+        # variable the program doesn't have.
+        with self.assertRaises(Exception):
+            eval_dollar_expr('len($$)', 5)
+
 
 class TestReplaceDollarsInPyExp(unittest.TestCase):
     """A dollar run names a scope: $ is the innermost value, $$ its parent, and

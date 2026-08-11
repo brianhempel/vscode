@@ -550,7 +550,7 @@ def strip_leading_dollar(name: str) -> str:
     return name
 
 
-def eval_dollar_expr(field_expr: str, value, eval_in_scope=None):
+def eval_dollar_expr(field_expr: str, value, eval_in_scope=None, outer=()):
     """Evaluate a $-prefixed field expression against a value.
 
     The value comes in as an argument and the expression is compiled in the
@@ -558,9 +558,17 @@ def eval_dollar_expr(field_expr: str, value, eval_in_scope=None):
     variables alongside the dollar. Without a scope to compile it in -- an
     unfocused preview, a test -- this module's globals are all there is, which
     is enough for an expression that only reaches through the dollar.
+
+    *outer* is the enclosing scopes, innermost first: what `$$` stands for,
+    then `$$$`, and so on. A caller with nothing outside the value passes none,
+    and then a longer run is left as written -- which won't compile, the right
+    answer for a dollar with nothing to bind.
     """
-    code = f'(lambda _v: {replace_dollars_in_py_exp(field_expr, ["_v"])})'
-    return (eval(code) if eval_in_scope is None else eval_in_scope(code))(value)
+    names = ['_v'] + [f'_v{n}' for n in range(2, len(outer) + 2)]
+    body = replace_dollars_in_py_exp(field_expr, names)
+    code = f'(lambda {", ".join(names)}: {body})'
+    return (eval(code) if eval_in_scope is None
+            else eval_in_scope(code))(value, *outer)
 
 
 @dataclass(frozen=True, slots=True)

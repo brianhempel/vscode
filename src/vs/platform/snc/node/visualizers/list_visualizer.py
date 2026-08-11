@@ -1102,16 +1102,39 @@ def _cell_source_expr(model: dict, eval_in_scope) -> 'str | None':
     return source_expr
 
 
-def _column_item_expr(col: str) -> str | None:
+def _column_dollars(source_expr: 'str | None', item_expr: str = 'item') -> list:
+    """What the dollars in a column expression stand for: the row, and -- when
+    there is an expression for it -- the list the row came from.
+
+    A column is written in row scope, but the box it is typed into says `$$` is
+    the whole list, so a column may name it (`$ / max($$)`). The source is
+    substituted into the user's own expression, so it is parenthesized to bind
+    as tightly as the `$$` it replaces. A source that can't be named leaves the
+    run as written, which won't compile -- the same as a column that names a
+    variable the program doesn't have.
+    """
+    return ([item_expr] if source_expr is None
+            else [item_expr, _atomize(source_expr)])
+
+
+def _column_item_expr(col: str, source_expr: 'str | None' = None) -> str | None:
     """One row's value for a column, written against a row bound to `item` --
     or None when the column is the item itself and there is nothing to read."""
-    return None if col.strip() == '$' else replace_dollars_in_py_exp(col, ['item'])
+    return (None if col.strip() == '$'
+            else replace_dollars_in_py_exp(col, _column_dollars(source_expr)))
 
 
-def _column_key_expr(col: str) -> str:
+def _column_key_expr(col: str, source_expr: 'str | None' = None) -> str:
     """The same, as a key to order the list by: `item` itself when the column
     is the row, which is what `min(lst, key=lambda item: item)` reads."""
-    return _column_item_expr(col) or 'item'
+    return _column_item_expr(col, source_expr) or 'item'
+
+
+def _column_cell_expr(col: str, source_expr: str, i: int) -> str:
+    """One cell of a column, naming its row through the source rather than
+    row-generically -- what a cell is read through and what it hands over."""
+    return replace_dollars_in_py_exp(
+        col, _column_dollars(source_expr, f'{source_expr}[{i}]'))
 
 
 def _column_values_clause(col: str, source_expr: str) -> str | None:
@@ -1123,7 +1146,7 @@ def _column_values_clause(col: str, source_expr: str) -> str | None:
     hands to a drag, what the tally counts, and what the tally hands over in
     turn.
     """
-    item_expr = _column_item_expr(col)
+    item_expr = _column_item_expr(col, source_expr)
     return None if item_expr is None else f'{item_expr} for item in {source_expr}'
 
 
@@ -1157,7 +1180,7 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     values = []
     for item in lst:
         try:
-            values.append(eval_dollar_expr(col, item, eval_in_scope))
+            values.append(eval_dollar_expr(col, item, eval_in_scope, outer=(lst,)))
         except Exception:
             pass
     return values
@@ -1500,7 +1523,7 @@ def _tally_row_count_expr(col: str, source_expr: str, literal: str,
     different question with the same name. Anything else -- and every computed
     column, which has no list to ask -- counts the rows that match as it goes.
     """
-    item_expr = _column_item_expr(col)
+    item_expr = _column_item_expr(col, source_expr)
     if item_expr is None:
         if isinstance(values, (list, tuple)):
             return f'{source_expr}.count({literal})'
@@ -1728,7 +1751,9 @@ def _sort_expr(text: str, col: str, direction: 'str | None') -> str:
     inner = parsed[0] if parsed else text
     if direction is None:
         return inner
-    key = _column_item_expr(col)
+    # A column naming the list means the list as the line has it, which is what
+    # is being sorted rather than the sort of it.
+    key = _column_item_expr(col, inner)
     parts = [inner]
     if key is not None:
         parts.append(f'key=lambda item: {key}')
@@ -1742,8 +1767,8 @@ def _sort_checked(text: 'str | None', col: str, direction: str) -> bool:
     parsed = _parse_sorted(text)
     if parsed is None:
         return False
-    _inner, key_expr, reverse = parsed
-    return (key_expr == _column_item_expr(col)
+    inner, key_expr, reverse = parsed
+    return (key_expr == _column_item_expr(col, inner)
             and reverse == (direction == 'desc'))
 
 
@@ -1837,7 +1862,7 @@ COMPUTE_CODES = (
 # What a box the user writes an aggregation in says of itself, wherever it is
 # drawn. The same thing the column search box says of its own, less `$$$`: an
 # aggregation is asked of the whole column, so there is no one item to name.
-COMPUTE_EXPR_TOOLTIP = '$ is this column, $$ the list'
+COMPUTE_EXPR_TOOLTIP = '$ is this whole column, $$ the whole list'
 
 # What the histogram's box says of itself. The other boxes in the submenu read
 # off the name beside them -- the number in Percentile's box is the percentile
@@ -2070,17 +2095,17 @@ def _numpy():
 
 
 def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
-               item_expr: str = 'item'):
+               col: str = '$'):
     """An aggregation's answer for a column's values, or NO_ANSWER.
 
     *lst* is the list the column was read out of, which is what a row
     aggregation orders; one that isn't handed a list has nothing to answer
     with, which is NO_ANSWER like any other question it can't answer.
 
-    *item_expr* is the column read off one row, against a row bound to `item`,
-    which is what `$` stands for in a row aggregation -- it asks its question
-    row by row rather than of every value at once. Defaulted to `item` itself,
-    the column that is the row.
+    *col* is what a row aggregation reads off each row -- it asks its question
+    row by row rather than of every value at once -- so it is read here against
+    the names this lambda binds rather than against the source expression a
+    drag would name. Defaulted to the column that is the row.
 
     Evaluated in the user's scope, so a column expression that named the
     program's own values has already been read by the time we get here -- but
@@ -2098,7 +2123,7 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
     user's own program by a menu they only opened to look at.
     """
     try:
-        column = item_expr if _agg_is_row(template) else '_v'
+        column = _column_key_expr(col, '_lst') if _agg_is_row(template) else '_v'
         body = replace_dollars_in_py_exp(_agg_expr(_agg_fill(template)),
                                          [column, '_lst'])
         code = f'lambda np, math, _v, _lst: {body}'
@@ -2128,7 +2153,7 @@ def _agg_column_expr(template: str, col: str, source_expr: str) -> str:
     """What `$` stands for in an aggregation over *col*: every value the column
     has, or -- for a row aggregation, which asks row by row -- the column read
     off the row its key is handed."""
-    return (_column_key_expr(col) if _agg_is_row(template)
+    return (_column_key_expr(col, source_expr) if _agg_is_row(template)
             else _column_values_expr(col, source_expr))
 
 
@@ -2381,7 +2406,8 @@ def _get_search_context(model: dict, var_and_exp=None,
     # first-match mode and rides along for generate_action to wrap.
     pick_expr = model.get('pick_expr')
     if pick_expr:
-        ctx['pick_expr'] = replace_dollars_in_py_exp(pick_expr, ['item'])
+        ctx['pick_expr'] = replace_dollars_in_py_exp(
+            pick_expr, ['item', _atomize(source_expr)])
         ctx['needs_index'] = _pick_needs_index(pick_expr)
         ctx['pick_is_array'] = _pick_is_array(model)
         ctx['is_first'] = True
@@ -2977,7 +3003,9 @@ def _pick_range_expr(col_id: str, columns, source_expr: str,
         sub = source_expr
     else:
         sub = f'{source_expr}[{start or ""}:{stop or ""}]'
-    inner = replace_dollars_in_py_exp(col, [_PICK_INNER_VAR])
+    # `$$` is the whole list, not the sublist this region is a band of.
+    inner = replace_dollars_in_py_exp(
+        col, _column_dollars(source_expr, _PICK_INNER_VAR))
     if inner == _PICK_INNER_VAR:
         # The identity column (a bare $, which is the default) maps each row to
         # itself, so the sublist is already the answer -- no comprehension.
@@ -3105,11 +3133,12 @@ def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
 
 
 def _pick_needs_index(pick_expr: str) -> bool:
-    """Whether an assembled expression refers to the matched row's index."""
-    code = replace_dollars_in_py_exp(pick_expr, ['item'])
-    try:
-        tree = ast.parse(code, mode='eval')
-    except SyntaxError:
+    """Whether an assembled expression refers to the matched row's index.
+
+    A question about the shape of the expression rather than about any scope in
+    it, so the dollars are collapsed rather than bound."""
+    tree = _parse_dollar_expr(pick_expr)
+    if tree is None:
         # Can't tell, so assume it does: the enumerate form binds `i` whether or
         # not the expression uses it, while the plain form would NameError.
         return True
@@ -3270,9 +3299,10 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         for col in columns:
             try:
                 if read_through and eval_in_scope is not None:
-                    cell_value = eval_in_scope(replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]']))
+                    cell_value = eval_in_scope(_column_cell_expr(col, source_expr, i))
                 else:
-                    cell_value = eval_dollar_expr(col, item, eval_in_scope)
+                    cell_value = eval_dollar_expr(col, item, eval_in_scope,
+                                                  outer=(lst,))
             except Exception:
                 cell_value = None
             if cell_value is not None:
@@ -3395,7 +3425,7 @@ def _render_column_search_row(col, index, model) -> str:
         f'value="{html.escape(row["text"])}" '
         f'{focus_attrs}'
         f'placeholder="Column Search" '
-        f'data-tooltip="$ is this column, $$ the item, $$$ the list" '
+        f'data-tooltip="$ is the item from the column, $$ the original list item, $$$ the whole list" '
         f'spellcheck="false" '
         f'class="col-search-input search-box" />'
         f'<span class="col-search-chips">{op_html}</span>'
@@ -3730,11 +3760,9 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
     values_expr = (None if source_expr is None
                    else _column_values_expr(col, source_expr))
 
-    item_expr = _column_key_expr(col)
-
     rows = []
     for label, template, checked in _compute_rows(model, col):
-        answer = _agg_value(template, values, eval_in_scope, lst, item_expr)
+        answer = _agg_value(template, values, eval_in_scope, lst, col)
         # A question this column can't answer isn't worth checking -- but one
         # already checked stays clickable, or there'd be no way to uncheck it.
         unanswered = answer is NO_ANSWER
@@ -3792,7 +3820,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
     # again by its place in the list of everything focusable would lose the
     # typing to it.
     for i, template in enumerate(_compute_free_rows(model, col)):
-        answer = _agg_value(template, values, eval_in_scope, lst, item_expr)
+        answer = _agg_value(template, values, eval_in_scope, lst, col)
         unanswered = answer is NO_ANSWER
         # Through _agg_column_expr like the catalog's rows, so a box holding
         # something written the way Min Item is hands over what it computed.
@@ -3822,7 +3850,6 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'value="{html.escape(template)}" placeholder="Add aggregation" '
             f'spellcheck="false" />'
             f'<span class="col-compute-preview"'
-            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}'
             f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
             f'</div>')
 
@@ -4024,7 +4051,8 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
         f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
-        f'placeholder="column name" '
+        f'placeholder="Column code" '
+        f'data-tooltip="$ is the item from the list, $$ the whole list" '
         f'spellcheck="false"'
         f'{extra_attrs} '
         f'class="col-input" />'
@@ -4527,7 +4555,8 @@ def _pick_standalone_exprs(model: dict, source_expr: str, eval_in_scope,
         if not expr:
             continue
         ctx = dict(base)
-        ctx['pick_expr'] = replace_dollars_in_py_exp(expr, ['item'])
+        ctx['pick_expr'] = replace_dollars_in_py_exp(
+            expr, ['item', _atomize(source_expr)])
         ctx['needs_index'] = _pick_needs_index(expr)
         ctx['is_first'] = True
         result = generate_action('filter', ctx)
@@ -4644,11 +4673,10 @@ def _agg_child_value(key: str, lst, model, eval_in_scope=None):
     if not _agg_is_row(template):
         values = _column_values(asking_col, lst, model, eval_in_scope)
         return _agg_display_value(_agg_value(template, values, eval_in_scope))
-    item = _agg_value(template, None, eval_in_scope, lst,
-                      _column_key_expr(asking_col))
+    item = _agg_value(template, None, eval_in_scope, lst, asking_col)
     if item is NO_ANSWER:
         return NO_ANSWER
-    return _agg_display_value(_column_cell_value(shown_col, item,
+    return _agg_display_value(_column_cell_value(shown_col, item, lst,
                                                  eval_in_scope))
 
 
@@ -4665,8 +4693,10 @@ def _agg_child_expr(key: str, source_expr) -> str | None:
     asking_col, template, shown_col = _parse_agg_child_key(key)
     if not _agg_is_row(template):
         return _agg_code(template, _column_values_expr(asking_col, source_expr))
-    item_code = _agg_code(template, _column_key_expr(asking_col), source_expr)
-    return replace_dollars_in_py_exp(shown_col, [item_code])
+    item_code = _agg_code(template, _column_key_expr(asking_col, source_expr),
+                          source_expr)
+    return replace_dollars_in_py_exp(shown_col,
+                                     _column_dollars(source_expr, item_code))
 
 
 def _agg_display_value(answer):
@@ -4809,11 +4839,14 @@ def _render_agg_cell(expr, index, col, level, values, model, get_visualizer,
         f'</div></td>')
 
 
-def _column_cell_value(col: str, item, eval_in_scope=None):
+def _column_cell_value(col: str, item, lst, eval_in_scope=None):
     """One row's value for a column, or NO_ANSWER when the column can't be read
-    off that row."""
+    off that row.
+
+    *lst* is what the column's `$$` names -- the row it is read off is not the
+    whole of its scope."""
     try:
-        return eval_dollar_expr(col, item, eval_in_scope)
+        return eval_dollar_expr(col, item, eval_in_scope, outer=(lst,))
     except Exception:
         return NO_ANSWER
 
@@ -4838,13 +4871,13 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
     column of it and the index cell the number beside it, so without the name
     there is no handle on the row unless a `$` column happens to be drawn.
     """
-    item_expr = _column_key_expr(columns[ci])
-    item = _agg_value(expr, None, eval_in_scope, lst, item_expr)
+    item = _agg_value(expr, None, eval_in_scope, lst, columns[ci])
     idx = _agg_row_index(lst, item)
     # Nothing to hand over when the aggregation has no row to point at, and
     # nothing to name the list by when it has no source.
     item_code = (None if item is NO_ANSWER or source_expr is None
-                 else _agg_code(expr, item_expr, source_expr))
+                 else _agg_code(expr, _column_key_expr(columns[ci], source_expr),
+                                source_expr))
     idx_code = (None if idx is NO_ANSWER or item_code is None
                 else _agg_row_index_code(item_code, source_expr))
 
@@ -4858,7 +4891,7 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
              f'</div></td>']
     for cj, col in enumerate(columns):
         value = (NO_ANSWER if item is NO_ANSWER
-                 else _column_cell_value(col, item, eval_in_scope))
+                 else _column_cell_value(col, item, lst, eval_in_scope))
         key = _agg_child_key(columns[ci], expr, col)
         code = (None if value is NO_ANSWER or item_code is None
                 else _agg_child_expr(key, source_expr))
@@ -5089,9 +5122,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             composite_key = f"{i}{CELL_KEY_SEP}{col}"
             try:
                 if read_through and eval_in_scope is not None:
-                    cell_value = eval_in_scope(replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]']))
+                    cell_value = eval_in_scope(_column_cell_expr(col, source_expr, i))
                 else:
-                    cell_value = eval_dollar_expr(col, item, eval_in_scope)
+                    cell_value = eval_dollar_expr(col, item, eval_in_scope,
+                                                  outer=(lst,))
             except Exception:
                 cell_value = None
 
@@ -5107,7 +5141,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
                 cell_expr = None
                 if source_expr is not None:
-                    cell_expr = replace_dollars_in_py_exp(col, [f'{source_expr}[{i}]'])
+                    cell_expr = _column_cell_expr(col, source_expr, i)
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -5190,8 +5224,8 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
     idx = int(row_key)
     if source_expr is not None and eval_in_scope is not None:
-        return eval_in_scope(replace_dollars_in_py_exp(field_key, [f'{source_expr}[{idx}]']))
-    return eval_dollar_expr(field_key, lst[idx], eval_in_scope)
+        return eval_in_scope(_column_cell_expr(field_key, source_expr, idx))
+    return eval_dollar_expr(field_key, lst[idx], eval_in_scope, outer=(lst,))
 
 
 def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_scope=None, source_span=None) -> Tuple[Any, List[Any]]:
@@ -5243,7 +5277,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # A column stays row-generic (the cell_col dollar expression);
             # anything bound for the clipboard names this row concretely, since
             # the user pastes it into the editor as-is.
-            concrete_cell = (replace_dollars_in_py_exp(cell_col, [f'{src}[{row_key}]'])
+            concrete_cell = (_column_cell_expr(cell_col, src, int(row_key))
                              if src else cell_col)
             commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
 

@@ -11481,5 +11481,96 @@ class TestSourceSpanAndExprRefresh(unittest.TestCase):
         self.assertEqual(model['_source_expr'], 'data')
 
 
+from list_visualizer import _column_item_expr, _column_key_expr
+
+
+class TestColumnDollarDollarIsTheList(unittest.TestCase):
+    """A column is written in row scope, but the box says `$$` is the whole
+    list -- so `$ / max($$)` is a column, and every place that reads a column or
+    writes code for one has to bind it."""
+
+    def named_source(self, lst):
+        """A table over `data`, whose cells are read through the name."""
+        scope = lambda code: eval(code, {}, {'data': lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=('data', 'data'))
+        return model, scope
+
+    def test_a_cell_read_through_the_source_reads_the_list_too(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        model['columns'] = ['$ * len($$)']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('>3<', out)
+        self.assertIn('>6<', out)
+        self.assertIn('>9<', out)
+
+    def test_a_cell_read_off_the_row_in_hand_reads_it_as_well(self):
+        # An impure source is never re-evaluated (see _is_pure_ref), so the
+        # list has to come in as a value rather than as an expression.
+        lst = [1, 2, 3]
+        scope = lambda code: eval(code, {}, {'f': lambda: lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=scope,
+                           var_and_exp=(None, 'f()'))
+        model['columns'] = ['$ * len($$)']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('>3<', out)
+        self.assertIn('>9<', out)
+
+    def test_with_no_scope_at_all_the_list_is_still_in_reach(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['$ * len($$)']
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('>9<', out)
+
+    def test_the_columns_values_are_gathered_over_the_list(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        self.assertEqual(_column_values('$ * len($$)', lst, model, scope),
+                         [3, 6, 9])
+
+    def test_gathered_without_a_scope_too(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertEqual(_column_values('$ * len($$)', lst, model), [3, 6, 9])
+
+    def test_the_column_hands_over_code_that_names_the_list(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        model['columns'] = ['$ * len($$)']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('[item * len(data) for item in data]', html.unescape(out))
+
+    def test_a_cell_hands_over_code_that_names_the_list(self):
+        lst = [1, 2, 3]
+        model, scope = self.named_source(lst)
+        model['columns'] = ['$ * len($$)']
+        out = visualize(lst, model, mock_get_visualizer, scope)
+        self.assertIn('child-expr=data[0] * len(data)', html.unescape(out))
+
+    def test_the_row_expression_names_the_list_the_row_came_from(self):
+        self.assertEqual(_column_item_expr('$ * len($$)', 'data'),
+                         'item * len(data)')
+        self.assertEqual(_column_key_expr('$ * len($$)', 'data'),
+                         'item * len(data)')
+
+    def test_a_source_that_is_not_a_name_is_parenthesized(self):
+        # It is substituted into the user's own expression, so it has to bind
+        # as tightly as the `$$` it stands for.
+        self.assertEqual(_column_item_expr('len($$)', 'a + b'), 'len((a + b))')
+
+    def test_sorting_by_such_a_column_names_the_list_in_the_key(self):
+        self.assertEqual(_sort_expr('data', '$ / max($$)', 'asc'),
+                         'sorted(data, key=lambda item: item / max(data))')
+
+    def test_a_column_search_lifts_the_list_into_the_search_box(self):
+        # In column scope $ is the value, $$ the row and $$$ the list; lifted
+        # into the search box's scope the column's own $$ is already what that
+        # scope calls the list.
+        self.assertEqual(lift_column_predicate('$ > 2', '$ / max($$)'),
+                         '($ / max($$)) > 2')
+
+
 if __name__ == '__main__':
     unittest.main()
