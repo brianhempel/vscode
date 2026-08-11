@@ -3952,9 +3952,16 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
         f'</span>'
     )
 
+    # Only while a column is actually being dragged. Every mouse move over a
+    # header is a full re-run of the user's program -- one per 16ms of movement
+    # -- and ColumnDragOver does nothing at all unless a drag is in progress, so
+    # outside one they are asked for, paid for, and thrown away. mouseup stays:
+    # it isn't continuous, and a release that lands here has to end the drag.
+    track_move = ('' if drag_from is None else
+                  f'snc-mouse-move="{html.escape(drag_over_event)}" ')
     return (
         f'<th class="{" ".join(th_classes)}" '
-        f'snc-mouse-move="{html.escape(drag_over_event)}" '
+        f'{track_move}'
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span class="col-header-inner">'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '

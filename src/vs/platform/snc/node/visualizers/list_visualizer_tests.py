@@ -1398,8 +1398,13 @@ class TestColumnVisualize(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('ColumnDragStart(index=0)', output)
-        self.assertIn('ColumnDragOver(index=0)', output)
         self.assertIn('ColumnDragEnd(index=0)', output)
+        # Movement is only tracked once a drag has started -- see
+        # TestHeaderTracksTheMouseOnlyWhileDragging.
+        self.assertNotIn('ColumnDragOver(index=0)', output)
+        model['column_drag_from'] = 0
+        self.assertIn('ColumnDragOver(index=0)',
+                      visualize(lst, model, mock_get_visualizer, None))
 
     def test_table_headers_have_click_handler(self):
         lst = [{'name': 'Alice', 'age': 30}]
@@ -11001,6 +11006,39 @@ class TestSortPanelRendering(SortPanelCase):
             visualize(lst, model, mock_get_visualizer,
                       lambda code: eval(code, {}, {'data': lst})))
         self.assertNotIn('col-sort-panel', th)
+
+
+class TestHeaderTracksTheMouseOnlyWhileDragging(unittest.TestCase):
+    """A header asks to hear about mouse movement only while a column is
+    actually being dragged.
+
+    Every one of those events is a full re-run of the user's program -- one per
+    16ms of movement -- and the handler that receives them does nothing at all
+    unless a drag is in progress. So outside a drag they are asked for, paid
+    for, and thrown away.
+    """
+
+    def header(self, **model_fields):
+        lst = [{'b': 3}, {'b': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['b']"]
+        model['_source_expr'] = 'data'
+        model.update(model_fields)
+        return _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+
+    def test_hovering_a_header_asks_for_nothing(self):
+        self.assertNotIn('snc-mouse-move', self.header())
+
+    def test_a_drag_in_progress_tracks_every_move(self):
+        self.assertIn('snc-mouse-move', self.header(column_drag_from=0))
+
+    def test_the_drag_can_always_be_finished(self):
+        # mouseup isn't continuous, so it costs nothing to keep listening --
+        # and a release that lands anywhere has to end the drag.
+        self.assertIn('snc-mouse-up', self.header())
+        self.assertIn('snc-mouse-up', self.header(column_drag_from=0))
 
 
 from list_visualizer import _is_pure_ref

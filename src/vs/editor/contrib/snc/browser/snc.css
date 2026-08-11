@@ -567,10 +567,17 @@
 /* Simple data-tooltip text labels (e.g. "Toggle replace/map/filter",
    "Match case", "Drag to reorder", tool names) are UI chrome, not code,
    so they get the same UI font as the surrounding action buttons. The
-   py-exp and action tooltips keep the code font (they show Python code). */
+   py-exp and action tooltips keep the code font (they show Python code).
+
+   And unlike those two, this one is a label with nothing in it to click and no
+   listeners of its own, so it has no reason to take the pointer -- while taking
+   it does cost something, since the tooltip is placed only 4px off its target
+   and can land under the cursor. The py-exp and action tooltips keep
+   pointer-events because you reach into them to copy or insert. */
 .snc-tooltip.snc-simple-tooltip {
 	font-family: var(--snc-ui-widget-font-family);
 	letter-spacing: -0.025em;
+	pointer-events: none;
 }
 
 .snc-action-tooltip-expr {
