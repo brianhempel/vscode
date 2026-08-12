@@ -68,6 +68,7 @@ from table_visualizer import (
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _column_groups,
     _column_header_text, _col_add, _col_at, _col_rename_at, _col_remove_at,
+    _leaf_values_expr,
     _col_move, _col_subs,
 )
 
@@ -766,6 +767,59 @@ class TestLeafColumns(unittest.TestCase):
                          [('$.name', 1), ('*$.members', 2)])
 
 
+class TestLeafDerivedExpressions(unittest.TestCase):
+    """A leaf under a splat has a whole-column expression of its own -- the
+    flattened comprehension -- which is what the header hands to a drag and
+    what the tally and the aggregations read."""
+
+    @staticmethod
+    def leaf(columns, n):
+        return _leaf_columns(columns)[n]
+
+    def test_a_plain_column_is_unchanged(self):
+        leaf = self.leaf({'$k': {}}, 0)
+        self.assertEqual(_leaf_values_expr(leaf, 'd', _binds_for({'a': 1})),
+                         'list(d)')
+
+    def test_a_splat_with_no_sub_columns_flattens_the_lists(self):
+        leaf = self.leaf({'*$v': {}}, 0)
+        self.assertEqual(_leaf_values_expr(leaf, 'd', _binds_for({'a': 1})),
+                         '[el for v in d.values() for el in v]')
+
+    def test_a_sub_column_reads_off_each_element(self):
+        cols = {'*$v': {'cols': {"$['who']": {}}}}
+        self.assertEqual(
+            _leaf_values_expr(self.leaf(cols, 0), 'd', _binds_for({'a': 1})),
+            "[el['who'] for v in d.values() for el in v]")
+
+    def test_a_list_source_binds_the_row(self):
+        cols = {"*$['members']": {'cols': {"$['who']": {}}}}
+        self.assertEqual(_leaf_values_expr(self.leaf(cols, 0), 'teams'),
+                         "[el['who'] for item in teams for el in item['members']]")
+
+    def test_the_derived_expression_actually_runs(self):
+        d = {'t1': [{'who': 'ann'}, {'who': 'bo'}], 't2': [{'who': 'cy'}]}
+        cols = {'*$v': {'cols': {"$['who']": {}}}}
+        code = _leaf_values_expr(self.leaf(cols, 0), 'd', _binds_for(d))
+        self.assertEqual(eval(code, {'d': d}), ['ann', 'bo', 'cy'])
+
+    def test_column_values_reads_a_leaf_flat(self):
+        d = {'t1': [{'who': 'ann'}, {'who': 'bo'}], 't2': [{'who': 'cy'}]}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['columns'] = {'$k': {}, '*$v': {'cols': {"$['who']": {}}}}
+        leaf = _leaf_columns(model['columns'])[1]
+        self.assertEqual(_column_values(leaf.expr, d, model), ['ann', 'bo', 'cy'])
+
+    def test_a_tally_over_a_sub_column_counts_the_elements(self):
+        d = {'t1': [{'x': 1}, {'x': 2}], 't2': [{'x': 1}]}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['columns'] = {'*$v': {'cols': {"$['x']": {}}}}
+        leaf = _leaf_columns(model['columns'])[0]
+        self.assertEqual(_tally(_column_values(leaf.expr, d, model)), {1: 2, 2: 1})
+
+
 class TestSplatSubColumnRendering(unittest.TestCase):
     """A splat's sub-columns each get their own cell, read off the splatted
     element -- and a second header row under the splat's own header."""
@@ -806,6 +860,14 @@ class TestSplatSubColumnRendering(unittest.TestCase):
         self.assertEqual(_column_header_text('*$v'), '*v')
         self.assertEqual(_column_header_text('$k'), 'k')
         self.assertEqual(_column_header_text("*$['m']"), "*['m']")
+
+    def test_a_sub_header_hands_over_its_flattened_column(self):
+        # Dragging a sub-column header gives the whole column, flattened
+        # across every group -- the same list the tally counts.
+        html_out = self.render(self.value(), ['$k', '*$v'],
+                               {'*$v': ["$['who']", "$['age']"]})
+        self.assertIn("for el in v]", html_out)
+        self.assertIn("el[&#x27;who&#x27;]", html_out)
 
     def test_a_table_without_sub_columns_has_one_header_row(self):
         d = {'a': 1}

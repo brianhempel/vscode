@@ -629,6 +629,79 @@ def _leaf_columns(columns) -> list:
     return leaves
 
 
+# The name a splatted element binds to in a derived whole-column expression.
+# Short, because it appears twice in every one of them.
+_SPLAT_ELEM = 'el'
+
+
+def _leaf_values_expr(leaf: LeafColumn, source_expr: str,
+                      binds: 'dict | None' = None) -> str:
+    """Every value a leaf column has, as one expression.
+
+    What the header hands to a drag and what the tally and the aggregations
+    read. A leaf under a splat is the flattened comprehension -- the splat's
+    list spread into the outer loop, the sub-column read off each element:
+
+        [el['who'] for v in d.values() for el in v]
+
+    A leaf that isn't under a splat is the ordinary whole-column expression,
+    unchanged.
+    """
+    if leaf.splat is None:
+        return _column_values_expr(leaf.expr, source_expr, binds)
+
+    inner = _split_splat(leaf.splat)[1]
+    # The splat's own list, written in root-row scope -- `v` for a dict's
+    # value column, `item['members']` for a list of records.
+    lists_expr = _column_item_expr(inner, source_expr, binds=binds)
+    if lists_expr is None:
+        # `*$` over a list: the row itself is the list to spread.
+        lists_expr = _default_item_expr(binds)
+    rows = _column_binding(inner, source_expr, binds)
+    # The sub-column is written against one element, so its bare `$` is the
+    # element -- substituted rather than formatted, so a `$` inside a string
+    # literal stays string content.
+    body = (_SPLAT_ELEM if leaf.sub in (None, '$')
+            else replace_dollars_in_py_exp(leaf.sub, [_SPLAT_ELEM]))
+    return f'[{body} for {rows} for {_SPLAT_ELEM} in {lists_expr}]'
+
+
+def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
+    """The leaf a composed column key names, or None."""
+    for leaf in _leaf_columns(columns):
+        if leaf.expr == expr:
+            return leaf
+    return None
+
+
+def _leaf_values(leaf: LeafColumn, lst, model, eval_in_scope=None) -> list:
+    """Every value a leaf column has, in row order.
+
+    Through the source expression when there is one, so the numbers on screen
+    come from the same code the header hands over; otherwise off the rows in
+    hand, which is what an unnamed list has to fall back to.
+    """
+    source_expr = _cell_source_expr(model, eval_in_scope)
+    if source_expr is not None and eval_in_scope is not None:
+        try:
+            return list(eval_in_scope(
+                _leaf_values_expr(leaf, source_expr, _binds_for(lst))))
+        except Exception:
+            pass
+    values = []
+    for row in _rows(lst, model.get('columns') or {}):
+        element = row.splats.get(leaf.splat)
+        if element is None:
+            continue
+        try:
+            values.append(element if leaf.sub in (None, '$')
+                          else eval_dollar_expr(leaf.sub, element,
+                                                eval_in_scope, outer=(lst,)))
+        except Exception:
+            pass
+    return values
+
+
 def _root_rows(value) -> list:
     """One Row per row of the container, before any splat."""
     if isinstance(value, dict):
@@ -1726,6 +1799,14 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     cost the other n-1 rows.
     """
     binds = _binds_for(lst)
+    # A leaf under a splat is identified by its composed key, not by an
+    # expression that means anything on its own -- so it is read through the
+    # leaf, flat, the same way the tally and the aggregations see it.
+    if SUBCOL_SEP in col or _split_splat(col)[0]:
+        leaf = _leaf_for(model.get('columns') or {}, col)
+        if leaf is not None:
+            return _leaf_values(leaf, lst, model, eval_in_scope)
+
     if col.strip() == '$':
         # For a list the source already IS the values. For a dict list(lst) is
         # the KEYS -- silently wrong for tally, sort and every aggregation --
@@ -6115,12 +6196,19 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         # Second header row: only the split columns contribute cells, since the
         # others already span down into it.
         strs.append('<tr>')
-        for group in groups:
-            for sub in group.subs:
-                strs.append(
-                    f'<th class="col-header col-subheader">'
-                    f'<span class="col-name">'
-                    f'{html.escape(strip_leading_dollar(sub) or sub)}</span></th>')
+        for leaf in leaves:
+            if leaf.sub is None or len(leaf.header) < 2:
+                continue
+            # The sub-header hands over its own flattened column, the same
+            # list the tally counts -- so dragging one is worth something.
+            header_src = model.get('_source_expr')
+            sub_exp = ('' if header_src is None
+                       else py_exp_attrs(_leaf_values_expr(
+                           leaf, header_src, _binds_for(lst))))
+            strs.append(
+                f'<th class="col-header col-subheader">'
+                f'<span class="col-name"{sub_exp}>'
+                f'{html.escape(_column_header_text(leaf.sub))}</span></th>')
         strs.append('</tr>')
 
     if len(lst) == 0:
