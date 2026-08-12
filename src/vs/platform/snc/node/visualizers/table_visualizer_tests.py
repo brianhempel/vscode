@@ -5911,7 +5911,7 @@ from table_visualizer import (
     ColumnSearchDropdownToggle, COLUMN_SEARCH_OPS, COLUMN_SEARCH_COMPOSE,
     column_search_predicate, lift_column_predicate, compose_column_searches,
     decompose_search, _column_search_row, _column_search_active,
-    _set_column_search, _tally_selection,
+    _set_column_search, _tally_selection, unlift_term,
 )
 
 
@@ -6051,6 +6051,47 @@ class TestLiftColumnPredicate(unittest.TestCase):
     def test_every_occurrence_is_lifted(self):
         self.assertEqual(lift_column_predicate('isOdd($) and $ > 5', 'len($)'),
                          'isOdd(len($)) and len($) > 5')
+
+
+class TestSigilsCrossLiftUntouched(unittest.TestCase):
+    """Every sigil names something about the row, not a scope, so lifting a
+    column predicate into item scope leaves it exactly where it is -- the rule
+    $i already followed, now that $k, $v and $j exist to follow it too.
+
+    The round-trip is the part that matters: unlift_term only accepts a reading
+    that lifts back verbatim, so a sigil mangled on either side fails safe and
+    the visible symptom is a main search that silently stops populating the
+    column search box."""
+
+    def test_each_sigil_crosses_the_lift_untouched(self):
+        for sigil in ('i', 'k', 'v', 'j'):
+            with self.subTest(sigil=sigil):
+                self.assertEqual(
+                    lift_column_predicate(f'$ > ${sigil}', 'len($)'),
+                    f'len($) > ${sigil}')
+
+    def test_a_sigil_does_not_read_as_a_deeper_run(self):
+        # The defect the captured groups fix: '$k'.rstrip('i') is '$k', so the
+        # old depth idiom read $k as a run of two and lifted the column into
+        # the wrong level.
+        self.assertEqual(lift_column_predicate('$k == 3', '$'), '$k == 3')
+
+    def test_each_sigil_survives_the_round_trip(self):
+        for sigil in ('i', 'k', 'v', 'j'):
+            with self.subTest(sigil=sigil):
+                pred = f'$ > ${sigil}'
+                term = lift_column_predicate(pred, "$['age']")
+                self.assertEqual(unlift_term(term, "$['age']"), pred)
+
+    def test_a_sigil_beside_a_deeper_run_still_round_trips(self):
+        pred = '$ == $$ and $k > 1'
+        term = lift_column_predicate(pred, 'len($)')
+        self.assertEqual(term, 'len($) == $ and $k > 1')
+        self.assertEqual(unlift_term(term, 'len($)'), pred)
+
+    def test_a_sigil_in_a_string_literal_is_left_alone(self):
+        self.assertEqual(lift_column_predicate("$ == '$k'", 'len($)'),
+                         "len($) == '$k'")
 
 
 class TestComposeColumnSearches(unittest.TestCase):

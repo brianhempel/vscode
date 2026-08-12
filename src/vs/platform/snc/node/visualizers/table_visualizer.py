@@ -57,12 +57,12 @@ from visualizer_utils import (
     with_pass_body,
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
-    DOLLARS_RE,
+    DOLLARS_RE, SIGILS,
     strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
     new_code_command,
-    dollar_expr_parses, dollar_expr_names_index, is_nested,
+    dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
@@ -566,9 +566,10 @@ def _parse_dollar_expr(expr: str):
     `i` instead, which is what generated code calls the row's number -- so a
     question asked of the shape of the tree (_pick_needs_index) gets the same
     answer whether the index was written as `$i` or picked off the index column.
+    The other sigils are values like any other, so they collapse like one.
     """
     try:
-        collapsed = DOLLARS_RE.sub(lambda m: 'i' if m[0].endswith('i') else '_crt_',
+        collapsed = DOLLARS_RE.sub(lambda m: 'i' if m[2] == 'i' else '_crt_',
                                    expr)
         return ast.parse(collapsed, mode='eval').body
     except SyntaxError:
@@ -635,22 +636,24 @@ def lift_column_predicate(pred: str, col_expr: str) -> str:
     box speaks): $ becomes the column expression, and every longer dollar run
     loses a level, so $$ (the item) becomes $ and $$$ (the array) becomes $$.
 
-    `$i` crosses untouched. It names no scope -- the column value and the row it
-    was read off share one row number -- so there is no level for it to lose.
+    Every sigil crosses untouched. None names a scope -- the column value and
+    the row it was read off share one row number, one key, one position -- so
+    there is no level for any of them to lose.
     """
-    depth = max((len(m[0].rstrip('i')) for m in DOLLARS_RE.finditer(pred)),
-                default=1)
+    depth = max((len(m[1]) for m in DOLLARS_RE.finditer(pred)), default=1)
     # Substituted in two passes via dollar-free placeholders:
     # replace_dollars_in_py_exp tells code dollars from string-literal dollars by
     # re-parsing with the run restored, and a replacement that itself contains
     # dollars never parses -- which would make every run after the first look
     # like code even inside a string.
     holders = [f'_snc_lift{n}_' for n in range(1, depth + 1)]
-    index_holder = '_snc_lifti_'
-    out = replace_dollars_in_py_exp(pred, holders, index_exp=index_holder)
+    sigil_holders = {s: f'_snc_lift{s}_' for s in SIGILS}
+    out = replace_dollars_in_py_exp(pred, holders, bindings=sigil_holders)
     for n, holder in enumerate(holders, start=1):
         out = out.replace(holder, _atomize(col_expr) if n == 1 else '$' * (n - 1))
-    return out.replace(index_holder, '$i')
+    for sigil, holder in sigil_holders.items():
+        out = out.replace(holder, f'${sigil}')
+    return out
 
 
 def _paren_if_loose(term: str) -> str:
@@ -800,8 +803,9 @@ def unlift_term(term: str, col: str) -> str | None:
     lifted from, or None when the column has no part in it.
 
     The inverse of lift_column_predicate: the column expression becomes $ again,
-    and every dollar already in the term gains back the level it lost. `$i` had
-    no level to lose, so it stays where it is.
+    and every dollar already in the term gains back the level it lost. A sigil
+    had no level to lose, so it stays where it is -- run deepened, suffix kept,
+    which is why this reads the two halves apart rather than the whole token.
     """
     atom = _atomize(col)
     if atom not in term:
@@ -810,7 +814,7 @@ def unlift_term(term: str, col: str) -> str | None:
         return None
     marked = term.replace(atom, _UNLIFT_MARK)
     deepened = DOLLARS_RE.sub(
-        lambda m: m[0] if m[0].endswith('i') else '$' * (len(m[0]) + 1), marked)
+        lambda m: m[0] if m[2] else '$' * (len(m[1]) + 1), marked)
     pred = deepened.replace(_UNLIFT_MARK, '$')
     # Substituting on sight is a guess -- a column expression can turn up in a
     # term it didn't come from -- so it only counts if it lifts back verbatim.

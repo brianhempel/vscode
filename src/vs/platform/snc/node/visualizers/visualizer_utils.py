@@ -455,22 +455,37 @@ def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
 # literal. replace only $ that are in variable position (not in strings, etc)
 # does this by replace-and-check one by one to see if parse succeeds with the $ retained
 #
-# A trailing `i` makes the token the INDEX of the value rather than the value:
-# `$i` beside `$`. It carries its own boundary, so `$item` is still a dollar
-# beside a variable the program might have and `$i2` a dollar beside that name --
-# only a bare `i` is the index. A dollar RUN says how far out to look, and the
-# index is not a scope of its own, so it is never a run: see
-# replace_dollars_in_py_exp.
-DOLLARS_RE = re.compile(r'(?<!\$)\$+(?!\$)(?:i(?![A-Za-z0-9_]))?')
+# A trailing letter makes the token something ABOUT the value rather than the
+# value: `$i` its index, `$k` a key, `$v` a value, `$j` a position within a
+# splat. Each carries its own boundary, so `$item` is still a dollar beside a
+# variable the program might have, `$i2` a dollar beside that name, and `$key`
+# and `$ki` likewise -- only the bare letter is a sigil. A dollar RUN says how
+# far out to look, and none of these is a scope of its own, so a sigil is never
+# a run: see replace_dollars_in_py_exp.
+#
+# The two halves are captured so the token doesn't have to be taken apart by
+# rstrip afterwards -- which read `$k` as a run of depth 2 and was the defect
+# every consumer of this pattern shared. Group 1 is the run, group 2 the sigil
+# or None. There is deliberately no `$ki`, so the character class needs no
+# longest-first ordering.
+DOLLARS_RE = re.compile(r'(?<!\$)(\$+)(?!\$)(?:([ijkv])(?![A-Za-z0-9_]))?')
 
 # replace_exps should be array, where replace_exps[0] is the replacement for $, replace_exps[1] for $$, etc
 # replace_exps should not have dollars in them. if necessary, run this on them first
 # a run naming a scope beyond replace_exps is left as written - the caller only
 # knows the scopes it was given, and must not invent a binding for the rest
-# index_exp binds `$i`, and only `$i`: a list has one index to give, so the index
-# means the same row number at every depth rather than one per scope. `$$i` names
-# nothing, and is left as written like any other run with no binding for it.
-def replace_dollars_in_py_exp(py_exp: str, replace_exps, index_exp=None) -> str:
+# bindings maps a sigil to the expression it stands for -- {'i': ..., 'k': ...}
+# -- and binds at depth 1 only: a container has one row number and one key to
+# give, so a sigil means the same thing at every depth rather than one per
+# scope. `$$i` and `$$k` name nothing, and are left as written like any other
+# run with no binding for them.
+# index_exp is the older spelling of bindings={'i': ...}, kept because
+# string_visualizer and z_object_visualizer call it that way.
+def replace_dollars_in_py_exp(py_exp: str, replace_exps, index_exp=None,
+                              bindings=None) -> str:
+    binds = dict(bindings or {})
+    if index_exp is not None:
+        binds.setdefault('i', index_exp)
     temp_names = {} # temp name to the dollar token it stands for
     def temp_replacer(m):
         temp_name = f'_{len(m[0])}dollars_{len(temp_names)}_'
@@ -484,10 +499,14 @@ def replace_dollars_in_py_exp(py_exp: str, replace_exps, index_exp=None) -> str:
             ast.parse(temp_str)
             out = temp_str # parse succeeded, meaning the dollars were likely in a string and should not be replaced
         except SyntaxError:
-            n_dollars = len(token.rstrip('i'))
-            if token.endswith('i'):
-                bound = token if index_exp is None or n_dollars > 1 else index_exp
-                out = out.replace(name, bound)
+            run, sigil = DOLLARS_RE.fullmatch(token).groups()
+            n_dollars = len(run)
+            if sigil is not None:
+                # Sigils bind at depth 1 only, and an unbound one is left as
+                # written -- which isn't Python, so the caller reads it as
+                # "no value" rather than as something it can evaluate.
+                bound = binds.get(sigil) if n_dollars == 1 else None
+                out = out.replace(name, token if bound is None else bound)
             elif n_dollars <= len(replace_exps):
                 out = out.replace(name, replace_exps[n_dollars-1])
             else:
@@ -506,22 +525,40 @@ _NAMES_INDEX_BINDER = '_snc_probe_'
 # Bounded, unlike _is_pure_ref's: that one is keyed on a source expression,
 # which changes when a line does, while this is keyed on text a box is being
 # typed into -- a new key per keystroke, and only the last few ever asked again.
-@functools.lru_cache(maxsize=1024)
-def dollar_expr_names_index(expr: str) -> bool:
-    """Whether *expr* asks for the index of the value it is written against.
+SIGILS = ('i', 'j', 'k', 'v')
 
-    What every caller choosing between `for item in lst` and
-    `for i, item in enumerate(lst)` has to know. Asked through the substitution
-    itself rather than by scanning for the characters, so a `$i` that is string
-    content answers no for exactly the reason it isn't bound.
+# One probe per sigil, for the same reason as the pair above: a name no program
+# has, so finding it in the result means the substitution bound it.
+_SIGIL_PROBES = {s: f'_snc_sigil_{s}_' for s in SIGILS}
+
+
+@functools.lru_cache(maxsize=1024)
+def dollar_expr_sigils(expr: str) -> frozenset:
+    """Which suffixed dollars *expr* actually binds.
+
+    What every caller choosing a comprehension header has to know: `$v` alone
+    wants `v in d.values()`, `$k` alone `k in d`, both `k, v in d.items()`.
+    Asked through the substitution itself rather than by scanning for the
+    characters, so a `$k` that is string content answers no for exactly the
+    reason it isn't bound.
 
     Cached on the text: a column is one string asked after once per cell, and
     the answer is a parse of it.
     """
-    depth = max((len(m[0].rstrip('i')) for m in DOLLARS_RE.finditer(expr)),
-                default=0)
-    return _NAMES_INDEX_PROBE in replace_dollars_in_py_exp(
-        expr, [_NAMES_INDEX_BINDER] * depth, index_exp=_NAMES_INDEX_PROBE)
+    depth = max((len(m[1]) for m in DOLLARS_RE.finditer(expr)), default=0)
+    out = replace_dollars_in_py_exp(expr, [_NAMES_INDEX_BINDER] * depth,
+                                    bindings=_SIGIL_PROBES)
+    return frozenset(s for s, probe in _SIGIL_PROBES.items() if probe in out)
+
+
+def dollar_expr_names_index(expr: str) -> bool:
+    """Whether *expr* asks for the index of the value it is written against.
+
+    What every caller choosing between `for item in lst` and
+    `for i, item in enumerate(lst)` has to know. The one sigil most callers
+    care about; the rest don't need the whole set.
+    """
+    return 'i' in dollar_expr_sigils(expr)
 
 
 def dollar_expr_parses(s: str, mode: str = 'eval') -> bool:
@@ -632,7 +669,7 @@ def strip_leading_dollar(name: str) -> str:
 
 
 def eval_dollar_expr(field_expr: str, value, eval_in_scope=None, outer=(),
-                     index=None):
+                     index=None, bindings=None):
     """Evaluate a $-prefixed field expression against a value.
 
     The value comes in as an argument and the expression is compiled in the
@@ -650,13 +687,22 @@ def eval_dollar_expr(field_expr: str, value, eval_in_scope=None, outer=(),
     `$i` names. It comes in as an argument like the value does, so a row number
     of 0 binds as readily as any other. A caller that has no index to give
     leaves `$i` unbound, which is the same answer as the run above.
+
+    *bindings* is the same for the other sigils -- {'k': ..., 'v': ...} for a
+    row of a dict -- as VALUES, so a column can be evaluated against a row that
+    has a key as well as a value. `index=` is the older spelling of {'i': ...}.
     """
     names = ['_v'] + [f'_v{n}' for n in range(2, len(outer) + 2)]
-    body = replace_dollars_in_py_exp(field_expr, names,
-                                     index_exp=None if index is None else '_i')
-    params = names + ([] if index is None else ['_i'])
+    binds = dict(bindings or {})
+    if index is not None:
+        binds['i'] = index
+    # `_b` prefixed so a $v binding can't land on top of _v, the value itself.
+    binders = {sigil: f'_b{sigil}' for sigil in binds}
+    body = replace_dollars_in_py_exp(field_expr, names, bindings=binders)
+    ordered = list(binds)
+    params = names + [binders[s] for s in ordered]
     code = f'(lambda {", ".join(params)}: {body})'
-    args = (value, *outer) + (() if index is None else (index,))
+    args = (value, *outer) + tuple(binds[s] for s in ordered)
     return (eval(code) if eval_in_scope is None else eval_in_scope(code))(*args)
 
 

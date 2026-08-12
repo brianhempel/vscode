@@ -17,7 +17,7 @@ import tempfile
 from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               aggregate_handled_keys, eval_dollar_expr,
                               replace_dollars_in_py_exp, dollar_expr_parses,
-                              dollar_expr_names_index,
+                              dollar_expr_names_index, dollar_expr_sigils,
                               py_exp_attrs, nest_child_command,
                               wrap_drag_grab, defer_drag_grab,
                               CHILD_SOURCE_BINDER)
@@ -541,6 +541,114 @@ class TestDollarExprNamesIndex(unittest.TestCase):
         # Not an expression yet, but the $i in it is one the user is writing
         # rather than one they quoted -- and asking must not crash on the way.
         self.assertTrue(dollar_expr_names_index('$i('))
+
+
+class TestSuffixedDollarSigils(unittest.TestCase):
+    """`$k`, `$v` and `$j` join `$i` as suffixes on a dollar run: the key, the
+    value, and the position within a splat. Like `$i` they bind at depth 1 only
+    and carry their own boundary, so `$key` is still a dollar beside a name."""
+
+    def test_each_sigil_binds_what_it_is_given(self):
+        for sigil, want in (('i', 'IDX'), ('k', 'KEY'), ('v', 'VAL'), ('j', 'POS')):
+            with self.subTest(sigil=sigil):
+                self.assertEqual(
+                    replace_dollars_in_py_exp(f'${sigil}', ['_v'],
+                                              bindings={sigil: want}),
+                    want)
+
+    def test_sigils_bind_alongside_each_other_and_the_bare_dollar(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('($, $k, $v, $i)', ['pair'],
+                                      bindings={'i': 'n', 'k': 'k', 'v': 'v'}),
+            '(pair, k, v, n)')
+
+    def test_a_sigil_has_to_be_the_whole_of_the_name(self):
+        # The trap the character class must not fall into: $key, $value and $ki
+        # are all a bare dollar beside a variable the program might have.
+        binds = {'i': '_i', 'k': '_k', 'v': '_vv', 'j': '_j'}
+        for text, want in (('$key', '_vkey'), ('$value', '_vvalue'),
+                           ('$ki', '_vki'), ('$k2', '_vk2'),
+                           ('$vi', '_vvi'), ('$jk', '_vjk')):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    replace_dollars_in_py_exp(text, ['_v'], bindings=binds), want)
+
+    def test_only_the_innermost_scope_has_them(self):
+        # Same rule as $$i: suffixes bind at depth 1, so $$k names nothing and
+        # is left as written. This is the known gap that keeps a column search
+        # from reaching the key.
+        self.assertEqual(
+            replace_dollars_in_py_exp('$$k', ['item', 'lst'],
+                                      bindings={'k': 'k'}),
+            '$$k')
+
+    def test_a_sigil_in_a_string_literal_is_string_content(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('"$k" + str($k)', ['_v'],
+                                      bindings={'k': '_k'}),
+            '"$k" + str(_k)')
+
+    def test_an_unbound_sigil_is_left_as_written(self):
+        # Which isn't Python, so it lands in the caller's except as "no value" --
+        # the same answer $i already gives a caller with no index.
+        self.assertEqual(replace_dollars_in_py_exp('$k', ['_v']), '$k')
+
+    def test_index_exp_still_works_as_the_old_spelling(self):
+        # string_visualizer and z_object_visualizer call it this way and are
+        # deliberately untouched.
+        self.assertEqual(
+            replace_dollars_in_py_exp('$ * $i', ['item'], index_exp='i'),
+            'item * i')
+
+    def test_eval_binds_the_sigils_beside_the_value(self):
+        self.assertEqual(
+            eval_dollar_expr('($k, $v)', ('a', 1),
+                             bindings={'k': 'a', 'v': 1}),
+            ('a', 1))
+
+    def test_eval_sigil_bindings_do_not_collide_with_the_value(self):
+        # eval_dollar_expr binds the value to the internal name _v; a $v
+        # binding must not land on top of it.
+        self.assertEqual(
+            eval_dollar_expr('($, $v)', ('a', 1), bindings={'v': 99}),
+            (('a', 1), 99))
+
+    def test_eval_binds_sigils_beside_index_and_outer_scopes(self):
+        d = {'a': 1}
+        self.assertEqual(
+            eval_dollar_expr('($k, $v, $i, len($$))', ('a', 1), outer=(d,),
+                             index=0, bindings={'k': 'a', 'v': 1}),
+            ('a', 1, 0, 1))
+
+
+class TestDollarExprSigils(unittest.TestCase):
+    """Which suffixed dollars an expression actually binds -- the generalisation
+    of dollar_expr_names_index, asked through the substitution so a sigil that is
+    string content correctly answers no."""
+
+    def test_it_reports_each_sigil_it_sees(self):
+        self.assertEqual(dollar_expr_sigils('$k'), frozenset({'k'}))
+        self.assertEqual(dollar_expr_sigils('$v > 3'), frozenset({'v'}))
+        self.assertEqual(dollar_expr_sigils('($k, $v)'), frozenset({'k', 'v'}))
+        self.assertEqual(dollar_expr_sigils('$ * $i'), frozenset({'i'}))
+
+    def test_an_expression_with_no_sigils_is_empty(self):
+        self.assertEqual(dollar_expr_sigils('$'), frozenset())
+        self.assertEqual(dollar_expr_sigils("$['name'] + $item"), frozenset())
+
+    def test_a_sigil_in_a_string_literal_is_not_named(self):
+        self.assertEqual(dollar_expr_sigils('"$k"'), frozenset())
+        self.assertEqual(dollar_expr_sigils('$ + "$k"'), frozenset())
+
+    def test_deeper_runs_name_nothing(self):
+        self.assertEqual(dollar_expr_sigils('$$k'), frozenset())
+
+    def test_it_agrees_with_names_index_on_the_index(self):
+        for expr in ('$ * $i', '$i', '$', "$['name'] + $item", '"$i"',
+                     '$ + "$i"', '$i(' , '$$i'):
+            with self.subTest(expr=expr):
+                self.assertEqual('i' in dollar_expr_sigils(expr),
+                                 dollar_expr_names_index(expr))
 
 
 class TestConfigKey(unittest.TestCase):
