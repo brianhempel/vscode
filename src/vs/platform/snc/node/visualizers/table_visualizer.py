@@ -48,7 +48,7 @@ import math
 import random
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Tuple, Optional
 
 from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
@@ -416,22 +416,99 @@ class Row:
     splat, with `rowspan=span`. Until splat lands every row is its own, so these
     are True and 1.
     """
-    key: str          # identity in `children`; "3" now, "3.1" under splat
+    key: str          # identity in `children`; "3" alone, "3.1" under splat
     index: int        # the root row's number -- what `$i` binds and what the
                       # row-index <td> shows
     item: Any         # what bare `$` binds to
     bindings: dict    # {'i': 0} for a list; {'i', 'k', 'v'} for a dict
     span_start: bool  # owns the rowspan cells of the unsplatted columns
     span: int         # how many rendered rows this root row occupies
+    splats: dict = field(default_factory=dict)  # splat column -> this row's element
 
 
-def _rows(value) -> list:
-    """Every row of a container, in order."""
+def _root_rows(value) -> list:
+    """One Row per row of the container, before any splat."""
     if isinstance(value, dict):
         return [Row(str(n), n, (k, v), {'i': n, 'k': k, 'v': v}, True, 1)
                 for n, (k, v) in enumerate(value.items())]
     return [Row(str(i), i, item, {'i': i}, True, 1)
             for i, item in enumerate(value)]
+
+
+def _splat_columns(columns) -> list:
+    """The columns carrying a `*`, in order."""
+    return [c for c in (columns or []) if _split_splat(c)[0]]
+
+
+def _splat_value(col: str, row: Row, container) -> list | None:
+    """The list a splat column produces for one root row, or None when it
+    produces something that isn't a list -- which splats to a single row, since
+    there is nothing to spread."""
+    _is_splat, inner = _split_splat(col)
+    try:
+        value = eval_dollar_expr(inner, row.item, outer=(container,),
+                                 bindings=row.bindings)
+    except Exception:
+        return None
+    return value if isinstance(value, list) else None
+
+
+def _rows(value, columns=None) -> list:
+    """Every rendered row of a container, in order.
+
+    A root row whose splat columns produce lists occupies one rendered row per
+    element. Two splats zip and pad -- aligned by position, the short one blank
+    -- so the group is as long as the longest of them and the row count stays
+    linear in the data.
+
+    A root row with no splat, an empty one, or one whose splat isn't a list
+    still gets exactly one rendered row: a row must not vanish from the table
+    for holding an empty list.
+    """
+    roots = _root_rows(value)
+    splat_cols = _splat_columns(columns)
+    if not splat_cols:
+        return roots
+
+    out = []
+    for root in roots:
+        lists = {c: _splat_value(c, root, value) for c in splat_cols}
+        span = max((len(v) for v in lists.values() if v is not None), default=0)
+        if span == 0:
+            out.append(root)
+            continue
+        for j in range(span):
+            out.append(Row(
+                key=f'{root.key}.{j}',
+                index=root.index,
+                item=root.item,
+                # `$j` is the position within the group. `$i` stays the ROOT
+                # row's number, so it rowspans like any other unsplatted value;
+                # the flat rendered position gets no sigil, because nothing in
+                # the data addresses it and no generated code can bind it.
+                bindings={**root.bindings, 'j': j},
+                span_start=(j == 0),
+                span=span,
+                splats={c: (v[j] if v is not None and j < len(v) else None)
+                        for c, v in lists.items()},
+            ))
+    return out
+
+
+def _row_by_key(value, columns, row_key: str) -> Row:
+    """The row a cell key names.
+
+    Under splat two rendered rows of one root row have different values for the
+    same leaf column, so the key is what distinguishes them and int() is not
+    enough -- int("3.1") raises. A key with no dot is a root row and is reached
+    without building the rest.
+    """
+    if '.' not in row_key:
+        return _row_at(value, int(row_key))
+    for row in _rows(value, columns):
+        if row.key == row_key:
+            return row
+    raise KeyError(row_key)
 
 
 def _row_at(value, i: int) -> Row:
@@ -546,7 +623,29 @@ def needs_implicit_dollar(search: str) -> bool:
     return bool(_IMPLICIT_DOLLAR_RE.match(search))
 
 
+SPLAT = '*'
+
+
+def _split_splat(col: str) -> tuple:
+    """(is_splat, the expression under it).
+
+    A `*` prefix, evocative of `*my_list`: the column's value is a list, and
+    its items become rows. The star has to LEAD -- `$ * 2` is arithmetic -- and
+    `*$` is a SyntaxError in eval mode, so the sigil can never collide with a
+    legitimate column expression. For that same reason every validator has to
+    take it off before asking whether the rest parses.
+    """
+    text = col.strip()
+    if text.startswith(SPLAT):
+        return (True, text[len(SPLAT):].strip())
+    return (False, text)
+
+
 def _is_valid_python_expression(s: str) -> bool:
+    is_splat, inner = _split_splat(s)
+    if is_splat:
+        # `*` alone splats nothing.
+        return bool(inner) and dollar_expr_parses(inner)
     return dollar_expr_parses(s)
 
 
@@ -3946,10 +4045,18 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     # False when the source can't be re-evaluated for free, and then the rows in
     # hand are what the cells are read from -- see _is_pure_ref.
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
-    for row in _rows(lst):
+    for row in _rows(lst, columns):
         for col in columns:
+            is_splat = _split_splat(col)[0]
+            # An unsplatted column belongs to the root row, so it builds one
+            # child per group rather than one per rendered row -- matching the
+            # cells _visualize_table actually draws.
+            if not is_splat and not row.span_start:
+                continue
             try:
-                if read_through and eval_in_scope is not None:
+                if is_splat:
+                    cell_value = row.splats.get(col)
+                elif read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(
                         _column_cell_expr(col, source_expr, row.index, lst))
                 else:
@@ -5792,8 +5899,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         return _render_pick_region(row, col_id, model, first_match_row,
                                    len(lst), pick_exprs)
 
-    for row in _rows(lst):
+    for row in _rows(lst, columns):
         i = row.index
+        # An unsplatted column draws only on the row that owns the group, and
+        # spans it. This is where the mockup's key cell comes from: `$k`
+        # rowspans because it did not splat, not because it is a key.
+        span_attr = f' rowspan="{row.span}"' if row.span > 1 else ''
         is_match = i in matched_indices
         row_class_attr = ''
         scroll_attr = ''
@@ -5812,15 +5923,28 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             if scroll_to and i == first_match_row:
                 scroll_attr = ' snc-scroll-to-match'
 
-        strs.append(f'<tr{row_class_attr}{scroll_attr}><td class="row-index">')
-        strs.append(str(i))
-        strs.append(pick_overlay(i, PICK_IDX_COLUMN))
-        strs.append('</td>')
+        strs.append(f'<tr{row_class_attr}{scroll_attr}>')
+        # The row index is a root-row value like any other, so it rowspans for
+        # the same reason the unsplatted columns do.
+        if row.span_start:
+            strs.append(f'<td class="row-index"{span_attr}>')
+            strs.append(str(i))
+            strs.append(pick_overlay(i, PICK_IDX_COLUMN))
+            strs.append('</td>')
 
         for ci, col in enumerate(columns):
+            is_splat = _split_splat(col)[0]
+            # A column that did not splat belongs to the root row, so it is
+            # drawn once per group rather than once per rendered row.
+            if not is_splat and not row.span_start:
+                continue
             composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
             try:
-                if read_through and eval_in_scope is not None:
+                if is_splat:
+                    # The element this rendered row stands for, already worked
+                    # out when the group was built.
+                    cell_value = row.splats.get(col)
+                elif read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(
                         _column_cell_expr(col, source_expr, i, lst))
                 else:
@@ -5842,7 +5966,16 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
                 cell_expr = None
                 if source_expr is not None:
-                    cell_expr = _column_cell_expr(col, source_expr, i, lst)
+                    # A splat cell names the ELEMENT it is showing, not the
+                    # starred column: the star is a display instruction, and
+                    # what the user drags into their file has to be the value
+                    # under the cursor.
+                    if is_splat:
+                        inner = _split_splat(col)[1]
+                        cell_expr = (f'{_atomize(_column_cell_expr(inner, source_expr, i, lst))}'
+                                     f'[{row.bindings["j"]}]')
+                    else:
+                        cell_expr = _column_cell_expr(col, source_expr, i, lst)
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -5853,14 +5986,19 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 else:
                     cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)]
 
-                strs.append('<td>')
+                # An unsplatted column is drawn once for the group, so it has
+                # to span it -- otherwise the cell occupies the first row only
+                # and every row under it shifts left.
+                cell_span = '' if is_splat else span_attr
+                strs.append(f'<td{cell_span}>')
                 strs.append(wrap_child_prefix(composite_key))
                 strs.extend(cell_htmls)
                 strs.append(wrap_child_suffix)
                 strs.append(pick_overlay(i, f'col_{ci}'))
                 strs.append('</td>')
             else:
-                strs.append(f'<td>{pick_overlay(i, f"col_{ci}")}</td>')
+                cell_span = '' if is_splat else span_attr
+                strs.append(f'<td{cell_span}>{pick_overlay(i, f"col_{ci}")}</td>')
 
         strs.append('</tr>')
 
@@ -5930,9 +6068,12 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
         return _agg_child_value(key, lst, model, eval_in_scope)
     source_expr = _cell_source_expr(model, eval_in_scope)
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
-    # int() is what a row key means today; under splat the row is looked up by
-    # the key itself, since "3.1" and "3.0" share a column but not a value.
-    row = _row_at(lst, int(row_key))
+    columns = model.get('columns') or []
+    row = _row_by_key(lst, columns, row_key)
+    if _split_splat(field_key)[0]:
+        # The element this rendered row stands for; the column expression alone
+        # names the whole splatted list, which is not what the cell is showing.
+        return row.splats.get(field_key)
     if source_expr is not None and eval_in_scope is not None:
         return eval_in_scope(
             _column_cell_expr(field_key, source_expr, row.index, lst))
@@ -5993,10 +6134,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # A column stays row-generic (the cell_col dollar expression);
             # anything bound for the clipboard names this row concretely, since
             # the user pastes it into the editor as-is.
-            # int() is what a row key means today -- the other half of the pair
-            # in _table_child_value_getter, and the other place splat has to
-            # look the row up by its key instead.
-            concrete_cell = (_column_cell_expr(cell_col, src, int(row_key), value)
+            # Under splat the row is looked up by its key, since "3.1" and
+            # "3.0" share a column but not a value -- and int("3.1") raises.
+            _row = (_row_by_key(value, model.get('columns') or [], row_key)
+                    if value is not None else None)
+            concrete_cell = (_column_cell_expr(cell_col, src,
+                                               _row.index if _row else 0, value)
                              if src else cell_col)
             commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
 

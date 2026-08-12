@@ -65,7 +65,8 @@ from table_visualizer import (
     CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_column_suggestions, _get_all_possible_columns,
-    Row, _rows, _row_at,
+    Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
+    _table_child_value_getter,
 )
 
 
@@ -471,6 +472,217 @@ class TestRows(unittest.TestCase):
         # would collide on the same leaf column.
         self.assertIsInstance(_rows(['a'])[0].key, str)
         self.assertIsInstance(_rows({'a': 1})[0].key, str)
+
+
+class TestSplatSigil(unittest.TestCase):
+    """A `*` prefix on a column expression, evocative of *my_list: the column's
+    value is a list, and its items become rows.
+
+    `*$` is a SyntaxError in eval mode -- as are `*x` and `*$.members` -- so it
+    can never collide with a legitimate column expression. For the same reason
+    the validators have to strip it before asking whether the rest parses."""
+
+    def test_a_splat_column_validates(self):
+        for col in ('*$', '*$v', '*$.members', "*$['items']"):
+            with self.subTest(col=col):
+                self.assertTrue(_is_valid_python_expression(col))
+
+    def test_the_thing_being_splatted_still_has_to_parse(self):
+        self.assertFalse(_is_valid_python_expression('*$ +'))
+        self.assertFalse(_is_valid_python_expression('*'))
+
+    def test_it_is_read_apart_into_the_star_and_the_expression(self):
+        self.assertEqual(_split_splat('*$.members'), (True, '$.members'))
+        self.assertEqual(_split_splat('  *$v  '), (True, '$v'))
+        self.assertEqual(_split_splat('$.members'), (False, '$.members'))
+
+    def test_a_multiplication_is_not_a_splat(self):
+        # The star has to LEAD; `$ * 2` is arithmetic.
+        self.assertEqual(_split_splat('$ * 2'), (False, '$ * 2'))
+
+
+class TestSplatRows(unittest.TestCase):
+    """A root row that splats a list occupies several rendered rows. The first
+    carries span_start and draws the cells of every column that did NOT splat,
+    with rowspan=span."""
+
+    def test_a_splat_column_turns_one_root_row_into_several(self):
+        lst = [{'name': 'A', 'members': [1, 2, 3]}]
+        rows = _rows(lst, ["$['name']", "*$['members']"])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r.key for r in rows], ['0.0', '0.1', '0.2'])
+
+    def test_only_the_first_row_of_a_group_owns_the_span(self):
+        lst = [{'name': 'A', 'members': [1, 2, 3]}]
+        rows = _rows(lst, ["$['name']", "*$['members']"])
+        self.assertEqual([r.span_start for r in rows], [True, False, False])
+        self.assertEqual([r.span for r in rows], [3, 3, 3])
+
+    def test_every_row_of_a_group_shares_the_root_index(self):
+        # $i is the ROOT row's number, so it rowspans like any other unsplatted
+        # value. The flat rendered position gets no sigil.
+        lst = [{'m': [1, 2]}, {'m': [3]}]
+        rows = _rows(lst, ['*$["m"]'])
+        self.assertEqual([r.index for r in rows], [0, 0, 1])
+
+    def test_the_position_within_a_group_binds_to_j(self):
+        lst = [{'m': [1, 2, 3]}]
+        rows = _rows(lst, ['*$["m"]'])
+        self.assertEqual([r.bindings['j'] for r in rows], [0, 1, 2])
+
+    def test_the_splatted_element_is_reachable_from_the_row(self):
+        lst = [{'m': [10, 20]}]
+        rows = _rows(lst, ['*$["m"]'])
+        self.assertEqual([r.splats['*$["m"]'] for r in rows], [10, 20])
+
+    def test_two_splats_zip_and_pad(self):
+        # Align by position, blank the short one; the group is as long as the
+        # longest splat.
+        lst = [{'a': [1, 2, 3], 'b': ['x']}]
+        rows = _rows(lst, ['*$["a"]', '*$["b"]'])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r.splats['*$["a"]'] for r in rows], [1, 2, 3])
+        self.assertEqual([r.splats['*$["b"]'] for r in rows], ['x', None, None])
+
+    def test_an_empty_splat_still_leaves_the_root_row_one_row(self):
+        # Otherwise a row would vanish from the table for having an empty list.
+        lst = [{'m': []}, {'m': [1]}]
+        rows = _rows(lst, ['*$["m"]'])
+        self.assertEqual([r.index for r in rows], [0, 1])
+        self.assertEqual([r.span for r in rows], [1, 1])
+
+    def test_a_splat_of_something_that_is_not_a_list_is_one_row(self):
+        lst = [{'m': 5}]
+        rows = _rows(lst, ['*$["m"]'])
+        self.assertEqual(len(rows), 1)
+
+    def test_the_dict_of_lists_grouped_view(self):
+        # The payoff the whole plan was aiming at, and it is not a dict feature:
+        # the key cell spans its group precisely because $k did NOT splat.
+        d = {'k1': ['a', 'b'], 'k2': ['c']}
+        rows = _rows(d, ['$k', '*$v'])
+        self.assertEqual([r.key for r in rows], ['0.0', '0.1', '1.0'])
+        self.assertEqual([r.bindings['k'] for r in rows], ['k1', 'k1', 'k2'])
+        self.assertEqual([r.splats['*$v'] for r in rows], ['a', 'b', 'c'])
+        self.assertEqual([r.span_start for r in rows], [True, False, True])
+        self.assertEqual([r.span for r in rows], [2, 2, 1])
+
+    def test_no_splat_columns_is_exactly_what_it_was(self):
+        lst = ['a', 'b']
+        self.assertEqual(_rows(lst, ["$"]), _rows(lst))
+        self.assertEqual([r.key for r in _rows(lst, ['$'])], ['0', '1'])
+
+
+class TestSplatRendering(unittest.TestCase):
+    """What the mockup asked for: the key cell spans its group -- precisely
+    because $k did NOT splat, not because it is a key."""
+
+    @staticmethod
+    def render(value, columns, gv=None):
+        gv = gv or mock_get_visualizer_dict_tables
+        model = init_model(value, gv, var_and_exp=('d', 'd'))
+        model['columns'] = list(columns)
+        return visualize(value, model, gv, None)
+
+    @staticmethod
+    def cells(html_out):
+        return [re.sub(r'<[^>]+>', '', c)
+                for c in re.findall(r'<td[^>]*>(.*?)</td>', html_out, re.S)]
+
+    def test_a_splat_column_draws_one_cell_per_element(self):
+        html_out = self.render({'k1': ['a', 'b']}, ['$k', '*$v'])
+        self.assertIn('a', html_out)
+        self.assertIn('b', html_out)
+
+    def test_the_unsplatted_column_rowspans_its_group(self):
+        html_out = self.render({'k1': ['a', 'b', 'c']}, ['$k', '*$v'])
+        self.assertIn('rowspan="3"', html_out)
+
+    def test_a_group_of_one_needs_no_rowspan(self):
+        html_out = self.render({'k1': ['a']}, ['$k', '*$v'])
+        self.assertNotIn('rowspan', html_out)
+
+    def test_the_key_cell_itself_spans_the_group(self):
+        # Drawn once AND spanning: without the rowspan the cell occupies the
+        # first row only and every row under it shifts left.
+        html_out = self.render({'k1': ['a', 'b', 'c']}, ['$k', '*$v'])
+        # Matched on the cell's TEXT: 'k1' also appears in the splat cells'
+        # drag expressions, d['k1'][j].
+        key_cells = [t for t, c in re.findall(r'<td([^>]*)>(.*?)</td>',
+                                              html_out, re.S)
+                     if re.sub(r'<[^>]+>', '', c).strip() == 'k1']
+        self.assertEqual(len(key_cells), 1)
+        self.assertIn('rowspan="3"', key_cells[0])
+
+    def test_the_splat_cells_do_not_span(self):
+        html_out = self.render({'k1': ['a', 'b']}, ['$k', '*$v'])
+        splat_cells = [t for t, c in re.findall(r'<td([^>]*)>(.*?)</td>',
+                                                html_out, re.S)
+                       if re.sub(r'<[^>]+>', '', c).strip() in ('a', 'b')]
+        self.assertEqual(len(splat_cells), 2)
+        for t in splat_cells:
+            self.assertNotIn('rowspan', t)
+
+    def test_the_key_is_drawn_once_not_once_per_element(self):
+        html_out = self.render({'k1': ['a', 'b', 'c']}, ['$k', '*$v'])
+        self.assertEqual(len([c for c in self.cells(html_out) if 'k1' in c]), 1)
+
+    def test_the_row_index_rowspans_too(self):
+        # It shows row.index, which is a root-row value like any other.
+        html_out = self.render({'k1': ['a', 'b']}, ['$k', '*$v'])
+        rows = [r for r in re.findall(r'<tr[^>]*>.*?</tr>', html_out, re.S)
+                if 'col-header' not in r]
+        self.assertEqual(len(rows), 2)
+        self.assertIn('rowspan="2"', rows[0])
+        self.assertNotIn('row-index', rows[1])
+
+    def test_a_list_of_lists_flattens_into_rows(self):
+        html_out = self.render([[1, 2], [3]], ['*$'], mock_get_visualizer)
+        rows = [r for r in re.findall(r'<tr[^>]*>.*?</tr>', html_out, re.S)
+                if 'col-header' not in r]
+        self.assertEqual(len(rows), 3)
+
+    def test_a_splat_cell_hands_over_the_element_not_the_column(self):
+        html_out = self.render({'k1': ['a', 'b']}, ['$k', '*$v'])
+        self.assertIn("d[&#x27;k1&#x27;][1]", html_out)
+        self.assertNotIn('*d[', html_out)
+
+    def test_columns_without_a_splat_render_exactly_as_before(self):
+        d = {'a': 1, 'b': 2}
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(d, gv, var_and_exp=('d', 'd'))
+        plain = visualize(d, model, gv, None)
+        self.assertNotIn('rowspan', plain)
+
+
+class TestSplatCellLookup(unittest.TestCase):
+    """A cell key under splat is "3.1", so the row is found by the key rather
+    than by int() -- which raises on it."""
+
+    @staticmethod
+    def splat_model(d):
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(d, gv, var_and_exp=('d', 'd'))
+        model['columns'] = ['$k', '*$v']
+        return model
+
+    def test_a_splat_cell_value_is_the_element(self):
+        d = {'k1': ['a', 'b']}
+        model = self.splat_model(d)
+        self.assertEqual(
+            _table_child_value_getter(f'0.1{CELL_KEY_SEP}*$v', d, model), 'b')
+
+    def test_the_unsplatted_cell_of_a_group_is_the_root_value(self):
+        d = {'k1': ['a', 'b']}
+        model = self.splat_model(d)
+        self.assertEqual(
+            _table_child_value_getter(f'0.0{CELL_KEY_SEP}$k', d, model), 'k1')
+
+    def test_a_root_key_still_works_without_a_dot(self):
+        lst = [10, 20]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('d', 'd'))
+        self.assertEqual(
+            _table_child_value_getter(f'1{CELL_KEY_SEP}$', lst, model), 20)
 
 
 class TestRowAt(unittest.TestCase):
