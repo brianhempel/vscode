@@ -1953,7 +1953,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
         with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
             model = init_model(o, _get_nesting_visualizer)
         child = model['children']['$.items']  # a list-visualizer model
-        self.assertEqual(child['columns'], ['$.lower()'])
+        self.assertEqual(list(child['columns']), ['$.lower()'])
 
     def test_cyclic_object_is_depth_capped_not_recursion_error(self):
         class Node:

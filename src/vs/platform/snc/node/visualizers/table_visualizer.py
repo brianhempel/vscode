@@ -394,7 +394,7 @@ def _save_slots(model: dict) -> None:
     save_columns_to_dotfile(
         model.get('_config_root_type'),
         model.get('_config_path') or [],
-        list(model.get('columns', [])),
+        _slots_from_columns(model.get('columns') or {}),
         model.get('_config_root_dotfile') or COLUMN_DOTFILE_NAME,
     )
 
@@ -425,6 +425,141 @@ class Row:
     span_start: bool  # owns the rowspan cells of the unsplatted columns
     span: int         # how many rendered rows this root row occupies
     splats: dict = field(default_factory=dict)  # splat column -> this row's element
+
+
+# === columns ==================================================================
+#
+# `columns` is an ordered map of column EXPRESSION -> that column's config:
+#
+#     {'$k': {}, '*$v': {'cols': {"$['who']": {}, "$['age']": {}}}}
+#
+# One structure rather than a list beside a parallel map, so the two can never
+# drift. Duplicate columns are impossible by construction -- which is what a
+# duplicate always should have been, since cell identity is the column
+# expression and two identical columns were always one identity. Order is
+# insertion order, which JSON round-trips.
+#
+# A column with nothing configured is `{}`, so the common case reads as a plain
+# ordered set. `cols` (this table's sub-columns, same shape recursively) sits
+# beside `children` (a nested VISUALIZER's own config, keyed by the cell's
+# type): different axes, named separately, neither able to overwrite the other.
+#
+# Iteration, len(), list() and `in` all do the right thing on a dict already;
+# only positional access and mutation need these.
+
+
+def _as_columns(columns) -> dict:
+    """The columns map, from either shape.
+
+    A plain list of expressions is still what a caller outside this module is
+    likely to hand over -- a test building a model literal, or a model
+    persisted before columns became a map -- so it is accepted and converted
+    rather than crashing somewhere further in. Duplicates collapse, which is
+    the same answer the map gives everywhere else.
+    """
+    if isinstance(columns, dict):
+        return columns
+    out = {}
+    for col in (columns or []):
+        _col_add(out, col)
+    return out
+
+
+def _col_at(columns, index: int) -> 'str | None':
+    """The column at a position, or None -- what an event carrying an index
+    means. Negative indices are out of range rather than counting back: an
+    event naming column -1 is a stale event, not a request for the last one."""
+    if index is None or index < 0:
+        return None
+    keys = list(columns or [])
+    return keys[index] if index < len(keys) else None
+
+
+def _col_subs(columns, col: str) -> dict:
+    """A column's sub-columns, in the same shape as `columns` itself."""
+    if not isinstance(columns, dict):
+        return {}
+    return (columns.get(col) or {}).get('cols') or {}
+
+
+def _col_add(columns, col: str, config=None) -> bool:
+    """Append a column. False when it is already there -- a duplicate would be
+    a second cell with the first one's identity."""
+    if col in columns:
+        return False
+    columns[col] = dict(config or {})
+    return True
+
+
+def _col_remove_at(columns, index: int) -> 'str | None':
+    """Remove the column at a position and hand back its expression."""
+    col = _col_at(columns, index)
+    if col is not None:
+        del columns[col]
+    return col
+
+
+def _col_rename_at(columns, index: int, new_col: str) -> bool:
+    """Rename in place, keeping the position and the column's config.
+
+    A dict has no in-place key rename, so the map is rebuilt in order. False
+    when the new name is already taken, which would silently merge two columns.
+    """
+    old = _col_at(columns, index)
+    if old is None or new_col == old:
+        return False
+    if new_col in columns:
+        return False
+    rebuilt = {(new_col if k == old else k): v for k, v in columns.items()}
+    columns.clear()
+    columns.update(rebuilt)
+    return True
+
+
+def _col_move(columns, frm: int, to: int) -> bool:
+    """Reorder, keeping every column's config with it."""
+    keys = list(columns)
+    if not (0 <= frm < len(keys)) or not (0 <= to <= len(keys)):
+        return False
+    col = keys.pop(frm)
+    keys.insert(to, col)
+    rebuilt = {k: columns[k] for k in keys}
+    columns.clear()
+    columns.update(rebuilt)
+    return True
+
+
+def _slots_from_columns(columns) -> list:
+    """The columns map as the slot list the dotfile stores.
+
+    A plain column stays a bare string, so a table with no splat writes exactly
+    the file it always did; only a splat carrying sub-columns needs the object
+    form.
+    """
+    slots = []
+    for col, config in (columns or {}).items():
+        subs = (config or {}).get('cols') or {}
+        slots.append({'expr': col, 'cols': list(subs)} if subs else col)
+    return slots
+
+
+def _columns_from_slots(exprs, slot_cols) -> dict:
+    """Build the columns map from what the dotfile gave up.
+
+    Sub-columns are one level deep: the row model describes exactly one
+    grouping level (Row.span / span_start is a width, not a tree), so a splat
+    inside a splat would load and then render wrong. Dropped here rather than
+    half-honoured.
+    """
+    columns = {}
+    for expr in exprs:
+        subs = slot_cols.get(expr) or []
+        config = {}
+        if subs and _split_splat(expr)[0]:
+            config['cols'] = {sub: {} for sub in subs
+                              if not _split_splat(sub)[0]}
+        _col_add(columns, expr, config)
+    return columns
 
 
 # A leaf's identity has to tell two splats' identically-named sub-columns
@@ -458,17 +593,16 @@ class ColumnGroup:
     subs: tuple
 
 
-def _column_groups(columns, slot_cols=None) -> list:
+def _column_groups(columns) -> list:
     """The top-level columns, each with the leaves it covers."""
-    slot_cols = slot_cols or {}
     groups = []
-    for col in (columns or []):
-        subs = tuple(slot_cols.get(col) or ()) if _split_splat(col)[0] else ()
+    for col in (columns or {}):
+        subs = tuple(_col_subs(columns, col)) if _split_splat(col)[0] else ()
         groups.append(ColumnGroup(col, max(len(subs), 1), subs))
     return groups
 
 
-def _leaf_columns(columns, slot_cols=None) -> list:
+def _leaf_columns(columns) -> list:
     """Every drawn column, in order.
 
     A plain column is its own leaf. A splat with no sub-columns is one leaf
@@ -476,7 +610,7 @@ def _leaf_columns(columns, slot_cols=None) -> list:
     every one of them reading off the same element.
     """
     leaves = []
-    for group in _column_groups(columns, slot_cols):
+    for group in _column_groups(columns):
         if not group.subs:
             is_splat = _split_splat(group.col)[0]
             leaves.append(LeafColumn(
@@ -1080,7 +1214,7 @@ def _claim_term(term: str, columns, first: int, used, eval_in_scope=None):
     """
     best = None
     for index in range(first, len(columns)):
-        col = columns[index]
+        col = _col_at(columns, index)
         if col in used:
             continue
         pred = unlift_term(term, col)
@@ -1140,7 +1274,7 @@ def decompose_search(search: str | None, columns,
 
 def _column_at(model: dict, index: int) -> str | None:
     columns = model.get('columns', [])
-    return columns[index] if 0 <= index < len(columns) else None
+    return _col_at(columns, index)
 
 
 def _column_search_row(model: dict, col: str) -> dict:
@@ -3729,7 +3863,7 @@ def _pick_column_expr(col_id: str, columns) -> str | None:
         n = int(col_id[len('col_'):])
     except ValueError:
         return None
-    return columns[n] if 0 <= n < len(columns) else None
+    return _col_at(columns, n)
 
 
 def _parse_pick_region_id(region_id: str) -> tuple | None:
@@ -4065,13 +4199,13 @@ def _resolve_columns(lst, get_visualizer, slots_config, config_path):
 
     if loaded is not None:
         exprs, slot_children = parse_slots(loaded)
-        return exprs, slot_children, parse_slot_cols(loaded)
+        return _columns_from_slots(exprs, parse_slot_cols(loaded)), slot_children
 
-    columns = _detect_table_columns(lst, get_visualizer)
-    if columns is None:
-        columns = ['$']
+    exprs = _detect_table_columns(lst, get_visualizer)
+    if exprs is None:
+        exprs = ['$']
     # Detection never proposes a splat, so it never proposes sub-columns.
-    return columns, {}, {}
+    return _columns_from_slots(exprs, {}), {}
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
@@ -4088,9 +4222,8 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     }
 
     if get_visualizer is None:
-        return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['$'],
-                '_slot_children': {}, '_slot_cols': {},
-                '_is_dict': isinstance(lst, dict),
+        return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': {'$': {}},
+                '_slot_children': {}, '_is_dict': isinstance(lst, dict),
                 **config_fields,
                 **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
@@ -4099,13 +4232,9 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
-    columns, slot_children, slot_cols = _resolve_columns(
+    columns, slot_children = _resolve_columns(
         lst, get_visualizer, slots_config, config_path)
     config_fields['_slot_children'] = slot_children
-    # A splat's sub-columns, keyed by the splat expr -- a sibling of
-    # _slot_children rather than part of it: `children` is a nested
-    # visualizer's own config keyed by TYPE, `cols` is this table's columns.
-    config_fields['_slot_cols'] = slot_cols
     # A fact about the value, not display state -- see _model_binds.
     config_fields['_is_dict'] = isinstance(lst, dict)
 
@@ -4123,7 +4252,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     # hand are what the cells are read from -- see _is_pure_ref.
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
     for row in _rows(lst, columns):
-        for leaf in _leaf_columns(columns, slot_cols):
+        for leaf in _leaf_columns(columns):
             col = leaf.expr
             is_splat = leaf.splat is not None
             # An unsplatted column belongs to the root row, so it builds one
@@ -5760,22 +5889,23 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
     column of it and the index cell the number beside it, so without the name
     there is no handle on the row unless a `$` column happens to be drawn.
     """
-    item = _agg_value(expr, None, eval_in_scope, lst, columns[ci])
-    idx = _agg_row_index(lst, item, expr, columns[ci], eval_in_scope)
+    asking = _col_at(columns, ci)
+    item = _agg_value(expr, None, eval_in_scope, lst, asking)
+    idx = _agg_row_index(lst, item, expr, asking, eval_in_scope)
     # Nothing to hand over when the aggregation has no row to point at, and
     # nothing to name the list by when it has no source.
     binds = _binds_for(lst)
     item_code = (None if item is NO_ANSWER or source_expr is None
-                 else _agg_col_code(expr, columns[ci], source_expr, binds))
+                 else _agg_col_code(expr, asking, source_expr, binds))
     idx_code = (None if idx is NO_ANSWER or item_code is None
                 else _agg_row_index_code(item_code, source_expr, expr,
-                                         columns[ci], binds))
+                                         asking, binds))
 
     cells = [f'<td class="row-index col-agg-cell">'
              f'<div class="col-agg"{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
              f'<div class="col-agg-label col-agg-item-label"'
              f'{py_exp_attrs(item_code, imports=_agg_imports(expr))}>'
-             f'{_agg_name(expr)} by {columns[ci]}</div>'
+             f'{_agg_name(expr)} by {asking}</div>'
              f'<div class="col-agg-label"></div>' # needed for spacing, the above is position: absolute to overflow
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
              f'</div></td>']
@@ -5783,7 +5913,7 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
         value = (NO_ANSWER if item is NO_ANSWER
                  else _column_cell_value(col, item, lst, eval_in_scope,
                                          index=None if idx is NO_ANSWER else idx))
-        key = _agg_child_key(columns[ci], expr, col)
+        key = _agg_child_key(asking, expr, col)
         code = (None if value is NO_ANSWER or item_code is None
                 else _agg_child_expr(key, source_expr, binds))
         label = ('<div class="col-agg-label"></div>' if cj != ci else
@@ -5874,7 +6004,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
             if expr is None:
                 cells.append('<td class="col-agg-blank"></td>')
             else:
-                cells.append(_render_agg_cell(expr, ci, columns[ci], level,
+                cells.append(_render_agg_cell(expr, ci, _col_at(columns, ci), level,
                                               reads[ci], model, get_visualizer,
                                               eval_in_scope, source_expr,
                                               max_width))
@@ -5943,9 +6073,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     if not small:
         strs.append(_render_tool_toolbar(model))
     strs.append(f'<div class="list-table-scroll" style="{table_div_style}">')
-    slot_cols = model.get('_slot_cols') or {}
-    groups = _column_groups(columns, slot_cols)
-    leaves = _leaf_columns(columns, slot_cols)
+    groups = _column_groups(columns)
+    leaves = _leaf_columns(columns)
     # A splat carrying sub-columns spans them, and they get a header row of
     # their own underneath. With no sub-columns anywhere this is one <tr> of
     # width-1 cells -- exactly the markup it has always been.
@@ -6185,6 +6314,7 @@ def _adopt_source(model: dict, var_and_exp=None, source_span=None) -> None:
 def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, source_span=None):
     _adopt_source(model, var_and_exp, source_span)
     model['_is_dict'] = isinstance(lst, dict)
+    model['columns'] = _as_columns(model.get('columns'))
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
         return f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
@@ -6220,7 +6350,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         return (model, [])
 
     if model is None:
-        model = {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['$'],
+        model = {'children': {}, 'handledKeys': [], 'display_mode': 'table',
+                 'columns': {'$': {}},
                  '_slot_children': {}, '_config_root_type': None,
                  '_config_root_dotfile': None, '_config_path': [],
                  **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
@@ -6231,6 +6362,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
     if value is not None:
         model['_is_dict'] = isinstance(value, dict)
+    model['columns'] = _as_columns(model.get('columns'))
 
     try:
         make_python_event = eval(event['pythonEventStr'])
@@ -6284,7 +6416,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # expression is one every row answers. An answer's isn't, so its
             # code travels on up to whoever asked for it.
             if isinstance(cmd, tuple) and len(cmd) in (2, 3) and not is_agg:
-                new_model['columns'].append(cmd[1])
+                _col_add(new_model['columns'], cmd[1])
                 if type_key:
                     _save_slots(new_model)
             else:
@@ -6316,16 +6448,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ColumnSelect(name=name):
             if model.get('adding_column'):
-                model['columns'].append(name)
+                _col_add(model['columns'], name)
                 model['adding_column'] = False
                 model['column_input_value'] = ''
                 if type_key:
                     _save_slots(model)
             elif model.get('editing_column_index') is not None:
                 idx = model['editing_column_index']
-                if 0 <= idx < len(model['columns']):
-                    old_name = model['columns'][idx]
-                    model['columns'][idx] = name
+                old_name = _col_at(model['columns'], idx)
+                if old_name is not None and _col_rename_at(model['columns'], idx, name):
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
                         # The search was written against the old expression, so
@@ -6343,15 +6474,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             _close_column_menus(model)
             detail = event_json.get('detail', 1)
             if detail >= 2:
-                if 0 <= idx < len(model['columns']):
+                if _col_at(model['columns'], idx) is not None:
                     model['editing_column_index'] = idx
-                    model['column_input_value'] = model['columns'][idx]
+                    model['column_input_value'] = _col_at(model['columns'], idx)
                     model['adding_column'] = False
 
         case RemoveColumnClick(index=idx):
             _close_column_menus(model)
-            if 0 <= idx < len(model['columns']):
-                removed_col = model['columns'].pop(idx)
+            if _col_at(model['columns'], idx) is not None:
+                removed_col = _col_remove_at(model['columns'], idx)
                 _remove_column_children(model, removed_col)
                 _remove_column_search(model, removed_col)
                 _remove_column_compute(model, removed_col)
@@ -6384,8 +6515,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if drag_from is not None and 0 <= drag_from < len(model['columns']):
                 target = idx
                 if drag_from != target:
-                    col = model['columns'].pop(drag_from)
-                    model['columns'].insert(target, col)
+                    _col_move(model['columns'], drag_from, target)
                     # Column order is term order in the composed search.
                     _recompose_search(model, eval_in_scope)
                     if type_key:
@@ -6430,7 +6560,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
                 if model.get('adding_column'):
                     if commit_val:
-                        model['columns'].append(commit_val)
+                        _col_add(model['columns'], commit_val)
                         if type_key:
                             _save_slots(model)
                     model['adding_column'] = False
@@ -6438,9 +6568,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['selected_suggestion_index'] = None
                 elif model.get('editing_column_index') is not None:
                     idx = model['editing_column_index']
-                    if commit_val and 0 <= idx < len(model['columns']):
-                        old_name = model['columns'][idx]
-                        model['columns'][idx] = commit_val
+                    old_name = _col_at(model['columns'], idx)
+                    if commit_val and old_name is not None and _col_rename_at(
+                            model['columns'], idx, commit_val):
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
                             _remove_column_search(model, old_name)

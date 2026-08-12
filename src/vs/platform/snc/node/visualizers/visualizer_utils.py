@@ -473,9 +473,19 @@ def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
     _normalize_slot_list(target)
     old = list(target)
     rebuilt = []
-    for e in exprs:
-        existing = _find_slot(old, e)
-        rebuilt.append(existing if existing is not None else {'expr': e})
+    for entry in exprs:
+        # An entry is either a bare expr or a slot carrying this table's own
+        # keys (`cols`). Either way the slot already on disk is reused when
+        # there is one, so its `children` -- a nested visualizer's config,
+        # which the caller knows nothing about -- survives untouched.
+        expr = entry['expr'] if isinstance(entry, dict) else entry
+        existing = _find_slot(old, expr)
+        slot = existing if existing is not None else {'expr': expr}
+        if isinstance(entry, dict):
+            for key, value in entry.items():
+                if key != 'expr':
+                    slot[key] = value
+        rebuilt.append(slot)
     target[:] = rebuilt
 
     _save_dotfile_dict(dotfile_name, data)

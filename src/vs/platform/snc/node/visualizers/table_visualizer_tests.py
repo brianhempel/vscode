@@ -67,7 +67,8 @@ from table_visualizer import (
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _column_groups,
-    _column_header_text,
+    _column_header_text, _col_add, _col_at, _col_rename_at, _col_remove_at,
+    _col_move, _col_subs,
 )
 
 
@@ -402,7 +403,7 @@ class TestNestedComposition(unittest.TestCase):
         lst = [[1, 2], [3, 4]]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['$[0]', '$[1]'])
+        self.assertEqual(list(model['columns']), ['$[0]', '$[1]'])
         self.assertIn('0\x00$[0]', model['children'])
         self.assertIn('0\x00$[1]', model['children'])
         self.assertIn('1\x00$[0]', model['children'])
@@ -656,25 +657,90 @@ class TestSplatRendering(unittest.TestCase):
         self.assertNotIn('rowspan', plain)
 
 
+class TestColumnsDict(unittest.TestCase):
+    """`columns` is an ordered map of column expression -> that column's config.
+
+    One structure rather than a list beside a sibling map, duplicates
+    impossible by construction, and order is insertion order -- which JSON
+    round-trips. A column with nothing configured is `{}`; only a splat with
+    sub-columns pays for the nesting."""
+
+    def sample(self):
+        return {'$k': {}, '*$v': {'cols': {"$['who']": {}, "$['age']": {}}}}
+
+    def test_the_common_case_is_an_empty_config(self):
+        model = init_model({'a': 1, 'b': 2}, mock_get_visualizer_dict_tables)
+        self.assertEqual(model['columns'], {'$k': {}, '$v': {}})
+
+    def test_iteration_gives_the_columns_in_order(self):
+        self.assertEqual(list(self.sample()), ['$k', '*$v'])
+
+    def test_a_column_cannot_be_added_twice(self):
+        cols = {'$a': {}}
+        _col_add(cols, '$a')
+        self.assertEqual(list(cols), ['$a'])
+        _col_add(cols, '$b')
+        self.assertEqual(list(cols), ['$a', '$b'])
+
+    def test_positional_access(self):
+        cols = self.sample()
+        self.assertEqual(_col_at(cols, 0), '$k')
+        self.assertEqual(_col_at(cols, 1), '*$v')
+        self.assertIsNone(_col_at(cols, 2))
+        self.assertIsNone(_col_at(cols, -1))
+
+    def test_renaming_keeps_the_position_and_the_config(self):
+        cols = self.sample()
+        _col_rename_at(cols, 1, '*$w')
+        self.assertEqual(list(cols), ['$k', '*$w'])
+        self.assertEqual(list(cols['*$w']['cols']), ["$['who']", "$['age']"])
+
+    def test_renaming_onto_an_existing_name_is_refused(self):
+        cols = {'$a': {}, '$b': {}}
+        self.assertFalse(_col_rename_at(cols, 1, '$a'))
+        self.assertEqual(list(cols), ['$a', '$b'])
+
+    def test_removing_by_position(self):
+        cols = self.sample()
+        self.assertEqual(_col_remove_at(cols, 0), '$k')
+        self.assertEqual(list(cols), ['*$v'])
+
+    def test_moving_a_column_preserves_every_config(self):
+        cols = self.sample()
+        _col_move(cols, 1, 0)
+        self.assertEqual(list(cols), ['*$v', '$k'])
+        self.assertEqual(list(cols['*$v']['cols']), ["$['who']", "$['age']"])
+
+    def test_sub_columns_are_read_off_the_column(self):
+        self.assertEqual(list(_col_subs(self.sample(), '*$v')),
+                         ["$['who']", "$['age']"])
+        self.assertEqual(_col_subs(self.sample(), '$k'), {})
+
+    def test_it_round_trips_through_json_in_order(self):
+        import json
+        self.assertEqual(list(json.loads(json.dumps(self.sample()))),
+                         ['$k', '*$v'])
+
+
 class TestLeafColumns(unittest.TestCase):
     """Store nested, render flat. `columns` plus the sub-column map expand into
     one list of leaves, and every per-column feature works on the leaves."""
 
     def test_a_table_with_no_splat_is_its_own_leaves(self):
-        leaves = _leaf_columns(['$.a', '$.b'], {})
+        leaves = _leaf_columns({'$.a': {}, '$.b': {}})
         self.assertEqual([l.expr for l in leaves], ['$.a', '$.b'])
         self.assertEqual([l.splat for l in leaves], [None, None])
 
     def test_a_splat_without_sub_columns_is_one_leaf(self):
-        leaves = _leaf_columns(['$k', '*$v'], {})
+        leaves = _leaf_columns({'$k': {}, '*$v': {}})
         self.assertEqual([l.expr for l in leaves], ['$k', '*$v'])
         self.assertEqual([l.splat for l in leaves], [None, '*$v'])
         # The whole element is what the cell shows.
         self.assertEqual(leaves[1].sub, '$')
 
     def test_a_splat_expands_into_one_leaf_per_sub_column(self):
-        cols = ['$.name', '*$.members']
-        leaves = _leaf_columns(cols, {'*$.members': ['$.who', '$.age']})
+        leaves = _leaf_columns({'$.name': {}, '*$.members': {
+            'cols': {'$.who': {}, '$.age': {}}}})
         self.assertEqual([l.sub for l in leaves], [None, '$.who', '$.age'])
         self.assertEqual([l.splat for l in leaves],
                          [None, '*$.members', '*$.members'])
@@ -682,20 +748,20 @@ class TestLeafColumns(unittest.TestCase):
     def test_leaf_identities_are_unique_across_two_splats(self):
         # Two splats can carry the same sub-column; the identity must still
         # tell their cells apart, or one column's children overwrite the other's.
-        leaves = _leaf_columns(['*$.a', '*$.b'],
-                               {'*$.a': ['$.x'], '*$.b': ['$.x']})
+        leaves = _leaf_columns({'*$.a': {'cols': {'$.x': {}}},
+                                '*$.b': {'cols': {'$.x': {}}}})
         self.assertEqual(len({l.expr for l in leaves}), 2)
 
     def test_the_header_path_is_what_the_two_rows_show(self):
-        leaves = _leaf_columns(['$.name', '*$.members'],
-                               {'*$.members': ['$.who', '$.age']})
+        leaves = _leaf_columns({'$.name': {}, '*$.members': {
+            'cols': {'$.who': {}, '$.age': {}}}})
         self.assertEqual([l.header for l in leaves],
                          [('$.name',), ('*$.members', '$.who'),
                           ('*$.members', '$.age')])
 
     def test_the_splat_group_knows_how_wide_it_is(self):
-        groups = _column_groups(['$.name', '*$.members'],
-                                {'*$.members': ['$.who', '$.age']})
+        groups = _column_groups({'$.name': {}, '*$.members': {
+            'cols': {'$.who': {}, '$.age': {}}}})
         self.assertEqual([(g.col, g.width) for g in groups],
                          [('$.name', 1), ('*$.members', 2)])
 
@@ -708,8 +774,9 @@ class TestSplatSubColumnRendering(unittest.TestCase):
     def render(value, columns, slot_cols):
         gv = mock_get_visualizer_dict_tables
         model = init_model(value, gv, var_and_exp=('d', 'd'))
-        model['columns'] = list(columns)
-        model['_slot_cols'] = dict(slot_cols)
+        model['columns'] = {c: ({'cols': {s: {} for s in slot_cols[c]}}
+                                if c in slot_cols else {})
+                            for c in columns}
         return visualize(value, model, gv, None)
 
     def value(self):
@@ -900,24 +967,24 @@ class TestDictCellsBecomeTables(unittest.TestCase):
         # with no get_fields attribute at all, so require_all bails. Written
         # explicitly or the implementation lands on ['$k'].
         model = init_model({'a': 1, 'b': 2}, mock_get_visualizer_dict_tables)
-        self.assertEqual(model['columns'], ['$k', '$v'])
+        self.assertEqual(list(model['columns']), ['$k', '$v'])
 
     def test_a_dict_of_records_detects_the_values_fields(self):
         d = {'alice': {'age': 30, 'city': 'SD'},
              'bob': {'age': 25, 'city': 'LA'}}
         model = init_model(d, mock_get_visualizer_dict_tables)
-        self.assertEqual(model['columns'], ['$k', "$v['age']", "$v['city']"])
+        self.assertEqual(list(model['columns']), ['$k', "$v['age']", "$v['city']"])
 
     def test_the_leading_dollar_is_rewritten_through_the_substitution(self):
         # Not str.replace: a field with a $ inside a string literal is exactly
         # the trap dollar_expr_names_index exists to avoid.
         d = {'x': {'a$b': 1}}
         model = init_model(d, mock_get_visualizer_dict_tables)
-        self.assertEqual(model['columns'], ['$k', "$v['a$b']"])
+        self.assertEqual(list(model['columns']), ['$k', "$v['a$b']"])
 
     def test_an_empty_dict_still_gets_the_two_columns(self):
         model = init_model({}, mock_get_visualizer_dict_tables)
-        self.assertEqual(model['columns'], ['$k', '$v'])
+        self.assertEqual(list(model['columns']), ['$k', '$v'])
 
     def test_a_dict_renders_key_and_value_side_by_side(self):
         # What the whole landing is for: a simple dict renders exactly as if it
@@ -957,24 +1024,24 @@ class TestTableDetection(unittest.TestCase):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['$'])
+        self.assertEqual(list(model['columns']), ['$'])
 
     def test_empty_list_is_table_mode(self):
         model = init_model([], mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['$'])
+        self.assertEqual(list(model['columns']), ['$'])
 
     def test_list_of_lists_is_table_mode(self):
         lst = [[1, 2, 3], [4, 5, 6]]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['$[0]', '$[1]', '$[2]'])
+        self.assertEqual(list(model['columns']), ['$[0]', '$[1]', '$[2]'])
 
     def test_mixed_types_is_table_mode_with_dollar_column(self):
         lst = ["hello", 42]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ['$'])
+        self.assertEqual(list(model['columns']), ['$'])
 
     def test_union_columns_from_different_field_sets(self):
         lst = [{'a': 1, 'b': 2}, {'b': 3, 'c': 4}]
@@ -1411,7 +1478,7 @@ class TestColumnAdd(unittest.TestCase):
         model['column_input_value'] = ''
         event = make_column_key_event('Enter')
         new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'], original_cols)
+        self.assertEqual(list(new_model['columns']), original_cols)
         self.assertFalse(new_model['adding_column'])
 
     def test_add_column_saves_dotfile(self):
@@ -1433,7 +1500,7 @@ class TestColumnEdit(unittest.TestCase):
         event = make_column_mouse_event(repr(ColumnClick(index=0)), detail=2)
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['editing_column_index'], 0)
-        self.assertEqual(new_model['column_input_value'], model['columns'][0])
+        self.assertEqual(new_model['column_input_value'], list(model['columns'])[0])
         self.assertFalse(new_model['adding_column'])
 
     def test_single_click_does_not_start_editing(self):
@@ -1444,39 +1511,55 @@ class TestColumnEdit(unittest.TestCase):
         self.assertIsNone(new_model['editing_column_index'])
 
     def test_column_select_replaces_column_when_editing(self):
+        # The suggestion list only ever offers columns the table doesn't
+        # already show, so the replacement here is one that isn't present --
+        # a name already in the table is refused, since columns are a map.
         lst = [{'name': 'Alice', 'age': 30, 'city': 'NYC'}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
-        model['column_input_value'] = "$['ci"
-        old_col = model['columns'][0]
-        event = make_column_mouse_event(repr(ColumnSelect(name="$['city']")))
+        model['column_input_value'] = "$['zi"
+        event = make_column_mouse_event(repr(ColumnSelect(name="$['zip']")))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'][0], "$['city']")
+        self.assertEqual(list(new_model['columns'])[0], "$['zip']")
         self.assertIsNone(new_model['editing_column_index'])
 
     def test_enter_commits_edit(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 0
+        model['column_input_value'] = "$['nick']"
+        event = make_column_key_event('Enter')
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, None, model, lst, mock_get_visualizer)
+        self.assertEqual(list(new_model['columns'])[0], "$['nick']")
+        self.assertIsNone(new_model['editing_column_index'])
+
+    def test_committing_a_name_the_table_already_has_is_refused(self):
+        # `columns` is a map, so two columns cannot share a name -- and they
+        # never usefully could: cell identity is the column expression, so a
+        # duplicate was always a second cell wearing the first one's identity.
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        before = list(model['columns'])
+        model['editing_column_index'] = 0
         model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'][0], "$['age']")
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertEqual(list(new_model['columns']), before)
 
     def test_escape_cancels_edit(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        original_col = model['columns'][0]
+        original_col = list(model['columns'])[0]
         model['editing_column_index'] = 0
         model['column_input_value'] = "$['bogus']"
         event = make_column_key_event('Escape')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model['editing_column_index'])
         self.assertEqual(new_model['column_input_value'], '')
-        self.assertEqual(new_model['columns'][0], original_col)
+        self.assertEqual(list(new_model['columns'])[0], original_col)
 
 
 class TestColumnRemove(unittest.TestCase):
@@ -1486,7 +1569,7 @@ class TestColumnRemove(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertIn("$['name']", model['columns'])
-        name_idx = model['columns'].index("$['name']")
+        name_idx = list(model['columns']).index("$['name']")
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
@@ -1503,7 +1586,7 @@ class TestColumnRemove(unittest.TestCase):
     def test_remove_column_cleans_up_children(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
-        name_idx = model['columns'].index("$['name']")
+        name_idx = list(model['columns']).index("$['name']")
         self.assertIn("0\x00$['name']", model['children'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -1517,7 +1600,7 @@ class TestColumnRemove(unittest.TestCase):
         original_cols = list(model['columns'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=99)))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'], original_cols)
+        self.assertEqual(list(new_model['columns']), original_cols)
 
     def test_remove_cancels_editing_if_index_matches(self):
         lst = [{'name': 'Alice', 'age': 30}]
@@ -1534,7 +1617,7 @@ class TestColumnRemove(unittest.TestCase):
         lst = [{'a': 1, 'b': 2, 'c': 3}]
         model = init_model(lst, mock_get_visualizer)
         model['editing_column_index'] = 2
-        model['column_input_value'] = model['columns'][2]
+        model['column_input_value'] = list(model['columns'])[2]
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
@@ -1607,7 +1690,7 @@ class TestColumnMenu(unittest.TestCase):
     def test_menu_removes_column_and_closes(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        name_idx = model['columns'].index("$['name']")
+        name_idx = list(model['columns']).index("$['name']")
         model['openDropdown'] = {'id': f'col-menu-{name_idx}'}
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -1667,9 +1750,9 @@ class TestColumnReorder(unittest.TestCase):
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=2)))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'][0], original[1])
-        self.assertEqual(new_model['columns'][1], original[2])
-        self.assertEqual(new_model['columns'][2], original[0])
+        self.assertEqual(list(new_model['columns'])[0], original[1])
+        self.assertEqual(list(new_model['columns'])[1], original[2])
+        self.assertEqual(list(new_model['columns'])[2], original[0])
         self.assertIsNone(new_model['column_drag_from'])
         self.assertIsNone(new_model['column_drag_over'])
 
@@ -1682,9 +1765,9 @@ class TestColumnReorder(unittest.TestCase):
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=0)))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'][0], original[2])
-        self.assertEqual(new_model['columns'][1], original[0])
-        self.assertEqual(new_model['columns'][2], original[1])
+        self.assertEqual(list(new_model['columns'])[0], original[2])
+        self.assertEqual(list(new_model['columns'])[1], original[0])
+        self.assertEqual(list(new_model['columns'])[2], original[1])
 
     def test_drag_end_same_position_is_noop(self):
         lst = [{'a': 1, 'b': 2}]
@@ -1694,7 +1777,7 @@ class TestColumnReorder(unittest.TestCase):
         model['column_drag_over'] = 0
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=0)))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'], original)
+        self.assertEqual(list(new_model['columns']), original)
 
     def test_drag_end_saves_dotfile(self):
         lst = [{'a': 1, 'b': 2}]
@@ -1712,7 +1795,7 @@ class TestColumnReorder(unittest.TestCase):
         original = list(model['columns'])
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=1)))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'], original)
+        self.assertEqual(list(new_model['columns']), original)
 
 
 class TestColumnKeyboard(unittest.TestCase):
@@ -1895,7 +1978,7 @@ class TestColumnDotfile(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(model['columns'], ["$['age']", "$['name']"])
+        self.assertEqual(list(model['columns']), ["$['age']", "$['name']"])
 
     def test_init_model_falls_back_when_no_dotfile(self):
         lst = [{'name': 'Alice', 'age': 30}]
@@ -2019,11 +2102,11 @@ class TestColumnManagementForStringLists(unittest.TestCase):
     def test_remove_dollar_column_from_string_list(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
-        self.assertEqual(model['columns'], ['$'])
+        self.assertEqual(list(model['columns']), ['$'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'], [])
+        self.assertEqual(list(new_model['columns']), [])
 
 
 class TestColumnHeaderExpression(unittest.TestCase):
@@ -3153,7 +3236,7 @@ class TestSearchBoxInput(unittest.TestCase):
         original_columns = list(model['columns'])
         event = make_search_input_event('$ > 15')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['columns'], original_columns)
+        self.assertEqual(list(new_model['columns']), original_columns)
 
 
 class TestAutoLinkOnInteraction(unittest.TestCase):
@@ -5407,11 +5490,11 @@ class TestNestedSlotsConfig(unittest.TestCase):
         with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
             model = init_model(['ABCdef'], mock_get_visualizer)
-        self.assertEqual(model['columns'], ['$', _FINDALL_COL])
+        self.assertEqual(list(model['columns']), ['$', _FINDALL_COL])
         # The re.findall cell is a list[str]; with no nested config it must fall
         # back to the default single column, NOT re-read builtins.str's config.
         child = model['children'][self._findall_key()]
-        self.assertEqual(child['columns'], ['$'])
+        self.assertEqual(list(child['columns']), ['$'])
 
     def test_explicit_nested_children_applies(self):
         slots = [
@@ -5422,7 +5505,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
         with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
-        self.assertEqual(child['columns'], ['$.lower()'])
+        self.assertEqual(list(child['columns']), ['$.lower()'])
 
     def test_root_model_stores_config_fields(self):
         slots = [{'expr': '$'}]
@@ -6772,7 +6855,7 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_typing_stores_the_text_and_recomposes_the_main_search(self):
         lst, model = self.make_model()
-        col = model['columns'][0]
+        col = list(model['columns'])[0]
         new_model, _ = update(make_column_search_input_event(0, "'Alice'"),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(new_model['column_searches'][col]['text'], "'Alice'")
@@ -6781,7 +6864,7 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_default_operator_is_equality_and_default_compose_is_and(self):
         lst, model = self.make_model()
-        col = model['columns'][0]
+        col = list(model['columns'])[0]
         new_model, _ = update(make_column_search_input_event(0, "'Alice'"),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         row = new_model['column_searches'][col]
@@ -6790,7 +6873,7 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_choosing_an_operator_recomposes_and_closes_the_chip_menu(self):
         lst, model = self.make_model()
-        col = model['columns'][1]
+        col = list(model['columns'])[1]
         model, _ = update(make_column_search_input_event(1, '25'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model['col_search_dropdown'] = 'op-1'
@@ -6802,7 +6885,7 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_choosing_a_compose_operator(self):
         lst, model = self.make_model()
-        col = model['columns'][0]
+        col = list(model['columns'])[0]
         model['col_search_dropdown'] = 'compose-0'
         new_model, _ = update(make_column_search_compose_event(0, 'or'),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
@@ -6839,7 +6922,7 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_removing_a_column_drops_its_search_and_recomposes(self):
         lst, model = self.make_model()
-        first, second = model['columns'][0], model['columns'][1]
+        first, second = list(model['columns'])[0], list(model['columns'])[1]
         model, _ = update(make_column_search_input_event(0, "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_column_search_input_event(1, '30'),
@@ -6876,7 +6959,7 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_re_expressing_a_column_leaves_the_other_columns_alone(self):
         lst, model = self.make_model()
-        second = model['columns'][1]
+        second = list(model['columns'])[1]
         model, _ = update(make_column_search_input_event(0, "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_column_search_input_event(1, '30'),
@@ -6889,14 +6972,14 @@ class TestColumnSearchEvents(unittest.TestCase):
         # An aggregation describes the column rather than filtering it, so it
         # follows the column to its new expression.
         lst, model = self.make_model()
-        old = model['columns'][0]
+        old = list(model['columns'])[0]
         _set_column_computes(model, old, ['min($)'])
         model = self.re_express(model, lst, 0, 'len($)')
         self.assertEqual(_column_computes(model, 'len($)'), ['min($)'])
 
     def test_reordering_columns_recomposes_in_the_new_order(self):
         lst, model = self.make_model()
-        first, second = model['columns'][0], model['columns'][1]
+        first, second = list(model['columns'])[0], list(model['columns'])[1]
         model, _ = update(make_column_search_input_event(0, "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model, _ = update(make_column_search_input_event(1, '30'),
@@ -6942,7 +7025,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
 
     def test_typing_a_column_search_fills_in_the_column_row(self):
         lst, model = self.make_model()
-        age = model['columns'][1]
+        age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30')
         row = _column_search_row(model, age)
         self.assertEqual((row['op'], row['text']), ('>=', '30'))
@@ -6950,14 +7033,14 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
 
     def test_typing_a_membership_search_checks_the_tally_rows(self):
         lst, model = self.make_model()
-        name = model['columns'][0]
+        name = list(model['columns'])[0]
         model = self.search(model, lst, f"{name} in ['Alice', 'Bo']")
         self.assertEqual(_tally_selection(_column_search_row(model, name)),
                          (["'Alice'", "'Bo'"], False))
 
     def test_editing_the_search_re_reads_it(self):
         lst, model = self.make_model()
-        age = model['columns'][1]
+        age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30')
         model = self.search(model, lst, f'{age} < 25')
         self.assertEqual(_column_search_row(model, age)['op'], '<')
@@ -6965,7 +7048,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
 
     def test_clearing_the_search_clears_the_column_rows(self):
         lst, model = self.make_model()
-        age = model['columns'][1]
+        age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30')
         model = self.search(model, lst, '')
         self.assertFalse(model.get('column_searches'))
@@ -6980,7 +7063,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
 
     def test_the_half_no_column_claims_survives_a_column_edit(self):
         lst, model = self.make_model()
-        age = model['columns'][1]
+        age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30 and len($) > 1')
         self.assertEqual(_column_search_row(model, age)['text'], '30')
         model, _ = update(make_column_search_input_event(1, '25'), None, model,
@@ -6991,7 +7074,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
         # The term was the column's, however it was written, so it leaves with
         # the column rather than lingering as a term nothing explains.
         lst, model = self.make_model()
-        age = model['columns'][1]
+        age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30 and len($) > 1')
         model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=1))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
@@ -7000,7 +7083,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
     def test_relinking_from_code_fills_in_the_column_rows(self):
         from table_visualizer import _ctx_to_model
         lst, model = self.make_model()
-        age = model['columns'][1]
+        age = list(model['columns'])[1]
         _ctx_to_model({'is_predicate': True,
                        'predicate_expr': f"{age.replace('$', 'item')} >= 30"},
                       model)
@@ -7016,7 +7099,7 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
         lst = [{'name': 'Alice'}, {'name': 'Bo'}]
         model = init_model(lst, mock_get_visualizer)
         model['openDropdown'] = {'id': 'col-menu-0'}
-        return lst, model, model['columns'][0]
+        return lst, model, list(model['columns'])[0]
 
     def pick_op(self, model, lst, op, index=0):
         return update(make_column_search_op_event(index, op), None, model, lst,
@@ -7136,7 +7219,7 @@ class TestColumnSearchRendering(unittest.TestCase):
     def test_chips_show_the_current_choice(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        col = model['columns'][0]
+        col = list(model['columns'])[0]
         model['column_searches'] = {col: {'compose': 'or', 'op': '>=',
                                           'text': '3'}}
         row = self.search_row(_first_column_header(self.open_menu_html(model, lst)))
@@ -7191,7 +7274,7 @@ class TestColumnSearchRendering(unittest.TestCase):
     def test_an_active_search_marks_the_header(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        col = model['columns'][0]
+        col = list(model['columns'])[0]
         model['column_searches'] = {col: {'compose': 'and', 'op': '==',
                                           'text': "'Alice'"}}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
@@ -7202,7 +7285,7 @@ class TestColumnSearchRendering(unittest.TestCase):
     def test_an_inactive_row_does_not_mark_the_header(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        col = model['columns'][0]
+        col = list(model['columns'])[0]
         model['column_searches'] = {col: {'compose': 'and', 'op': '>=', 'text': ''}}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
         self.assertNotIn('col-filtered', th)
@@ -10286,7 +10369,7 @@ class TestComputeEvents(unittest.TestCase):
         model['column_input_value'] = "$['b']"
         model, _ = update(make_column_key_event('Enter'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
-        self.assertEqual(model['columns'], ["$['b']"])
+        self.assertEqual(list(model['columns']), ["$['b']"])
         self.assertEqual(_column_computes(model, "$['b']"), ['min($)'])
 
     def test_a_removed_column_takes_its_aggregations_with_it(self):
@@ -10997,7 +11080,7 @@ class TestComputeCellChildEvents(unittest.TestCase):
         new_model, commands = update(
             make_child_mouse_event(key, 'None'), None, model, lst, get_vis,
             eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
-        self.assertEqual(new_model['columns'], ['$'])
+        self.assertEqual(list(new_model['columns']), ['$'])
         self.assertEqual(commands, [('x', '(sorted(data))')])
 
     def test_an_answer_binds_the_code_the_same_way_wherever_it_goes(self):
