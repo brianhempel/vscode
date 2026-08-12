@@ -164,8 +164,11 @@ class MockObjectVisualizer:
         return (model, [])
 
 
-class ListVisualizerAdapter:
-    """Wraps the table_visualizer module to act like a visualizer object."""
+class TableVisualizerAdapter:
+    """Wraps the table_visualizer module to act like a visualizer object.
+
+    Covers both of the types the engine claims -- list and dict -- so a test
+    that opts dicts into the engine gets the real thing, not a mock of it."""
     def can_visualize(self, value):
         return table_visualizer.can_visualize(value)
     def get_fields(self, value):
@@ -196,7 +199,8 @@ _mock_int_vis = MockIntVisualizer()
 _mock_dict_vis = MockDictVisualizer()
 _mock_obj_vis = MockObjectVisualizer()
 _mock_code_vis = MockCodeVisualizer()
-_mock_list_vis = ListVisualizerAdapter()
+_mock_table_vis = TableVisualizerAdapter()
+_mock_list_vis = _mock_table_vis  # legacy name, still used widely below
 
 
 def mock_get_visualizer(value):
@@ -206,6 +210,24 @@ def mock_get_visualizer(value):
         return _mock_string_vis
     if isinstance(value, dict):
         return _mock_dict_vis
+    if isinstance(value, int):
+        return _mock_int_vis
+    return _mock_obj_vis
+
+
+def mock_get_visualizer_dict_tables(value):
+    """Opt-in variant of `mock_get_visualizer` that routes dicts to the table
+    engine, the way the real runtime does now that the engine claims them.
+
+    The default above deliberately keeps sending dicts to MockDictVisualizer.
+    Flipping it would rewrite the expectations of a large fraction of the
+    suite -- every list-of-dicts table has dict cells -- and drown out the
+    signal from the tests that are actually about this behaviour. Tests that
+    want a real dict child ask for it by using this."""
+    if isinstance(value, (list, dict)):
+        return _mock_table_vis
+    if isinstance(value, str):
+        return _mock_string_vis
     if isinstance(value, int):
         return _mock_int_vis
     return _mock_obj_vis
@@ -402,6 +424,102 @@ class TestGetFields(unittest.TestCase):
         fields = get_fields(lst)
         self.assertEqual(eval_dollar_expr(fields[0], lst), 10)
         self.assertEqual(eval_dollar_expr(fields[2], lst), 30)
+
+
+class TestCanVisualizeClaimsDicts(unittest.TestCase):
+    """The engine claims dicts as well as lists, so dict_visualizer.py can go."""
+
+    def test_claims_lists(self):
+        self.assertTrue(can_visualize([1, 2, 3]))
+        self.assertTrue(can_visualize([]))
+
+    def test_claims_dicts(self):
+        self.assertTrue(can_visualize({'a': 1}))
+        self.assertTrue(can_visualize({}))
+
+    def test_declines_everything_else(self):
+        for value in ('hi', 3, 3.5, None, (1, 2), {1, 2}):
+            with self.subTest(value=value):
+                self.assertFalse(can_visualize(value))
+
+
+class TestDictGetFields(unittest.TestCase):
+    """Addressing a dict from *outside* -- when a dict is a cell in another
+    table. Folded in from dict_visualizer_tests.py, which retires with this.
+    Unrelated to the $k/$v column sigils, which address it from inside."""
+
+    def test_string_keys(self):
+        from table_visualizer import get_fields
+        self.assertEqual(get_fields({'name': 'Alice', 'age': 30}),
+                         ["$['name']", "$['age']"])
+
+    def test_empty_dict(self):
+        from table_visualizer import get_fields
+        self.assertEqual(get_fields({}), [])
+
+    def test_int_keys(self):
+        from table_visualizer import get_fields
+        self.assertEqual(get_fields({1: 'a', 2: 'b'}), ['$[1]', '$[2]'])
+
+    def test_string_key_roundtrip(self):
+        from table_visualizer import get_fields
+        from visualizer_utils import eval_dollar_expr
+        d = {'name': 'Alice', 'age': 30}
+        fields = get_fields(d)
+        self.assertEqual(eval_dollar_expr(fields[0], d), 'Alice')
+        self.assertEqual(eval_dollar_expr(fields[1], d), 30)
+
+    def test_int_key_roundtrip(self):
+        from table_visualizer import get_fields
+        from visualizer_utils import eval_dollar_expr
+        d = {1: 'a', 2: 'b'}
+        fields = get_fields(d)
+        self.assertEqual(eval_dollar_expr(fields[0], d), 'a')
+        self.assertEqual(eval_dollar_expr(fields[1], d), 'b')
+
+    def test_tuple_key_roundtrip(self):
+        from table_visualizer import get_fields
+        from visualizer_utils import eval_dollar_expr
+        d = {(1, 2): 'pair'}
+        fields = get_fields(d)
+        self.assertEqual(eval_dollar_expr(fields[0], d), 'pair')
+
+
+class TestDictCellsBecomeTables(unittest.TestCase):
+    """Pins the behaviour change: a dict cell inside a list is a nested table
+    now, not a compact {a: 1} span -- the same way a list cell already is.
+
+    Asserted here rather than discovered in the UI. The engine's own column
+    expressions for dicts land later; all this pins is *which visualizer* the
+    cell gets, which is what widening can_visualize decides."""
+
+    def test_dict_cell_gets_a_table_child_model(self):
+        lst = [{'info': {'x': 1}}, {'info': {'x': 2}}]
+        model = init_model(lst, mock_get_visualizer_dict_tables)
+        child = model['children'][f"0{CELL_KEY_SEP}$['info']"]
+        # MockDictVisualizer would have handed back None here.
+        self.assertIsInstance(child, dict)
+        self.assertIn('display_mode', child)
+
+    def test_dict_survives_init_model_and_visualize(self):
+        # PR A's actual guarantee: the engine accepts a dict end-to-end. The
+        # column expressions that make it *read* correctly ($k/$v) land with
+        # the sigils; until then a dict takes the ['$'] fallback. What must
+        # not happen is a crash -- the sampling path indexes positionally,
+        # which on a dict is a key lookup.
+        for d in ({'a': 1, 'b': 2}, {}, {(1, 2): 'pair'}, {'x': {'y': 1}}):
+            with self.subTest(d=d):
+                model = init_model(d, mock_get_visualizer_dict_tables)
+                self.assertIsInstance(model, dict)
+                html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
+                self.assertIsInstance(html_out, str)
+
+    def test_default_mock_still_routes_dicts_to_the_compact_mock(self):
+        # Guards the opt-in: if this ever flips, the rest of the suite is
+        # silently testing something else.
+        lst = [{'info': {'x': 1}}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIsNone(model['children'][f"0{CELL_KEY_SEP}$['info']"])
 
 
 class TestTableDetection(unittest.TestCase):

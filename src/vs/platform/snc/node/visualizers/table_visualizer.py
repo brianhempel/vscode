@@ -1,4 +1,4 @@
-"""List visualizer for Sculpt-n-Code.
+"""Table visualizer for Sculpt-n-Code -- claims both lists and dicts.
 
 ================================================================================
 ARCHITECTURE OVERVIEW
@@ -423,6 +423,15 @@ def _collect_fields_from_samples(lst, get_visualizer, require_all=False):
     If require_all is True, returns None when any sampled item lacks get_fields.
     Otherwise skips items without get_fields.
     """
+    # Sampling indexes positionally, which on a dict is a key lookup -- so a
+    # dict cannot come through here as though it were a list. Detecting a
+    # dict's columns is its own thing (the key alongside the values' fields)
+    # and arrives with the $k/$v sigils; until then a dict declines detection
+    # and takes the ['$'] fallback rather than borrowing the list shape, which
+    # would address it wrong rather than merely plainly.
+    if isinstance(lst, dict):
+        return None if require_all else []
+
     if not lst:
         return [] if not require_all else None
 
@@ -3356,10 +3365,16 @@ def _rename_column_children(model, old_name, new_name):
 
 
 def can_visualize(value):
-    return isinstance(value, list)
+    return isinstance(value, (list, dict))
 
 
 def get_fields(value):
+    """How this container is addressed from *outside* -- the expressions an
+    enclosing table uses to pull cells out of it. A dict addresses by key,
+    a list by position. Unrelated to the $k/$v column sigils, which address
+    a container from inside."""
+    if isinstance(value, dict):
+        return [f'$[{k!r}]' for k in value]
     return [f'$[{i}]' for i in range(len(value))]
 
 
