@@ -1194,6 +1194,67 @@ def _cell_source_expr(model: dict, eval_in_scope) -> 'str | None':
     return source_expr
 
 
+# === The binds seam ===============================================
+#
+# Every column helper below is a pure function of strings, so there is no
+# parameter through which a dict could announce itself. `binds` is that
+# parameter: a suffix -> EXPRESSION map, the string-side twin of Row.bindings.
+#
+# `'k' in binds` is what "this is a dict" means at the string layer -- one value
+# threaded rather than a bool beside two names. It replaces the old `index_exp=`,
+# which was only ever {'i': ...} written out longhand.
+
+_LIST_BINDS = {'i': 'i'}
+_DICT_BINDS = {'i': 'i', 'k': 'k', 'v': 'v'}
+
+
+def _binds_for(value) -> dict:
+    """The comprehension-scope binds for a container's rows."""
+    return dict(_DICT_BINDS if isinstance(value, dict) else _LIST_BINDS)
+
+
+def _model_binds(model) -> dict:
+    """The same, for a render path that has the model but not the container.
+
+    `_is_dict` is a fact about the value, not display state. init_model,
+    visualize and update all receive the value, so it refreshes at every entry
+    point and survives the relink round trip -- which is the point: the relink
+    path rebuilds its context by parsing a source line and never holds the
+    container at all.
+    """
+    return dict(_DICT_BINDS if (model or {}).get('_is_dict') else _LIST_BINDS)
+
+
+def _is_dict_binds(binds: 'dict | None') -> bool:
+    return 'k' in (binds or {})
+
+
+def _default_item_expr(binds: 'dict | None') -> str:
+    """What bare `$` stands for in a comprehension over these rows: the pair for
+    a dict, the row itself for a list."""
+    return '(k, v)' if _is_dict_binds(binds) else 'item'
+
+
+_BARE_DOLLAR_PROBE = '_snc_bare_dollar_'
+
+
+def _names_bare_dollar(col: str) -> bool:
+    """Whether *col* reads the row ITSELF, as opposed to only naming things
+    about it. `$v > 3` doesn't; `len($)` does.
+
+    Asked through the substitution like every other question about a dollar
+    expression, so a `$` inside a string literal answers no. What keeps
+    _column_binding from narrowing a header to `v in d.values()` when the
+    column also needs the key.
+    """
+    depth = max((len(m[1]) for m in DOLLARS_RE.finditer(col)), default=0)
+    if depth == 0:
+        return False
+    holders = [_BARE_DOLLAR_PROBE] + [f'_snc_outer{n}_' for n in range(2, depth + 1)]
+    return _BARE_DOLLAR_PROBE in replace_dollars_in_py_exp(
+        col, holders, bindings={s: f'_snc_sig{s}_' for s in SIGILS})
+
+
 def _column_dollars(source_expr: 'str | None', item_expr: str = 'item') -> list:
     """What the dollars in a column expression stand for: the row, and -- when
     there is an expression for it -- the list the row came from.
@@ -1210,27 +1271,76 @@ def _column_dollars(source_expr: 'str | None', item_expr: str = 'item') -> list:
 
 
 def _column_item_expr(col: str, source_expr: 'str | None' = None,
-                      item_expr: str = 'item', index_exp: str = 'i') -> str | None:
-    """One row's value for a column, written against a row bound to `item` and
-    its index to `i` -- or None when the column is the item itself and there is
-    nothing to read.
+                      item_expr: 'str | None' = None,
+                      binds: 'dict | None' = None) -> str | None:
+    """One row's value for a column, written against a row bound to `item` (or,
+    for a dict, a pair bound to `k, v`) -- or None when the column is the item
+    itself and the source already IS the values.
+
+    That None is a list-only protocol. For a dict it would be a lie: `list(d)`
+    is the keys, not the values, so a dict answers with a real expression and
+    its five readers each get an explicit whole-column form instead.
 
     A caller that binds the row some other way says so: a row aggregation keyed
     over the row numbers reaches its row through one.
     """
-    return (None if col.strip() == '$'
-            else replace_dollars_in_py_exp(col, _column_dollars(source_expr, item_expr),
-                                           index_exp=index_exp))
+    binds = _LIST_BINDS if binds is None else binds
+    if item_expr is None:
+        item_expr = _default_item_expr(binds)
+    if col.strip() == '$':
+        return item_expr if _is_dict_binds(binds) else None
+    return replace_dollars_in_py_exp(col, _column_dollars(source_expr, item_expr),
+                                     bindings=binds)
 
 
 def _column_key_expr(col: str, source_expr: 'str | None' = None,
-                     item_expr: str = 'item', index_exp: str = 'i') -> str:
+                     item_expr: 'str | None' = None,
+                     binds: 'dict | None' = None) -> str:
     """The same, as a key to order the list by: `item` itself when the column
     is the row, which is what `min(lst, key=lambda item: item)` reads."""
-    return _column_item_expr(col, source_expr, item_expr, index_exp) or item_expr
+    if item_expr is None:
+        item_expr = _default_item_expr(binds)
+    return _column_item_expr(col, source_expr, item_expr, binds) or item_expr
 
 
-def _column_cell_expr(col: str, source_expr: str, i: int) -> str:
+def _has_source_form(k) -> bool:
+    """Whether repr(k) is a literal that reads back as k, so a cell can address
+    its row by key rather than by position.
+
+    Inside a try because literal_eval RAISES rather than answering False for a
+    fair number of keys: float('nan') is a ValueError, and so is anything whose
+    repr isn't a literal at all (str subclasses, most objects).
+    """
+    try:
+        return ast.literal_eval(repr(k)) == k
+    except Exception:
+        return False
+
+
+def _cell_binds(source_expr: str, i: int, container=None) -> tuple:
+    """(binds, item_expr) naming row *i*'s parts concretely.
+
+    A cell stands on its own wherever it is dropped, so every part of it is a
+    literal or a subscript rather than a comprehension variable. For a dict that
+    means addressing by key -- what a user would write, and what is pleasant to
+    drag into the editor -- with a fallback to positional addressing for a key
+    that has no source form, which always works.
+    """
+    if not isinstance(container, dict):
+        return {'i': str(i)}, f'{source_expr}[{i}]'
+    key = _row_at(container, i).item[0]
+    if _has_source_form(key):
+        key_expr = repr(key)
+        val_expr = f'{_atomize(source_expr)}[{key_expr}]'
+        return ({'i': str(i), 'k': key_expr, 'v': val_expr},
+                f'({key_expr}, {val_expr})')
+    src = _atomize(source_expr)
+    return ({'i': str(i), 'k': f'list({src})[{i}]',
+             'v': f'list({src}.values())[{i}]'},
+            f'list({src}.items())[{i}]')
+
+
+def _column_cell_expr(col: str, source_expr: str, i: int, container=None) -> str:
     """One cell of a column, naming its row through the source rather than
     row-generically -- what a cell is read through and what it hands over.
 
@@ -1238,22 +1348,46 @@ def _column_cell_expr(col: str, source_expr: str, i: int) -> str:
     concretely, so `$i` in it is a number rather than a variable, and the
     expression stands on its own wherever it is dropped.
     """
+    binds, item_expr = _cell_binds(source_expr, i, container)
     return replace_dollars_in_py_exp(
-        col, _column_dollars(source_expr, f'{source_expr}[{i}]'), index_exp=str(i))
+        col, _column_dollars(source_expr, item_expr), bindings=binds)
 
 
-def _column_binding(col: str, source_expr: str) -> str:
+def _column_binding(col: str, source_expr: str,
+                    binds: 'dict | None' = None) -> str:
     """How a comprehension over a column's rows binds them: the row alone, or
     the row and its number when the column asks for the number.
 
     The enumerate is only ever there because the column asked, so a column that
     doesn't hands over exactly the code it always did.
+
+    For a dict, the tightest header the column actually asks for -- `$v` alone
+    wants `v in d.values()`, `$k` alone `k in d`, anything reading the row
+    itself `k, v in d.items()`. The index wraps whichever of those it was.
     """
-    return (f'i, item in enumerate({source_expr})'
-            if dollar_expr_names_index(col) else f'item in {source_expr}')
+    names_index = dollar_expr_names_index(col)
+    if not _is_dict_binds(binds):
+        return (f'i, item in enumerate({source_expr})'
+                if names_index else f'item in {source_expr}')
+
+    src = _atomize(source_expr)
+    wants = dollar_expr_sigils(col) & {'k', 'v'}
+    if wants == {'v'} and not _names_bare_dollar(col):
+        target, iterable = 'v', f'{src}.values()'
+    elif wants == {'k'} and not _names_bare_dollar(col):
+        target, iterable = 'k', src
+    else:
+        target, iterable = 'k, v', f'{src}.items()'
+
+    if not names_index:
+        return f'{target} in {iterable}'
+    # A tuple target needs its own parens inside the enumerate pair.
+    unpacked = f'({target})' if ',' in target else target
+    return f'i, {unpacked} in enumerate({iterable})'
 
 
-def _column_values_clause(col: str, source_expr: str) -> str | None:
+def _column_values_clause(col: str, source_expr: str,
+                          binds: 'dict | None' = None) -> str | None:
     """A column's values as a comprehension body, `<value> for item in <source>`,
     for a caller that brackets it itself -- or None when the column is the item
     and the source already is the values.
@@ -1262,15 +1396,29 @@ def _column_values_clause(col: str, source_expr: str) -> str | None:
     hands to a drag, what the tally counts, and what the tally hands over in
     turn.
     """
-    item_expr = _column_item_expr(col, source_expr)
+    item_expr = _column_item_expr(col, source_expr, binds=binds)
     return (None if item_expr is None
-            else f'{item_expr} for {_column_binding(col, source_expr)}')
+            else f'{item_expr} for {_column_binding(col, source_expr, binds)}')
 
 
-def _column_values_expr(col: str, source_expr: str) -> str:
+# A whole-column read of a dict has a short spelling a person would recognise,
+# so the header hands over `list(d.values())` rather than a comprehension that
+# means the same thing. Note list(d) is the KEYS -- the reason `$` cannot be
+# answered with the source itself the way a list's is.
+_DICT_WHOLE_COLUMN = {'$':  'list({src}.items())',
+                      '$k': 'list({src})',
+                      '$v': 'list({src}.values())'}
+
+
+def _column_values_expr(col: str, source_expr: str,
+                        binds: 'dict | None' = None) -> str:
     """The same as a list: the source itself when the column is the item, and a
     comprehension over it otherwise."""
-    clause = _column_values_clause(col, source_expr)
+    if _is_dict_binds(binds):
+        short = _DICT_WHOLE_COLUMN.get(col.strip())
+        if short is not None:
+            return short.format(src=_atomize(source_expr))
+    clause = _column_values_clause(col, source_expr, binds)
     return source_expr if clause is None else f'[{clause}]'
 
 
@@ -1282,13 +1430,20 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     drag. Rows the column can't be read from are dropped: a summary shouldn't
     cost the other n-1 rows.
     """
+    binds = _binds_for(lst)
     if col.strip() == '$':
-        return list(lst)
+        # For a list the source already IS the values. For a dict list(lst) is
+        # the KEYS -- silently wrong for tally, sort and every aggregation --
+        # so it goes the long way round, through the rows.
+        if not _is_dict_binds(binds):
+            return list(lst)
+        return [row.item for row in _rows(lst)]
 
     source_expr = _cell_source_expr(model, eval_in_scope)
     if source_expr is not None:
         try:
-            return list(eval_in_scope(_column_values_expr(col, source_expr)))
+            return list(eval_in_scope(
+                _column_values_expr(col, source_expr, binds)))
         except Exception:
             # A comprehension is all or nothing, so one unreadable row lands
             # here too; the loop below gets the rest.
@@ -1618,18 +1773,19 @@ def _in_tally_order(literals, order) -> List[str]:
 TALLY_IMPORTS = ('from collections import Counter',)
 
 
-def _tally_counter_expr(col: str, source_expr: str) -> str:
+def _tally_counter_expr(col: str, source_expr: str,
+                        binds: 'dict | None' = None) -> str:
     """The whole tally, before the menu has narrowed or reordered anything.
 
     Counter takes any iterable, so a computed column goes in as a generator --
     there is no list to build on the way to counting it.
     """
-    clause = _column_values_clause(col, source_expr)
+    clause = _column_values_clause(col, source_expr, binds)
     return f'Counter({clause if clause is not None else source_expr})'
 
 
 def _tally_row_count_expr(col: str, source_expr: str, literal: str,
-                          values) -> str:
+                          values, binds: 'dict | None' = None) -> str:
     """How many rows have one value -- the number that row is showing.
 
     A question about a single value, so it asks about that one rather than
@@ -1641,12 +1797,14 @@ def _tally_row_count_expr(col: str, source_expr: str, literal: str,
     different question with the same name. Anything else -- and every computed
     column, which has no list to ask -- counts the rows that match as it goes.
     """
-    item_expr = _column_item_expr(col, source_expr)
+    # A dict never takes the .count path: it has no .count at all, and its
+    # item_expr is a real expression rather than the None that would ask for one.
+    item_expr = _column_item_expr(col, source_expr, binds=binds)
     if item_expr is None:
         if isinstance(values, (list, tuple)):
             return f'{source_expr}.count({literal})'
         item_expr = 'item'
-    return (f'sum(1 for {_column_binding(col, source_expr)} '
+    return (f'sum(1 for {_column_binding(col, source_expr, binds)} '
             f'if {item_expr} == {literal})')
 
 
@@ -1830,6 +1988,16 @@ def _parse_sorted(text: str | None):
         node = ast.parse(text, mode='eval').body
     except (SyntaxError, ValueError):
         return None
+    # A sorted dict is `dict(sorted(d.items(), ...))`, and the wrapper is
+    # unwrapped TRANSPARENTLY: the same triple comes back, so no caller grows a
+    # fourth element and canonical_source_expr goes on recognising a sorted
+    # dict as the same source -- without which every sort of a dict would read
+    # as a new expression and discard the searches and aggregations set up on
+    # the very table being sorted.
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'dict' and len(node.args) == 1
+            and not node.keywords):
+        node = node.args[0]
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id == 'sorted' and len(node.args) == 1):
         return None
@@ -1850,6 +2018,14 @@ def _parse_sorted(text: str | None):
     inner = ast.get_source_segment(text, node.args[0])
     if inner is None:
         return None
+    # `inner` is the container the line names, so a dict sort's trailing
+    # .items() comes off with the wrapper. _sort_expr re-emits both from its own
+    # binds rather than from what was parsed.
+    arg_node = node.args[0]
+    if (isinstance(arg_node, ast.Call) and isinstance(arg_node.func, ast.Attribute)
+            and arg_node.func.attr == 'items' and not arg_node.args
+            and not arg_node.keywords):
+        inner = ast.get_source_segment(text, arg_node.func.value) or inner
     if key_node is None:
         key_expr = None
     elif (isinstance(key_node, ast.Lambda) and len(key_node.args.args) == 1
@@ -1860,34 +2036,58 @@ def _parse_sorted(text: str | None):
     return (inner, key_expr, reverse)
 
 
-def _sort_expr(text: str, col: str, direction: 'str | None') -> str:
+# A sort's key lambda binds one parameter, and tuple-unpacking parameters are
+# illegal in Python 3 -- so a dict's pair is reached through it by position.
+# The name stays `item` because that is the name _parse_sorted recognises.
+_SORT_PAIR_BINDS = {'k': 'item[0]', 'v': 'item[1]', 'i': 'i'}
+
+
+def _sort_key_expr(col: str, inner: str, binds: 'dict | None') -> 'str | None':
+    """What a sort orders on, written against the lambda's one parameter."""
+    if not _is_dict_binds(binds):
+        return _column_item_expr(col, inner)
+    # For a dict the key is never None: `sorted(d.items())` would order on the
+    # pair, and the menu means the column.
+    return _column_item_expr(col, inner, item_expr='item',
+                             binds=_SORT_PAIR_BINDS)
+
+
+def _sort_expr(text: str, col: str, direction: 'str | None',
+               binds: 'dict | None' = None) -> str:
     """*text* sorted by *col* -- or, with no direction, with its sort taken off.
 
     Always unwraps first, so re-sorting by another column, or flipping the
     direction, replaces the sort rather than nesting inside it.
+
+    A dict sorts its items and is rebuilt as a dict: `sorted(d, key=...)`
+    returns a list of KEYS whatever the key function is, so this is a shape
+    change rather than a key= to get right.
     """
     parsed = _parse_sorted(text)
     inner = parsed[0] if parsed else text
     if direction is None:
         return inner
+    is_dict = _is_dict_binds(binds)
     # A column naming the list means the list as the line has it, which is what
     # is being sorted rather than the sort of it.
-    key = _column_item_expr(col, inner)
-    parts = [inner]
+    key = _sort_key_expr(col, inner, binds)
+    parts = [f'{_atomize(inner)}.items()' if is_dict else inner]
     if key is not None:
         parts.append(f'key=lambda item: {key}')
     if direction == 'desc':
         parts.append('reverse=True')
-    return f'sorted({", ".join(parts)})'
+    call = f'sorted({", ".join(parts)})'
+    return f'dict({call})' if is_dict else call
 
 
-def _sort_checked(text: 'str | None', col: str, direction: str) -> bool:
+def _sort_checked(text: 'str | None', col: str, direction: str,
+                  binds: 'dict | None' = None) -> bool:
     """Whether the line already sorts by this column in this direction."""
     parsed = _parse_sorted(text)
     if parsed is None:
         return False
     inner, key_expr, reverse = parsed
-    return (key_expr == _column_item_expr(col, inner)
+    return (key_expr == _sort_key_expr(col, inner, binds)
             and reverse == (direction == 'desc'))
 
 
@@ -2113,7 +2313,8 @@ def _agg_row_key_expr(col: str, source_expr: str) -> str:
     if not dollar_expr_names_index(col):
         return _column_key_expr(col, source_expr)
     return _column_key_expr(col, source_expr,
-                            item_expr=f'{_atomize(source_expr)}[i]', index_exp='i')
+                            item_expr=f'{_atomize(source_expr)}[i]',
+                            binds=_LIST_BINDS)
 
 
 def _agg_row_index_code(item_code: str, source_expr: str,
@@ -3443,8 +3644,39 @@ def get_fields(value):
     return [f'$[{i}]' for i in range(len(value))]
 
 
+# What a dict shows when its values have no fields of their own to detect: the
+# key beside the value, which is the two-column layout a simple dict wants.
+_DICT_DEFAULT_COLUMNS = ['$k', '$v']
+
+
+def _dict_value_columns(d, get_visualizer):
+    """A dict's columns: `$k`, then whatever its VALUES have to show.
+
+    The values rather than the rows, because a dict's row is a pair and there
+    is no tuple visualizer to ask for a pair's fields. Each field comes back
+    written against the value as `$`, so the leading dollar is rebound to `$v`
+    -- through the substitution rather than str.replace, since a field may have
+    a `$` inside a string literal.
+    """
+    fields = _collect_fields_from_samples(list(d.values()), get_visualizer,
+                                          require_all=True)
+    if not fields:
+        # Includes the empty dict and the simple {'a': 1} case, whose values
+        # have no fields: both want the plain two columns.
+        return list(_DICT_DEFAULT_COLUMNS)
+    # Rebound in two passes via a dollar-free placeholder, for the same reason
+    # lift_column_predicate does: a replacement that itself contains a dollar
+    # never re-parses, which would make every run after the first look like
+    # code -- turning the `$` in `$['a$b']` into a binding too.
+    holder = '_snc_val_'
+    return ['$k'] + [replace_dollars_in_py_exp(f, [holder]).replace(holder, '$v')
+                     for f in fields]
+
+
 def _detect_table_columns(lst, get_visualizer):
     """Sample items and return union of fields if all sampled items are tabular, else None."""
+    if isinstance(lst, dict):
+        return _dict_value_columns(lst, get_visualizer)
     return _collect_fields_from_samples(lst, get_visualizer, require_all=True)
 
 
@@ -3540,7 +3772,8 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
 
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['$'],
-                '_slot_children': {}, **config_fields,
+                '_slot_children': {}, '_is_dict': isinstance(lst, dict),
+                **config_fields,
                 **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
     source_expr = None
@@ -3550,6 +3783,8 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
 
     columns, slot_children = _resolve_columns(lst, get_visualizer, slots_config, config_path)
     config_fields['_slot_children'] = slot_children
+    # A fact about the value, not display state -- see _model_binds.
+    config_fields['_is_dict'] = isinstance(lst, dict)
 
     # Depth backstop: beyond the cap, stop building nested children entirely
     # (renders as a truncated repr) so cyclic values can't RecursionError.
@@ -3569,7 +3804,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
             try:
                 if read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(
-                        _column_cell_expr(col, source_expr, row.index))
+                        _column_cell_expr(col, source_expr, row.index, lst))
                 else:
                     cell_value = eval_dollar_expr(col, row.item, eval_in_scope,
                                                   outer=(lst,),
@@ -3767,7 +4002,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     if not isinstance(tally, dict):
         # A tally too long to list is still a tally worth handing over; values
         # that can't be counted have no expression to give.
-        note_expr = (_tally_counter_expr(col, source_expr)
+        note_expr = (_tally_counter_expr(col, source_expr, _model_binds(model))
                      if tally == TALLY_TOO_MANY and source_expr else None)
         return (f'<div class="col-tally"{dwell}>{title_html(note_expr)}'
                 f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
@@ -3805,7 +4040,8 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             continue
         checked = literal in selected
         toggle_event = repr(TallyItemToggle(index=index, literal=literal))
-        count_expr = (_tally_row_count_expr(col, source_expr, literal, lst)
+        count_expr = (_tally_row_count_expr(col, source_expr, literal, lst,
+                                            _model_binds(model))
                       if source_expr else None)
         rows.append(
             f'<div class="col-tally-row{" checked" if checked else ""}" '
@@ -3951,7 +4187,7 @@ def _render_sort_panel(col, index, model) -> str:
 
     rows = []
     for direction in SORT_DIRECTIONS:
-        checked = _sort_checked(text, col, direction)
+        checked = _sort_checked(text, col, direction, _model_binds(model))
         inert = text is None
         classes = ('col-compute-row col-sort-row'
                    + (' checked' if checked else '')
@@ -3965,7 +4201,7 @@ def _render_sort_panel(col, index, model) -> str:
         # these menus: a tooltip above one would cover the rows around it.
         rows.append(
             f'<div class="{classes}"'
-            f'{py_exp_attrs(None if inert else _sort_expr(text, col, direction), align="right")}>'
+            f'{py_exp_attrs(None if inert else _sort_expr(text, col, direction, _model_binds(model)), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{_sort_label(direction)}</span>'
@@ -3976,7 +4212,8 @@ def _render_sort_panel(col, index, model) -> str:
         # The row itself is the handle, like Unique and Tally. Without a source
         # there is no list to name and so no line to write or drag.
         code = (None if source_expr is None
-                else _sort_expr(source_expr, col, direction))
+                else _sort_expr(source_expr, col, direction,
+                                _model_binds(model)))
         click_attr = '' if code is None else (
             f' snc-mouse-down="'
             f'{html.escape(repr(SortCodeClick(index=index, direction=direction)))}"')
@@ -4037,7 +4274,8 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
     values = _column_values(col, lst, model, eval_in_scope)
     source_expr = model.get('_source_expr')
     values_expr = (None if source_expr is None
-                   else _column_values_expr(col, source_expr))
+                   else _column_values_expr(col, source_expr,
+                                            _model_binds(model)))
 
     rows = []
     for label, template, checked in _compute_rows(model, col):
@@ -4234,7 +4472,8 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
 
     source_expr = model.get('_source_expr')
     py_exp_attr = ('' if source_expr is None
-                   else py_exp_attrs(_column_values_expr(col, source_expr)))
+                   else py_exp_attrs(_column_values_expr(col, source_expr,
+                                                         _model_binds(model))))
 
     # The ▾ trigger is pinned to the cell's right edge by .col-header-inner's flex
     # layout (which lives on an inner span, never on the <th>: display:flex on a
@@ -5414,7 +5653,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
             try:
                 if read_through and eval_in_scope is not None:
-                    cell_value = eval_in_scope(_column_cell_expr(col, source_expr, i))
+                    cell_value = eval_in_scope(
+                        _column_cell_expr(col, source_expr, i, lst))
                 else:
                     cell_value = eval_dollar_expr(col, row.item, eval_in_scope,
                                                   outer=(lst,),
@@ -5434,7 +5674,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
                 cell_expr = None
                 if source_expr is not None:
-                    cell_expr = _column_cell_expr(col, source_expr, i)
+                    cell_expr = _column_cell_expr(col, source_expr, i, lst)
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -5504,6 +5744,7 @@ def _adopt_source(model: dict, var_and_exp=None, source_span=None) -> None:
 
 def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, source_span=None):
     _adopt_source(model, var_and_exp, source_span)
+    model['_is_dict'] = isinstance(lst, dict)
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
         return f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
@@ -5525,7 +5766,8 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
     # the key itself, since "3.1" and "3.0" share a column but not a value.
     row = _row_at(lst, int(row_key))
     if source_expr is not None and eval_in_scope is not None:
-        return eval_in_scope(_column_cell_expr(field_key, source_expr, row.index))
+        return eval_in_scope(
+            _column_cell_expr(field_key, source_expr, row.index, lst))
     return eval_dollar_expr(field_key, row.item, eval_in_scope, outer=(lst,),
                             bindings=row.bindings)
 
@@ -5543,6 +5785,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     # The span only, and only when this run brought one: see _adopt_source.
     if source_span is not None:
         _adopt_source(model, source_span=source_span)
+
+    if value is not None:
+        model['_is_dict'] = isinstance(value, dict)
 
     try:
         make_python_event = eval(event['pythonEventStr'])
@@ -5582,7 +5827,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # int() is what a row key means today -- the other half of the pair
             # in _table_child_value_getter, and the other place splat has to
             # look the row up by its key instead.
-            concrete_cell = (_column_cell_expr(cell_col, src, int(row_key))
+            concrete_cell = (_column_cell_expr(cell_col, src, int(row_key), value)
                              if src else cell_col)
             commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
 
@@ -5859,8 +6104,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 text, *coords = span
                 # Clicking the direction the line already sorts in takes the
                 # sort off, so one row is both the way in and the way out.
-                wanted = None if _sort_checked(text, col, direction) else direction
-                expr = _sort_expr(text, col, wanted)
+                binds = _model_binds(model)
+                wanted = (None if _sort_checked(text, col, direction, binds)
+                          else direction)
+                expr = _sort_expr(text, col, wanted, binds)
                 if expr != text:
                     commands.append(ChangeSourceExpr(expr, *coords))
 
@@ -5878,7 +6125,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # -- the way every Compute row asks after the whole column.
                 _has_var, base = _name_context_for_source(source_expr)
                 commands.append(new_code_command(
-                    (f'{base}_sorted', _sort_expr(source_expr, col, direction))))
+                    (f'{base}_sorted', _sort_expr(source_expr, col, direction,
+                                                  _model_binds(model)))))
 
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.

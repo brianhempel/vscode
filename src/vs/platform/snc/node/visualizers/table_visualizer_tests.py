@@ -589,18 +589,46 @@ class TestDictCellsBecomeTables(unittest.TestCase):
                 html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
                 self.assertIsInstance(html_out, str)
 
-    def test_a_dicts_default_column_shows_the_pair(self):
-        # The one dict-visible consequence of routing rows through _rows: bare
-        # $ for a dict is the (key, value) pair, so the ['$'] fallback column
-        # shows pairs where it showed bare keys before. Still not the two-column
-        # layout -- that needs $k and $v as columns -- but no longer a view that
-        # silently drops half the container.
+    def test_a_simple_dict_gets_the_two_column_layout(self):
+        # Reached by the FALLBACK, not by sampling: sampling the values of
+        # {'a': 1} asks an int for its fields, and ints fall to a visualizer
+        # with no get_fields attribute at all, so require_all bails. Written
+        # explicitly or the implementation lands on ['$k'].
+        model = init_model({'a': 1, 'b': 2}, mock_get_visualizer_dict_tables)
+        self.assertEqual(model['columns'], ['$k', '$v'])
+
+    def test_a_dict_of_records_detects_the_values_fields(self):
+        d = {'alice': {'age': 30, 'city': 'SD'},
+             'bob': {'age': 25, 'city': 'LA'}}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(model['columns'], ['$k', "$v['age']", "$v['city']"])
+
+    def test_the_leading_dollar_is_rewritten_through_the_substitution(self):
+        # Not str.replace: a field with a $ inside a string literal is exactly
+        # the trap dollar_expr_names_index exists to avoid.
+        d = {'x': {'a$b': 1}}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(model['columns'], ['$k', "$v['a$b']"])
+
+    def test_an_empty_dict_still_gets_the_two_columns(self):
+        model = init_model({}, mock_get_visualizer_dict_tables)
+        self.assertEqual(model['columns'], ['$k', '$v'])
+
+    def test_a_dict_renders_key_and_value_side_by_side(self):
+        # What the whole landing is for: a simple dict renders exactly as if it
+        # were a two-column list of key and value.
         d = {'alice': 30}
         model = init_model(d, mock_get_visualizer_dict_tables)
-        self.assertEqual(model['columns'], ['$'])
         html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
         self.assertIn('alice', html_out)
         self.assertIn('30', html_out)
+
+    def test_a_bare_dollar_column_still_reads_as_the_pair(self):
+        # The columns are $k/$v by default now, but a user who types `$` gets
+        # the row itself, which for a dict is the (key, value) pair.
+        d = {'alice': 30}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(_column_values('$', d, model), [('alice', 30)])
 
     def test_default_mock_still_routes_dicts_to_the_compact_mock(self):
         # Guards the opt-in: if this ever flips, the rest of the suite is
@@ -6976,6 +7004,7 @@ from table_visualizer import (
     _write_tally_selection, _tally_literals, _tally_shows, _sorted_tally,
     _tally_count_shows, _tally_extreme,
     _column_values_expr, _tally_exprs, _column_tally_rows, _tally_lists,
+    _column_binding, _column_cell_expr, _column_values, _binds_for,
     _tally_row_count_expr,
 )
 
@@ -8534,6 +8563,133 @@ class TestColumnValuesExpr(unittest.TestCase):
 
     def test_the_item_column_is_recognised_however_it_is_spaced(self):
         self.assertEqual(_column_values_expr(' $ ', 'data'), 'data')
+
+
+class TestDictColumnBinding(unittest.TestCase):
+    """How a comprehension over a dict's rows binds them: the tightest header
+    the column actually asks for, so the code it writes reads the way a person
+    would have written it."""
+
+    @staticmethod
+    def binds():
+        return _binds_for({'a': 1})
+
+    def test_only_the_value_iterates_the_values(self):
+        self.assertEqual(_column_binding('$v', 'd', self.binds()),
+                         'v in d.values()')
+
+    def test_only_the_key_iterates_the_dict(self):
+        self.assertEqual(_column_binding('$k', 'd', self.binds()), 'k in d')
+
+    def test_both_halves_iterate_the_items(self):
+        self.assertEqual(_column_binding('($k, $v)', 'd', self.binds()),
+                         'k, v in d.items()')
+
+    def test_the_bare_row_iterates_the_items(self):
+        self.assertEqual(_column_binding('$', 'd', self.binds()),
+                         'k, v in d.items()')
+
+    def test_a_column_that_reads_the_row_itself_needs_both_halves(self):
+        # The trap in narrowing: `$v + len($)` names the value AND the row, so
+        # the header cannot be the values alone -- $ would have nothing to be.
+        self.assertEqual(_column_binding('len($) + $v', 'd', self.binds()),
+                         'k, v in d.items()')
+
+    def test_the_index_wraps_whatever_the_header_was(self):
+        self.assertEqual(_column_binding('($k, $v, $i)', 'd', self.binds()),
+                         'i, (k, v) in enumerate(d.items())')
+        self.assertEqual(_column_binding('$v * $i', 'd', self.binds()),
+                         'i, v in enumerate(d.values())')
+
+    def test_a_list_binding_is_untouched(self):
+        self.assertEqual(_column_binding("$['n']", 'data'), 'item in data')
+        self.assertEqual(_column_binding('$ * $i', 'data'),
+                         'i, item in enumerate(data)')
+
+
+class TestDictWholeColumnExpr(unittest.TestCase):
+    """A whole-column read gets the short spelling rather than a degenerate
+    comprehension -- what the header hands to a drag."""
+
+    @staticmethod
+    def binds():
+        return _binds_for({'a': 1})
+
+    def test_the_three_short_forms(self):
+        for col, want in (('$', 'list(d.items())'),
+                          ('$k', 'list(d)'),
+                          ('$v', 'list(d.values())')):
+            with self.subTest(col=col):
+                self.assertEqual(_column_values_expr(col, 'd', self.binds()), want)
+
+    def test_anything_else_falls_through_to_a_comprehension(self):
+        self.assertEqual(_column_values_expr("$v['age']", 'd', self.binds()),
+                         "[v['age'] for v in d.values()]")
+
+    def test_a_dict_column_is_never_the_source_itself(self):
+        # The None protocol: for a list, `$` means the source already IS the
+        # values. For a dict that is false -- list(d) is the keys -- so `$`
+        # must come back as a real expression.
+        self.assertNotEqual(_column_values_expr('$', 'd', self.binds()), 'd')
+
+
+class TestDictCellExpr(unittest.TestCase):
+    """One cell, named concretely. Key-subscript addressing is what a user
+    would write and what is pleasant to drag into the editor."""
+
+    def test_it_addresses_by_key(self):
+        d = {'alice': 30, 'bob': 25}
+        for col, want in (('$k', "'alice'"),
+                          ('$v', "d['alice']"),
+                          ('$', "('alice', d['alice'])"),
+                          ('$i', '0')):
+            with self.subTest(col=col):
+                self.assertEqual(_column_cell_expr(col, 'd', 0, d), want)
+
+    def test_it_addresses_the_right_row(self):
+        d = {'alice': 30, 'bob': 25}
+        self.assertEqual(_column_cell_expr('$v', 'd', 1, d), "d['bob']")
+
+    def test_a_key_with_no_source_form_falls_back_to_position(self):
+        # repr(nan) is 'nan', which isn't a literal -- literal_eval raises
+        # rather than returning False, so the guard has to be inside a try.
+        d = {float('nan'): 'no source form'}
+        for col, want in (('$k', 'list(d)[0]'),
+                          ('$v', 'list(d.values())[0]'),
+                          ('$', 'list(d.items())[0]')):
+            with self.subTest(col=col):
+                self.assertEqual(_column_cell_expr(col, 'd', 0, d), want)
+
+    def test_a_tuple_key_still_has_a_source_form(self):
+        d = {(1, 2): 'pair'}
+        self.assertEqual(_column_cell_expr('$v', 'd', 0, d), "d[(1, 2)]")
+
+    def test_a_list_cell_expr_is_untouched(self):
+        self.assertEqual(_column_cell_expr('$ * $i', 'data', 2), 'data[2] * 2')
+        self.assertEqual(_column_cell_expr("$['n']", 'data', 1), "data[1]['n']")
+
+
+class TestDictColumnValues(unittest.TestCase):
+    """_column_values' fast path lies for dicts: `$` short-circuits to
+    list(lst), which for a dict is the KEYS -- silently wrong for tally, sort
+    and every aggregation."""
+
+    def test_the_bare_column_gives_pairs_not_keys(self):
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(_column_values('$', d, model),
+                         [('alice', 30), ('bob', 25)])
+
+    def test_the_key_and_value_columns_read_their_halves(self):
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(_column_values('$k', d, model), ['alice', 'bob'])
+        self.assertEqual(_column_values('$v', d, model), [30, 25])
+
+    def test_a_list_still_takes_the_fast_path(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertEqual(_column_values('$', lst, model), [1, 2, 3])
 
 
 class TestTallyExprs(unittest.TestCase):
@@ -11080,6 +11236,68 @@ class TestParseSorted(unittest.TestCase):
     def test_syntax_that_is_not_python_is_not_a_sort(self):
         self.assertIsNone(_parse_sorted('sorted(data'))
         self.assertIsNone(_parse_sorted(''))
+
+
+class TestDictSort(unittest.TestCase):
+    """A shape change, not a key= fix: sorted(d, key=...) returns a list of
+    KEYS whatever the key function is, so appending a correct key= would turn
+    the user's dict table into a list of keys the moment they click Sort."""
+
+    @staticmethod
+    def binds():
+        return _binds_for({'a': 1})
+
+    def test_the_row_itself_sorts_the_items_and_stays_a_dict(self):
+        self.assertEqual(_sort_expr('d', '$', 'asc', self.binds()),
+                         'dict(sorted(d.items(), key=lambda item: item))')
+
+    def test_a_column_keys_through_the_pair(self):
+        # The lambda parameter stays named `item` -- that is the name
+        # _parse_sorted recognises -- and tuple-unpacking parameters are
+        # illegal in Python 3, so item[1] is the only spelling available.
+        self.assertEqual(_sort_expr('d', "$v['age']", 'desc', self.binds()),
+                         "dict(sorted(d.items(), key=lambda item: item[1]['age'],"
+                         " reverse=True))")
+
+    def test_sorting_by_the_key(self):
+        self.assertEqual(_sort_expr('d', '$k', 'asc', self.binds()),
+                         'dict(sorted(d.items(), key=lambda item: item[0]))')
+
+    def test_an_existing_dict_sort_is_replaced_rather_than_nested(self):
+        was = 'dict(sorted(d.items(), key=lambda item: item[0]))'
+        self.assertEqual(_sort_expr(was, '$v', 'asc', self.binds()),
+                         'dict(sorted(d.items(), key=lambda item: item[1]))')
+
+    def test_unsorting_hands_back_the_container_the_line_names(self):
+        was = 'dict(sorted(d.items(), key=lambda item: item[0]))'
+        self.assertEqual(_sort_expr(was, '$k', None, self.binds()), 'd')
+
+    def test_parse_sorted_unwraps_the_dict_transparently(self):
+        # Same (inner, key, reverse) triple as a list sort, with the trailing
+        # .items() taken off the inner too -- so `inner` is the container the
+        # line names, and no caller grows a fourth element.
+        self.assertEqual(
+            _parse_sorted('dict(sorted(d.items(), key=lambda item: item[1]))'),
+            ('d', 'item[1]', False))
+
+    def test_the_direction_checkmark_round_trips(self):
+        for direction in ('asc', 'desc'):
+            with self.subTest(direction=direction):
+                line = _sort_expr('d', "$v['age']", direction, self.binds())
+                self.assertTrue(
+                    _sort_checked(line, "$v['age']", direction, self.binds()))
+                other = 'desc' if direction == 'asc' else 'asc'
+                self.assertFalse(
+                    _sort_checked(line, "$v['age']", other, self.binds()))
+
+    def test_canonical_source_expr_sees_through_a_dict_sort(self):
+        # If it didn't, every sort of a dict would read as a NEW source
+        # expression and throw away the user's searches, aggregations and child
+        # models -- exactly what this function exists to prevent.
+        self.assertEqual(
+            canonical_source_expr(
+                'dict(sorted(d.items(), key=lambda item: item[1]))'),
+            'd')
 
 
 class TestSortExpr(unittest.TestCase):
