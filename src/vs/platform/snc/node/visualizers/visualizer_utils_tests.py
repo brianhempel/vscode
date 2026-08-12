@@ -679,13 +679,13 @@ class TestChildNestingKwargs(unittest.TestCase):
         model = {
             '_slot_children': {'f': {'builtins.str': [{'expr': '$'}]}},
             '_config_root_type': 'builtins.str',
-            '_config_root_dotfile': '.snc_list_columns.json',
+            '_config_root_dotfile': '.snc_table_columns.json',
             '_config_path': [],
         }
         kw = child_nesting_kwargs(model, 'f', ['a', 'b'])
         self.assertEqual(kw['slots_config'], [{'expr': '$'}])
         self.assertEqual(kw['config_root_type'], 'builtins.str')
-        self.assertEqual(kw['config_root_dotfile'], '.snc_list_columns.json')
+        self.assertEqual(kw['config_root_dotfile'], '.snc_table_columns.json')
         self.assertEqual(kw['config_path'], [('f', 'builtins.str')])
 
     def test_no_children_returns_none_slots(self):

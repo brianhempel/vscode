@@ -29,7 +29,7 @@ from z_object_visualizer import (
 )
 from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name, wrap_drag_grab, MAX_NEST_DEPTH
 import z_object_visualizer
-import list_visualizer
+import table_visualizer
 
 
 class _GenericVis:
@@ -61,17 +61,17 @@ class _ZObjectVisAdapter:
 
 
 class _ListVisAdapter:
-    """Adapter wrapping the list_visualizer module (for cross-type nesting tests)."""
+    """Adapter wrapping the table_visualizer module (for cross-type nesting tests)."""
     def can_visualize(self, value):
-        return list_visualizer.can_visualize(value)
+        return table_visualizer.can_visualize(value)
     def get_fields(self, value):
-        return list_visualizer.get_fields(value)
+        return table_visualizer.get_fields(value)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
-        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
+        return table_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
-        return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+        return table_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
-        return list_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
+        return table_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
 _generic_vis = _GenericVis()
 _zobj_vis = _ZObjectVisAdapter()

@@ -26,7 +26,7 @@ COLUMN CONFIGURATION
 
 Columns shown in the table are configurable and persisted:
 
-1. DOTFILE (.snc_list_columns.json in working directory):
+1. DOTFILE (.snc_table_columns.json in working directory):
    - JSON mapping {item_type_key: [column_name, ...]}
    - Highest priority: user-customized columns
 
@@ -50,7 +50,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, List, Tuple, Optional
 
-from list_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
+from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
 from visualizer_utils import (
     ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
@@ -366,7 +366,7 @@ class ChangeSourceExpr:
 
 # === Dotfile operations ===
 
-COLUMN_DOTFILE_NAME = '.snc_list_columns.json'
+COLUMN_DOTFILE_NAME = '.snc_table_columns.json'
 
 
 def _get_item_type_key(lst):

@@ -1,8 +1,8 @@
 """
-Tests for list_visualizer.py - list composition with child visualizers.
+Tests for table_visualizer.py - list composition with child visualizers.
 
 Run:
-    python3 -m pytest list_visualizer_tests.py -v
+    python3 -m pytest table_visualizer_tests.py -v
 """
 
 import ast
@@ -17,11 +17,11 @@ import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
                               replace_dollars_in_py_exp, CHILD_SOURCE_BINDER)
-import list_visualizer
+import table_visualizer
 
 
 # Isolate the entire test module from the user's cwd so that stray
-# .snc_list_columns.json files (or other dotfiles created by other tests)
+# .snc_table_columns.json files (or other dotfiles created by other tests)
 # don't influence column auto-detection.
 #
 # Strategy: chdir to a tempdir for the whole module, AND neutralise the
@@ -41,9 +41,9 @@ def setUpModule():
     _module_tmp_dir = tempfile.mkdtemp()
     os.chdir(_module_tmp_dir)
 
-    p_load = _mock.patch('list_visualizer.load_columns_from_dotfile',
+    p_load = _mock.patch('table_visualizer.load_columns_from_dotfile',
                          return_value=None)
-    p_save = _mock.patch('list_visualizer.save_columns_to_dotfile')
+    p_save = _mock.patch('table_visualizer.save_columns_to_dotfile')
     p_load.start()
     p_save.start()
     _module_patches.extend([p_load, p_save])
@@ -57,7 +57,7 @@ def tearDownModule():
         os.chdir(_module_orig_cwd)
     if _module_tmp_dir is not None:
         shutil.rmtree(_module_tmp_dir, ignore_errors=True)
-from list_visualizer import (
+from table_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
@@ -165,17 +165,17 @@ class MockObjectVisualizer:
 
 
 class ListVisualizerAdapter:
-    """Wraps the list_visualizer module to act like a visualizer object."""
+    """Wraps the table_visualizer module to act like a visualizer object."""
     def can_visualize(self, value):
-        return list_visualizer.can_visualize(value)
+        return table_visualizer.can_visualize(value)
     def get_fields(self, value):
-        return list_visualizer.get_fields(value)
+        return table_visualizer.get_fields(value)
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
-        return list_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
+        return table_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
-        return list_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+        return table_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
-        return list_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
+        return table_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
 
 class MockCodeVisualizer:
@@ -385,18 +385,18 @@ class TestNestedComposition(unittest.TestCase):
 
 
 class TestGetFields(unittest.TestCase):
-    """Test get_fields and eval_dollar_expr integration on list_visualizer."""
+    """Test get_fields and eval_dollar_expr integration on table_visualizer."""
 
     def test_returns_string_indices(self):
-        from list_visualizer import get_fields
+        from table_visualizer import get_fields
         self.assertEqual(get_fields([10, 20, 30]), ['$[0]', '$[1]', '$[2]'])
 
     def test_empty_list(self):
-        from list_visualizer import get_fields
+        from table_visualizer import get_fields
         self.assertEqual(get_fields([]), [])
 
     def test_eval_dollar_expr_roundtrip(self):
-        from list_visualizer import get_fields
+        from table_visualizer import get_fields
         from visualizer_utils import eval_dollar_expr
         lst = [10, 20, 30]
         fields = get_fields(lst)
@@ -846,7 +846,7 @@ class TestColumnAdd(unittest.TestCase):
         model['adding_column'] = True
         model['column_input_value'] = "$['ci"
         event = make_column_mouse_event(repr(ColumnSelect(name="$['city']")))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn("$['city']", new_model['columns'])
         self.assertFalse(new_model['adding_column'])
@@ -858,7 +858,7 @@ class TestColumnAdd(unittest.TestCase):
         model['adding_column'] = True
         model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn("$['age']", new_model['columns'])
         self.assertFalse(new_model['adding_column'])
@@ -880,7 +880,7 @@ class TestColumnAdd(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         event = make_column_mouse_event(repr(ColumnSelect(name="$['extra']")))
-        with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
 
@@ -911,7 +911,7 @@ class TestColumnEdit(unittest.TestCase):
         model['column_input_value'] = "$['ci"
         old_col = model['columns'][0]
         event = make_column_mouse_event(repr(ColumnSelect(name="$['city']")))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'][0], "$['city']")
         self.assertIsNone(new_model['editing_column_index'])
@@ -922,7 +922,7 @@ class TestColumnEdit(unittest.TestCase):
         model['editing_column_index'] = 0
         model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'][0], "$['age']")
         self.assertIsNone(new_model['editing_column_index'])
@@ -949,7 +949,7 @@ class TestColumnRemove(unittest.TestCase):
         self.assertIn("$['name']", model['columns'])
         name_idx = model['columns'].index("$['name']")
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("$['name']", new_model['columns'])
 
@@ -957,7 +957,7 @@ class TestColumnRemove(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
-        with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
 
@@ -967,7 +967,7 @@ class TestColumnRemove(unittest.TestCase):
         name_idx = model['columns'].index("$['name']")
         self.assertIn("0\x00$['name']", model['children'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("0\x00$['name']", new_model['children'])
         self.assertNotIn("1\x00$['name']", new_model['children'])
@@ -986,7 +986,7 @@ class TestColumnRemove(unittest.TestCase):
         model['editing_column_index'] = 0
         model['column_input_value'] = "$['name']"
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model['editing_column_index'])
         self.assertEqual(new_model['column_input_value'], '')
@@ -997,7 +997,7 @@ class TestColumnRemove(unittest.TestCase):
         model['editing_column_index'] = 2
         model['column_input_value'] = model['columns'][2]
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['editing_column_index'], 1)
 
@@ -1071,7 +1071,7 @@ class TestColumnMenu(unittest.TestCase):
         name_idx = model['columns'].index("$['name']")
         model['openDropdown'] = {'id': f'col-menu-{name_idx}'}
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("$['name']", new_model['columns'])
         self.assertIsNone(new_model['openDropdown'])
@@ -1126,7 +1126,7 @@ class TestColumnReorder(unittest.TestCase):
         model['column_drag_from'] = 0
         model['column_drag_over'] = 2
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=2)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'][0], original[1])
         self.assertEqual(new_model['columns'][1], original[2])
@@ -1141,7 +1141,7 @@ class TestColumnReorder(unittest.TestCase):
         model['column_drag_from'] = 2
         model['column_drag_over'] = 0
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=0)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'][0], original[2])
         self.assertEqual(new_model['columns'][1], original[0])
@@ -1163,7 +1163,7 @@ class TestColumnReorder(unittest.TestCase):
         model['column_drag_from'] = 0
         model['column_drag_over'] = 1
         event = make_column_mouse_up_event(repr(ColumnDragEnd(index=1)))
-        with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
 
@@ -1235,7 +1235,7 @@ class TestColumnKeyboard(unittest.TestCase):
         model['selected_suggestion_index'] = 0
         expected_col = suggestions[0]
         event = make_column_key_event('Tab')
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn(expected_col, new_model['columns'])
         self.assertFalse(new_model['adding_column'])
@@ -1494,7 +1494,7 @@ class TestColumnManagementForStringLists(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['columns'], ['$'])
         event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
-        with patch('list_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['columns'], [])
 
@@ -1660,7 +1660,7 @@ class TestSourceExprInModel(unittest.TestCase):
 # Search feature tests
 # ============================================================================
 
-from list_visualizer import (
+from table_visualizer import (
     SearchBoxInput, FirstMatchToggle, ActionButtonClick, DropdownToggle,
     CopyToClipboard,
     parse_search_term, needs_implicit_dollar,
@@ -2882,7 +2882,7 @@ class TestActionButtonClick(unittest.TestCase):
         self.assertIsInstance(commands[0], CopyToClipboard)
 
     def test_join_custom_input_stored_in_dropdown(self):
-        from list_visualizer import JoinSeparatorInput
+        from table_visualizer import JoinSeparatorInput
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['openDropdown'] = {'id': 'action-join'}
@@ -3777,7 +3777,7 @@ class TestCtxToModel(unittest.TestCase):
     """Test _ctx_to_model sets model search/first_match from parsed context."""
 
     def test_predicate_ctx_to_model(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         model = {'search': None, 'first_match': False}
         ctx = {'is_predicate': True, 'predicate_expr': 'item > 100', 'is_first': False}
         _ctx_to_model(ctx, model)
@@ -3785,35 +3785,35 @@ class TestCtxToModel(unittest.TestCase):
         self.assertFalse(model['first_match'])
 
     def test_predicate_first_ctx_to_model(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         model = {'search': None, 'first_match': False}
         ctx = {'is_predicate': True, 'predicate_expr': 'item > 100', 'is_first': True}
         _ctx_to_model(ctx, model)
         self.assertTrue(model['first_match'])
 
     def test_index_ctx_to_model(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         model = {'search': None, 'first_match': False}
         ctx = {'is_index': True, 'index_expr': '5'}
         _ctx_to_model(ctx, model)
         self.assertEqual(model['search'], '5')
 
     def test_slice_ctx_to_model(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         model = {'search': None, 'first_match': False}
         ctx = {'is_slice': True, 'slice_start': '2', 'slice_stop': '5'}
         _ctx_to_model(ctx, model)
         self.assertEqual(model['search'], '2:5')
 
     def test_multi_index_ctx_to_model(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         model = {'search': None, 'first_match': False}
         ctx = {'is_multi_index': True, 'indices_expr': '[1,3,5]'}
         _ctx_to_model(ctx, model)
         self.assertEqual(model['search'], '[1,3,5]')
 
     def test_predicate_with_method_call(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         model = {'search': None, 'first_match': False}
         ctx = {'is_predicate': True, 'predicate_expr': 'item.startswith("a")', 'is_first': False}
         _ctx_to_model(ctx, model)
@@ -3848,7 +3848,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         self.assertIsNone(model.get('linked_has_assignment'))
 
     def test_linked_action_button_emits_change_selected_text(self):
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model = self._adopt('[item for item in data if item > 3]')
         event = make_action_button_event('delete')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
@@ -3858,7 +3858,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
 
     def test_action_change_carries_new_var_name(self):
         """Switching action on an assignment-linked line suggests a new var name."""
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         # Assignment-form line links with target 'data_filtered'.
         model = self._adopt('data_filtered = [item for item in data if item > 3]')
         self.assertTrue(model.get('linked_has_assignment'))
@@ -3872,7 +3872,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
 
     def test_unchanged_name_carries_no_new_var_name(self):
         """A search change that keeps the same action keeps the same name."""
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model = self._adopt('data_filtered = [item for item in data if item > 3]')
         event = make_search_input_event('$ > 2')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
@@ -3881,7 +3881,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         self.assertIsNone(change_cmds[0].suggested_var_name)
 
     def test_linked_join_menu_updates_selected_text(self):
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model = self._adopt("''.join(str(item) for item in data)")
         self.assertEqual(model.get('linked_action'), 'join')
         event = make_action_button_event("join:', '")
@@ -3892,7 +3892,7 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         self.assertEqual(change_cmds[0].expression, "', '.join(str(item) for item in data)")
 
     def test_linked_search_change_emits_change_selected_text(self):
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model = self._adopt('[item for item in data if item > 3]')
         event = make_search_input_event('$ > 2')
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
@@ -3946,7 +3946,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
         self.assertNotIn('pass', code)
 
     def test_linked_action_change_emits_header_without_body(self):
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model, _ = self._clicked('loop_no_idx')
         self.assertEqual(model['linked_action'], 'loop_no_idx')
         model, commands = self._clicked('loop_new_idx', model)
@@ -3957,7 +3957,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
 
     def test_linked_search_change_still_updates_a_statement(self):
         """The syntax guard must not silently drop statement updates."""
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model, _ = self._clicked('loop_no_idx')
         model, commands = update(make_search_input_event('$ > 25'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
@@ -3966,7 +3966,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
         self.assertIn('item > 25', changes[0].expression)
 
     def test_copy_statement_action_copies_runnable_code(self):
-        from list_visualizer import CopyToClipboard
+        from table_visualizer import CopyToClipboard
         model = init_model(self.lst, mock_get_visualizer)
         model['search'] = '$ > 15'
         model, commands = update(make_action_button_event('loop_no_idx', copy=True),
@@ -3979,7 +3979,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
 
     def test_hover_preview_of_statement_action_is_runnable(self):
         """The preview is copied and dragged into the file, so it needs a body."""
-        from list_visualizer import _preview_expr
+        from table_visualizer import _preview_expr
         model = init_model(self.lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
         model['search'] = '$ > 15'
@@ -3988,7 +3988,7 @@ class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
         ast.parse(preview)
 
     def test_hover_preview_of_expression_action_is_unchanged(self):
-        from list_visualizer import _preview_expr
+        from table_visualizer import _preview_expr
         model = init_model(self.lst, mock_get_visualizer)
         model['_source_expr'] = 'data'
         model['search'] = '$ > 15'
@@ -4026,7 +4026,7 @@ class TestRelinkTakeoverOfStatementHeader(unittest.TestCase):
     def test_resumed_statement_action_is_not_marked_as_assignment(self):
         """Unlink then relink a statement: the stashed action is regenerated,
         and marking it as an assignment would make its updates unparseable."""
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model = self._unlinked_after('loop_no_idx')
         model, commands = update(make_relink_event('takeover', text=self.header),
                                  self.var_and_exp, model, self.lst,
@@ -4092,7 +4092,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         self.assertTrue(model.get('linked_has_assignment'))
 
     def test_next_interaction_edits_the_line_instead_of_inserting(self):
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model, _ = self._took_over(self.foreign)
         model, commands = update(make_search_input_event('$ > 2'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
@@ -4116,14 +4116,14 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
     def test_header_takeover_links_a_statement_action(self):
         """Linking to a header must pick an action that generates a header, or
         the first interaction would replace the block and orphan its body."""
-        from list_visualizer_grammar import _STATEMENT_ACTIONS
+        from table_visualizer_grammar import _STATEMENT_ACTIONS
         model, commands = self._took_over('if flag:')
         self.assertEqual(commands, [])
         self.assertIn(model.get('linked_action'), _STATEMENT_ACTIONS)
         self.assertFalse(model.get('linked_has_assignment'))
 
     def test_next_interaction_after_header_takeover_stays_a_header(self):
-        from list_visualizer import ChangeSelectedText
+        from table_visualizer import ChangeSelectedText
         model, _ = self._took_over('if flag:')
         model, commands = update(make_search_input_event('$ > 2'), self.var_and_exp,
                                  model, self.lst, mock_get_visualizer, eval_in_scope=eval)
@@ -4133,7 +4133,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
 
     def test_stashed_expression_action_is_dropped_for_a_header(self):
         """A stashed `filter` would write a comprehension over the header."""
-        from list_visualizer_grammar import _STATEMENT_ACTIONS
+        from table_visualizer_grammar import _STATEMENT_ACTIONS
         model = init_model(self.lst, mock_get_visualizer)
         model['search'] = '$ > 3'
         model, _ = update(make_action_button_event('filter'), self.var_and_exp,
@@ -4148,7 +4148,7 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
 
     def test_stashed_statement_action_is_dropped_for_an_assignment(self):
         """The mirror case: a stashed loop would leave `x = for item in ...:`."""
-        from list_visualizer_grammar import _STATEMENT_ACTIONS
+        from table_visualizer_grammar import _STATEMENT_ACTIONS
         model = init_model(self.lst, mock_get_visualizer)
         model['search'] = '$ > 3'
         model, _ = update(make_action_button_event('loop_no_idx'), self.var_and_exp,
@@ -4170,9 +4170,9 @@ class _ListActionTestBase(unittest.TestCase):
     """Base class for list visualizer DSL grammar roundtrip tests."""
 
     def setUp(self):
-        from list_visualizer_grammar import LIST_VIZ_GRAMMAR, generate_action as grammar_generate, parse_generated_code
+        from table_visualizer_grammar import TABLE_VIZ_GRAMMAR, generate_action as grammar_generate, parse_generated_code
         from bidirectional_dsl import generate, parse
-        self.grammar = LIST_VIZ_GRAMMAR
+        self.grammar = TABLE_VIZ_GRAMMAR
         self.raw_generate = generate
         self.raw_parse = parse
         self.generate_action = grammar_generate
@@ -4541,7 +4541,7 @@ class TestListGrammarParse(_ListActionTestBase):
     # --- Whole-list forms (no search) ---
     #
     # These are the actions available before the user types a search. They are
-    # generated by list_visualizer.generate_action, so the grammar has to parse
+    # generated by table_visualizer.generate_action, so the grammar has to parse
     # them too or a relink can never recognize a plain `for item in xs:` as a
     # line this visualizer wrote.
 
@@ -4596,15 +4596,15 @@ class TestListGrammarParse(_ListActionTestBase):
 
 
 class TestWholeListGrammarMatchesGeneration(unittest.TestCase):
-    """The grammar and list_visualizer.generate_action must agree on whole-list
+    """The grammar and table_visualizer.generate_action must agree on whole-list
     code, since one writes the line and the other reads it back."""
 
     WHOLE_LIST_ACTIONS = ['loop_no_idx', 'loop_orig_idx', 'loop_new_idx',
                           'if_any', 'if_all', 'any', 'all']
 
     def setUp(self):
-        from list_visualizer_grammar import generate_action as grammar_generate
-        from list_visualizer_grammar import parse_generated_code
+        from table_visualizer_grammar import generate_action as grammar_generate
+        from table_visualizer_grammar import parse_generated_code
         self.grammar_generate = grammar_generate
         self.parse_generated_code = parse_generated_code
         self.ctx = {
@@ -4642,7 +4642,7 @@ class TestWholeListGrammarMatchesGeneration(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_parse_assignment_form(self):
-        from list_visualizer_grammar import parse_generated_code_or_assignment
+        from table_visualizer_grammar import parse_generated_code_or_assignment
         ctx, prefix = parse_generated_code_or_assignment('result = [item for item in data if item > 100]')
         self.assertIsNotNone(ctx)
         self.assertEqual(prefix, 'result = ')
@@ -4655,7 +4655,7 @@ class TestWholeListGrammarMatchesGeneration(unittest.TestCase):
         self.assertEqual(result['source_expr'], 'data')
 
     def test_parse_join_assignment_form(self):
-        from list_visualizer_grammar import parse_generated_code_or_assignment
+        from table_visualizer_grammar import parse_generated_code_or_assignment
         ctx, prefix = parse_generated_code_or_assignment("result = ''.join(str(item) for item in data)")
         self.assertIsNotNone(ctx)
         self.assertEqual(prefix, 'result = ')
@@ -4877,7 +4877,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_list_of_str_with_list_column_does_not_recurse(self):
         slots = [{'expr': '$'}, {'expr': _FINDALL_COL}]
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
             model = init_model(['ABCdef'], mock_get_visualizer)
         self.assertEqual(model['columns'], ['$', _FINDALL_COL])
@@ -4892,25 +4892,25 @@ class TestNestedSlotsConfig(unittest.TestCase):
             {'expr': _FINDALL_COL,
              'children': {'builtins.str': [{'expr': '$.lower()'}]}},
         ]
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
         self.assertEqual(child['columns'], ['$.lower()'])
 
     def test_root_model_stores_config_fields(self):
         slots = [{'expr': '$'}]
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['x'], mock_get_visualizer)
         self.assertEqual(model['_config_root_type'], 'builtins.str')
         self.assertEqual(model['_config_root_dotfile'],
-                         list_visualizer.COLUMN_DOTFILE_NAME)
+                         table_visualizer.COLUMN_DOTFILE_NAME)
         self.assertEqual(model['_config_path'], [])
         self.assertEqual(model['_slot_children'], {})
 
     def test_nested_child_carries_path_and_root(self):
         slots = [{'expr': _FINDALL_COL,
                   'children': {'builtins.str': [{'expr': '$'}]}}]
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
         self.assertEqual(child['_config_root_type'], 'builtins.str')
@@ -4920,7 +4920,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
     def test_cyclic_list_is_depth_capped_not_recursion_error(self):
         a = []
         a.append(a)  # a == [a]; would recurse forever via auto-detected columns
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=None):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=None):
             model = init_model(a, mock_get_visualizer)  # must not RecursionError
         # Walk down the single nested child chain; a leaf must be marked too deep.
         m, depth, hit_cap = model, 0, False
@@ -4979,20 +4979,20 @@ class TestNestedConfigIsOfferedBySignature(unittest.TestCase):
     def test_child_naming_the_params_receives_the_nested_config(self):
         cell_vis = self.RecordingNestedVis()
         slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             init_model(['ABC'], self._get_visualizer_for(cell_vis))
         self.assertEqual(len(cell_vis.calls), 1)
         call = cell_vis.calls[0]
         self.assertEqual(call['slots_config'], [{'expr': '$.lower()'}])
         self.assertEqual(call['config_root_type'], 'builtins.str')
         self.assertEqual(call['config_root_dotfile'],
-                         list_visualizer.COLUMN_DOTFILE_NAME)
+                         table_visualizer.COLUMN_DOTFILE_NAME)
         self.assertEqual(call['config_path'], [('$', 'builtins.str')])
 
     def test_child_not_naming_the_params_is_not_handed_them(self):
         # Would TypeError if the nesting kwargs were passed regardless.
         slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
             model = init_model(['ABC'], self._get_visualizer_for(self.PlainVis()))
         self.assertEqual(model['children'][f'0\x00$'], {'handledKeys': []})
 
@@ -5005,7 +5005,7 @@ class TestNestedSlotsSave(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         event = make_column_mouse_event(repr(ColumnSelect(name="$['x']")))
-        with patch('list_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
             update(event, None, model, lst, mock_get_visualizer)
         mock_save.assert_called_once()
         args = mock_save.call_args.args
@@ -5026,9 +5026,9 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         whose single column is *column*. Returns (model, commands)."""
         import string_visualizer
         eval_in_scope = lambda code: eval(code, {'re': re, 'rows': rows})
-        get_vis = lambda v: string_visualizer if isinstance(v, str) else list_visualizer
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
 
-        with patch('list_visualizer.load_columns_from_dotfile', return_value=[column]):
+        with patch('table_visualizer.load_columns_from_dotfile', return_value=[column]):
             model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
                                var_and_exp=('rows', 'rows'))
         key = f'0{CELL_KEY_SEP}{column}'
@@ -5069,7 +5069,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         model, _cmds, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.SegmentToggle(segment_id='suffix'),
         ])
-        get_vis = lambda v: string_visualizer if isinstance(v, str) else list_visualizer
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
         rendered = visualize(rows, model, get_vis, eval_in_scope)
         chips = {html.unescape(m) for m in re.findall(r'snc-py-exp="([^"]*)"', rendered)}
         placeholder = [c for c in chips if c.startswith('str[')]
@@ -5152,7 +5152,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
 
 # === Pick tool ===
 
-from list_visualizer import (
+from table_visualizer import (
     ToolSelect, PickToggle,
     _pick_region_ids, _pick_region_expr, _build_pick_expr, _pick_needs_index,
     _pick_edge_class, _pick_is_array, pick_filter_expr, PICK_IDX_COLUMN,
@@ -5474,7 +5474,7 @@ class TestPickGeneratedCode(unittest.TestCase):
             'next((item for item in strs if len(item) > 4), None)')
 
     def test_hand_written_and_grammar_generation_agree(self):
-        from list_visualizer_grammar import generate_action as grammar_generate
+        from table_visualizer_grammar import generate_action as grammar_generate
         for picked in [['match_col_1'], ['match_idx'], ['pre_col_0', 'match_col_0'],
                        ['match_idx', 'match_col_1'], ['pre_col_1', 'post_col_1']]:
             with self.subTest(picked=picked):
@@ -5730,7 +5730,7 @@ class TestListGrammarPick(_ListActionTestBase):
         self.assertIsNone(parsed.get('pick_expr'))
 
     def test_ctx_to_model_restores_the_picked_expression(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         code = 'next((len(item) for item in strs if len(item) > 4), None)'
         parsed = self.parse_generated_code(code)
         model = {}
@@ -5754,7 +5754,7 @@ class TestListGrammarPick(_ListActionTestBase):
                 })
 
     def test_grammar_matches_generation_for_array_pick_loops(self):
-        from list_visualizer_grammar import generate_action as grammar_generate
+        from table_visualizer_grammar import generate_action as grammar_generate
         model = make_pick_model(picked=['pre_col_1', 'match_col_1'])
         ctx = _get_search_context(model, ('strs', 'strs'), eval_in_scope=pick_eval)
         for action in ['loop_no_idx', 'loop_new_idx']:
@@ -5778,7 +5778,7 @@ class TestListGrammarPick(_ListActionTestBase):
         self.assertEqual(parsed['source_expr'], 'data')
 
     def test_ctx_to_model_clears_pick_for_an_unpicked_line(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         parsed = self.parse_generated_code('[item for item in strs if len(item) > 4]')
         model = {'tool': 'pick', 'pick_expr': 'len($)', 'picked': ['match_col_1']}
         _ctx_to_model(parsed, model)
@@ -5788,7 +5788,7 @@ class TestListGrammarPick(_ListActionTestBase):
 
 # === Per-column search tests ===
 
-from list_visualizer import (
+from table_visualizer import (
     ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
     ColumnSearchDropdownToggle, COLUMN_SEARCH_OPS, COLUMN_SEARCH_COMPOSE,
     column_search_predicate, lift_column_predicate, compose_column_searches,
@@ -6430,7 +6430,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
         self.assertEqual(model['search'], 'len($) > 1')
 
     def test_relinking_from_code_fills_in_the_column_rows(self):
-        from list_visualizer import _ctx_to_model
+        from table_visualizer import _ctx_to_model
         lst, model = self.make_model()
         age = model['columns'][1]
         _ctx_to_model({'is_predicate': True,
@@ -6719,7 +6719,7 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
 
 # === Column tally tests ===
 
-from list_visualizer import (
+from table_visualizer import (
     TallyItemToggle, TallySelectAll, TallySelectNone, TallyExcludeToggle,
     TallyFilterInput, TallySortSelect, TallyCountFilterInput, TallyCountOpSelect,
     TALLY_MAX_CARDINALITY, TALLY_TOO_MANY, TALLY_UNHASHABLE,
@@ -8674,7 +8674,7 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 
 # === Column compute tests ===
 
-from list_visualizer import (
+from table_visualizer import (
     COMPUTE_AGGS, HISTOGRAM_AGG, HISTOGRAM_BINS_TOOLTIP, NO_ANSWER,
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
     _agg_value, _agg_code, _agg_name, _format_agg_value,
@@ -9160,7 +9160,7 @@ class TestFormatAggValue(unittest.TestCase):
         self.assertIn('…', _format_agg_value('x' * 200))
 
 
-from list_visualizer import (
+from table_visualizer import (
     ComputeToggle, ComputeHoleInput,
     _column_computes, _set_column_computes, _compute_rows,
 )
@@ -10202,7 +10202,7 @@ class TestComputeItemRowRendering(unittest.TestCase):
         self.assertNotIn('snc-child-key', index_cell)
 
 
-from list_visualizer import (
+from table_visualizer import (
     COMPUTE_CODES, COMPUTE_EXPR_TOOLTIP, TALLY_IMPORTS,
     ComputeCodeClick, ComputeExprInput, ComputeExprKeyDown,
     _agg_is_free, _compute_free_rows,
@@ -10773,7 +10773,7 @@ class TestFreeAggregationRemoval(unittest.TestCase):
         self.assertIsNone(model['column_computes'])
 
 
-from list_visualizer import (
+from table_visualizer import (
     _parse_sorted, _sort_expr, _sort_checked, canonical_source_expr,
 )
 
@@ -10926,7 +10926,7 @@ class TestCanonicalSourceExpr(unittest.TestCase):
         self.assertIsNone(canonical_source_expr(None))
 
 
-from list_visualizer import ChangeSourceExpr, SortClick, SortCodeClick
+from table_visualizer import ChangeSourceExpr, SortClick, SortCodeClick
 
 SORT_LIST = [{'b': 3}, {'b': 1}, {'b': 2}]
 
@@ -11105,7 +11105,7 @@ class TestHeaderTracksTheMouseOnlyWhileDragging(unittest.TestCase):
         self.assertIn('snc-mouse-up', self.header(column_drag_from=0))
 
 
-from list_visualizer import _is_pure_ref
+from table_visualizer import _is_pure_ref
 
 
 class TestPureRef(unittest.TestCase):
@@ -11194,7 +11194,7 @@ class TestImpureSourceIsNotReEvaluated(unittest.TestCase):
         self.assertIn('for item in f()', html_out)
 
 
-from list_visualizer import ColumnSubmenuDwell
+from table_visualizer import ColumnSubmenuDwell
 
 
 class TestColumnMenuDwell(unittest.TestCase):
@@ -11259,7 +11259,7 @@ class TestColumnMenuDwell(unittest.TestCase):
         self.assertIn(self.opens(None), self.dwells(remove_row))
 
 
-from list_visualizer import ColumnMenuDismiss
+from table_visualizer import ColumnMenuDismiss
 
 
 class TestColumnMenuDismiss(unittest.TestCase):
@@ -11481,7 +11481,7 @@ class TestSourceSpanAndExprRefresh(unittest.TestCase):
         self.assertEqual(model['_source_expr'], 'data')
 
 
-from list_visualizer import _column_item_expr, _column_key_expr
+from table_visualizer import _column_item_expr, _column_key_expr
 
 
 class TestColumnDollarDollarIsTheList(unittest.TestCase):
@@ -11572,11 +11572,11 @@ class TestColumnDollarDollarIsTheList(unittest.TestCase):
                          '($ / max($$)) > 2')
 
 
-from list_visualizer import (_column_cell_expr, _column_values_clause,
+from table_visualizer import (_column_cell_expr, _column_values_clause,
                              _pick_range_expr, _render_sort_panel,
                              _agg_column_expr, _agg_col_code, _agg_row_index,
                              _pick_standalone_exprs, _ctx_to_model, unlift_term)
-from list_visualizer_grammar import parse_generated_code_or_assignment
+from table_visualizer_grammar import parse_generated_code_or_assignment
 
 
 class TestColumnDollarIIsTheRowIndex(unittest.TestCase):

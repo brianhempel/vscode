@@ -54,4 +54,4 @@ __pycache__
 .snc_object_fields.json
 .snc_io_cache/
 .vs
-.snc_list_columns.json
+.snc_table_columns.json

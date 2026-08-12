@@ -4,7 +4,7 @@ from bidirectional_dsl import BiTemplate, Alt, BASE_RULES, make_grammar, generat
 from visualizer_utils import without_pass_body
 
 
-LIST_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
+TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     BiTemplate("SliceComponent", re.compile(r"[^:\]]*"), {}),
     BiTemplate("IndexExpr", re.compile(r"[^\]]+"), {}),
     BiTemplate("IndicesExpr", ast.parse, {}),
@@ -337,7 +337,7 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     if ctx.get('is_slice'):
         gen_ctx['has_slice_start'] = bool(ctx.get('slice_start'))
         gen_ctx['has_slice_stop'] = bool(ctx.get('slice_stop'))
-    result = generate(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Action'], gen_ctx)
+    result = generate(TABLE_VIZ_GRAMMAR, TABLE_VIZ_GRAMMAR['Action'], gen_ctx)
     if result is not None:
         return (_suggest_name_for_action(action, gen_ctx), result[0])
 
@@ -467,7 +467,7 @@ def parse_generated_code(code_line: str) -> dict | None:
     # Statements are generated as bare headers, but text coming back from the
     # editor may still carry the placeholder body that was inserted with it.
     code_line = without_pass_body(code_line)
-    ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Action'], code_line)
+    ctx = parse(TABLE_VIZ_GRAMMAR, TABLE_VIZ_GRAMMAR['Action'], code_line)
     if ctx is not None:
         return ctx
     return _parse_generated_join(code_line)
@@ -475,7 +475,7 @@ def parse_generated_code(code_line: str) -> dict | None:
 
 def parse_generated_code_or_assignment(code_line: str) -> tuple[dict | None, str]:
     code_line = without_pass_body(code_line)
-    ctx = parse(LIST_VIZ_GRAMMAR, LIST_VIZ_GRAMMAR['Assignment'], code_line)
+    ctx = parse(TABLE_VIZ_GRAMMAR, TABLE_VIZ_GRAMMAR['Assignment'], code_line)
     if ctx is not None and 'assign_var_name' in ctx:
         return (ctx, f"{ctx['assign_var_name']} = ")
     try:
