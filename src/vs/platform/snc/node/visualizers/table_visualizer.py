@@ -370,13 +370,6 @@ class ChangeSourceExpr:
 COLUMN_DOTFILE_NAME = '.snc_table_columns.json'
 
 
-def _get_item_type_key(lst):
-    """Return a type key for the items in the list (based on first item's class)."""
-    if not lst:
-        return None
-    return get_full_class_name(lst[0])
-
-
 def load_columns_from_dotfile(type_key: str):
     """Load the saved slot list for an item type from the dotfile (or None).
 
@@ -5887,7 +5880,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
 
         filtered_commands: List[Any] = []
-        type_key = _get_item_type_key(value) if value else None
+        type_key = config_key(value) if value else None
         for cmd in commands:
             # Code out of a cell becomes a column of this table, since a cell's
             # expression is one every row answers. An answer's isn't, so its
@@ -5902,7 +5895,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         return (new_model, filtered_commands)
 
     commands: List[Any] = []
-    type_key = _get_item_type_key(value) if value else None
+    type_key = config_key(value) if value else None
     model['_scroll_to_match'] = False
     # A one-shot request, cleared here so it can't pull focus into a column
     # search box on some later, unrelated render.

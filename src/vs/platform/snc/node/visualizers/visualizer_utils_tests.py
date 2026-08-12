@@ -653,12 +653,13 @@ class TestDollarExprSigils(unittest.TestCase):
 
 class TestConfigKey(unittest.TestCase):
     """config_key selects the per-element type so a list-of-T and a single T
-    share one config."""
+    share one config -- with a dict as the one deliberate exception."""
 
     def test_list_of_str(self):
         self.assertEqual(config_key(['a', 'b']), 'builtins.str')
 
     def test_list_of_dict(self):
+        # A LIST of dicts keys on its element class, unchanged.
         self.assertEqual(config_key([{'a': 1}]), 'builtins.dict')
 
     def test_empty_list_is_none(self):
@@ -666,6 +667,27 @@ class TestConfigKey(unittest.TestCase):
 
     def test_single_string_matches_list_of_string(self):
         self.assertEqual(config_key('hi'), config_key(['hi']))
+
+    def test_a_dict_keys_on_the_pair_of_types_it_holds(self):
+        # Without this every dict in a program would share one saved column
+        # config no matter what it held.
+        self.assertEqual(config_key({'a': 1}), 'builtins.str->builtins.int')
+        self.assertEqual(config_key({1: 'a'}), 'builtins.int->builtins.str')
+
+    def test_an_empty_dict_has_no_key(self):
+        self.assertIsNone(config_key({}))
+
+    def test_a_dict_is_the_exception_to_the_list_of_t_invariant(self):
+        # Deliberate: a list of dicts keys on the ELEMENT class while a bare
+        # dict keys on its pair of types. Different axes, not shared.
+        self.assertNotEqual(config_key({'a': 1}), config_key([{'a': 1}]))
+
+    def test_heterogeneous_dicts_fragment_their_cell_configs(self):
+        # Pinned rather than left to be read later as a bug: columns configured
+        # on one row's nested table no longer apply to the next when the rows
+        # hold different value types. The same failure mode a list already has
+        # when its first element's type changes.
+        self.assertNotEqual(config_key({'a': 1}), config_key({'a': 'x'}))
 
     def test_object_class_name(self):
         class Foo:

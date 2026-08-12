@@ -64,7 +64,7 @@ from table_visualizer import (
     ColumnKeyDown, ExpandToggle, COLUMN_DOTFILE_NAME, CELL_KEY_SEP,
     CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
-    _get_item_type_key, _get_column_suggestions, _get_all_possible_columns,
+    _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at,
 )
 
@@ -1584,18 +1584,6 @@ class TestColumnDotfile(unittest.TestCase):
             f.write('not json{{{')
         result = load_columns_from_dotfile('builtins.dict')
         self.assertIsNone(result)
-
-    def test_get_item_type_key_for_dict(self):
-        self.assertEqual(_get_item_type_key([{'a': 1}]), 'builtins.dict')
-
-    def test_get_item_type_key_for_empty_list(self):
-        self.assertIsNone(_get_item_type_key([]))
-
-    def test_get_item_type_key_for_custom_class(self):
-        class Foo:
-            pass
-        key = _get_item_type_key([Foo()])
-        self.assertIn('Foo', key)
 
     def test_init_model_loads_from_dotfile(self):
         save_columns_to_dotfile('builtins.dict', [], ["$['age']", "$['name']"])

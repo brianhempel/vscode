@@ -234,13 +234,25 @@ def config_key(value) -> 'str | None':
     """The type key that selects a value's slots.
 
     For a list it's the element type (so a list-of-T and a single T share one
-    config); for everything else it's the value's own class. Empty lists have
-    no key.
+    config); for a dict it's the pair of types its entries hold, written
+    `K->V`; for everything else the value's own class. An empty list or dict
+    has no key.
+
+    The dict branch is a deliberate exception to `config_key(x) ==
+    config_key([x])`. A list of dicts keys on `builtins.dict` -- its ELEMENT
+    class -- while a bare dict keys on `str->int`, because otherwise every dict
+    in a program would share one saved column config no matter what it held.
+    Different axes, deliberately not shared.
     """
     if isinstance(value, list):
         if not value:
             return None
         return get_full_class_name(value[0])
+    if isinstance(value, dict):
+        if not value:
+            return None
+        k, v = next(iter(value.items()))
+        return f'{get_full_class_name(k)}->{get_full_class_name(v)}'
     return get_full_class_name(value)
 
 
