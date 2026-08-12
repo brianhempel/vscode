@@ -666,6 +666,22 @@ def _leaf_values_expr(leaf: LeafColumn, source_expr: str,
     return f'[{body} for {rows} for {_SPLAT_ELEM} in {lists_expr}]'
 
 
+def _column_whole_expr(model, col: str, source_expr: str) -> str:
+    """Every value a column has, as one expression -- for any column.
+
+    A leaf under a splat is keyed by a composed identity that means nothing on
+    its own, so it is resolved through the leaf and flattened; everything else
+    is the ordinary whole-column expression. The one place that choice is made,
+    so a header, a tally and an aggregation cannot disagree about what a
+    column's values are.
+    """
+    binds = _model_binds(model)
+    leaf = _leaf_for(model.get('columns') or {}, col)
+    if leaf is not None and leaf.splat is not None:
+        return _leaf_values_expr(leaf, source_expr, binds)
+    return _column_values_expr(col, source_expr, binds)
+
+
 def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
     """The leaf a composed column key names, or None."""
     for leaf in _leaf_columns(columns):
@@ -1345,9 +1361,67 @@ def decompose_search(search: str | None, columns,
 # The rows are keyed by column EXPRESSION, like _slot_children and the cell
 # children, so reordering columns can't scramble which search belongs to which.
 
+def _menu_targets(columns) -> list:
+    """What a column event's index names, in order.
+
+    The leaves first -- so a table with no sub-columns has exactly the index
+    space it always had, and nothing about lists or plain dicts moves -- then
+    one entry per splat that carries sub-columns. A split splat is not a leaf
+    (its sub-columns are the drawn columns), but it is still a column: it can
+    be renamed, removed and reordered, and its own group header points here.
+    """
+    targets = [leaf.expr for leaf in _leaf_columns(columns)]
+    targets += [col for col in (columns or {}) if _col_subs(columns, col)]
+    return targets
+
+
+def _menu_target_at(columns, index: int) -> 'str | None':
+    if index is None or index < 0:
+        return None
+    targets = _menu_targets(columns)
+    return targets[index] if index < len(targets) else None
+
+
+def _splat_of(columns, target: str) -> 'str | None':
+    """The splat a target lives under, or None when it is top-level."""
+    if SUBCOL_SEP not in target:
+        return None
+    return target.split(SUBCOL_SEP, 1)[0]
+
+
+def _remove_target(columns, target: str) -> bool:
+    """Remove a column, wherever it lives."""
+    splat = _splat_of(columns, target)
+    if splat is None:
+        if target not in columns:
+            return False
+        del columns[target]
+        return True
+    subs = _col_subs(columns, splat)
+    sub = target.split(SUBCOL_SEP, 1)[1]
+    if sub not in subs:
+        return False
+    del subs[sub]
+    return True
+
+
+def _rename_target(columns, target: str, new_name: str) -> bool:
+    """Rename a column in place, keeping its position and whatever it lives
+    under. False when the name is taken among its own siblings."""
+    splat = _splat_of(columns, target)
+    if splat is None:
+        index = list(columns).index(target) if target in columns else None
+        return False if index is None else _col_rename_at(columns, index, new_name)
+    subs = _col_subs(columns, splat)
+    sub = target.split(SUBCOL_SEP, 1)[1]
+    if sub not in subs or new_name in subs:
+        return False
+    index = list(subs).index(sub)
+    return _col_rename_at(subs, index, new_name)
+
+
 def _column_at(model: dict, index: int) -> str | None:
-    columns = model.get('columns', [])
-    return _col_at(columns, index)
+    return _menu_target_at(model.get('columns') or {}, index)
 
 
 def _column_search_row(model: dict, col: str) -> dict:
@@ -5011,8 +5085,13 @@ def _column_header_text(col: str) -> str:
 
 
 def _render_column_header(col, index, model, lst, eval_in_scope=None,
-                          span_attrs=''):
-    """Render a normal column header with drag handle, column name, and ▾ menu."""
+                          span_attrs='', extra_classes='', label=None):
+    """Render a normal column header with drag handle, column name, and ▾ menu.
+
+    *label* is what the cell shows when that differs from the column
+    expression -- a sub-column is keyed by its composed identity but reads as
+    the expression the user wrote.
+    """
     click_event = repr(ColumnClick(index=index))
     drag_start_event = repr(ColumnDragStart(index=index))
     drag_over_event = repr(ColumnDragOver(index=index))
@@ -5034,8 +5113,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
 
     source_expr = model.get('_source_expr')
     py_exp_attr = ('' if source_expr is None
-                   else py_exp_attrs(_column_values_expr(col, source_expr,
-                                                         _model_binds(model))))
+                   else py_exp_attrs(_column_whole_expr(model, col, source_expr)))
 
     # The ▾ trigger is pinned to the cell's right edge by .col-header-inner's flex
     # layout (which lives on an inner span, never on the <th>: display:flex on a
@@ -5069,6 +5147,8 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
     # it isn't continuous, and a release that lands here has to end the drag.
     track_move = ('' if drag_from is None else
                   f'snc-mouse-move="{html.escape(drag_over_event)}" ')
+    if extra_classes:
+        th_classes.append(extra_classes)
     return (
         f'<th class="{" ".join(th_classes)}"{span_attrs} '
         f'{track_move}'
@@ -5080,7 +5160,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
-        f'{html.escape(_column_header_text(col))}</span>'
+        f'{html.escape(_column_header_text(col) if label is None else label)}</span>'
         f'{menu_html}'
         f'</span>'
         f'</th>'
@@ -6163,7 +6243,13 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     strs.append('<table><tr>')
     strs.append(f'<th{" rowspan=\"2\"" if has_subs else ""}></th>')
 
-    for ci, group in enumerate(groups):
+    # Header cells carry the index of what their menu acts on, which is the
+    # menu-target space -- leaves first, then the split splats. For a table
+    # with no sub-columns that is position-for-position what it always was.
+    target_index = {t: n for n, t in enumerate(_menu_targets(columns))}
+
+    for group in groups:
+        ci = target_index.get(group.col, 0)
         if model.get('editing_column_index') == ci:
             strs.append(_render_column_input(lst, model, get_visualizer, is_editing=True, editing_index=ci))
         else:
@@ -6199,16 +6285,18 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         for leaf in leaves:
             if leaf.sub is None or len(leaf.header) < 2:
                 continue
-            # The sub-header hands over its own flattened column, the same
-            # list the tally counts -- so dragging one is worth something.
-            header_src = model.get('_source_expr')
-            sub_exp = ('' if header_src is None
-                       else py_exp_attrs(_leaf_values_expr(
-                           leaf, header_src, _binds_for(lst))))
-            strs.append(
-                f'<th class="col-header col-subheader">'
-                f'<span class="col-name"{sub_exp}>'
-                f'{html.escape(_column_header_text(leaf.sub))}</span></th>')
+            # A sub-column is a column: it gets the same header, so the same ▾
+            # menu -- search, tally, sort and Compute all key on the column
+            # expression, and a leaf's is one _column_values understands.
+            ci = target_index.get(leaf.expr, 0)
+            if model.get('editing_column_index') == ci:
+                strs.append(_render_column_input(lst, model, get_visualizer,
+                                                 is_editing=True, editing_index=ci))
+            else:
+                strs.append(_render_column_header(
+                    leaf.expr, ci, model, lst, eval_in_scope,
+                    extra_classes='col-subheader',
+                    label=_column_header_text(leaf.sub)))
         strs.append('</tr>')
 
     if len(lst) == 0:
@@ -6543,8 +6631,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_slots(model)
             elif model.get('editing_column_index') is not None:
                 idx = model['editing_column_index']
-                old_name = _col_at(model['columns'], idx)
-                if old_name is not None and _col_rename_at(model['columns'], idx, name):
+                old_name = _column_at(model, idx)
+                if old_name is not None and _rename_target(model['columns'],
+                                                           old_name, name):
                     if old_name != name:
                         _rename_column_children(model, old_name, name)
                         # The search was written against the old expression, so
@@ -6562,15 +6651,21 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             _close_column_menus(model)
             detail = event_json.get('detail', 1)
             if detail >= 2:
-                if _col_at(model['columns'], idx) is not None:
+                target = _column_at(model, idx)
+                if target is not None:
                     model['editing_column_index'] = idx
-                    model['column_input_value'] = _col_at(model['columns'], idx)
+                    # A sub-column is edited as the expression it is, not as
+                    # the composed identity it is keyed by.
+                    model['column_input_value'] = (
+                        target.split(SUBCOL_SEP, 1)[1]
+                        if SUBCOL_SEP in target else target)
                     model['adding_column'] = False
 
         case RemoveColumnClick(index=idx):
             _close_column_menus(model)
-            if _col_at(model['columns'], idx) is not None:
-                removed_col = _col_remove_at(model['columns'], idx)
+            removed_col = _column_at(model, idx)
+            if removed_col is not None and _remove_target(model['columns'],
+                                                          removed_col):
                 _remove_column_children(model, removed_col)
                 _remove_column_search(model, removed_col)
                 _remove_column_compute(model, removed_col)
@@ -6656,9 +6751,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['selected_suggestion_index'] = None
                 elif model.get('editing_column_index') is not None:
                     idx = model['editing_column_index']
-                    old_name = _col_at(model['columns'], idx)
-                    if commit_val and old_name is not None and _col_rename_at(
-                            model['columns'], idx, commit_val):
+                    old_name = _column_at(model, idx)
+                    if commit_val and old_name is not None and _rename_target(
+                            model['columns'], old_name, commit_val):
                         if old_name != commit_val:
                             _rename_column_children(model, old_name, commit_val)
                             _remove_column_search(model, old_name)

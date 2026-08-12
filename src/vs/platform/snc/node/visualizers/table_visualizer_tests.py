@@ -68,7 +68,7 @@ from table_visualizer import (
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _column_groups,
     _column_header_text, _col_add, _col_at, _col_rename_at, _col_remove_at,
-    _leaf_values_expr,
+    _leaf_values_expr, _menu_targets, _column_at, _col_subs,
     _col_move, _col_subs,
 )
 
@@ -765,6 +765,87 @@ class TestLeafColumns(unittest.TestCase):
             'cols': {'$.who': {}, '$.age': {}}}})
         self.assertEqual([(g.col, g.width) for g in groups],
                          [('$.name', 1), ('*$.members', 2)])
+
+
+class TestMenuTargets(unittest.TestCase):
+    """What a column event's index names. Leaves first, so a table with no
+    sub-columns has exactly the index space it always had; then one entry per
+    splat that carries sub-columns, which is what its own group header points
+    at -- the splat itself is not a leaf, but it can still be renamed and
+    removed."""
+
+    def test_without_sub_columns_the_targets_are_the_columns(self):
+        cols = {"$['a']": {}, "$['b']": {}}
+        self.assertEqual(_menu_targets(cols), ["$['a']", "$['b']"])
+
+    def test_a_splat_with_no_sub_columns_is_its_own_target(self):
+        self.assertEqual(_menu_targets({'$k': {}, '*$v': {}}), ['$k', '*$v'])
+
+    def test_a_split_splat_contributes_its_leaves_then_itself(self):
+        cols = {'$k': {}, '*$v': {'cols': {"$['who']": {}, "$['age']": {}}}}
+        targets = _menu_targets(cols)
+        self.assertEqual(targets[0], '$k')
+        self.assertEqual(targets[1], "*$v\x01$['who']")
+        self.assertEqual(targets[2], "*$v\x01$['age']")
+        self.assertEqual(targets[3], '*$v')
+
+    def test_column_at_reads_the_target_space(self):
+        model = {'columns': {'$k': {}, '*$v': {'cols': {"$['x']": {}}}}}
+        self.assertEqual(_column_at(model, 0), '$k')
+        self.assertEqual(_column_at(model, 1), "*$v\x01$['x']")
+        self.assertEqual(_column_at(model, 2), '*$v')
+        self.assertIsNone(_column_at(model, 3))
+
+
+class TestSubColumnMenuEvents(unittest.TestCase):
+    """A sub-column is a column: it has a menu, and removing or renaming it
+    changes its splat's `cols` rather than the top-level list."""
+
+    def model(self):
+        d = {'t1': [{'who': 'ann', 'age': 30}]}
+        m = init_model(d, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = {'$k': {},
+                        '*$v': {'cols': {"$['who']": {}, "$['age']": {}}}}
+        return d, m
+
+    def test_removing_a_sub_column_leaves_the_splat_standing(self):
+        d, model = self.model()
+        event = make_column_mouse_event(repr(RemoveColumnClick(index=1)))
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
+        self.assertEqual(list(new_model['columns']), ['$k', '*$v'])
+        self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
+                         ["$['age']"])
+
+    def test_removing_the_splat_takes_its_sub_columns_with_it(self):
+        d, model = self.model()
+        event = make_column_mouse_event(repr(RemoveColumnClick(index=3)))
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
+        self.assertEqual(list(new_model['columns']), ['$k'])
+
+    def test_renaming_a_sub_column_keeps_it_under_its_splat(self):
+        d, model = self.model()
+        model['editing_column_index'] = 1
+        model['column_input_value'] = "$['name']"
+        event = make_column_key_event('Enter')
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
+        self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
+                         ["$['name']", "$['age']"])
+
+    def test_a_sub_column_search_is_keyed_on_the_leaf(self):
+        d, model = self.model()
+        leaf = _leaf_columns(model['columns'])[1]
+        _set_column_search(model, leaf.expr, op='>', text='2', compose='and')
+        self.assertTrue(_column_search_active(model, leaf.expr))
+        self.assertFalse(_column_search_active(model, '$k'))
+
+    def test_the_sub_header_carries_a_menu_trigger(self):
+        d, model = self.model()
+        html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
+        self.assertIn('col-menu-1', html_out)
 
 
 class TestLeafDerivedExpressions(unittest.TestCase):
