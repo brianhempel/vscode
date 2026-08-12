@@ -42,6 +42,7 @@ Columns shown in the table are configurable and persisted:
 import ast
 import functools
 import html
+import itertools
 import keyword
 import math
 import random
@@ -404,10 +405,69 @@ def _save_slots(model: dict) -> None:
     )
 
 
+# === Rows ===
+
+@dataclass(frozen=True)
+class Row:
+    """One rendered row, however the container gave it up.
+
+    `key` identifies the row in `children` and in a cell key. It is the root
+    row's number today; under splat a row inside a group is "3.1", so two
+    rendered rows of one root row never collide on one column.
+
+    `bindings` is what the suffixed dollars stand for in this row, as VALUES --
+    the eval-side twin of the expression map the column helpers thread.
+
+    A root row that splats a list occupies several rendered rows: the first of
+    them carries `span_start`, and draws the cells of every column that did NOT
+    splat, with `rowspan=span`. Until splat lands every row is its own, so these
+    are True and 1.
+    """
+    key: str          # identity in `children`; "3" now, "3.1" under splat
+    index: int        # the root row's number -- what `$i` binds and what the
+                      # row-index <td> shows
+    item: Any         # what bare `$` binds to
+    bindings: dict    # {'i': 0} for a list; {'i', 'k', 'v'} for a dict
+    span_start: bool  # owns the rowspan cells of the unsplatted columns
+    span: int         # how many rendered rows this root row occupies
+
+
+def _rows(value) -> list:
+    """Every row of a container, in order."""
+    if isinstance(value, dict):
+        return [Row(str(n), n, (k, v), {'i': n, 'k': k, 'v': v}, True, 1)
+                for n, (k, v) in enumerate(value.items())]
+    return [Row(str(i), i, item, {'i': i}, True, 1)
+            for i, item in enumerate(value)]
+
+
+def _row_at(value, i: int) -> Row:
+    """One row without building the rest -- for the per-cell and sampling
+    paths, which are the reason `_rows` must not be the only way in.
+
+    islice is O(i) and stateless, and stays that way deliberately. An id()-keyed
+    memo is not a safe alternative: a dict freed mid-render can have its address
+    recycled and hand back another dict's items, and pinning the value to fix
+    that means holding a strong reference to arbitrary user data in module state
+    that nobody clears across init_model / visualize / update in a long-lived
+    runner -- and it would still go stale on in-place mutation. A weakref-keyed
+    one isn't available either: weakref.ref({}) raises TypeError. The only
+    caller that cares about cost is _sample_indices, whose whole job is to touch
+    at most ~12 rows.
+    """
+    if isinstance(value, dict):
+        k, v = next(itertools.islice(value.items(), i, None))
+        return Row(str(i), i, (k, v), {'i': i, 'k': k, 'v': v}, True, 1)
+    return Row(str(i), i, value[i], {'i': i}, True, 1)
+
+
 # === Column autocomplete helpers ===
 
 def _sample_indices(lst):
-    """Return a sorted set of representative indices for sampling a list."""
+    """Return a sorted set of representative row positions for sampling.
+
+    The one caller that cares what _row_at costs: its whole job is to name at
+    most ~12 rows, so an O(i) islice per row is not worth memoizing away."""
     indices = {0}
     if len(lst) > 1:
         indices.add(len(lst) - 1)
@@ -423,12 +483,12 @@ def _collect_fields_from_samples(lst, get_visualizer, require_all=False):
     If require_all is True, returns None when any sampled item lacks get_fields.
     Otherwise skips items without get_fields.
     """
-    # Sampling indexes positionally, which on a dict is a key lookup -- so a
-    # dict cannot come through here as though it were a list. Detecting a
-    # dict's columns is its own thing (the key alongside the values' fields)
-    # and arrives with the $k/$v sigils; until then a dict declines detection
-    # and takes the ['$'] fallback rather than borrowing the list shape, which
-    # would address it wrong rather than merely plainly.
+    # Detecting a dict's columns is its own thing -- the key alongside the
+    # values' fields -- and arrives with the column expressions. Sampling a
+    # dict's rows here would sample PAIRS, and there is no tuple visualizer to
+    # give fields for one, so a dict declines detection and takes the ['$']
+    # fallback rather than borrowing the list shape, which would address it
+    # wrong rather than merely plainly.
     if isinstance(lst, dict):
         return None if require_all else []
 
@@ -439,13 +499,14 @@ def _collect_fields_from_samples(lst, get_visualizer, require_all=False):
     seen = set()
 
     for idx in _sample_indices(lst):
-        vis = get_visualizer(lst[idx])
+        item = _row_at(lst, idx).item
+        vis = get_visualizer(item)
         item_get_fields = getattr(vis, 'get_fields', None)
         if item_get_fields is None:
             if require_all:
                 return None
             continue
-        fields = item_get_fields(lst[idx])
+        fields = item_get_fields(item)
         if fields is None:
             if require_all:
                 return None
@@ -1234,10 +1295,10 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
             pass
 
     values = []
-    for i, item in enumerate(lst):
+    for row in _rows(lst):
         try:
-            values.append(eval_dollar_expr(col, item, eval_in_scope, outer=(lst,),
-                                           index=i))
+            values.append(eval_dollar_expr(col, row.item, eval_in_scope,
+                                           outer=(lst,), bindings=row.bindings))
         except Exception:
             pass
     return values
@@ -3089,10 +3150,10 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
         return []
 
     matched = []
-    for i, item in enumerate(lst):
+    for row in _rows(lst):
         try:
-            if predicate(item, lst, i):
-                matched.append(i)
+            if predicate(row.item, lst, row.index):
+                matched.append(row.index)
         except Exception:
             pass
     return matched
@@ -3503,14 +3564,16 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     # False when the source can't be re-evaluated for free, and then the rows in
     # hand are what the cells are read from -- see _is_pure_ref.
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
-    for i, item in enumerate(lst):
+    for row in _rows(lst):
         for col in columns:
             try:
                 if read_through and eval_in_scope is not None:
-                    cell_value = eval_in_scope(_column_cell_expr(col, source_expr, i))
+                    cell_value = eval_in_scope(
+                        _column_cell_expr(col, source_expr, row.index))
                 else:
-                    cell_value = eval_dollar_expr(col, item, eval_in_scope,
-                                                  outer=(lst,), index=i)
+                    cell_value = eval_dollar_expr(col, row.item, eval_in_scope,
+                                                  outer=(lst,),
+                                                  bindings=row.bindings)
             except Exception:
                 cell_value = None
             if cell_value is not None:
@@ -3519,7 +3582,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                 # init_model gets {} back and isn't handed them.
                 extra = child_nesting_kwargs(config_fields, col, cell_value,
                                              cell_vis.init_model)
-                children[f"{i}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
+                children[f"{row.key}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
                     cell_value, get_visualizer, eval_in_scope=eval_in_scope, **extra)
 
     handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
@@ -5322,7 +5385,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         return _render_pick_region(row, col_id, model, first_match_row,
                                    len(lst), pick_exprs)
 
-    for i, item in enumerate(lst):
+    for row in _rows(lst):
+        i = row.index
         is_match = i in matched_indices
         row_class_attr = ''
         scroll_attr = ''
@@ -5347,13 +5411,14 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         strs.append('</td>')
 
         for ci, col in enumerate(columns):
-            composite_key = f"{i}{CELL_KEY_SEP}{col}"
+            composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
             try:
                 if read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(_column_cell_expr(col, source_expr, i))
                 else:
-                    cell_value = eval_dollar_expr(col, item, eval_in_scope,
-                                                  outer=(lst,), index=i)
+                    cell_value = eval_dollar_expr(col, row.item, eval_in_scope,
+                                                  outer=(lst,),
+                                                  bindings=row.bindings)
             except Exception:
                 cell_value = None
 
@@ -5456,11 +5521,13 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
         return _agg_child_value(key, lst, model, eval_in_scope)
     source_expr = _cell_source_expr(model, eval_in_scope)
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
-    idx = int(row_key)
+    # int() is what a row key means today; under splat the row is looked up by
+    # the key itself, since "3.1" and "3.0" share a column but not a value.
+    row = _row_at(lst, int(row_key))
     if source_expr is not None and eval_in_scope is not None:
-        return eval_in_scope(_column_cell_expr(field_key, source_expr, idx))
-    return eval_dollar_expr(field_key, lst[idx], eval_in_scope, outer=(lst,),
-                            index=idx)
+        return eval_in_scope(_column_cell_expr(field_key, source_expr, row.index))
+    return eval_dollar_expr(field_key, row.item, eval_in_scope, outer=(lst,),
+                            bindings=row.bindings)
 
 
 def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_scope=None, source_span=None) -> Tuple[Any, List[Any]]:
@@ -5512,6 +5579,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # A column stays row-generic (the cell_col dollar expression);
             # anything bound for the clipboard names this row concretely, since
             # the user pastes it into the editor as-is.
+            # int() is what a row key means today -- the other half of the pair
+            # in _table_child_value_getter, and the other place splat has to
+            # look the row up by its key instead.
             concrete_cell = (_column_cell_expr(cell_col, src, int(row_key))
                              if src else cell_col)
             commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]

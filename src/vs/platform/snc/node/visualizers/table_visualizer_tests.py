@@ -65,6 +65,7 @@ from table_visualizer import (
     CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_item_type_key, _get_column_suggestions, _get_all_possible_columns,
+    Row, _rows, _row_at,
 )
 
 
@@ -426,6 +427,80 @@ class TestGetFields(unittest.TestCase):
         self.assertEqual(eval_dollar_expr(fields[2], lst), 30)
 
 
+class TestRows(unittest.TestCase):
+    """One description of what a row is, whatever container gave it up.
+
+    Shaped for splat now so Landing 2 fills the fields in rather than
+    reworking callers: every row is its own span of 1 until then."""
+
+    def test_a_list_row_binds_the_item_and_its_index(self):
+        rows = _rows(['a', 'b'])
+        self.assertEqual([r.key for r in rows], ['0', '1'])
+        self.assertEqual([r.index for r in rows], [0, 1])
+        self.assertEqual([r.item for r in rows], ['a', 'b'])
+        self.assertEqual([r.bindings for r in rows], [{'i': 0}, {'i': 1}])
+
+    def test_a_dict_row_binds_the_pair_beside_the_key_and_value(self):
+        rows = _rows({'a': 1, 'b': 2})
+        self.assertEqual([r.key for r in rows], ['0', '1'])
+        self.assertEqual([r.index for r in rows], [0, 1])
+        # Bare $ for a dict is the (key, value) pair.
+        self.assertEqual([r.item for r in rows], [('a', 1), ('b', 2)])
+        self.assertEqual(rows[0].bindings, {'i': 0, 'k': 'a', 'v': 1})
+
+    def test_row_index_is_the_root_row_number_for_both(self):
+        # $i is the root row's number -- n in enumerate(d.items()) -- which for
+        # a dict is also the key's position, forever. That is why there is no
+        # separate $ki.
+        self.assertEqual([r.index for r in _rows({'x': 9, 'y': 8})], [0, 1])
+
+    def test_every_row_owns_its_own_span_until_splat(self):
+        for container in (['a', 'b'], {'a': 1, 'b': 2}):
+            with self.subTest(container=container):
+                for r in _rows(container):
+                    self.assertTrue(r.span_start)
+                    self.assertEqual(r.span, 1)
+
+    def test_empty_containers_give_no_rows(self):
+        self.assertEqual(_rows([]), [])
+        self.assertEqual(_rows({}), [])
+
+    def test_row_key_is_a_string_not_an_int(self):
+        # The format the tests pin is the one splat needs: under a splat two
+        # rendered rows of one root row are "3.0" and "3.1", so an int key
+        # would collide on the same leaf column.
+        self.assertIsInstance(_rows(['a'])[0].key, str)
+        self.assertIsInstance(_rows({'a': 1})[0].key, str)
+
+
+class TestRowAt(unittest.TestCase):
+    """One row without building the rest -- what the per-cell and sampling
+    paths need, and the reason _rows must not be the only way in."""
+
+    def test_it_agrees_with_rows_on_a_list(self):
+        lst = ['a', 'b', 'c']
+        for i in range(len(lst)):
+            with self.subTest(i=i):
+                self.assertEqual(_row_at(lst, i), _rows(lst)[i])
+
+    def test_it_agrees_with_rows_on_a_dict(self):
+        d = {'a': 1, 'b': 2, 'c': 3}
+        for i in range(len(d)):
+            with self.subTest(i=i):
+                self.assertEqual(_row_at(d, i), _rows(d)[i])
+
+    def test_it_reaches_a_dict_row_by_position_not_by_key(self):
+        # d[1] would be a key lookup; the second row is what's wanted.
+        d = {'a': 1, 'b': 2}
+        self.assertEqual(_row_at(d, 1).item, ('b', 2))
+
+    def test_an_integer_keyed_dict_still_indexes_by_position(self):
+        # The case where a key lookup would silently succeed with the wrong row.
+        d = {10: 'x', 11: 'y'}
+        self.assertEqual(_row_at(d, 0).item, (10, 'x'))
+        self.assertEqual(_row_at(d, 1).item, (11, 'y'))
+
+
 class TestCanVisualizeClaimsDicts(unittest.TestCase):
     """The engine claims dicts as well as lists, so dict_visualizer.py can go."""
 
@@ -513,6 +588,19 @@ class TestDictCellsBecomeTables(unittest.TestCase):
                 self.assertIsInstance(model, dict)
                 html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
                 self.assertIsInstance(html_out, str)
+
+    def test_a_dicts_default_column_shows_the_pair(self):
+        # The one dict-visible consequence of routing rows through _rows: bare
+        # $ for a dict is the (key, value) pair, so the ['$'] fallback column
+        # shows pairs where it showed bare keys before. Still not the two-column
+        # layout -- that needs $k and $v as columns -- but no longer a view that
+        # silently drops half the container.
+        d = {'alice': 30}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(model['columns'], ['$'])
+        html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
+        self.assertIn('alice', html_out)
+        self.assertIn('30', html_out)
 
     def test_default_mock_still_routes_dicts_to_the_compact_mock(self):
         # Guards the opt-in: if this ever flips, the rest of the suite is
