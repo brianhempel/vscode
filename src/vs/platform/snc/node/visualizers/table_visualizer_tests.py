@@ -4414,7 +4414,7 @@ class _ListActionTestBase(unittest.TestCase):
         'is_first', 'source_expr', 'predicate_expr', 'index_expr',
         'slice_start', 'slice_stop', 'indices_expr',
         'has_slice_start', 'has_slice_stop',
-        'pick_expr', 'needs_index',
+        'pick_expr', 'needs_index', 'is_dict',
     })
 
     def _roundtrip(self, action, ctx):
@@ -6995,6 +6995,7 @@ from table_visualizer import (
     _column_binding, _column_cell_expr, _column_values, _binds_for,
     _get_matching_indices, _render_action_buttons, _render_tool_toolbar,
     _agg_value, ROW_AGGS, NO_ANSWER, _tally, _tally_counter_expr,
+    _get_whole_list_context, _agg_col_code, _agg_row_index_code,
     TALLY_UNHASHABLE,
     _tally_row_count_expr,
 )
@@ -8730,15 +8731,43 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         model['search'] = '$v > 28'
         return d, model
 
-    def test_generate_action_writes_nothing_for_a_dict(self):
-        # The guard that matters: whatever the buttons look like, no action may
-        # put list-shaped code into the file.
-        d, model = self.dict_model()
+    @staticmethod
+    def positional_model(search):
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = search
+        return d, model
+
+    def test_the_positional_families_write_nothing(self):
+        # d[3] is a key lookup, d[1:5] a TypeError, and src[:i] + src[i+1:]
+        # splices a list -- so these stay cut, and the buttons stay dim.
+        for search in ('1', '0:2', '[0, 1]'):
+            with self.subTest(search=search):
+                d, model = self.positional_model(search)
+                ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
+                for action in ('filter', 'delete', 'find_indices'):
+                    self.assertIsNone(generate_action(action, ctx))
+
+    def test_the_first_match_forms_stay_cut(self):
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = '$v > 28'
+        model['first_match'] = True
         ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
-        for action in ('filter', 'delete', 'count', 'find_indices', 'any',
-                       'all', 'join', 'loop_no_idx'):
-            with self.subTest(action=action):
-                self.assertIsNone(generate_action(action, ctx))
+        self.assertIsNone(generate_action('filter', ctx))
+
+    def test_the_predicate_actions_now_write_and_their_buttons_are_live(self):
+        d, model = self.dict_model()
+        html_out = _render_action_buttons(model, d)
+        self.assertIn('data-action-expr', html_out)
+
+    def test_a_positional_search_still_dims_the_buttons(self):
+        d, model = self.positional_model('0:2')
+        html_out = _render_action_buttons(model, d)
+        self.assertIn('dimmed', html_out)
+        self.assertNotIn('data-action-expr', html_out)
 
     def test_a_list_still_generates_its_actions(self):
         lst = [1, 2, 3]
@@ -8747,35 +8776,178 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
         self.assertIsNotNone(generate_action('filter', ctx))
 
-    def test_the_action_buttons_render_dimmed(self):
-        d, model = self.dict_model()
-        html_out = _render_action_buttons(model, d)
-        self.assertIn('dimmed', html_out)
-        # And hand over no expression to drag into the file.
-        self.assertNotIn('data-action-expr', html_out)
-
     def test_pick_is_dimmed_for_a_dict(self):
         d, model = self.dict_model()
         self.assertIn('dimmed', _render_tool_toolbar(model))
 
-    def test_row_aggregations_are_unanswerable_for_a_dict(self):
-        # Min Item / Max Item order the container, and iterating a dict yields
-        # keys -- so they would answer confidently with the wrong row.
+    def test_row_aggregations_answer_with_the_right_pair(self):
+        # min($$.items(), key=...) rather than min($$, ...), which would have
+        # ordered the KEYS.
         d = {'alice': 30, 'bob': 25}
-        for template in ROW_AGGS:
-            with self.subTest(template=template):
-                self.assertIs(_agg_value(template, [30, 25], None, d, '$v'),
-                              NO_ANSWER)
+        self.assertEqual(_agg_value(ROW_AGGS[0], [30, 25], None, d, '$v'),
+                         ('bob', 25))
+        self.assertEqual(_agg_value(ROW_AGGS[1], [30, 25], None, d, '$v'),
+                         ('alice', 30))
 
     def test_a_list_row_aggregation_still_answers(self):
         lst = [{'a': 3}, {'a': 1}]
         self.assertIsNot(_agg_value(ROW_AGGS[0], [3, 1], None, lst, "$['a']"),
                          NO_ANSWER)
 
+    def test_the_row_aggregation_code_reads_the_items(self):
+        self.assertEqual(_agg_col_code(ROW_AGGS[0], '$v', 'd',
+                                       _binds_for({'a': 1})),
+                         'min(d.items(), key=lambda item: item[1])')
+
+    def test_the_row_index_code_indexes_the_items(self):
+        # dicts have no .index at all.
+        code = _agg_row_index_code('X', 'd', ROW_AGGS[0], '$v',
+                                   _binds_for({'a': 1}))
+        self.assertEqual(code, 'list(d.items()).index(X)')
+
     def test_the_search_still_highlights_the_right_rows(self):
         # The rows highlight; only the buttons dim.
         d, _model = self.dict_model()
         self.assertEqual(_get_matching_indices('$v > 28', d), [0])
+
+
+class TestDictGenerateAction(unittest.TestCase):
+    """What a dict writes into the user's file: dict comprehensions, so the
+    result is still a dict rather than the list of keys the list-shaped
+    templates would silently have produced."""
+
+    @staticmethod
+    def ctx(search='$v > 28'):
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = search
+        return _get_search_context(model, ('d', 'd'), source_expr='d')
+
+    @staticmethod
+    def whole_ctx():
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        return _get_whole_list_context(model, ('d', 'd'), source_expr='d')
+
+    def test_filter_writes_a_dict_comprehension(self):
+        self.assertEqual(generate_action('filter', self.ctx())[1],
+                         '{k: v for k, v in d.items() if v > 28}')
+
+    def test_delete_negates_the_same_comprehension(self):
+        self.assertEqual(generate_action('delete', self.ctx())[1],
+                         '{k: v for k, v in d.items() if not (v > 28)}')
+
+    def test_a_dicts_indices_are_its_keys(self):
+        self.assertEqual(generate_action('find_indices', self.ctx())[1],
+                         '[k for k, v in d.items() if v > 28]')
+
+    def test_count_any_and_all(self):
+        self.assertEqual(generate_action('count', self.ctx())[1],
+                         'sum(1 for k, v in d.items() if v > 28)')
+        self.assertEqual(generate_action('any', self.ctx())[1],
+                         'any(v > 28 for k, v in d.items())')
+        self.assertEqual(generate_action('all', self.ctx())[1],
+                         'all(v > 28 for k, v in d.items())')
+
+    def test_the_if_forms_open_a_block(self):
+        self.assertEqual(generate_action('if_any', self.ctx())[1],
+                         'if any(v > 28 for k, v in d.items()):')
+
+    def test_a_search_naming_the_key_reads_it(self):
+        self.assertEqual(generate_action('filter', self.ctx("$k == 'bob'"))[1],
+                         "{k: v for k, v in d.items() if k == 'bob'}")
+
+    def test_a_search_naming_the_index_gets_the_enumerate_twin(self):
+        # $i is the ROOT ROW index, so enumerate(d.items()) binds exactly what
+        # $i means.
+        self.assertEqual(generate_action('filter', self.ctx('$i > 0'))[1],
+                         '{k: v for i, (k, v) in enumerate(d.items()) if i > 0}')
+
+    def test_the_whole_dict_loops_over_its_items(self):
+        self.assertEqual(generate_action('loop_no_idx', self.whole_ctx())[1],
+                         'for k, v in d.items():')
+
+    def test_the_whole_dict_joins_its_values(self):
+        self.assertEqual(generate_action('join', self.whole_ctx())[1],
+                         "''.join(str(v) for v in d.values())")
+
+    def test_the_generated_filter_actually_runs_and_stays_a_dict(self):
+        d = {'alice': 30, 'bob': 25}
+        code = generate_action('filter', self.ctx())[1]
+        self.assertEqual(eval(code, {'d': d}), {'alice': 30})
+
+    def test_the_generated_find_indices_runs(self):
+        d = {'alice': 30, 'bob': 25}
+        code = generate_action('find_indices', self.ctx())[1]
+        self.assertEqual(eval(code, {'d': d}), ['alice'])
+
+    def test_a_list_action_is_byte_identical_to_before(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model['search'] = '$ > 1'
+        ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         '[item for item in data if item > 1]')
+
+
+class TestDictGrammarRoundtrip(unittest.TestCase):
+    """Each generated dict line parses back, so auto-linking keeps working --
+    and the grammar generator agrees with the live one, which is the whole
+    reason both exist."""
+
+    ACTIONS = ('filter', 'delete', 'find_indices', 'count', 'any', 'all',
+               'if_any', 'if_all', 'loop_no_idx', 'loop_orig_idx',
+               'loop_new_idx')
+
+    def setUp(self):
+        from table_visualizer_grammar import (generate_action as grammar_gen,
+                                              parse_generated_code)
+        self.grammar_gen = grammar_gen
+        self.parse_generated_code = parse_generated_code
+
+    def ctx(self, search='$v > 28'):
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = search
+        return _get_search_context(model, ('d', 'd'), source_expr='d')
+
+    def test_both_generators_agree(self):
+        for search in ('$v > 28', '$i > 0'):
+            ctx = self.ctx(search)
+            for action in self.ACTIONS:
+                with self.subTest(action=action, search=search):
+                    live = generate_action(action, ctx)
+                    gram = self.grammar_gen(action, ctx)
+                    self.assertIsNotNone(gram)
+                    self.assertEqual(live[1], gram[1])
+
+    def test_every_generated_line_parses_back(self):
+        for search in ('$v > 28', '$i > 0'):
+            ctx = self.ctx(search)
+            for action in self.ACTIONS:
+                with self.subTest(action=action, search=search):
+                    code = generate_action(action, ctx)[1]
+                    parsed = self.parse_generated_code(code)
+                    self.assertIsNotNone(parsed, code)
+                    self.assertTrue(parsed.get('is_dict'))
+                    self.assertEqual(parsed.get('source_expr'), 'd')
+
+    def test_a_dict_line_is_not_misread_as_a_list_one(self):
+        # The failure that would matter: a dict comprehension parsed as a list
+        # action would relink the table to code that means something else.
+        for code in ('{k: v for k, v in d.items() if v > 28}',
+                     '[k for k, v in d.items() if v > 28]'):
+            with self.subTest(code=code):
+                parsed = self.parse_generated_code(code)
+                self.assertTrue(parsed.get('is_dict'))
+
+    def test_list_lines_still_parse_as_lists(self):
+        parsed = self.parse_generated_code('[item for item in data if item > 1]')
+        self.assertIsNotNone(parsed)
+        self.assertFalse(parsed.get('is_dict'))
 
 
 class TestDictColumnValues(unittest.TestCase):

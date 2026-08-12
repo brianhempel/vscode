@@ -22,6 +22,18 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # program happens to spell `i` on the way back.
     Alt("FilterAction", [
         Alt("FilterPlainAction", [
+            # Dict forms come first: they are conditioned on is_dict, so a list
+            # ctx never reaches them, while a dict ctx must not fall through to
+            # the list templates below and write a comprehension that silently
+            # yields keys.
+            BiTemplate("FilterPredicateAllDict",
+                       "{k: v for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}}",
+                       {'is_predicate': True, 'is_first': False,
+                        'names_index': False, 'is_dict': True}),
+            BiTemplate("FilterPredicateAllDictIndexed",
+                       "{k: v for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}}",
+                       {'is_predicate': True, 'is_first': False,
+                        'names_index': True, 'is_dict': True}),
             BiTemplate("FilterPredicateFirst",
                        "next((item for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}), None)",
                        {'is_predicate': True, 'is_first': True, 'names_index': False}),
@@ -82,6 +94,12 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("DeleteAction", [
+        BiTemplate("DeletePredicateAllDict",
+                   "{k: v for k, v in {source_expr:VarOrExpr}.items() if not ({predicate_expr:AnyPython})}",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True, 'is_first': False}),
+        BiTemplate("DeletePredicateAllDictIndexed",
+                   "{k: v for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if not ({predicate_expr:AnyPython})}",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True, 'is_first': False}),
         # The first-match form counts the rows off whatever the search asked,
         # since it needs the number to cut the list at.
         BiTemplate("DeletePredicateFirst",
@@ -125,6 +143,12 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("FindIndicesAction", [
+        BiTemplate("FindIndicesPredicateDict",
+                   "[k for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}]",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True, 'is_first': False}),
+        BiTemplate("FindIndicesPredicateDictIndexed",
+                   "[k for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}]",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True, 'is_first': False}),
         BiTemplate("FindIndicesPredicateFirst",
                    "next((i for i, item in enumerate({source_expr:VarOrExpr}) if {predicate_expr:AnyPython}), None)",
                    {'is_predicate': True, 'is_first': True}),
@@ -139,6 +163,12 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # --- Count ---
 
     Alt("CountAction", [
+        BiTemplate("CountPredicateDict",
+                   "sum(1 for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython})",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("CountPredicateDictIndexed",
+                   "sum(1 for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython})",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
         BiTemplate("CountPredicate",
                    "sum(1 for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython})",
                    {'is_predicate': True, 'names_index': False}),
@@ -157,6 +187,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # specific, and a whole-list source_expr would otherwise swallow them.
 
     Alt("AnyAction", [
+        BiTemplate("AnyPredicateDict",
+                   "any({predicate_expr:AnyPython} for k, v in {source_expr:VarOrExpr}.items())",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("AnyPredicateDictIndexed",
+                   "any({predicate_expr:AnyPython} for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()))",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("AnyWholeListDict",
+                   "any({source_expr:VarOrExpr}.values())",
+                   {'is_whole_list': True, 'is_dict': True}),
         BiTemplate("AnyPredicate",
                    "any({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr})",
                    {'is_predicate': True, 'names_index': False}),
@@ -174,6 +213,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # --- All ---
 
     Alt("AllAction", [
+        BiTemplate("AllPredicateDict",
+                   "all({predicate_expr:AnyPython} for k, v in {source_expr:VarOrExpr}.items())",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("AllPredicateDictIndexed",
+                   "all({predicate_expr:AnyPython} for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()))",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("AllWholeListDict",
+                   "all({source_expr:VarOrExpr}.values())",
+                   {'is_whole_list': True, 'is_dict': True}),
         BiTemplate("AllPredicate",
                    "all({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr})",
                    {'is_predicate': True, 'names_index': False}),
@@ -191,6 +239,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # --- If Any / If All ---
 
     Alt("IfAnyAction", [
+        BiTemplate("IfAnyPredicateDict",
+                   "if any({predicate_expr:AnyPython} for k, v in {source_expr:VarOrExpr}.items()):",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("IfAnyPredicateDictIndexed",
+                   "if any({predicate_expr:AnyPython} for i, (k, v) in enumerate({source_expr:VarOrExpr}.items())):",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("IfAnyWholeListDict",
+                   "if any({source_expr:VarOrExpr}.values()):",
+                   {'is_whole_list': True, 'is_dict': True}),
         BiTemplate("IfAnyPredicate",
                    "if any({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr}):",
                    {'is_predicate': True, 'names_index': False}),
@@ -203,6 +260,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("IfAllAction", [
+        BiTemplate("IfAllPredicateDict",
+                   "if all({predicate_expr:AnyPython} for k, v in {source_expr:VarOrExpr}.items()):",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("IfAllPredicateDictIndexed",
+                   "if all({predicate_expr:AnyPython} for i, (k, v) in enumerate({source_expr:VarOrExpr}.items())):",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("IfAllWholeListDict",
+                   "if all({source_expr:VarOrExpr}.values()):",
+                   {'is_whole_list': True, 'is_dict': True}),
         BiTemplate("IfAllPredicate",
                    "if all({predicate_expr:AnyPython} for item in {source_expr:VarOrExpr}):",
                    {'is_predicate': True, 'names_index': False}),
@@ -217,6 +283,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # --- Loop ---
 
     Alt("LoopNoIdxAction", [
+        BiTemplate("LoopNoIdxPredicateDict",
+                   "for k, v in {k: v for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}}.items():",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("LoopNoIdxPredicateDictIndexed",
+                   "for k, v in {k: v for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}}.items():",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("LoopNoIdxWholeListDict",
+                   "for k, v in {source_expr:VarOrExpr}.items():",
+                   {'is_whole_list': True, 'is_dict': True}),
         # An array pick is already a list, so the loop runs straight over it.
         BiTemplate("LoopNoIdxPick",
                    "for item in {:PickFirstMatch}:",
@@ -236,6 +311,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("LoopOrigIdxAction", [
+        BiTemplate("LoopOrigIdxPredicateDict",
+                   "for k, v in {source_expr:VarOrExpr}.items():\n    if {predicate_expr:AnyPython}:",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("LoopOrigIdxPredicateDictIndexed",
+                   "for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()):\n    if {predicate_expr:AnyPython}:",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("LoopOrigIdxWholeListDict",
+                   "for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()):",
+                   {'is_whole_list': True, 'is_dict': True}),
         BiTemplate("LoopOrigIdxPredicate",
                    "for i, item in enumerate({source_expr:VarOrExpr}):\n    if {predicate_expr:AnyPython}:",
                    {'is_predicate': True}),
@@ -248,6 +332,15 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("LoopNewIdxAction", [
+        BiTemplate("LoopNewIdxPredicateDict",
+                   "for i, (k, v) in enumerate({k: v for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}}.items()):",
+                   {'is_predicate': True, 'names_index': False, 'is_dict': True}),
+        BiTemplate("LoopNewIdxPredicateDictIndexed",
+                   "for i, (k, v) in enumerate({k: v for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}}.items()):",
+                   {'is_predicate': True, 'names_index': True, 'is_dict': True}),
+        BiTemplate("LoopNewIdxWholeListDict",
+                   "for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()):",
+                   {'is_whole_list': True, 'is_dict': True}),
         BiTemplate("LoopNewIdxPick",
                    "for i, item in enumerate({:PickFirstMatch}):",
                    {'has_pick': True, 'pick_is_array': True}),
@@ -330,6 +423,14 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
+    # The same cut as the live generator: the positional families have no dict
+    # templates, so without this a dict ctx would fall through to the list ones
+    # and write a comprehension that silently yields keys.
+    if ctx.get('is_dict') and (ctx.get('is_index') or ctx.get('is_slice')
+                               or ctx.get('is_multi_index')
+                               or ctx.get('is_broadcast_slice')
+                               or ctx.get('is_first') or ctx.get('pick_expr')):
+        return None
     gen_ctx = {k: v for k, v in ctx.items() if v is not None}
     gen_ctx['action'] = action
     gen_ctx['has_pick'] = bool(ctx.get('pick_expr'))

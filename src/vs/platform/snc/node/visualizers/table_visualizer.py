@@ -2147,6 +2147,17 @@ ROW_AGGS = ('min($$, key=lambda item: $)', 'max($$, key=lambda item: $)')
 # of it -- an aggregation still answers with a row of the list, whichever way it
 # found one, and the number beside it is the one it found rather than a lookup
 # after the fact. _agg_row_template is where the choice is made.
+# Iterating a dict yields KEYS, so a row aggregation over one has to name the
+# items explicitly -- otherwise min() answers confidently with the wrong row.
+ROW_AGGS_DICT = ('min($$.items(), key=lambda item: $)',
+                 'max($$.items(), key=lambda item: $)')
+ROW_AGGS_BY_INDEX_DICT = tuple(f'list($$.items())[{expr}]'
+                               for expr in ('min(range(len($$)), key=lambda i: $)',
+                                            'max(range(len($$)), key=lambda i: $)'))
+
+# The list template a dict's row aggregation is written as instead.
+_ROW_AGG_DICT_FORM = dict(zip(ROW_AGGS, ROW_AGGS_DICT))
+
 ROW_AGG_INDEXES = ('min(range(len($$)), key=lambda i: $)',
                    'max(range(len($$)), key=lambda i: $)')
 ROW_AGGS_BY_INDEX = tuple(f'$$[{expr}]' for expr in ROW_AGG_INDEXES)
@@ -2291,18 +2302,35 @@ def _agg_by_index(template: str, col: str, shapes) -> str | None:
     return None
 
 
-def _agg_row_template(template: str, col: str) -> str:
+def _agg_row_template(template: str, col: str, binds: 'dict | None' = None) -> str:
     """A row aggregation's shape for the column it is asked of."""
+    if _is_dict_binds(binds):
+        return (_agg_by_index(template, col, ROW_AGGS_BY_INDEX_DICT)
+                or _ROW_AGG_DICT_FORM.get(template, template))
     return _agg_by_index(template, col, ROW_AGGS_BY_INDEX) or template
 
 
-def _agg_row_key_expr(col: str, source_expr: str) -> str:
+def _agg_row_key_expr(col: str, source_expr: str,
+                      binds: 'dict | None' = None) -> str:
     """What `$` stands for in a row aggregation: the column read off the row its
     key is handed.
 
     Reached through the row number when the column names one, since that is what
     such a key is handed instead -- see ROW_AGGS_BY_INDEX.
     """
+    if _is_dict_binds(binds):
+        # The lambda binds one pair, so the column reads through it -- and a
+        # column naming $i is handed the row NUMBER instead, which reaches its
+        # pair through list(d.items())[i] rather than d[i] (a key lookup, and
+        # silently wrong or a KeyError).
+        if not dollar_expr_names_index(col):
+            return _column_key_expr(col, source_expr, item_expr='item',
+                                    binds=_SORT_PAIR_BINDS)
+        src = _atomize(source_expr)
+        return _column_key_expr(
+            col, source_expr, item_expr=f'list({src}.items())[i]',
+            binds={'i': 'i', 'k': f'list({src})[i]',
+                   'v': f'list({src}.values())[i]'})
     if not dollar_expr_names_index(col):
         return _column_key_expr(col, source_expr)
     return _column_key_expr(col, source_expr,
@@ -2311,7 +2339,8 @@ def _agg_row_key_expr(col: str, source_expr: str) -> str:
 
 
 def _agg_row_index_code(item_code: str, source_expr: str,
-                        template: str = None, col: str = None) -> str:
+                        template: str = None, col: str = None,
+                        binds: 'dict | None' = None) -> str:
     """The index of the row a row aggregation picked: the list's own index of
     it, written around the code that picked it.
 
@@ -2329,7 +2358,11 @@ def _agg_row_index_code(item_code: str, source_expr: str,
     """
     by_index = _agg_by_index(template, col, ROW_AGG_INDEXES) if col else None
     if by_index is not None:
-        return _agg_code(by_index, _agg_row_key_expr(col, source_expr), source_expr)
+        return _agg_code(by_index, _agg_row_key_expr(col, source_expr, binds),
+                         source_expr)
+    if _is_dict_binds(binds):
+        # dicts have no .index at all.
+        return f'list({_atomize(source_expr)}.items()).index({item_code})'
     return f'{source_expr}.index({item_code})'
 
 
@@ -2339,7 +2372,8 @@ def _agg_row_index(lst, item, template: str = None, col: str = None,
     question _agg_row_index_code writes down, asked here."""
     by_index = _agg_by_index(template, col, ROW_AGG_INDEXES) if col else None
     if by_index is not None:
-        return _agg_eval(by_index, _agg_row_key_expr(col, '_lst'), None, lst,
+        return _agg_eval(by_index, _agg_row_key_expr(col, '_lst', _binds_for(lst)),
+                         None, lst,
                          eval_in_scope)
     try:
         return lst.index(item)
@@ -2520,14 +2554,10 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
     the names this lambda binds rather than against the source expression a
     drag would name. Defaulted to the column that is the row.
     """
-    # A row aggregation orders the CONTAINER (min($$, key=...)), and iterating
-    # a dict yields keys -- so it would answer confidently with the wrong row.
-    # Unanswerable explicitly rather than by happening to raise; the dict form
-    # is min($$.items(), key=...), which lands with the dict templates.
-    if _agg_is_row(template) and isinstance(lst, dict):
-        return NO_ANSWER
-    return _agg_eval(_agg_expr(_agg_fill(_agg_row_template(template, col))),
-                     _agg_row_key_expr(col, '_lst') if _agg_is_row(template) else '_v',
+    binds = _binds_for(lst) if lst is not None else None
+    return _agg_eval(_agg_expr(_agg_fill(_agg_row_template(template, col, binds))),
+                     (_agg_row_key_expr(col, '_lst', binds)
+                      if _agg_is_row(template) else '_v'),
                      values, lst, eval_in_scope)
 
 
@@ -2545,23 +2575,26 @@ def _agg_code(template: str, column_expr: str, source_expr: str = None) -> str:
     return replace_dollars_in_py_exp(_agg_fill(template), replacements)
 
 
-def _agg_column_expr(template: str, col: str, source_expr: str) -> str:
+def _agg_column_expr(template: str, col: str, source_expr: str,
+                     binds: 'dict | None' = None) -> str:
     """What `$` stands for in an aggregation over *col*: every value the column
     has, or -- for a row aggregation, which asks row by row -- the column read
     off the row its key is handed."""
-    return (_agg_row_key_expr(col, source_expr) if _agg_is_row(template)
-            else _column_values_expr(col, source_expr))
+    return (_agg_row_key_expr(col, source_expr, binds) if _agg_is_row(template)
+            else _column_values_expr(col, source_expr, binds))
 
 
-def _agg_col_code(template: str, col: str, source_expr: str) -> str:
+def _agg_col_code(template: str, col: str, source_expr: str,
+                  binds: 'dict | None' = None) -> str:
     """An aggregation's expression for one column of one list.
 
     The one place a column and an aggregation are put together, so what a cell
     hands over, what a menu row hands over, and what an event coming back is
     rebound onto cannot say different things.
     """
-    return _agg_code(_agg_row_template(template, col),
-                     _agg_column_expr(template, col, source_expr), source_expr)
+    return _agg_code(_agg_row_template(template, col, binds),
+                     _agg_column_expr(template, col, source_expr, binds),
+                     source_expr)
 
 
 def _format_agg_value(value) -> str:
@@ -2816,9 +2849,15 @@ def _search_context_for(model: dict, var_and_exp=None,
     # $ is the item and $$ the array, which is the level a column search's $$$
     # lands on once it is lifted into this scope. $i is the row's number, which
     # is what the comprehensions below bind `i` to.
-    predicate_expr = replace_dollars_in_py_exp(predicate_with_dollar,
-                                              ['item', _atomize(source_expr)],
-                                              index_exp='i')
+    # For a dict the row is a pair, so bare $ is `(k, v)` and the halves bind
+    # beside it -- matching the `k, v in d.items()` header generate_action
+    # writes. $i stays the ROOT ROW's number for both.
+    is_dict = bool(model.get('_is_dict'))
+    predicate_expr = replace_dollars_in_py_exp(
+        predicate_with_dollar,
+        [_default_item_expr(_DICT_BINDS if is_dict else None),
+         _atomize(source_expr)],
+        bindings=_DICT_BINDS if is_dict else _LIST_BINDS)
 
     ctx = {
         'source_expr': source_expr, 'has_var': has_var, 'suggest_base': suggest_base,
@@ -3003,12 +3042,15 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     Returns (suggest_name, code_str) or None.
     """
-    # Every ctx family is still list-shaped: a dict comprehension is not a
-    # list one, and `[item for item in d if p]` runs cleanly while silently
-    # yielding KEYS. Until the dict templates exist, no action writes anything.
-    # Sort is not routed through here -- it writes dict(sorted(...)) and is
-    # correct, which is why it is not dimmed alongside these.
-    if ctx.get('is_dict'):
+    # The positional families stay cut for a dict: d[3] is a key lookup, d[1:5]
+    # a TypeError, and src[:i] + src[i+1:] splices a list. Translating them
+    # means list(d.items()) round-tripping through dict(...) for every action
+    # plus a BiTemplate each; they land with splat, which needs the same
+    # machinery. The search still highlights the right rows -- only the buttons
+    # dim. The predicate and whole-list families below ARE written.
+    if ctx.get('is_dict') and (ctx.get('is_index') or ctx.get('is_slice')
+                               or ctx.get('is_multi_index')
+                               or ctx.get('is_broadcast_slice')):
         return None
 
     src = ctx['source_expr']
@@ -3150,6 +3192,72 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 code = f'len({pairs}) == len({src})'
             case 'find_indices':
                 code = f'[i for i, j in {pairs}]'
+            case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_predicate') and ctx.get('is_dict'):
+        pred = ctx['predicate_expr']
+        if ctx.get('pick_expr') or first:
+            # Pick builds band slices a dict cannot take, and the first-match
+            # forms splice a list. Both stay dim rather than write a lie.
+            return None
+        # $i is the ROOT ROW index, so enumerate(d.items()) binds exactly what
+        # $i means. The header is the general one either way: narrowing it to
+        # d.values() would leave a `$k` in the predicate unbound.
+        rows = (f'i, (k, v) in enumerate({src}.items())' if ctx.get('names_index')
+                else f'k, v in {src}.items()')
+        match action:
+            case 'filter':
+                code = f'{{k: v for {rows} if {pred}}}'
+            case 'delete':
+                code = f'{{k: v for {rows} if not ({pred})}}'
+            case 'find_indices':
+                # A dict's "indices" are its keys.
+                code = f'[k for {rows} if {pred}]'
+            case 'count':
+                code = f'sum(1 for {rows} if {pred})'
+            case 'any':
+                code = f'any({pred} for {rows})'
+            case 'all':
+                code = f'all({pred} for {rows})'
+            case 'if_any':
+                code = f'if any({pred} for {rows}):'
+            case 'if_all':
+                code = f'if all({pred} for {rows}):'
+            case 'loop_no_idx':
+                code = f'for k, v in {{k: v for {rows} if {pred}}}.items():'
+            case 'loop_orig_idx':
+                code = f'for {rows}:\n    if {pred}:'
+            case 'loop_new_idx':
+                code = (f'for i, (k, v) in enumerate('
+                        f'{{k: v for {rows} if {pred}}}.items()):')
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(v) for {rows} if {pred})'
+            case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_whole_list') and ctx.get('is_dict'):
+        match action:
+            case 'loop_no_idx':
+                code = f'for k, v in {src}.items():'
+            case 'loop_orig_idx' | 'loop_new_idx':
+                code = f'for i, (k, v) in enumerate({src}.items()):'
+            case 'any':
+                code = f'any({src}.values())'
+            case 'all':
+                code = f'all({src}.values())'
+            case 'if_any':
+                code = f'if any({src}.values()):'
+            case 'if_all':
+                code = f'if all({src}.values()):'
+            case 'count':
+                code = f'sum(1 for v in {src}.values() if v)'
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(v) for v in {src}.values())'
             case _:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
@@ -4339,7 +4447,8 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
         # Nothing to hand over when there is no answer, and nothing to name the
         # column by when the list has no source.
         code = (None if unanswered or source_expr is None
-                else _agg_col_code(template, col, source_expr))
+                else _agg_col_code(template, col, source_expr,
+                                   _model_binds(model)))
         rows.append(
             f'<div class="{classes}"{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
@@ -4379,7 +4488,8 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
         # Through _agg_column_expr like the catalog's rows, so a box holding
         # something written the way Min Item is hands over what it computed.
         code = (None if unanswered or source_expr is None
-                else _agg_col_code(template, col, source_expr))
+                else _agg_col_code(template, col, source_expr,
+                                   _model_binds(model)))
         # A row of theirs is checked by being there at all, and unchecking is
         # how it is taken away: the expression is the only record of it, so
         # there would be nothing left to keep. The empty one is checking
@@ -4847,11 +4957,18 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     linked_action = model.get('linked_action')
 
     # Nothing generate_action declines to write should offer a button that
-    # looks like it will -- see the guard there.
-    writes_code = not model.get('_is_dict')
+    # looks like it will. For a list that is every action; for a dict the
+    # positional families are still cut, so the question is asked per action
+    # rather than answered once for the whole container.
+    is_dict = bool(model.get('_is_dict'))
+
+    def writes_code(action):
+        if not is_dict:
+            return True
+        return bool(_preview_expr(model, action, eval_in_scope))
 
     def action_btn(label, action, enabled=True, title='', extra_classes=''):
-        enabled = enabled and writes_code
+        enabled = enabled and writes_code(action)
         cls = 'action-button'
         if not enabled:
             cls += ' dimmed'
@@ -4871,7 +4988,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         )
 
     def dropdown_row(label, action, enabled):
-        enabled = enabled and writes_code
+        enabled = enabled and writes_code(action)
         cls = 'snc-dropdown-option'
         if not enabled:
             cls += ' dimmed'
@@ -5247,7 +5364,7 @@ def _agg_child_value(key: str, lst, model, eval_in_scope=None):
         index=None if idx is NO_ANSWER else idx))
 
 
-def _agg_child_expr(key: str, source_expr) -> str | None:
+def _agg_child_expr(key: str, source_expr, binds: 'dict | None' = None) -> str | None:
     """The expression that names the value a key points at, or None when the
     list has no source to name it from.
 
@@ -5260,10 +5377,11 @@ def _agg_child_expr(key: str, source_expr) -> str | None:
     asking_col, template, shown_col = _parse_agg_child_key(key)
     if not _agg_is_row(template):
         return _agg_code(template, _column_values_expr(asking_col, source_expr))
-    item_code = _agg_col_code(template, asking_col, source_expr)
+    item_code = _agg_col_code(template, asking_col, source_expr, binds)
     return replace_dollars_in_py_exp(
         shown_col, _column_dollars(source_expr, item_code),
-        index_exp=_agg_row_index_code(item_code, source_expr, template, asking_col))
+        index_exp=_agg_row_index_code(item_code, source_expr, template,
+                                      asking_col, binds))
 
 
 def _agg_display_value(answer):
@@ -5394,7 +5512,7 @@ def _render_agg_cell(expr, index, col, level, values, model, get_visualizer,
     # A column whose values have changed out from under an aggregation says
     # nothing rather than dropping the cell the user put there.
     code = (None if answer is NO_ANSWER
-            else _agg_child_expr(key, source_expr))
+            else _agg_child_expr(key, source_expr, _model_binds(model)))
     return (
         f'<td class="col-agg-cell snc-hover-hidden-parent">'
         f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
@@ -5443,10 +5561,12 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
     idx = _agg_row_index(lst, item, expr, columns[ci], eval_in_scope)
     # Nothing to hand over when the aggregation has no row to point at, and
     # nothing to name the list by when it has no source.
+    binds = _binds_for(lst)
     item_code = (None if item is NO_ANSWER or source_expr is None
-                 else _agg_col_code(expr, columns[ci], source_expr))
+                 else _agg_col_code(expr, columns[ci], source_expr, binds))
     idx_code = (None if idx is NO_ANSWER or item_code is None
-                else _agg_row_index_code(item_code, source_expr, expr, columns[ci]))
+                else _agg_row_index_code(item_code, source_expr, expr,
+                                         columns[ci], binds))
 
     cells = [f'<td class="row-index col-agg-cell">'
              f'<div class="col-agg"{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
@@ -5462,7 +5582,7 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
                                          index=None if idx is NO_ANSWER else idx))
         key = _agg_child_key(columns[ci], expr, col)
         code = (None if value is NO_ANSWER or item_code is None
-                else _agg_child_expr(key, source_expr))
+                else _agg_child_expr(key, source_expr, binds))
         label = ('<div class="col-agg-label"></div>' if cj != ci else
                  f'{_agg_label_html(expr, ci, level)}'
                  f'{_agg_remove_x_html(expr, ci)}')
@@ -5865,7 +5985,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # An answer is one value the aggregation worked out, not a value
             # each row has, so there is no row-generic form of it: the same
             # expression names it wherever it is headed.
-            agg_expr = _agg_child_expr(msg.child_key, src) or cell_col
+            agg_expr = _agg_child_expr(msg.child_key, src,
+                                       _model_binds(model)) or cell_col
             commands = [nest_child_command(cmd, agg_expr, agg_expr)
                         for cmd in commands]
         else:
