@@ -2527,6 +2527,12 @@ def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
     the names this lambda binds rather than against the source expression a
     drag would name. Defaulted to the column that is the row.
     """
+    # A row aggregation orders the CONTAINER (min($$, key=...)), and iterating
+    # a dict yields keys -- so it would answer confidently with the wrong row.
+    # Unanswerable explicitly rather than by happening to raise; the dict form
+    # is min($$.items(), key=...), which lands with the dict templates.
+    if _agg_is_row(template) and isinstance(lst, dict):
+        return NO_ANSWER
     return _agg_eval(_agg_expr(_agg_fill(_agg_row_template(template, col))),
                      _agg_row_key_expr(col, '_lst') if _agg_is_row(template) else '_v',
                      values, lst, eval_in_scope)
@@ -2693,6 +2699,22 @@ def _name_context_for_source(source_expr: str) -> tuple[bool, str]:
 
 def _get_search_context(model: dict, var_and_exp=None,
                         *, source_expr: str = None, eval_in_scope=None) -> dict | None:
+    """The search context, plus whether the container is a dict.
+
+    `is_dict` cannot be derived at the edge the way `binds` is: on the relink
+    path the shared helper in visualizer_utils rebuilds ctx by parsing a source
+    line, through a LinkConfig signature string_visualizer shares, and never
+    holds the container at all. So it rides on the model.
+    """
+    ctx = _search_context_for(model, var_and_exp, source_expr=source_expr,
+                              eval_in_scope=eval_in_scope)
+    if ctx is not None:
+        ctx['is_dict'] = bool(model.get('_is_dict'))
+    return ctx
+
+
+def _search_context_for(model: dict, var_and_exp=None,
+                        *, source_expr: str = None, eval_in_scope=None) -> dict | None:
     """Build search context dict from model + source info.
 
     Returns None if no valid search or source info.
@@ -2829,6 +2851,15 @@ def _get_search_context(model: dict, var_and_exp=None,
 
 
 def _get_whole_list_context(model: dict, var_and_exp=None,
+                            *, source_expr: str = None) -> dict | None:
+    """The whole list as a context, plus whether it is a dict."""
+    ctx = _whole_list_context_for(model, var_and_exp, source_expr=source_expr)
+    if ctx is not None:
+        ctx['is_dict'] = bool(model.get('_is_dict'))
+    return ctx
+
+
+def _whole_list_context_for(model: dict, var_and_exp=None,
                             *, source_expr: str = None) -> dict | None:
     """Build a context dict representing the whole list (no search filter)."""
     if source_expr:
@@ -2979,6 +3010,14 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     Returns (suggest_name, code_str) or None.
     """
+    # Every ctx family is still list-shaped: a dict comprehension is not a
+    # list one, and `[item for item in d if p]` runs cleanly while silently
+    # yielding KEYS. Until the dict templates exist, no action writes anything.
+    # Sort is not routed through here -- it writes dict(sorted(...)) and is
+    # correct, which is why it is not dimmed alongside these.
+    if ctx.get('is_dict'):
+        return None
+
     src = ctx['source_expr']
     first = ctx.get('is_first', False)
 
@@ -3241,14 +3280,19 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
 # === Matching indices for highlighting ===
 
 def _compile_predicate(predicate_expr: str, eval_in_scope=None):
-    """A dollar-substituted predicate as a callable of (item, lst, index).
+    """A dollar-substituted predicate as a callable of (item, lst, index, k, v).
+
+    The key and value are bound for every container, not just a dict: a list
+    row has no halves, so they arrive as None and a predicate naming them
+    simply never matches -- which is the right answer, and cheaper than
+    compiling two shapes of lambda.
 
     Built in the user's scope so the predicate's free names resolve to their
     program's, which is the only place they were ever written. Without a scope
     to build it in -- an unfocused preview, a test -- this module's globals are
     all there is, which is enough for a predicate that names nothing.
     """
-    code = f'(lambda _item, _lst, _i: {predicate_expr})'
+    code = f'(lambda _item, _lst, _i, _bk=None, _bv=None: {predicate_expr})'
     return eval(code) if eval_in_scope is None else eval_in_scope(code)
 
 
@@ -3334,8 +3378,9 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
         else:
             predicate_with_dollar = '$ ' + search.lstrip()
 
-    predicate_expr = replace_dollars_in_py_exp(predicate_with_dollar,
-                                               ['_item', '_lst'], index_exp='_i')
+    predicate_expr = replace_dollars_in_py_exp(
+        predicate_with_dollar, ['_item', '_lst'],
+        bindings={'i': '_i', 'k': '_bk', 'v': '_bv'})
 
     # The predicate is the user's own text, so the names in it are their
     # program's names: `== s` has to mean the same `s` the line above defines.
@@ -3353,7 +3398,8 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
     matched = []
     for row in _rows(lst):
         try:
-            if predicate(row.item, lst, row.index):
+            if predicate(row.item, lst, row.index,
+                         row.bindings.get('k'), row.bindings.get('v')):
                 matched.append(row.index)
         except Exception:
             pass
@@ -4807,7 +4853,12 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
 
     linked_action = model.get('linked_action')
 
+    # Nothing generate_action declines to write should offer a button that
+    # looks like it will -- see the guard there.
+    writes_code = not model.get('_is_dict')
+
     def action_btn(label, action, enabled=True, title='', extra_classes=''):
+        enabled = enabled and writes_code
         cls = 'action-button'
         if not enabled:
             cls += ' dimmed'
@@ -4827,6 +4878,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         )
 
     def dropdown_row(label, action, enabled):
+        enabled = enabled and writes_code
         cls = 'snc-dropdown-option'
         if not enabled:
             cls += ' dimmed'
@@ -5011,10 +5063,13 @@ def _render_tool_toolbar(model: dict) -> str:
         current = 'normal'
     search = model.get('search')
     has_search = search is not None and search != ''
+    # Pick builds src[a:b] band slices, which a dict cannot take; bands over
+    # list(d.items()) are the natural translation, and land with splat.
+    disabled = ('pick',) if (not has_search or model.get('_is_dict')) else ()
     return render_tool_toolbar(
         _TOOL_TOOLBAR_TOOLS, current,
         lambda tool: repr(ToolSelect(tool=tool)),
-        disabled=() if has_search else ('pick',))
+        disabled=disabled)
 
 
 def _pick_band_for_row(row: int, first_idx: int) -> str:

@@ -7005,6 +7005,9 @@ from table_visualizer import (
     _tally_count_shows, _tally_extreme,
     _column_values_expr, _tally_exprs, _column_tally_rows, _tally_lists,
     _column_binding, _column_cell_expr, _column_values, _binds_for,
+    _get_matching_indices, _render_action_buttons, _render_tool_toolbar,
+    _agg_value, ROW_AGGS, NO_ANSWER, _tally, _tally_counter_expr,
+    TALLY_UNHASHABLE,
     _tally_row_count_expr,
 )
 
@@ -8667,6 +8670,124 @@ class TestDictCellExpr(unittest.TestCase):
     def test_a_list_cell_expr_is_untouched(self):
         self.assertEqual(_column_cell_expr('$ * $i', 'data', 2), 'data[2] * 2')
         self.assertEqual(_column_cell_expr("$['n']", 'data', 1), "data[1]['n']")
+
+
+class TestDictMainSearch(unittest.TestCase):
+    """The main search box speaks row scope, so for a dict it can name the key
+    and the value as well as the pair."""
+
+    @staticmethod
+    def d():
+        return {'alice': 30, 'bob': 25, 'carol': 41}
+
+    def test_it_matches_on_the_value(self):
+        self.assertEqual(_get_matching_indices('$v > 28', self.d()), [0, 2])
+
+    def test_it_matches_on_the_key(self):
+        self.assertEqual(_get_matching_indices("$k == 'bob'", self.d()), [1])
+
+    def test_a_bare_int_still_means_a_row_position(self):
+        # list(my_dict) gives positions to the kv pairs, so 1 is the second
+        # pair -- unchanged from the list behaviour.
+        self.assertEqual(_get_matching_indices('1', self.d()), [1])
+
+    def test_a_slice_still_means_a_run_of_rows(self):
+        self.assertEqual(_get_matching_indices('0:2', self.d()), [0, 1])
+
+    def test_a_list_search_is_untouched(self):
+        self.assertEqual(_get_matching_indices('$ > 2', [1, 2, 3, 4]), [2, 3])
+
+
+class TestDictTally(unittest.TestCase):
+    """Tally is written against column expressions and _column_values, so it
+    follows the column work -- verified rather than assumed."""
+
+    def test_it_counts_the_values(self):
+        d = {'a': 1, 'b': 2, 'c': 1}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(_tally(_column_values('$v', d, model)), {1: 2, 2: 1})
+
+    def test_it_counts_the_keys(self):
+        d = {'a': 1, 'b': 2}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(_tally(_column_values('$k', d, model)),
+                         {'a': 1, 'b': 1})
+
+    def test_the_counter_expression_reads_the_values(self):
+        self.assertEqual(
+            _tally_counter_expr('$v', 'd', _binds_for({'a': 1})),
+            'Counter(v for v in d.values())')
+
+    def test_unhashable_values_are_unhashable_not_a_crash(self):
+        d = {'x': [1], 'y': [2]}
+        model = init_model(d, mock_get_visualizer_dict_tables)
+        self.assertEqual(_tally(_column_values('$v', d, model)),
+                         TALLY_UNHASHABLE)
+
+
+class TestDictActionsAreDimmed(unittest.TestCase):
+    """The table UI is fully exposed for dicts while generate_action and
+    ROW_AGGS are still list-shaped. Left alone, clicking Filter on a dict
+    writes `[item for item in d if p]` into the user's file -- which runs
+    cleanly and silently yields KEYS. So this dims what is not yet written.
+
+    Sort is deliberately NOT in the dimming set: it writes dict(sorted(...))
+    and is correct."""
+
+    @staticmethod
+    def dict_model():
+        d = {'alice': 30, 'bob': 25}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = '$v > 28'
+        return d, model
+
+    def test_generate_action_writes_nothing_for_a_dict(self):
+        # The guard that matters: whatever the buttons look like, no action may
+        # put list-shaped code into the file.
+        d, model = self.dict_model()
+        ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
+        for action in ('filter', 'delete', 'count', 'find_indices', 'any',
+                       'all', 'join', 'loop_no_idx'):
+            with self.subTest(action=action):
+                self.assertIsNone(generate_action(action, ctx))
+
+    def test_a_list_still_generates_its_actions(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model['search'] = '$ > 1'
+        ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
+        self.assertIsNotNone(generate_action('filter', ctx))
+
+    def test_the_action_buttons_render_dimmed(self):
+        d, model = self.dict_model()
+        html_out = _render_action_buttons(model, d)
+        self.assertIn('dimmed', html_out)
+        # And hand over no expression to drag into the file.
+        self.assertNotIn('data-action-expr', html_out)
+
+    def test_pick_is_dimmed_for_a_dict(self):
+        d, model = self.dict_model()
+        self.assertIn('dimmed', _render_tool_toolbar(model))
+
+    def test_row_aggregations_are_unanswerable_for_a_dict(self):
+        # Min Item / Max Item order the container, and iterating a dict yields
+        # keys -- so they would answer confidently with the wrong row.
+        d = {'alice': 30, 'bob': 25}
+        for template in ROW_AGGS:
+            with self.subTest(template=template):
+                self.assertIs(_agg_value(template, [30, 25], None, d, '$v'),
+                              NO_ANSWER)
+
+    def test_a_list_row_aggregation_still_answers(self):
+        lst = [{'a': 3}, {'a': 1}]
+        self.assertIsNot(_agg_value(ROW_AGGS[0], [3, 1], None, lst, "$['a']"),
+                         NO_ANSWER)
+
+    def test_the_search_still_highlights_the_right_rows(self):
+        # The rows highlight; only the buttons dim.
+        d, _model = self.dict_model()
+        self.assertEqual(_get_matching_indices('$v > 28', d), [0])
 
 
 class TestDictColumnValues(unittest.TestCase):
