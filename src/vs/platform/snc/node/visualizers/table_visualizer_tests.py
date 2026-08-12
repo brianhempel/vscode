@@ -66,7 +66,8 @@ from table_visualizer import (
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
-    _table_child_value_getter,
+    _table_child_value_getter, _leaf_columns, _column_groups,
+    _column_header_text,
 )
 
 
@@ -653,6 +654,98 @@ class TestSplatRendering(unittest.TestCase):
         model = init_model(d, gv, var_and_exp=('d', 'd'))
         plain = visualize(d, model, gv, None)
         self.assertNotIn('rowspan', plain)
+
+
+class TestLeafColumns(unittest.TestCase):
+    """Store nested, render flat. `columns` plus the sub-column map expand into
+    one list of leaves, and every per-column feature works on the leaves."""
+
+    def test_a_table_with_no_splat_is_its_own_leaves(self):
+        leaves = _leaf_columns(['$.a', '$.b'], {})
+        self.assertEqual([l.expr for l in leaves], ['$.a', '$.b'])
+        self.assertEqual([l.splat for l in leaves], [None, None])
+
+    def test_a_splat_without_sub_columns_is_one_leaf(self):
+        leaves = _leaf_columns(['$k', '*$v'], {})
+        self.assertEqual([l.expr for l in leaves], ['$k', '*$v'])
+        self.assertEqual([l.splat for l in leaves], [None, '*$v'])
+        # The whole element is what the cell shows.
+        self.assertEqual(leaves[1].sub, '$')
+
+    def test_a_splat_expands_into_one_leaf_per_sub_column(self):
+        cols = ['$.name', '*$.members']
+        leaves = _leaf_columns(cols, {'*$.members': ['$.who', '$.age']})
+        self.assertEqual([l.sub for l in leaves], [None, '$.who', '$.age'])
+        self.assertEqual([l.splat for l in leaves],
+                         [None, '*$.members', '*$.members'])
+
+    def test_leaf_identities_are_unique_across_two_splats(self):
+        # Two splats can carry the same sub-column; the identity must still
+        # tell their cells apart, or one column's children overwrite the other's.
+        leaves = _leaf_columns(['*$.a', '*$.b'],
+                               {'*$.a': ['$.x'], '*$.b': ['$.x']})
+        self.assertEqual(len({l.expr for l in leaves}), 2)
+
+    def test_the_header_path_is_what_the_two_rows_show(self):
+        leaves = _leaf_columns(['$.name', '*$.members'],
+                               {'*$.members': ['$.who', '$.age']})
+        self.assertEqual([l.header for l in leaves],
+                         [('$.name',), ('*$.members', '$.who'),
+                          ('*$.members', '$.age')])
+
+    def test_the_splat_group_knows_how_wide_it_is(self):
+        groups = _column_groups(['$.name', '*$.members'],
+                                {'*$.members': ['$.who', '$.age']})
+        self.assertEqual([(g.col, g.width) for g in groups],
+                         [('$.name', 1), ('*$.members', 2)])
+
+
+class TestSplatSubColumnRendering(unittest.TestCase):
+    """A splat's sub-columns each get their own cell, read off the splatted
+    element -- and a second header row under the splat's own header."""
+
+    @staticmethod
+    def render(value, columns, slot_cols):
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(value, gv, var_and_exp=('d', 'd'))
+        model['columns'] = list(columns)
+        model['_slot_cols'] = dict(slot_cols)
+        return visualize(value, model, gv, None)
+
+    def value(self):
+        return {'t1': [{'who': 'ann', 'age': 30},
+                       {'who': 'bo', 'age': 25}]}
+
+    def test_each_sub_column_gets_its_own_cell(self):
+        html_out = self.render(self.value(), ['$k', '*$v'],
+                               {'*$v': ["$['who']", "$['age']"]})
+        for text in ('ann', '30', 'bo', '25'):
+            with self.subTest(text=text):
+                self.assertIn(text, html_out)
+
+    def test_the_splat_header_spans_its_sub_columns(self):
+        html_out = self.render(self.value(), ['$k', '*$v'],
+                               {'*$v': ["$['who']", "$['age']"]})
+        self.assertIn('colspan="2"', html_out)
+
+    def test_the_key_still_spans_the_group(self):
+        html_out = self.render(self.value(), ['$k', '*$v'],
+                               {'*$v': ["$['who']", "$['age']"]})
+        self.assertIn('rowspan="2"', html_out)
+
+    def test_a_splat_header_reads_as_a_star_and_a_name(self):
+        # `*$v` shows as `*v`: the star still says the column spreads, and the
+        # name matches every other header.
+        self.assertEqual(_column_header_text('*$v'), '*v')
+        self.assertEqual(_column_header_text('$k'), 'k')
+        self.assertEqual(_column_header_text("*$['m']"), "*['m']")
+
+    def test_a_table_without_sub_columns_has_one_header_row(self):
+        d = {'a': 1}
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(d, gv, var_and_exp=('d', 'd'))
+        html_out = visualize(d, model, gv, None)
+        self.assertNotIn('colspan', html_out)
 
 
 class TestSplatCellLookup(unittest.TestCase):

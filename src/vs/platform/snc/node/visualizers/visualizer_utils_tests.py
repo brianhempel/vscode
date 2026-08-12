@@ -22,7 +22,8 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               wrap_drag_grab, defer_drag_grab,
                               CHILD_SOURCE_BINDER)
 from visualizer_utils import (
-    config_key, parse_slots, load_root_slots, save_slots_at_path,
+    config_key, parse_slots, parse_slot_cols, load_root_slots, save_slots_at_path,
+    _save_dotfile_dict,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
     opens_block, with_pass_body, without_pass_body,
     supported_kwargs, call_with_supported_kwargs, keyword_params, wants_kwarg,
@@ -649,6 +650,51 @@ class TestDollarExprSigils(unittest.TestCase):
             with self.subTest(expr=expr):
                 self.assertEqual('i' in dollar_expr_sigils(expr),
                                  dollar_expr_names_index(expr))
+
+
+class TestParseSlotCols(unittest.TestCase):
+    """A splat slot may carry `cols`: the sub-columns written against ONE
+    splatted element. `children` (nested-visualizer config, keyed by type) and
+    `cols` (sub-columns) are different axes and must not be conflated."""
+
+    def test_it_reads_a_slots_sub_columns(self):
+        config = ['$.name', {'expr': '*$.members', 'cols': ['$.who', '$.age']}]
+        self.assertEqual(parse_slot_cols(config),
+                         {'*$.members': ['$.who', '$.age']})
+
+    def test_a_slot_without_cols_is_absent_rather_than_empty(self):
+        self.assertEqual(parse_slot_cols(['$.name', {'expr': '$.x'}]), {})
+
+    def test_children_are_not_read_as_cols(self):
+        config = [{'expr': '$.x', 'children': {'builtins.dict': ['$.y']}}]
+        self.assertEqual(parse_slot_cols(config), {})
+
+    def test_a_slot_can_carry_both_without_either_leaking(self):
+        config = [{'expr': '*$.m', 'cols': ['$.a'],
+                   'children': {'builtins.dict': ['$.b']}}]
+        self.assertEqual(parse_slot_cols(config), {'*$.m': ['$.a']})
+        self.assertEqual(parse_slots(config)[1],
+                         {'*$.m': {'builtins.dict': ['$.b']}})
+
+    def test_bare_strings_are_tolerated(self):
+        self.assertEqual(parse_slot_cols(['$.a', '$.b']), {})
+
+    def test_cols_survive_a_save_that_does_not_mention_them(self):
+        # save_slots_at_path rewrites the expr list and keeps each surviving
+        # slot's other keys, so an ancestor never clobbers a descendant's
+        # sub-columns.
+        import tempfile, os, json
+        cwd = os.getcwd()
+        os.chdir(tempfile.mkdtemp())
+        try:
+            _save_dotfile_dict('.t.json', {'T': [
+                {'expr': '$.name'},
+                {'expr': '*$.m', 'cols': ['$.who']}]})
+            save_slots_at_path('.t.json', 'T', [], ['$.name', '*$.m'])
+            on_disk = json.load(open('.t.json'))['T']
+            self.assertEqual(on_disk[1], {'expr': '*$.m', 'cols': ['$.who']})
+        finally:
+            os.chdir(cwd)
 
 
 class TestConfigKey(unittest.TestCase):

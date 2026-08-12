@@ -281,6 +281,28 @@ def parse_slots(slots_config, expr_transform=None):
     return exprs, slot_children
 
 
+def parse_slot_cols(slots_config) -> dict:
+    """A slot's SUB-COLUMNS, keyed by slot expr -- {expr: [col, ...]}.
+
+    Only splat slots carry these: `{'expr': '*$.members', 'cols': [...]}`, the
+    columns written against ONE splatted element. Read apart from parse_slots
+    because `children` and `cols` are different axes -- `children` is a nested
+    visualizer's own config keyed by TYPE, `cols` is this table's sub-columns --
+    and conflating them would let one overwrite the other.
+
+    Slots without sub-columns are absent rather than present-and-empty, so a
+    caller can ask `expr in cols` and mean it.
+    """
+    out = {}
+    for entry in (slots_config or []):
+        if not isinstance(entry, dict) or 'expr' not in entry:
+            continue
+        cols = entry.get('cols')
+        if isinstance(cols, list) and cols:
+            out[entry['expr']] = [c for c in cols if isinstance(c, str)]
+    return out
+
+
 def too_deep(config_path) -> bool:
     """True when nesting has reached the depth cap (a backstop against cyclic
     values that would otherwise RecursionError)."""

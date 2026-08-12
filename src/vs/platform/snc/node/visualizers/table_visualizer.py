@@ -64,6 +64,7 @@ from visualizer_utils import (
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
     new_code_command,
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
+    parse_slot_cols,
     get_full_class_name, truncate_str,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
@@ -424,6 +425,74 @@ class Row:
     span_start: bool  # owns the rowspan cells of the unsplatted columns
     span: int         # how many rendered rows this root row occupies
     splats: dict = field(default_factory=dict)  # splat column -> this row's element
+
+
+# A leaf's identity has to tell two splats' identically-named sub-columns
+# apart, or one column's children overwrite the other's. It is never shown --
+# LeafColumn.header carries the display text -- so a character no expression
+# contains is enough.
+SUBCOL_SEP = '\x01'
+
+
+@dataclass(frozen=True)
+class LeafColumn:
+    """One drawn column, after the splat groups are flattened.
+
+    `columns` stays the shape the user configured -- top-level exprs, with a
+    splat's sub-columns stored beside them -- and everything that draws or
+    computes goes through this expansion instead. A leaf under a splat reads
+    its value off the splatted ELEMENT, which is what `sub` is written against.
+    """
+    expr: str          # identity: the cell key and the per-column config key
+    splat: str | None  # the splat column this lives under, or None
+    sub: str | None    # the expression against one element; None when not split
+    header: tuple      # the header path, one entry per header row
+
+
+@dataclass(frozen=True)
+class ColumnGroup:
+    """A top-level column and how many leaves it draws -- what a header cell
+    has to span."""
+    col: str
+    width: int
+    subs: tuple
+
+
+def _column_groups(columns, slot_cols=None) -> list:
+    """The top-level columns, each with the leaves it covers."""
+    slot_cols = slot_cols or {}
+    groups = []
+    for col in (columns or []):
+        subs = tuple(slot_cols.get(col) or ()) if _split_splat(col)[0] else ()
+        groups.append(ColumnGroup(col, max(len(subs), 1), subs))
+    return groups
+
+
+def _leaf_columns(columns, slot_cols=None) -> list:
+    """Every drawn column, in order.
+
+    A plain column is its own leaf. A splat with no sub-columns is one leaf
+    showing the whole element. A splat with sub-columns becomes one leaf each,
+    every one of them reading off the same element.
+    """
+    leaves = []
+    for group in _column_groups(columns, slot_cols):
+        if not group.subs:
+            is_splat = _split_splat(group.col)[0]
+            leaves.append(LeafColumn(
+                expr=group.col,
+                splat=group.col if is_splat else None,
+                # A splat with no sub-columns shows the element itself.
+                sub='$' if is_splat else None,
+                header=(group.col,)))
+            continue
+        for sub in group.subs:
+            leaves.append(LeafColumn(
+                expr=f'{group.col}{SUBCOL_SEP}{sub}',
+                splat=group.col,
+                sub=sub,
+                header=(group.col, sub)))
+    return leaves
 
 
 def _root_rows(value) -> list:
@@ -3995,12 +4064,14 @@ def _resolve_columns(lst, get_visualizer, slots_config, config_path):
         loaded = slots_config
 
     if loaded is not None:
-        return parse_slots(loaded)
+        exprs, slot_children = parse_slots(loaded)
+        return exprs, slot_children, parse_slot_cols(loaded)
 
     columns = _detect_table_columns(lst, get_visualizer)
     if columns is None:
         columns = ['$']
-    return columns, {}
+    # Detection never proposes a splat, so it never proposes sub-columns.
+    return columns, {}, {}
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
@@ -4018,7 +4089,8 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
 
     if get_visualizer is None:
         return {'children': {}, 'handledKeys': [], 'display_mode': 'table', 'columns': ['$'],
-                '_slot_children': {}, '_is_dict': isinstance(lst, dict),
+                '_slot_children': {}, '_slot_cols': {},
+                '_is_dict': isinstance(lst, dict),
                 **config_fields,
                 **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
@@ -4027,8 +4099,13 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
-    columns, slot_children = _resolve_columns(lst, get_visualizer, slots_config, config_path)
+    columns, slot_children, slot_cols = _resolve_columns(
+        lst, get_visualizer, slots_config, config_path)
     config_fields['_slot_children'] = slot_children
+    # A splat's sub-columns, keyed by the splat expr -- a sibling of
+    # _slot_children rather than part of it: `children` is a nested
+    # visualizer's own config keyed by TYPE, `cols` is this table's columns.
+    config_fields['_slot_cols'] = slot_cols
     # A fact about the value, not display state -- see _model_binds.
     config_fields['_is_dict'] = isinstance(lst, dict)
 
@@ -4046,8 +4123,9 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     # hand are what the cells are read from -- see _is_pure_ref.
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
     for row in _rows(lst, columns):
-        for col in columns:
-            is_splat = _split_splat(col)[0]
+        for leaf in _leaf_columns(columns, slot_cols):
+            col = leaf.expr
+            is_splat = leaf.splat is not None
             # An unsplatted column belongs to the root row, so it builds one
             # child per group rather than one per rendered row -- matching the
             # cells _visualize_table actually draws.
@@ -4055,7 +4133,15 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                 continue
             try:
                 if is_splat:
-                    cell_value = row.splats.get(col)
+                    element = row.splats.get(leaf.splat)
+                    if leaf.sub in (None, '$'):
+                        cell_value = element
+                    elif element is None:
+                        cell_value = None
+                    else:
+                        cell_value = eval_dollar_expr(
+                            leaf.sub, element, eval_in_scope, outer=(lst,),
+                            bindings={'j': row.bindings.get('j', 0)})
                 elif read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(
                         _column_cell_expr(col, source_expr, row.index, lst))
@@ -4705,7 +4791,17 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
     )
 
 
-def _render_column_header(col, index, model, lst, eval_in_scope=None):
+def _column_header_text(col: str) -> str:
+    """What a column header shows: the expression without its leading `$`, and
+    without the splat star in front of it -- `*$v` reads as `*v`, so the star
+    still says the column spreads while the name matches every other header."""
+    is_splat, inner = _split_splat(col)
+    text = strip_leading_dollar(inner) or inner
+    return f'{SPLAT}{text}' if is_splat else text
+
+
+def _render_column_header(col, index, model, lst, eval_in_scope=None,
+                          span_attrs=''):
     """Render a normal column header with drag handle, column name, and ▾ menu."""
     click_event = repr(ColumnClick(index=index))
     drag_start_event = repr(ColumnDragStart(index=index))
@@ -4764,7 +4860,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
     track_move = ('' if drag_from is None else
                   f'snc-mouse-move="{html.escape(drag_over_event)}" ')
     return (
-        f'<th class="{" ".join(th_classes)}" '
+        f'<th class="{" ".join(th_classes)}"{span_attrs} '
         f'{track_move}'
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span class="col-header-inner">'
@@ -4774,7 +4870,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None):
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
-        f'{html.escape(strip_leading_dollar(col) or col)}</span>'
+        f'{html.escape(_column_header_text(col))}</span>'
         f'{menu_html}'
         f'</span>'
         f'</th>'
@@ -5847,14 +5943,29 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     if not small:
         strs.append(_render_tool_toolbar(model))
     strs.append(f'<div class="list-table-scroll" style="{table_div_style}">')
+    slot_cols = model.get('_slot_cols') or {}
+    groups = _column_groups(columns, slot_cols)
+    leaves = _leaf_columns(columns, slot_cols)
+    # A splat carrying sub-columns spans them, and they get a header row of
+    # their own underneath. With no sub-columns anywhere this is one <tr> of
+    # width-1 cells -- exactly the markup it has always been.
+    has_subs = any(g.subs for g in groups)
     strs.append('<table><tr>')
-    strs.append('<th></th>')
+    strs.append(f'<th{" rowspan=\"2\"" if has_subs else ""}></th>')
 
-    for ci, col in enumerate(columns):
+    for ci, group in enumerate(groups):
         if model.get('editing_column_index') == ci:
             strs.append(_render_column_input(lst, model, get_visualizer, is_editing=True, editing_index=ci))
         else:
-            strs.append(_render_column_header(col, ci, model, lst, eval_in_scope))
+            span_attrs = ''
+            if group.subs:
+                span_attrs = f' colspan="{group.width}"'
+            elif has_subs:
+                # A plain column beside a split one spans both header rows.
+                span_attrs = ' rowspan="2"'
+            strs.append(_render_column_header(group.col, ci, model, lst,
+                                              eval_in_scope,
+                                              span_attrs=span_attrs))
 
     if model.get('adding_column'):
         strs.append(_render_column_input(lst, model, get_visualizer, is_editing=False))
@@ -5871,8 +5982,20 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     strs.append('</tr>')
 
+    if has_subs:
+        # Second header row: only the split columns contribute cells, since the
+        # others already span down into it.
+        strs.append('<tr>')
+        for group in groups:
+            for sub in group.subs:
+                strs.append(
+                    f'<th class="col-header col-subheader">'
+                    f'<span class="col-name">'
+                    f'{html.escape(strip_leading_dollar(sub) or sub)}</span></th>')
+        strs.append('</tr>')
+
     if len(lst) == 0:
-        strs.append(f'<tr><td class="empty-list" colspan="{len(columns) + 1}">Empty.</td></tr>')
+        strs.append(f'<tr><td class="empty-list" colspan="{len(leaves) + 1}">Empty.</td></tr>')
 
     source_expr = model.get('_source_expr')
     # Whether a cell may be read by evaluating `<source>[i]` again, or has to be
@@ -5932,8 +6055,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             strs.append(pick_overlay(i, PICK_IDX_COLUMN))
             strs.append('</td>')
 
-        for ci, col in enumerate(columns):
-            is_splat = _split_splat(col)[0]
+        for ci, leaf in enumerate(leaves):
+            col = leaf.expr
+            is_splat = leaf.splat is not None
             # A column that did not splat belongs to the root row, so it is
             # drawn once per group rather than once per rendered row.
             if not is_splat and not row.span_start:
@@ -5942,8 +6066,18 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             try:
                 if is_splat:
                     # The element this rendered row stands for, already worked
-                    # out when the group was built.
-                    cell_value = row.splats.get(col)
+                    # out when the group was built -- then the leaf's own
+                    # expression read off it, when the splat carries
+                    # sub-columns.
+                    element = row.splats.get(leaf.splat)
+                    if leaf.sub in (None, '$'):
+                        cell_value = element
+                    elif element is None:
+                        cell_value = None
+                    else:
+                        cell_value = eval_dollar_expr(
+                            leaf.sub, element, eval_in_scope, outer=(lst,),
+                            bindings={'j': row.bindings.get('j', 0)})
                 elif read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(
                         _column_cell_expr(col, source_expr, i, lst))
