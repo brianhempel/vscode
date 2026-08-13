@@ -10038,8 +10038,242 @@ def make_dict_pick_model(picked=None, columns=None, search=DICT_PICK_SEARCH,
 from table_visualizer import (
     _agg_group_depth, _column_group_computes, _set_column_group_computes,
     _leaf_group_values, _leaf_values, _leaf_columns, _agg_layout, _agg_value,
-    _column_computes, _set_column_computes,
+    _column_computes, _set_column_computes, _column_groups, _header_depth,
+    _rows, _row_by_key, _slots_from_columns, _columns_from_slots,
+    MAX_SPLAT_DEPTH,
 )
+from visualizer_utils import parse_slot_cols
+
+
+class TestNestedLeafColumns(unittest.TestCase):
+    """A splat's sub-column may itself splat. The leaves are what everything
+    that draws or computes goes through, so they are the first thing that has
+    to know a chain of splats from a single one."""
+
+    FLAT = {'$k': {}, '*$v': {'cols': {"$['who']": {}, "$['age']": {}}}}
+    NESTED = {'$.name': {},
+              '*$.teams': {'cols': {'$.title': {},
+                                    '*$.members': {'cols': {'$.who': {},
+                                                            '$.age': {}}}}}}
+
+    def test_a_flat_table_is_what_it_always_was(self):
+        leaves = _leaf_columns(self.FLAT)
+        self.assertEqual([l.depth for l in leaves], [0, 1, 1])
+        self.assertEqual([l.splat for l in leaves], [None, '*$v', '*$v'])
+        self.assertEqual([l.header for l in leaves],
+                         [('$k',), ('*$v', "$['who']"), ('*$v', "$['age']")])
+
+    def test_a_nested_splat_gives_its_leaves_the_deeper_depth(self):
+        leaves = _leaf_columns(self.NESTED)
+        self.assertEqual([l.depth for l in leaves], [0, 1, 2, 2])
+
+    def test_a_leaf_reads_off_its_innermost_splat(self):
+        leaves = _leaf_columns(self.NESTED)
+        self.assertEqual([l.splat for l in leaves],
+                         [None, '*$.teams', '*$.members', '*$.members'])
+
+    def test_the_chain_is_the_splats_from_the_outside_in(self):
+        leaves = _leaf_columns(self.NESTED)
+        self.assertEqual([l.chain for l in leaves],
+                         [(), ('*$.teams',), ('*$.teams', '*$.members'),
+                          ('*$.teams', '*$.members')])
+
+    def test_the_header_path_grows_with_the_nesting(self):
+        leaves = _leaf_columns(self.NESTED)
+        self.assertEqual(leaves[2].header,
+                         ('*$.teams', '*$.members', '$.who'))
+        self.assertEqual(leaves[1].header, ('*$.teams', '$.title'))
+
+    def test_identities_cannot_collide_across_ancestors(self):
+        # The same sub-column name under two different splats is two columns.
+        cols = {'*$.a': {'cols': {'$.n': {}}}, '*$.b': {'cols': {'$.n': {}}}}
+        exprs = [l.expr for l in _leaf_columns(cols)]
+        self.assertEqual(len(set(exprs)), 2)
+
+    def test_a_nested_splat_with_no_subs_shows_the_element(self):
+        cols = {'*$.teams': {'cols': {'*$.members': {}}}}
+        leaves = _leaf_columns(cols)
+        self.assertEqual(len(leaves), 1)
+        self.assertEqual(leaves[0].depth, 2)
+        self.assertEqual(leaves[0].sub, '$')
+
+    def test_a_group_is_as_wide_as_the_leaves_under_it(self):
+        # Not len(cols): a sub-splat expands further than its own count.
+        groups = _column_groups(self.NESTED)
+        self.assertEqual([g.col for g in groups], ['$.name', '*$.teams'])
+        self.assertEqual([g.width for g in groups], [1, 3])
+
+    def test_the_header_is_one_row_per_level(self):
+        self.assertEqual(_header_depth(self.NESTED), 3)
+        self.assertEqual(_header_depth(self.FLAT), 2)
+        self.assertEqual(_header_depth({'$k': {}, '$v': {}}), 1)
+
+
+class TestNestedRows(unittest.TestCase):
+    """A row belongs to one group per depth. The spans are what a leaf reads to
+    know how far down its cell reaches and which row draws it."""
+
+    ORGS = [
+        {'name': 'acme',
+         'teams': [{'title': 'red', 'members': [{'who': 'ann'}, {'who': 'bo'}]},
+                   {'title': 'blue', 'members': [{'who': 'cy'}]}]},
+        {'name': 'globex',
+         'teams': [{'title': 'green', 'members': [{'who': 'di'}]}]},
+    ]
+    COLS = {'$["name"]': {},
+            '*$["teams"]': {'cols': {'$["title"]': {},
+                                     '*$["members"]': {'cols': {'$["who"]': {}}}}}}
+
+    def rows(self):
+        return _rows(self.ORGS, self.COLS)
+
+    def test_one_rendered_row_per_innermost_element(self):
+        # acme: red has 2, blue has 1; globex: green has 1. Four rows.
+        self.assertEqual(len(self.rows()), 4)
+
+    def test_the_key_names_the_whole_path(self):
+        self.assertEqual([r.key for r in self.rows()],
+                         ['0.0.0', '0.0.1', '0.1.0', '1.0.0'])
+
+    def test_the_root_index_stays_the_root_row(self):
+        self.assertEqual([r.index for r in self.rows()], [0, 0, 0, 1])
+
+    def test_each_depth_knows_its_own_group(self):
+        rows = self.rows()
+        # depth 0 is the whole root row: acme covers 3, globex 1.
+        self.assertEqual([r.span_at(0) for r in rows], [3, 3, 3, 1])
+        # depth 1 is the team: red covers 2, blue 1, green 1.
+        self.assertEqual([r.span_at(1) for r in rows], [2, 2, 1, 1])
+        # depth 2 is the member, which is one row by definition.
+        self.assertEqual([r.span_at(2) for r in rows], [1, 1, 1, 1])
+
+    def test_only_the_first_row_of_each_group_draws_it(self):
+        rows = self.rows()
+        self.assertEqual([r.starts_at(0) for r in rows],
+                         [True, False, False, True])
+        self.assertEqual([r.starts_at(1) for r in rows],
+                         [True, False, True, True])
+        self.assertEqual([r.starts_at(2) for r in rows], [True] * 4)
+
+    def test_every_splat_in_the_chain_is_reachable_from_the_row(self):
+        row = self.rows()[1]
+        self.assertEqual(row.splats['*$["teams"]']['title'], 'red')
+        self.assertEqual(row.splats['*$["members"]'], {'who': 'bo'})
+
+    def test_j_binds_the_innermost_position(self):
+        # Decided: outer group positions get no sigil at all.
+        self.assertEqual([r.bindings['j'] for r in self.rows()], [0, 1, 0, 0])
+
+    def test_an_empty_inner_list_still_leaves_one_row(self):
+        orgs = [{'name': 'a', 'teams': [{'title': 't', 'members': []}]}]
+        rows = _rows(orgs, self.COLS)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].splats['*$["teams"]']['title'], 't')
+
+    def test_an_empty_outer_list_still_leaves_one_row(self):
+        rows = _rows([{'name': 'a', 'teams': []}], self.COLS)
+        self.assertEqual(len(rows), 1)
+
+    def test_a_row_is_found_by_its_nested_key(self):
+        row = _row_by_key(self.ORGS, self.COLS, '0.1.0')
+        self.assertEqual(row.splats['*$["members"]'], {'who': 'cy'})
+
+    def test_one_level_is_exactly_what_it_was(self):
+        d = {'a': [1, 2, 3], 'b': [10]}
+        rows = _rows(d, {'$k': {}, '*$v': {}})
+        self.assertEqual([r.key for r in rows], ['0.0', '0.1', '0.2', '1.0'])
+        self.assertEqual([r.span for r in rows], [3, 3, 3, 1])
+        self.assertEqual([r.span_start for r in rows],
+                         [True, False, False, True])
+        self.assertEqual([r.span_at(1) for r in rows], [1, 1, 1, 1])
+
+    def test_a_flat_table_has_one_row_per_row(self):
+        rows = _rows([1, 2, 3], {'$': {}})
+        self.assertEqual([r.span for r in rows], [1, 1, 1])
+        self.assertTrue(all(r.span_start for r in rows))
+
+
+class TestNestedColumnsRoundTrip(unittest.TestCase):
+    """Nested `cols` used to be dropped at load, because the row model
+    described exactly one grouping level and honouring them would have rendered
+    wrong. It doesn't any more, so they load."""
+
+    NESTED = {'$.name': {},
+              '*$.teams': {'cols': {'$.title': {},
+                                    '*$.members': {'cols': {'$.who': {}}}}}}
+
+    def test_the_slot_list_nests(self):
+        self.assertEqual(_slots_from_columns(self.NESTED),
+                         ['$.name',
+                          {'expr': '*$.teams',
+                           'cols': ['$.title',
+                                    {'expr': '*$.members', 'cols': ['$.who']}]}])
+
+    def test_it_comes_back_the_way_it_went_out(self):
+        slots = _slots_from_columns(self.NESTED)
+        exprs = [s if isinstance(s, str) else s['expr'] for s in slots]
+        self.assertEqual(_columns_from_slots(exprs, parse_slot_cols(
+            [s for s in slots if isinstance(s, dict)])), self.NESTED)
+
+    def test_a_flat_table_writes_exactly_what_it_always_did(self):
+        flat = {'$k': {}, '*$v': {'cols': {"$['who']": {}}}}
+        self.assertEqual(_slots_from_columns(flat),
+                         ['$k', {'expr': '*$v', 'cols': ["$['who']"]}])
+
+    def test_nesting_is_capped(self):
+        # Bounded by the config rather than the data, but a hand-edited
+        # dotfile is a real input.
+        entry = {'expr': '*$.x', 'cols': ['$.leaf']}
+        for _ in range(MAX_SPLAT_DEPTH + 3):
+            entry = {'expr': '*$.x', 'cols': [entry]}
+        cols = _columns_from_slots(['*$.x'], parse_slot_cols([entry]))
+        self.assertLessEqual(_header_depth(cols), MAX_SPLAT_DEPTH + 1)
+
+
+class TestNestedRendering(unittest.TestCase):
+    """The whole table, three levels deep."""
+
+    ORGS = [
+        {'name': 'acme',
+         'teams': [{'title': 'red', 'members': [{'who': 'ann'}, {'who': 'bo'}]},
+                   {'title': 'blue', 'members': [{'who': 'cy'}]}]},
+    ]
+    COLS = {'$["name"]': {},
+            '*$["teams"]': {'cols': {'$["title"]': {},
+                                     '*$["members"]': {'cols': {'$["who"]': {}}}}}}
+
+    def html(self):
+        m = init_model(self.ORGS, mock_get_visualizer, var_and_exp=('o', 'o'))
+        m['columns'] = self.COLS
+        return visualize(self.ORGS, m, mock_get_visualizer, None)
+
+    def test_the_header_has_a_row_per_level(self):
+        out = self.html()
+        header = out[:out.index('</tr>', out.index('</tr>') + 1)]
+        self.assertEqual(_header_depth(self.COLS), 3)
+        self.assertEqual(out.count('col-subheader'), 3)
+
+    def test_the_outer_splat_spans_every_leaf_under_it(self):
+        # *teams covers title, *members and who -- two leaves, not two cols.
+        self.assertIn('colspan="2"', self.html())
+
+    def test_the_root_column_spans_every_rendered_row(self):
+        # acme has three members across two teams.
+        self.assertIn('rowspan="3"', self.html())
+
+    def test_a_middle_column_spans_its_own_group(self):
+        # 'red' has two members, so the title cell covers two rows.
+        self.assertIn('rowspan="2"', self.html())
+
+    def test_every_innermost_value_is_drawn(self):
+        out = self.html()
+        for who in ('ann', 'bo', 'cy'):
+            self.assertIn(who, out)
+
+    def test_the_middle_values_are_drawn_once_each(self):
+        out = self.html()
+        self.assertEqual(out.count('red'), 1)
+        self.assertEqual(out.count('blue'), 1)
 
 
 class TestGroupAggregationStorage(unittest.TestCase):

@@ -48,7 +48,7 @@ import math
 import random
 import re
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, List, Tuple, Optional
 
 from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
@@ -405,6 +405,11 @@ def _save_slots(model: dict) -> None:
     )
 
 
+# A default that is not None, since None is a real element: a splat padded
+# short gives its cell None, and "no scope given" has to mean something else.
+_UNSET = object()
+
+
 # === Rows ===
 
 @dataclass(frozen=True)
@@ -420,17 +425,40 @@ class Row:
 
     A root row that splats a list occupies several rendered rows: the first of
     them carries `span_start`, and draws the cells of every column that did NOT
-    splat, with `rowspan=span`. Until splat lands every row is its own, so these
-    are True and 1.
+    splat, with `rowspan=span`.
+
+    Under nesting a row belongs to one group PER DEPTH, so the width and the
+    flag are tuples indexed by it: `spans[0]` is the whole root row, `spans[d]`
+    the depth-*d* group this row sits in, and the innermost is always 1. A leaf
+    draws at the depth it was splatted to -- `span_starts[d]` says whether this
+    is the row that draws it, `spans[d]` how far down it reaches.
     """
-    key: str          # identity in `children`; "3" alone, "3.1" under splat
+    key: str          # identity in `children`; "3" alone, "3.1.2" under splat
     index: int        # the root row's number -- what `$i` binds and what the
                       # row-index <td> shows
     item: Any         # what bare `$` binds to
     bindings: dict    # {'i': 0} for a list; {'i', 'k', 'v'} for a dict
-    span_start: bool  # owns the rowspan cells of the unsplatted columns
-    span: int         # how many rendered rows this root row occupies
+    span_starts: tuple = (True,)  # per depth: owns the rowspan cells there
+    spans: tuple = (1,)           # per depth: how many rendered rows it covers
     splats: dict = field(default_factory=dict)  # splat column -> this row's element
+
+    @property
+    def span_start(self) -> bool:
+        """The depth-0 flag, which is the only one a flat table has."""
+        return self.span_starts[0] if self.span_starts else True
+
+    @property
+    def span(self) -> int:
+        """The depth-0 width, which is the only one a flat table has."""
+        return self.spans[0] if self.spans else 1
+
+    def starts_at(self, depth: int) -> bool:
+        """Whether this row draws a leaf splatted to *depth*. Past the nesting
+        a row actually has, every row is its own group of one."""
+        return self.span_starts[depth] if depth < len(self.span_starts) else True
+
+    def span_at(self, depth: int) -> int:
+        return self.spans[depth] if depth < len(self.spans) else 1
 
 
 # === columns ==================================================================
@@ -545,27 +573,47 @@ def _slots_from_columns(columns) -> list:
     slots = []
     for col, config in (columns or {}).items():
         subs = (config or {}).get('cols') or {}
-        slots.append({'expr': col, 'cols': list(subs)} if subs else col)
+        slots.append({'expr': col, 'cols': _slots_from_columns(subs)}
+                     if subs else col)
     return slots
 
 
-def _columns_from_slots(exprs, slot_cols) -> dict:
+def _columns_from_slots(exprs, slot_cols, depth: int = 0) -> dict:
     """Build the columns map from what the dotfile gave up.
 
-    Sub-columns are one level deep: the row model describes exactly one
-    grouping level (Row.span / span_start is a width, not a tree), so a splat
-    inside a splat would load and then render wrong. Dropped here rather than
-    half-honoured.
+    Recursive, because a splat's sub-column may splat in turn and `cols` has
+    the same shape as `columns` itself. Capped at MAX_SPLAT_DEPTH: the depth is
+    bounded by the config rather than by the data, so it cannot run away the
+    way a deep value can -- but a hand-edited dotfile is a real input, and a cap
+    is cheaper than the header arithmetic going wrong.
     """
     columns = {}
     for expr in exprs:
         subs = slot_cols.get(expr) or []
         config = {}
-        if subs and _split_splat(expr)[0]:
-            config['cols'] = {sub: {} for sub in subs
-                              if not _split_splat(sub)[0]}
+        if subs and _split_splat(expr)[0] and depth < MAX_SPLAT_DEPTH:
+            config['cols'] = _sub_columns_from_entries(subs, depth + 1)
         _col_add(columns, expr, config)
     return columns
+
+
+def _sub_columns_from_entries(entries, depth: int) -> dict:
+    """A splat's sub-columns as the dotfile stores them: a bare expression, or
+    -- when the sub-column splats in turn -- one carrying `cols` of its own."""
+    out = {}
+    for entry in entries:
+        if isinstance(entry, str):
+            _col_add(out, entry, {})
+            continue
+        if not isinstance(entry, dict) or 'expr' not in entry:
+            continue
+        expr = entry['expr']
+        config = {}
+        nested = entry.get('cols')
+        if nested and _split_splat(expr)[0] and depth < MAX_SPLAT_DEPTH:
+            config['cols'] = _sub_columns_from_entries(nested, depth + 1)
+        _col_add(out, expr, config)
+    return out
 
 
 # A leaf's identity has to tell two splats' identically-named sub-columns
@@ -585,9 +633,12 @@ class LeafColumn:
     its value off the splatted ELEMENT, which is what `sub` is written against.
     """
     expr: str          # identity: the cell key and the per-column config key
-    splat: str | None  # the splat column this lives under, or None
+    splat: str | None  # the INNERMOST splat this lives under, or None -- which
+                       # is the one whose element the leaf reads off
     sub: str | None    # the expression against one element; None when not split
     header: tuple      # the header path, one entry per header row
+    chain: tuple = ()  # every splat above it, outermost first
+    depth: int = 0     # which grouping level it draws at; len(chain)
 
 
 @dataclass(frozen=True)
@@ -600,39 +651,104 @@ class ColumnGroup:
 
 
 def _column_groups(columns) -> list:
-    """The top-level columns, each with the leaves it covers."""
+    """The top-level columns, each with the leaves it covers.
+
+    The width is a count of LEAVES rather than of sub-columns: a sub-column
+    that splats again expands further than the one cell its own entry suggests,
+    so counting entries would leave the header cell too narrow for what is
+    drawn under it.
+    """
     groups = []
     for col in (columns or {}):
         subs = tuple(_col_subs(columns, col)) if _split_splat(col)[0] else ()
-        groups.append(ColumnGroup(col, max(len(subs), 1), subs))
+        width = len(_leaf_columns({col: (columns or {})[col]}))
+        groups.append(ColumnGroup(col, max(width, 1), subs))
     return groups
 
 
-def _leaf_columns(columns) -> list:
+def _leaf_columns(columns, chain: tuple = ()) -> list:
     """Every drawn column, in order.
 
     A plain column is its own leaf. A splat with no sub-columns is one leaf
     showing the whole element. A splat with sub-columns becomes one leaf each,
-    every one of them reading off the same element.
+    every one of them reading off the same element -- and a sub-column that
+    splats in turn recurses, so its own leaves sit one level deeper again.
+
+    *chain* is the splats already entered, outermost first. It is what keeps
+    two identically-named sub-columns under different ancestors apart, since
+    the identity joins the whole path.
     """
     leaves = []
-    for group in _column_groups(columns):
-        if not group.subs:
-            is_splat = _split_splat(group.col)[0]
+    for col in (columns or {}):
+        is_splat = _split_splat(col)[0]
+        # A bare list of expressions is still a legal `columns`, and carries no
+        # sub-columns at all -- _col_subs is what knows both shapes.
+        subs = _col_subs(columns, col) if is_splat else {}
+        prefix = f'{SUBCOL_SEP}'.join(chain)
+        identity = f'{prefix}{SUBCOL_SEP}{col}' if prefix else col
+        if not subs:
+            here = chain + (col,) if is_splat else chain
             leaves.append(LeafColumn(
-                expr=group.col,
-                splat=group.col if is_splat else None,
-                # A splat with no sub-columns shows the element itself.
-                sub='$' if is_splat else None,
-                header=(group.col,)))
+                expr=identity,
+                splat=here[-1] if here else None,
+                # A splat with no sub-columns shows the element itself. One
+                # that isn't under any splat reads its row the ordinary way.
+                sub='$' if is_splat else (None if not chain else col),
+                header=chain + (col,),
+                chain=here,
+                depth=len(here)))
             continue
-        for sub in group.subs:
-            leaves.append(LeafColumn(
-                expr=f'{group.col}{SUBCOL_SEP}{sub}',
-                splat=group.col,
-                sub=sub,
-                header=(group.col, sub)))
+        leaves.extend(_leaf_columns(subs, chain + (col,)))
     return leaves
+
+
+# A hand-edited dotfile is a real input, and splat depth is bounded by the
+# config rather than by the data -- so it cannot run away the way a deep value
+# can, but a cap is still cheaper than the header arithmetic going wrong.
+MAX_SPLAT_DEPTH = 5
+
+
+def _header_depth(columns) -> int:
+    """How many header rows the table needs: one per grouping level, plus one
+    for the columns themselves."""
+    return max((len(leaf.header) for leaf in _leaf_columns(columns)), default=1)
+
+
+@dataclass(frozen=True)
+class HeaderCell:
+    """One cell of the header, wherever the nesting puts it."""
+    expr: str        # its identity, and what its ▾ menu acts on
+    label: str       # the column expression this cell shows
+    colspan: int
+    rowspan: int
+    is_leaf: bool    # a drawn column, rather than a splat covering others
+
+
+def _header_cells(columns) -> list:
+    """The header, row by row.
+
+    A splat carrying sub-columns spans them across and hands the row below to
+    them; anything else is a drawn column and spans DOWN to the bottom, so
+    every header, however deep the table, ends flush with the body.
+    """
+    n = _header_depth(columns)
+    rows = [[] for _ in range(n)]
+
+    def walk(cols, chain, level):
+        for col in (cols or {}):
+            is_splat = _split_splat(col)[0]
+            subs = _col_subs(cols, col) if is_splat else {}
+            path = chain + (col,)
+            expr = f'{SUBCOL_SEP}'.join(path)
+            if subs:
+                width = len(_leaf_columns({col: cols[col]}))
+                rows[level].append(HeaderCell(expr, col, max(width, 1), 1, False))
+                walk(subs, path, level + 1)
+            else:
+                rows[level].append(HeaderCell(expr, col, 1, n - level, True))
+
+    walk(columns, (), 0)
+    return rows
 
 
 # The name a splatted element binds to in a derived whole-column expression.
@@ -753,9 +869,9 @@ def _leaf_group_values(leaf: LeafColumn, root_index: int, lst, model,
 def _root_rows(value) -> list:
     """One Row per row of the container, before any splat."""
     if isinstance(value, dict):
-        return [Row(str(n), n, (k, v), {'i': n, 'k': k, 'v': v}, True, 1)
+        return [Row(str(n), n, (k, v), {'i': n, 'k': k, 'v': v}, (True,), (1,))
                 for n, (k, v) in enumerate(value.items())]
-    return [Row(str(i), i, item, {'i': i}, True, 1)
+    return [Row(str(i), i, item, {'i': i}, (True,), (1,))
             for i, item in enumerate(value)]
 
 
@@ -764,17 +880,41 @@ def _splat_columns(columns) -> list:
     return [c for c in (columns or []) if _split_splat(c)[0]]
 
 
-def _splat_value(col: str, row: Row, container) -> list | None:
-    """The list a splat column produces for one root row, or None when it
-    produces something that isn't a list -- which splats to a single row, since
-    there is nothing to spread."""
+def _splat_value(col: str, row: Row, container, scope=_UNSET) -> list | None:
+    """The list a splat column produces for one row, or None when it produces
+    something that isn't a list -- which splats to a single row, since there is
+    nothing to spread.
+
+    *scope* is what the splat's own `$` reads: the row's item for a top-level
+    splat, and the enclosing splat's ELEMENT for one nested inside another,
+    which is the same rule a sub-column already follows.
+    """
     _is_splat, inner = _split_splat(col)
+    item = row.item if scope is _UNSET else scope
     try:
-        value = eval_dollar_expr(inner, row.item, outer=(container,),
+        value = eval_dollar_expr(inner, item, outer=(container,),
                                  bindings=row.bindings)
     except Exception:
         return None
     return value if isinstance(value, list) else None
+
+
+def _splat_levels(columns) -> list:
+    """The splat chains by depth: level *d* holds every chain of *d+1* splats
+    the columns reach, outermost first.
+
+    All the chains at one level expand together -- they zip and pad against
+    each other the way two top-level splats always have -- so the row count
+    stays linear in the rows actually drawn rather than multiplying out.
+    """
+    chains = [leaf.chain for leaf in _leaf_columns(columns) if leaf.chain]
+    levels = []
+    for d in range(1, MAX_SPLAT_DEPTH + 1):
+        at_d = list(dict.fromkeys(c[:d] for c in chains if len(c) >= d))
+        if not at_d:
+            break
+        levels.append(at_d)
+    return levels
 
 
 def _rows(value, columns=None) -> list:
@@ -790,32 +930,65 @@ def _rows(value, columns=None) -> list:
     for holding an empty list.
     """
     roots = _root_rows(value)
-    splat_cols = _splat_columns(columns)
-    if not splat_cols:
+    levels = _splat_levels(columns)
+    if not levels:
         return roots
 
     out = []
     for root in roots:
-        lists = {c: _splat_value(c, root, value) for c in splat_cols}
-        span = max((len(v) for v in lists.values() if v is not None), default=0)
-        if span == 0:
-            out.append(root)
+        group = _expand_row(root, value, levels, 0)
+        out.extend(_stamp_span(group, 0))
+    return out
+
+
+def _stamp_span(group: list, depth: int) -> list:
+    """Tell every row of one group how wide that group is and which row starts
+    it, at *depth*. Prepended, because a group is worked out from the inside
+    out but read from the outside in."""
+    return [replace(row,
+                    spans=(len(group),) + row.spans,
+                    span_starts=(n == 0,) + row.span_starts)
+            for n, row in enumerate(group)]
+
+
+def _expand_row(row: Row, container, levels: list, level: int) -> list:
+    """One row spread into the rows its splats at *level* and below make of it.
+
+    Returns them with the spans for every depth BELOW this one already stamped;
+    the caller stamps its own. A row whose splats give nothing to spread -- no
+    list, or an empty one -- still gets exactly one rendered row, because a row
+    must not vanish from the table for holding an empty list.
+    """
+    if level >= len(levels):
+        return [row]
+    lists = {}
+    for chain in levels[level]:
+        col = chain[-1]
+        # A nested splat reads off the element of the splat it is inside; a
+        # top-level one reads off the row itself.
+        scope = row.splats.get(chain[-2]) if len(chain) > 1 else _UNSET
+        if scope is None:
             continue
-        for j in range(span):
-            out.append(Row(
-                key=f'{root.key}.{j}',
-                index=root.index,
-                item=root.item,
-                # `$j` is the position within the group. `$i` stays the ROOT
-                # row's number, so it rowspans like any other unsplatted value;
-                # the flat rendered position gets no sigil, because nothing in
-                # the data addresses it and no generated code can bind it.
-                bindings={**root.bindings, 'j': j},
-                span_start=(j == 0),
-                span=span,
-                splats={c: (v[j] if v is not None and j < len(v) else None)
-                        for c, v in lists.items()},
-            ))
+        lists[col] = _splat_value(col, row, container, scope)
+    width = max((len(v) for v in lists.values() if v is not None), default=0)
+    if width == 0:
+        return [row]
+    out = []
+    for j in range(width):
+        # `$j` is the position within the INNERMOST group. `$i` stays the ROOT
+        # row's number, so it rowspans like any other unsplatted value; the
+        # flat rendered position and the outer groups' get no sigil, because
+        # nothing in the data addresses them and no generated code binds them.
+        child = replace(
+            row,
+            key=f'{row.key}.{j}',
+            bindings={**row.bindings, 'j': j},
+            splats={**row.splats,
+                    **{c: (v[j] if v is not None and j < len(v) else None)
+                       for c, v in lists.items()}},
+        )
+        out.extend(_stamp_span(_expand_row(child, container, levels, level + 1),
+                               level + 1))
     return out
 
 
@@ -851,8 +1024,8 @@ def _row_at(value, i: int) -> Row:
     """
     if isinstance(value, dict):
         k, v = next(itertools.islice(value.items(), i, None))
-        return Row(str(i), i, (k, v), {'i': i, 'k': k, 'v': v}, True, 1)
-    return Row(str(i), i, value[i], {'i': i}, True, 1)
+        return Row(str(i), i, (k, v), {'i': i, 'k': k, 'v': v}, (True,), (1,))
+    return Row(str(i), i, value[i], {'i': i}, (True,), (1,))
 
 
 # === Column autocomplete helpers ===
@@ -1403,7 +1576,8 @@ def _menu_targets(columns) -> list:
     be renamed, removed and reordered, and its own group header points here.
     """
     targets = [leaf.expr for leaf in _leaf_columns(columns)]
-    targets += [col for col in (columns or {}) if _col_subs(columns, col)]
+    targets += [cell.expr for row in _header_cells(columns) for cell in row
+                if not cell.is_leaf]
     return targets
 
 
@@ -6715,69 +6889,58 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     if not small:
         strs.append(_render_tool_toolbar(model))
     strs.append(f'<div class="list-table-scroll" style="{table_div_style}">')
-    groups = _column_groups(columns)
     leaves = _leaf_columns(columns)
+    header_rows = _header_cells(columns)
     # A splat carrying sub-columns spans them, and they get a header row of
-    # their own underneath. With no sub-columns anywhere this is one <tr> of
-    # width-1 cells -- exactly the markup it has always been.
-    has_subs = any(g.subs for g in groups)
+    # their own underneath -- one more for every level of nesting. With no
+    # sub-columns anywhere this is one <tr> of width-1 cells, exactly the
+    # markup it has always been.
+    n_header = len(header_rows)
     strs.append('<table><tr>')
-    strs.append(f'<th{" rowspan=\"2\"" if has_subs else ""}></th>')
+    strs.append(f'<th{f" rowspan=\"{n_header}\"" if n_header > 1 else ""}></th>')
 
     # Header cells carry the index of what their menu acts on, which is the
-    # menu-target space -- leaves first, then the split splats. For a table
-    # with no sub-columns that is position-for-position what it always was.
+    # menu-target space -- leaves first, then the splats that carry others. For
+    # a table with no sub-columns that is position-for-position what it was.
     target_index = {t: n for n, t in enumerate(_menu_targets(columns))}
 
-    for group in groups:
-        ci = target_index.get(group.col, 0)
-        if model.get('editing_column_index') == ci:
-            strs.append(_render_column_input(lst, model, get_visualizer, is_editing=True, editing_index=ci))
-        else:
-            span_attrs = ''
-            if group.subs:
-                span_attrs = f' colspan="{group.width}"'
-            elif has_subs:
-                # A plain column beside a split one spans both header rows.
-                span_attrs = ' rowspan="2"'
-            strs.append(_render_column_header(group.col, ci, model, lst,
-                                              eval_in_scope,
-                                              span_attrs=span_attrs))
-
-    if model.get('adding_column'):
-        strs.append(_render_column_input(lst, model, get_visualizer, is_editing=False))
-
-    if not small:
-        add_event = repr(AddColumnClick())
-        strs.append(
-            f'<th class="col-add" '
-            f'snc-mouse-down="{html.escape(add_event)}" '
-            f'data-tooltip="Add column">'
-            f'<span class="col-add-icon full-opacity-on-hover">+</span>'
-            f'</th>'
-        )
-
-    strs.append('</tr>')
-
-    if has_subs:
-        # Second header row: only the split columns contribute cells, since the
-        # others already span down into it.
-        strs.append('<tr>')
-        for leaf in leaves:
-            if leaf.sub is None or len(leaf.header) < 2:
+    for level, cells in enumerate(header_rows):
+        if level:
+            strs.append('<tr>')
+        for cell in cells:
+            ci = target_index.get(cell.expr, 0)
+            if model.get('editing_column_index') == ci:
+                strs.append(_render_column_input(
+                    lst, model, get_visualizer, is_editing=True,
+                    editing_index=ci))
                 continue
-            # A sub-column is a column: it gets the same header, so the same ▾
+            span_attrs = ''
+            if cell.colspan > 1:
+                span_attrs = f' colspan="{cell.colspan}"'
+            if cell.rowspan > 1:
+                span_attrs += f' rowspan="{cell.rowspan}"'
+            # A sub-column is a column: it gets the same header, so the same
             # menu -- search, tally, sort and Compute all key on the column
             # expression, and a leaf's is one _column_values understands.
-            ci = target_index.get(leaf.expr, 0)
-            if model.get('editing_column_index') == ci:
+            strs.append(_render_column_header(
+                cell.expr, ci, model, lst, eval_in_scope,
+                span_attrs=span_attrs,
+                extra_classes='col-subheader' if level else None,
+                label=_column_header_text(cell.label) if level else None))
+
+        if level == 0:
+            if model.get('adding_column'):
                 strs.append(_render_column_input(lst, model, get_visualizer,
-                                                 is_editing=True, editing_index=ci))
-            else:
-                strs.append(_render_column_header(
-                    leaf.expr, ci, model, lst, eval_in_scope,
-                    extra_classes='col-subheader',
-                    label=_column_header_text(leaf.sub)))
+                                                 is_editing=False))
+            if not small:
+                add_event = repr(AddColumnClick())
+                strs.append(
+                    f'<th class="col-add" '
+                    f'snc-mouse-down="{html.escape(add_event)}" '
+                    f'data-tooltip="Add column">'
+                    f'<span class="col-add-icon full-opacity-on-hover">+</span>'
+                    f'</th>'
+                )
         strs.append('</tr>')
 
     if len(lst) == 0:
@@ -6817,15 +6980,20 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     hung_group = [[None] * (n_group_aggs - len(stack)) + stack
                   for stack in group_stacks]
 
-    for row in _rows(lst, columns):
+    rendered = _rows(lst, columns)
+    for rn, row in enumerate(rendered):
         i = row.index
-        # An unsplatted column draws only on the row that owns the group, and
-        # spans it. This is where the mockup's key cell comes from: `$k`
-        # rowspans because it did not splat, not because it is a key.
-        # The per-group answers are inside the group, so they are inside its
-        # span too -- otherwise the key cell stops short and they shift left.
-        row_span = row.span + n_group_aggs
-        span_attr = f' rowspan="{row_span}"' if row_span > 1 else ''
+        # A column draws once per group at the depth it was splatted to, and
+        # spans that group. This is where the mockup's key cell comes from: `$k`
+        # rowspans because it did not splat, not because it is a key -- and a
+        # column splatted once but not twice spans its inner group the same way.
+        # The per-group answers are inside the root group, so they are inside
+        # its span too -- otherwise the key cell stops short and they shift left.
+        def leaf_span(depth):
+            width = row.span_at(depth) + (n_group_aggs if depth == 0 else 0)
+            return f' rowspan="{width}"' if width > 1 else ''
+
+        span_attr = leaf_span(0)
         is_match = i in matched_indices
         row_class_attr = ''
         scroll_attr = ''
@@ -6856,9 +7024,11 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
             is_splat = leaf.splat is not None
-            # A column that did not splat belongs to the root row, so it is
-            # drawn once per group rather than once per rendered row.
-            if not is_splat and not row.span_start:
+            # A column belongs to the group at the depth it was splatted to, so
+            # it is drawn once per group at THAT depth rather than once per
+            # rendered row. The innermost depth is a group of one, which is how
+            # a leaf under the last splat comes to draw on every row.
+            if not row.starts_at(leaf.depth):
                 continue
             composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
             try:
@@ -6918,10 +7088,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 else:
                     cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)]
 
-                # An unsplatted column is drawn once for the group, so it has
-                # to span it -- otherwise the cell occupies the first row only
-                # and every row under it shifts left.
-                cell_span = '' if is_splat else span_attr
+                # A column drawn once for a group has to span it -- otherwise
+                # the cell occupies the first row only and every row under it
+                # shifts left.
+                cell_span = leaf_span(leaf.depth)
                 strs.append(f'<td{cell_span}>')
                 strs.append(wrap_child_prefix(composite_key))
                 strs.extend(cell_htmls)
@@ -6929,7 +7099,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 strs.append(pick_overlay(i, f'col_{ci}'))
                 strs.append('</td>')
             else:
-                cell_span = '' if is_splat else span_attr
+                cell_span = leaf_span(leaf.depth)
                 strs.append(f'<td{cell_span}>{pick_overlay(i, f"col_{ci}")}</td>')
 
         strs.append('</tr>')
@@ -6938,7 +7108,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         # unsplatted columns already reach down here, so these rows carry only
         # the splatted ones -- a per-group answer about a column that did not
         # splat would be that column's single value, which is the cell itself.
-        if n_group_aggs and row.bindings.get('j', 0) == row.span - 1:
+        last_of_root = (rn + 1 == len(rendered)
+                        or rendered[rn + 1].index != row.index)
+        if n_group_aggs and last_of_root:
             for level in range(n_group_aggs):
                 cells = []
                 for ci, leaf in enumerate(leaves):

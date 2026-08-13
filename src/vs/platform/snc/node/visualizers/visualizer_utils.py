@@ -299,7 +299,12 @@ def parse_slot_cols(slots_config) -> dict:
             continue
         cols = entry.get('cols')
         if isinstance(cols, list) and cols:
-            out[entry['expr']] = [c for c in cols if isinstance(c, str)]
+            # A sub-column is a bare expression, or -- when it splats in turn --
+            # an entry with `cols` of its own. Both are kept; the caller is what
+            # knows how deep it is willing to go.
+            out[entry['expr']] = [c for c in cols
+                                  if isinstance(c, str)
+                                  or (isinstance(c, dict) and 'expr' in c)]
     return out
 
 
