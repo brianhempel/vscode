@@ -46,7 +46,7 @@
 - [ ] extract row by grabbing index cell
 - [ ] add column left/right in col menu
 - [ ] need to be able to pick or select columns without a filter predicate first
-- [ ] need to able to select/delete rows
+- [ ] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
 - [ ] hiding the $ sometimes is a bit funky
 - [ ] $item instead of $, maybe?
@@ -56,7 +56,7 @@
 - [ ] tuple visualizer
 - [ ] list of tuples
 - [ ] tuple of lists
-- [ ] group by (i.e. dictionaries of lists)
+- [x] group by (i.e. dictionaries of lists)
 - [ ] generic object visualizer
 - [ ] visualize sets
 - [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*

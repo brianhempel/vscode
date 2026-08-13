@@ -1297,6 +1297,20 @@
 	background: var(--snc-hover-bg);
 }
 
+/* Group By is an ordinary menu row, so it needs no styling of its own -- except
+   for having nothing to write, which the two submenus each spell out for their
+   own rows and a plain .snc-dropdown-option doesn't. A list with no name has no
+   line to write or drag, so the row reads as one to read past. */
+.col-menu-panel .snc-dropdown-option.unselectable {
+	cursor: default;
+	color: var(--snc-text-muted);
+
+	&:hover,
+	&:active {
+		background: none;
+	}
+}
+
 .submenu-right-arrow {
 	flex: none;
 	color: var(--snc-text-muted);

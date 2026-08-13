@@ -13999,6 +13999,218 @@ class TestSortCodeClick(SortEventCase):
         self.assertEqual(commands, [])
 
 
+# === Group By ===
+
+from table_visualizer import (GroupByClick, _group_by_expr, _column_binding,
+                              _LIST_BINDS, _DICT_BINDS)
+
+
+class TestGroupByExpr(unittest.TestCase):
+    """The list as a dict of lists, keyed by the column.
+
+    A dict of lists rather than itertools.groupby, which only groups runs and
+    so would answer wrongly for any list the user hasn't already sorted.
+    """
+
+    def test_a_column_becomes_the_key(self):
+        self.assertEqual(
+            _group_by_expr("$['b']", 'data'),
+            "(_d := {}, [_d.setdefault(item['b'], []).append(item) "
+            "for item in data])[0]")
+
+    def test_the_row_itself_can_be_the_key(self):
+        self.assertEqual(
+            _group_by_expr('$', 'nums'),
+            '(_d := {}, [_d.setdefault(item, []).append(item) '
+            'for item in nums])[0]')
+
+    def test_a_computed_column_reads_the_row_through_its_expression(self):
+        self.assertEqual(
+            _group_by_expr('len($)', 'data'),
+            '(_d := {}, [_d.setdefault(len(item), []).append(item) '
+            'for item in data])[0]')
+
+    def test_a_column_naming_the_row_number_enumerates(self):
+        # The one thing Sort can't do: sorted() takes a key over rows and a row
+        # handed to one doesn't know its number, but a comprehension can count.
+        self.assertEqual(
+            _group_by_expr('$i % 2', 'data'),
+            '(_d := {}, [_d.setdefault(i % 2, []).append(item) '
+            'for i, item in enumerate(data)])[0]')
+
+    def test_a_dict_groups_the_pairs_its_rows_are(self):
+        self.assertEqual(
+            _group_by_expr('$v', 'd', _DICT_BINDS),
+            '(_d := {}, [_d.setdefault(v, []).append((k, v)) '
+            'for k, v in d.items()])[0]')
+
+    def test_a_dict_keyed_on_its_keys_still_groups_the_pairs(self):
+        self.assertEqual(
+            _group_by_expr('$k[0]', 'd', _DICT_BINDS),
+            '(_d := {}, [_d.setdefault(k[0], []).append((k, v)) '
+            'for k, v in d.items()])[0]')
+
+    def test_the_code_it_writes_actually_groups_a_list(self):
+        # Unusual enough an expression to be run rather than only matched.
+        data = [{'b': 1, 'n': 'a'}, {'b': 2, 'n': 'x'}, {'b': 1, 'n': 'c'}]
+        self.assertEqual(
+            eval(_group_by_expr("$['b']", 'data'), {'data': data}),
+            {1: [{'b': 1, 'n': 'a'}, {'b': 1, 'n': 'c'}],
+             2: [{'b': 2, 'n': 'x'}]})
+
+    def test_and_a_dict(self):
+        d = {'a': 1, 'b': 2, 'c': 1}
+        self.assertEqual(
+            eval(_group_by_expr('$v', 'd', _DICT_BINDS), {'d': d}),
+            {1: [('a', 1), ('c', 1)], 2: [('b', 2)]})
+
+    def test_and_one_keyed_on_the_row_number(self):
+        nums = [3, 1, 4, 1, 5]
+        self.assertEqual(
+            eval(_group_by_expr('$i % 2', 'nums'), {'nums': nums}),
+            {0: [3, 4, 5], 1: [1, 1]})
+
+
+class TestColumnBindingWholeRow(unittest.TestCase):
+    """A group holds whole rows, so the binding keeps the pair even where the
+    key alone would have needed only half of it."""
+
+    def test_a_dict_column_narrows_by_default(self):
+        self.assertEqual(_column_binding('$v', 'd', _DICT_BINDS),
+                         'v in d.values()')
+        self.assertEqual(_column_binding('$k', 'd', _DICT_BINDS), 'k in d')
+
+    def test_asking_for_the_whole_row_stops_it_narrowing(self):
+        self.assertEqual(
+            _column_binding('$v', 'd', _DICT_BINDS, whole_row=True),
+            'k, v in d.items()')
+        self.assertEqual(
+            _column_binding('$k', 'd', _DICT_BINDS, whole_row=True),
+            'k, v in d.items()')
+
+    def test_the_index_still_wraps_it(self):
+        self.assertEqual(
+            _column_binding('$v * $i', 'd', _DICT_BINDS, whole_row=True),
+            'i, (k, v) in enumerate(d.items())')
+
+    def test_a_list_has_only_the_one_row_to_bind(self):
+        self.assertEqual(_column_binding("$['b']", 'data', _LIST_BINDS,
+                                         whole_row=True),
+                         'item in data')
+
+
+def group_by_model(lst=None, columns=None, span=SPAN, source='data'):
+    """A table model with a column menu open, and no submenu -- Group By is a
+    row of the menu itself rather than a flyout out of it."""
+    lst, model = sort_model(lst, columns, span, source)
+    model['col_search_dropdown'] = None
+    return lst, model
+
+
+class TestGroupByRow(unittest.TestCase):
+    """One plain row of the column ▾ menu, which writes a line of its own."""
+
+    def row(self, model, lst):
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        start = th.index('col-group-by')
+        return th[th.rindex('<div', 0, start):th.index('</div>', start)]
+
+    def test_it_sits_between_sort_and_compute(self):
+        # Sort's own trigger carries Compute's classes as well as its own, so
+        # the rows are told apart by what they say rather than by class.
+        lst, model = group_by_model()
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        menu = th[th.index('col-menu-panel'):]
+        self.assertEqual(re.findall(r'>(Remove Column|Sort|Group By|Compute)<',
+                                    menu),
+                         ['Remove Column', 'Sort', 'Group By', 'Compute'])
+
+    def test_it_hands_over_the_line_it_writes(self):
+        lst, model = group_by_model()
+        self.assertIn(
+            'snc-py-exp="(_d := {}, [_d.setdefault(item[&#x27;b&#x27;], [])'
+            '.append(item) for item in data])[0]"',
+            self.row(model, lst))
+
+    def test_it_hands_it_out_to_the_right(self):
+        # A tooltip over a menu row would otherwise cover the rows around it.
+        lst, model = group_by_model()
+        self.assertIn('snc-py-exp-align="right"', self.row(model, lst))
+
+    def test_clicking_it_asks_to_group(self):
+        lst, model = group_by_model()
+        self.assertIn(html.escape(repr(GroupByClick(index=0))),
+                      self.row(model, lst))
+
+    def test_it_names_the_list_rather_than_the_lines_own_expression(self):
+        # Like every Compute row, and like Sort's two `(new code)` rows.
+        lst, model = group_by_model()
+        self.assertIn('for item in data', self.row(model, lst))
+
+    def test_a_column_naming_the_row_number_still_works(self):
+        # Where Sort goes inert, this enumerates.
+        lst, model = group_by_model(lst=[1, 2, 3], columns=['$i % 2'])
+        row = self.row(model, lst)
+        self.assertNotIn('unselectable', row)
+        self.assertIn('enumerate(data)', row)
+
+    def test_without_a_source_there_is_no_list_to_name(self):
+        lst, model = group_by_model(source=None)
+        row = self.row(model, lst)
+        self.assertIn('unselectable', row)
+        self.assertNotIn('snc-py-exp', row)
+        self.assertNotIn('GroupByClick', row)
+
+
+class TestGroupByClick(unittest.TestCase):
+    """Clicking it writes the grouped dict as a line of its own."""
+
+    def click(self, event, lst=None, **kwargs):
+        lst, model = group_by_model(lst, **kwargs)
+        return update(make_column_mouse_event(repr(event)),
+                      ('data', 'data'), model, lst, mock_get_visualizer,
+                      eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+
+    def test_it_writes_the_grouped_list_as_a_new_line(self):
+        _, commands = self.click(GroupByClick(index=0))
+        self.assertEqual(
+            commands[0][:2],
+            ('data_grouped',
+             "(_d := {}, [_d.setdefault(item['b'], []).append(item) "
+             "for item in data])[0]"))
+
+    def test_setdefault_is_a_builtin_so_it_needs_no_import(self):
+        _, commands = self.click(GroupByClick(index=0))
+        self.assertEqual(len(commands[0]), 2)
+
+    def test_it_groups_the_whole_list_rather_than_the_lines_expression(self):
+        span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
+        _, commands = self.click(GroupByClick(index=0), span=span)
+        self.assertIn('for item in data', commands[0][1])
+
+    def test_the_name_falls_back_when_the_list_has_no_name(self):
+        _, commands = self.click(GroupByClick(index=0), source='data[0]')
+        self.assertEqual(commands[0][0], 'result_grouped')
+
+    def test_the_menu_closes_behind_it(self):
+        # One line written, unlike checking a box, which invites the next.
+        model, _ = self.click(GroupByClick(index=0))
+        self.assertIsNone(model['openDropdown'])
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_a_list_with_no_source_writes_nothing(self):
+        _, commands = self.click(GroupByClick(index=0), source=None)
+        self.assertEqual(commands, [])
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        _, commands = self.click(GroupByClick(index=7))
+        self.assertEqual(commands, [])
+
+
 class TestSourceSpanAndExprRefresh(unittest.TestCase):
     """The line can be rewritten under a model that outlives the rewrite, so
     what the model knows about it is refreshed rather than remembered."""

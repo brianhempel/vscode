@@ -244,6 +244,18 @@ class SortCodeClick:
     direction: str
 
 @dataclass(frozen=True, slots=True)
+class GroupByClick:
+    """User clicked Group By in a column's ▾ menu, which writes the list cut up
+    by that column as a line of its own.
+
+    A line rather than a rewrite of the one the table is showing: sorting is the
+    same rows in another order, but grouping changes what the value IS -- a list
+    becomes a dict of lists -- so it is written beside the original rather than
+    over it.
+    """
+    index: int
+
+@dataclass(frozen=True, slots=True)
 class ComputeToggle:
     """User checked or unchecked one of a column's Compute rows.
 
@@ -2139,7 +2151,8 @@ def _column_cell_expr(col: str, source_expr: str, i: int, container=None) -> str
 
 
 def _column_binding(col: str, source_expr: str,
-                    binds: 'dict | None' = None) -> str:
+                    binds: 'dict | None' = None, *,
+                    whole_row: bool = False) -> str:
     """How a comprehension over a column's rows binds them: the row alone, or
     the row and its number when the column asks for the number.
 
@@ -2149,6 +2162,11 @@ def _column_binding(col: str, source_expr: str,
     For a dict, the tightest header the column actually asks for -- `$v` alone
     wants `v in d.values()`, `$k` alone `k in d`, anything reading the row
     itself `k, v in d.items()`. The index wraps whichever of those it was.
+
+    *whole_row* is for a caller that keeps the row as well as the column: Group
+    By puts whole rows in its groups, so it needs the pair through even where
+    the key alone would have needed only half of it. A list has the one row to
+    bind either way, so it is a dict-only distinction.
     """
     names_index = dollar_expr_names_index(col)
     if not _is_dict_binds(binds):
@@ -2157,9 +2175,10 @@ def _column_binding(col: str, source_expr: str,
 
     src = _atomize(source_expr)
     wants = dollar_expr_sigils(col) & {'k', 'v'}
-    if wants == {'v'} and not _names_bare_dollar(col):
+    narrows = not whole_row and not _names_bare_dollar(col)
+    if narrows and wants == {'v'}:
         target, iterable = 'v', f'{src}.values()'
-    elif wants == {'k'} and not _names_bare_dollar(col):
+    elif narrows and wants == {'k'}:
         target, iterable = 'k', src
     else:
         target, iterable = 'k, v', f'{src}.items()'
@@ -2899,6 +2918,49 @@ def canonical_source_expr(expr: 'str | None') -> 'str | None':
     """
     parsed = _parse_sorted(expr)
     return parsed[0] if parsed else expr
+
+
+# =============================================================================
+# Group by
+# =============================================================================
+#
+# One row of a column's ▾ menu, which writes the list cut up by that column: a
+# dict whose keys are the column's values and whose values are the rows that
+# had them. The answer is a dict of lists, so the dict and table visualizers
+# already know how to draw it -- the groups show up under the new line without
+# a line of drawing code here.
+
+# The name the dict is built up under, which stays bound in the user's scope
+# after the line runs. Short, because it appears twice in every line this
+# writes.
+_GROUP_VAR = '_d'
+
+
+def _group_by_expr(col: str, source_expr: str,
+                   binds: 'dict | None' = None) -> str:
+    """*source_expr* cut up by *col*: a dict of the rows that share a value.
+
+    A dict of lists rather than `itertools.groupby`, which only groups runs and
+    so answers wrongly for any list the user hasn't already sorted -- and
+    `setdefault` rather than a `defaultdict`, which would need an import. The
+    walrus is what keeps the whole thing an expression, so the row can hand it
+    to a drag and the line it writes reads like every other line this menu
+    writes.
+
+    A group holds whole rows rather than the column's own values -- what the
+    user asks for by grouping is the table cut up -- so the binding is the
+    whole-row one even where the key alone would have needed less of it.
+
+    A column naming `$i` is welcome here, unlike in Sort: `sorted` takes a key
+    over rows and a row handed to one doesn't know its number, but a
+    comprehension can count, so the row number is a key like any other.
+    """
+    return (f'({_GROUP_VAR} := {{}}, '
+            f'[{_GROUP_VAR}.setdefault('
+            f'{_column_key_expr(col, source_expr, binds=binds)}, [])'
+            f'.append({_default_item_expr(binds)}) '
+            f'for {_column_binding(col, source_expr, binds, whole_row=True)}'
+            f'])[0]')
 
 
 # =============================================================================
@@ -5435,6 +5497,34 @@ def _render_sort_panel(col, index, model) -> str:
             f'col-sort-panel" snc-dropdown-align="flyout">{"".join(rows)}</div>')
 
 
+def _render_column_group_by(col, index, model) -> str:
+    """Render the Group By row of a column's ▾ menu.
+
+    A plain row rather than a flyout: there is one thing to write, and it writes
+    a line of its own the way Sort's `(new code)` rows and Compute's Unique and
+    Tally do. So it takes the dwell that puts an open submenu away, like every
+    other row of the menu that opens none of its own.
+
+    The row itself is the handle. Without a source there is no list to name, and
+    so no line to write or drag. A column naming `$i` needs no such care: the
+    comprehension enumerates, where a sort's key could not.
+    """
+    source_expr = model.get('_source_expr')
+    code = (None if source_expr is None
+            else _group_by_expr(col, source_expr, _model_binds(model)))
+    click_attr = '' if code is None else (
+        f' snc-mouse-down="{html.escape(repr(GroupByClick(index=index)))}"')
+    # Rightwards, like every handle in these menus: a tooltip above one would
+    # cover the rows around it.
+    return (
+        f'<div class="snc-dropdown-option col-group-by'
+        f'{"" if code else " unselectable"}"'
+        f'{_column_dwell_attr(model)}{py_exp_attrs(code, align="right")}>'
+        f'<span class="snc-dropdown-option-label"{click_attr}>Group By</span>'
+        f'</div>'
+    )
+
+
 def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
     """Render the Compute row of a column's ▾ menu, and its submenu when open.
 
@@ -5656,6 +5746,7 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
         f'class="snc-dropdown-option-label">Remove Column</span>'
         f'</div>',
         _render_column_sort(col, index, model),
+        _render_column_group_by(col, index, model),
         _render_column_compute(col, index, model, lst, eval_in_scope),
         _render_column_search_row(col, index, model),
         _render_column_tally(col, index, model, lst, eval_in_scope),
@@ -7576,6 +7667,21 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 commands.append(new_code_command(
                     (f'{base}_sorted', _sort_expr(source_expr, col, direction,
                                                   _model_binds(model)))))
+
+        # One line written, like the Sort code rows, so this closes the menu.
+        # The list, named -- the line the table is showing has no say in it,
+        # the same way the Compute rows ask after the whole column.
+        case GroupByClick(index=idx):
+            col = _column_at(model, idx)
+            source_expr = model.get('_source_expr')
+            if col is not None and source_expr is not None:
+                _close_column_menus(model)
+                _has_var, base = _name_context_for_source(source_expr)
+                # setdefault and the walrus are the language's own, so there is
+                # nothing for the line to import.
+                commands.append(new_code_command(
+                    (f'{base}_grouped',
+                     _group_by_expr(col, source_expr, _model_binds(model)))))
 
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.
