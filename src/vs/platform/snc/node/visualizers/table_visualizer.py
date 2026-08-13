@@ -3655,9 +3655,15 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     if ctx.get('is_predicate') and ctx.get('is_dict'):
         pred = ctx['predicate_expr']
-        if ctx.get('pick_expr') or first:
-            # Pick builds band slices a dict cannot take, and the first-match
-            # forms splice a list. Both stay dim rather than write a lie.
+        if ctx.get('pick_expr'):
+            # Pick builds band slices a dict cannot take.
+            return None
+        if first and action not in ('filter', 'find_indices'):
+            # Find One hands back the pair, and a dict's "index" is its key --
+            # both read cleanly. Delete-one does not: a dict has no positional
+            # splice, and every expression form of "remove the first matching
+            # entry" either evaluates the predicate twice or collides on a None
+            # key. Left unwritten rather than written badly.
             return None
         # $i is the ROOT ROW index, so enumerate(d.items()) binds exactly what
         # $i means. The header is the general one either way: narrowing it to
@@ -3665,6 +3671,11 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
         rows = (f'i, (k, v) in enumerate({src}.items())' if ctx.get('names_index')
                 else f'k, v in {src}.items()')
         match action:
+            case 'filter' if first:
+                # The pair is what a row IS, so that is what one match is.
+                code = f'next(((k, v) for {rows} if {pred}), None)'
+            case 'find_indices' if first:
+                code = f'next((k for {rows} if {pred}), None)'
             case 'filter':
                 code = f'{{k: v for {rows} if {pred}}}'
             case 'delete':

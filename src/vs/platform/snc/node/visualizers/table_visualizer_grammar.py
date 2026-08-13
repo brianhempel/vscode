@@ -26,6 +26,14 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
             # ctx never reaches them, while a dict ctx must not fall through to
             # the list templates below and write a comprehension that silently
             # yields keys.
+            BiTemplate("FilterPredicateFirstDict",
+                       "next(((k, v) for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), None)",
+                       {'is_predicate': True, 'is_first': True,
+                        'names_index': False, 'is_dict': True}),
+            BiTemplate("FilterPredicateFirstDictIndexed",
+                       "next(((k, v) for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}), None)",
+                       {'is_predicate': True, 'is_first': True,
+                        'names_index': True, 'is_dict': True}),
             BiTemplate("FilterPredicateAllDict",
                        "{k: v for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}}",
                        {'is_predicate': True, 'is_first': False,
@@ -143,6 +151,14 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("FindIndicesAction", [
+        BiTemplate("FindIndicesPredicateFirstDict",
+                   "next((k for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), None)",
+                   {'is_predicate': True, 'is_first': True,
+                    'names_index': False, 'is_dict': True}),
+        BiTemplate("FindIndicesPredicateFirstDictIndexed",
+                   "next((k for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}), None)",
+                   {'is_predicate': True, 'is_first': True,
+                    'names_index': True, 'is_dict': True}),
         BiTemplate("FindIndicesPredicateDict",
                    "[k for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}]",
                    {'is_predicate': True, 'names_index': False, 'is_dict': True, 'is_first': False}),
@@ -429,7 +445,11 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     if ctx.get('is_dict') and (ctx.get('is_index') or ctx.get('is_slice')
                                or ctx.get('is_multi_index')
                                or ctx.get('is_broadcast_slice')
-                               or ctx.get('is_first') or ctx.get('pick_expr')):
+                               or ctx.get('pick_expr')):
+        return None
+    # Delete-one has no dict form: see the live generator for why.
+    if ctx.get('is_dict') and ctx.get('is_first') and action not in (
+            'filter', 'find_indices'):
         return None
     gen_ctx = {k: v for k, v in ctx.items() if v is not None}
     gen_ctx['action'] = action

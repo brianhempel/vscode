@@ -9280,14 +9280,18 @@ class TestDictActionsAreDimmed(unittest.TestCase):
                 for action in ('filter', 'delete', 'find_indices'):
                     self.assertIsNone(generate_action(action, ctx))
 
-    def test_the_first_match_forms_stay_cut(self):
+    def test_only_delete_one_stays_cut_under_first_match(self):
+        # Find One and Find Indices read cleanly for a dict; delete-one does
+        # not, so it alone stays dim.
         d = {'alice': 30, 'bob': 25}
         model = init_model(d, mock_get_visualizer_dict_tables,
                            var_and_exp=('d', 'd'))
         model['search'] = '$v > 28'
         model['first_match'] = True
         ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
-        self.assertIsNone(generate_action('filter', ctx))
+        self.assertIsNotNone(generate_action('filter', ctx))
+        self.assertIsNotNone(generate_action('find_indices', ctx))
+        self.assertIsNone(generate_action('delete', ctx))
 
     def test_the_predicate_actions_now_write_and_their_buttons_are_live(self):
         d, model = self.dict_model()
@@ -9479,6 +9483,78 @@ class TestDictGrammarRoundtrip(unittest.TestCase):
         parsed = self.parse_generated_code('[item for item in data if item > 1]')
         self.assertIsNotNone(parsed)
         self.assertFalse(parsed.get('is_dict'))
+
+
+class TestDictFirstMatch(unittest.TestCase):
+    """Find One on a dict. The pair is what a row IS, so that is what the
+    first match hands back -- and a dict's "index" is its key, so Find Indices
+    hands back the key."""
+
+    @staticmethod
+    def ctx(search='$v > 28'):
+        d = {'alice': 30, 'bob': 25, 'carol': 41}
+        model = init_model(d, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = search
+        model['first_match'] = True
+        return _get_search_context(model, ('d', 'd'), source_expr='d')
+
+    def test_filter_first_hands_back_the_pair(self):
+        self.assertEqual(generate_action('filter', self.ctx())[1],
+                         'next(((k, v) for k, v in d.items() if v > 28), None)')
+
+    def test_find_indices_first_hands_back_the_key(self):
+        self.assertEqual(generate_action('find_indices', self.ctx())[1],
+                         'next((k for k, v in d.items() if v > 28), None)')
+
+    def test_the_indexed_twins(self):
+        self.assertEqual(
+            generate_action('filter', self.ctx('$i > 0'))[1],
+            'next(((k, v) for i, (k, v) in enumerate(d.items()) if i > 0), None)')
+
+    def test_the_generated_code_runs(self):
+        d = {'alice': 30, 'bob': 25, 'carol': 41}
+        self.assertEqual(eval(generate_action('filter', self.ctx())[1],
+                              {'d': d}), ('alice', 30))
+        self.assertEqual(eval(generate_action('find_indices', self.ctx())[1],
+                              {'d': d}), 'alice')
+
+    def test_no_match_is_none_rather_than_an_error(self):
+        d = {'alice': 30}
+        code = generate_action('filter', self.ctx('$v > 999'))[1]
+        self.assertIsNone(eval(code, {'d': d}))
+
+    def test_delete_one_stays_cut(self):
+        # A dict has no positional splice, and every expression form of
+        # "remove the first matching entry" either evaluates the predicate
+        # twice or collides on a None key. Left unwritten rather than written
+        # badly -- the button dims.
+        self.assertIsNone(generate_action('delete', self.ctx()))
+
+    def test_both_generators_agree_and_it_parses_back(self):
+        from table_visualizer_grammar import (generate_action as ggen,
+                                              parse_generated_code)
+        for action in ('filter', 'find_indices'):
+            for search in ('$v > 28', '$i > 0'):
+                with self.subTest(action=action, search=search):
+                    ctx = self.ctx(search)
+                    live = generate_action(action, ctx)
+                    gram = ggen(action, ctx)
+                    self.assertIsNotNone(gram)
+                    self.assertEqual(live[1], gram[1])
+                    parsed = parse_generated_code(gram[1])
+                    self.assertIsNotNone(parsed, gram[1])
+                    self.assertTrue(parsed.get('is_dict'))
+                    self.assertTrue(parsed.get('is_first'))
+
+    def test_a_list_first_match_is_unchanged(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model['search'] = '$ > 1'
+        model['first_match'] = True
+        ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         'next((item for item in data if item > 1), None)')
 
 
 class TestDictColumnValues(unittest.TestCase):
