@@ -54,6 +54,12 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
             BiTemplate("FilterPredicateAllIndexed",
                        "[item for i, item in enumerate({source_expr:VarOrExpr}) if {predicate_expr:AnyPython}]",
                        {'is_predicate': True, 'is_first': False, 'names_index': True}),
+            BiTemplate("FilterIndexDict",
+                       "list({source_expr:VarOrExpr}.items())[{index_expr:IndexExpr}]",
+                       {'is_index': True, 'is_dict': True}),
+            BiTemplate("FilterSliceDict",
+                       "dict(list({source_expr:VarOrExpr}.items())[{slice_start:SliceComponent}:{slice_stop:SliceComponent}])",
+                       {'is_slice': True, 'is_dict': True}),
             BiTemplate("FilterSlice",
                        "{source_expr:VarOrExpr}[{slice_start:SliceComponent}:{slice_stop:SliceComponent}]",
                        {'is_slice': True}),
@@ -87,6 +93,20 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 
     # --- Delete ---
 
+    Alt("DeleteSliceLeftDict", [
+        BiTemplate("DeleteSliceLeftDictPresent",
+                   "list({source_expr:VarOrExpr}.items())[:{slice_start:SliceComponent}]",
+                   {'has_slice_start': True}),
+        BiTemplate("DeleteSliceLeftDictEmpty", "[]", {'has_slice_start': False}),
+    ], {}),
+
+    Alt("DeleteSliceRightDict", [
+        BiTemplate("DeleteSliceRightDictPresent",
+                   "list({source_expr:VarOrExpr}.items())[{slice_stop:SliceComponent}:]",
+                   {'has_slice_stop': True}),
+        BiTemplate("DeleteSliceRightDictEmpty", "[]", {'has_slice_stop': False}),
+    ], {}),
+
     Alt("DeleteSliceLeft", [
         BiTemplate("DeleteSliceLeftPresent",
                    "{source_expr:VarOrExpr}[:{slice_start:SliceComponent}]",
@@ -102,6 +122,12 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("DeleteAction", [
+        BiTemplate("DeleteIndexDict",
+                   "{k: v for j, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if j != {index_expr:IndexExpr}}",
+                   {'is_index': True, 'is_dict': True}),
+        BiTemplate("DeleteSliceDict",
+                   "dict({:DeleteSliceLeftDict} + {:DeleteSliceRightDict})",
+                   {'is_slice': True, 'is_dict': True}),
         BiTemplate("DeletePredicateFirstDict",
                    "next(({k2: v2 for k2, v2 in {source_expr:VarOrExpr}.items() if k2 != k} for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), {source_expr:VarOrExpr})",
                    {'is_predicate': True, 'is_first': True,
@@ -159,6 +185,12 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("FindIndicesAction", [
+        BiTemplate("FindIndicesIndexDict",
+                   "list({source_expr:VarOrExpr})[{index_expr:IndexExpr}]",
+                   {'is_index': True, 'is_dict': True}),
+        BiTemplate("FindIndicesSliceDict",
+                   "list({source_expr:VarOrExpr})[{slice_start:SliceComponent}:{slice_stop:SliceComponent}]",
+                   {'is_slice': True, 'is_dict': True}),
         BiTemplate("FindIndicesPredicateFirstDict",
                    "next((k for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), None)",
                    {'is_predicate': True, 'is_first': True,
@@ -450,8 +482,7 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     # The same cut as the live generator: the positional families have no dict
     # templates, so without this a dict ctx would fall through to the list ones
     # and write a comprehension that silently yields keys.
-    if ctx.get('is_dict') and (ctx.get('is_index') or ctx.get('is_slice')
-                               or ctx.get('is_multi_index')
+    if ctx.get('is_dict') and (ctx.get('is_multi_index')
                                or ctx.get('is_broadcast_slice')
                                or ctx.get('pick_expr')):
         return None

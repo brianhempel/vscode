@@ -3596,13 +3596,55 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     # plus a BiTemplate each; they land with splat, which needs the same
     # machinery. The search still highlights the right rows -- only the buttons
     # dim. The predicate and whole-list families below ARE written.
-    if ctx.get('is_dict') and (ctx.get('is_index') or ctx.get('is_slice')
-                               or ctx.get('is_multi_index')
+    if ctx.get('is_dict') and (ctx.get('is_multi_index')
                                or ctx.get('is_broadcast_slice')):
+        # Both want band machinery over list(d.items()) -- the same machinery
+        # Pick wants, and they land together with it.
         return None
 
     src = ctx['source_expr']
     first = ctx.get('is_first', False)
+
+    if ctx.get('is_dict') and ctx.get('is_index'):
+        idx = ctx['index_expr']
+        pairs = f'list({_atomize(src)}.items())'
+        match action:
+            case 'filter':
+                # A row IS the pair, so that is what one position picks.
+                code = f'{pairs}[{idx}]'
+            case 'delete':
+                # By POSITION, not by key: the position is what was searched
+                # for, and d.pop(k) would need a key nobody named.
+                code = (f'{{k: v for j, (k, v) in enumerate({_atomize(src)}.items()) '
+                        f'if j != {idx}}}')
+            case 'find_indices':
+                # A dict's index is its key.
+                code = f'list({_atomize(src)})[{idx}]'
+            case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_dict') and ctx.get('is_slice'):
+        start = ctx.get('slice_start', '')
+        stop = ctx.get('slice_stop', '')
+        atom = _atomize(src)
+        pairs = f'list({atom}.items())'
+        match action:
+            case 'filter':
+                code = f'dict({pairs}[{start}:{stop}])'
+            case 'delete':
+                left = f'{pairs}[:{start}]' if start else '[]'
+                right = f'{pairs}[{stop}:]' if stop else '[]'
+                code = f'dict({left} + {right})'
+            case 'find_indices':
+                code = f'list({atom})[{start}:{stop}]'
+            case _:
+                # Count and Join over a slice have no dict template yet, and a
+                # generator that writes what the grammar cannot read back is
+                # exactly the asymmetry both were built to avoid.
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
 
     if ctx.get('is_index'):
         idx = ctx['index_expr']

@@ -9366,15 +9366,22 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         model['search'] = search
         return d, model
 
-    def test_the_positional_families_write_nothing(self):
-        # d[3] is a key lookup, d[1:5] a TypeError, and src[:i] + src[i+1:]
-        # splices a list -- so these stay cut, and the buttons stay dim.
-        for search in ('1', '0:2', '[0, 1]'):
+    def test_index_and_slice_now_write_through_the_items(self):
+        for search in ('1', '0:2'):
             with self.subTest(search=search):
                 d, model = self.positional_model(search)
                 ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
                 for action in ('filter', 'delete', 'find_indices'):
-                    self.assertIsNone(generate_action(action, ctx))
+                    self.assertIsNotNone(generate_action(action, ctx))
+
+    def test_the_band_families_stay_cut(self):
+        # multi-index and broadcast-slice want the band machinery Pick wants,
+        # and land with it.
+        d, model = self.positional_model('[0, 1]')
+        ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
+        for action in ('filter', 'delete', 'find_indices'):
+            with self.subTest(action=action):
+                self.assertIsNone(generate_action(action, ctx))
 
     def test_the_first_match_forms_all_write_for_a_dict(self):
         # All three: the pair, the key, and the dict without its first match.
@@ -9393,8 +9400,8 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         html_out = _render_action_buttons(model, d)
         self.assertIn('data-action-expr', html_out)
 
-    def test_a_positional_search_still_dims_the_buttons(self):
-        d, model = self.positional_model('0:2')
+    def test_a_band_search_still_dims_the_buttons(self):
+        d, model = self.positional_model('[0, 1]')
         html_out = _render_action_buttons(model, d)
         self.assertIn('dimmed', html_out)
         self.assertNotIn('data-action-expr', html_out)
@@ -9678,6 +9685,93 @@ class TestDictFirstMatch(unittest.TestCase):
         ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
         self.assertEqual(generate_action('filter', ctx)[1],
                          'next((item for item in data if item > 1), None)')
+
+
+class TestDictPositionalActions(unittest.TestCase):
+    """`3` and `1:3` in the search box mean ROW POSITIONS for a dict, since
+    list(my_dict) gives positions to the kv pairs. The rows already highlighted;
+    now the buttons write too, through list(d.items()) and back into a dict."""
+
+    D = {'alice': 30, 'bob': 25, 'carol': 41}
+
+    def ctx(self, search):
+        model = init_model(self.D, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        model['search'] = search
+        return _get_search_context(model, ('d', 'd'), source_expr='d')
+
+    def gen(self, action, search):
+        result = generate_action(action, self.ctx(search))
+        return None if result is None else result[1]
+
+    def test_an_index_picks_the_pair_at_that_position(self):
+        self.assertEqual(self.gen('filter', '1'), 'list(d.items())[1]')
+        self.assertEqual(eval(self.gen('filter', '1'), {'d': self.D}),
+                         ('bob', 25))
+
+    def test_an_index_deletes_by_position_not_by_key(self):
+        # d.pop(k) would need the key; the position is what was searched for.
+        code = self.gen('delete', '1')
+        self.assertEqual(code,
+                         '{k: v for j, (k, v) in enumerate(d.items()) if j != 1}')
+        self.assertEqual(eval(code, {'d': self.D}), {'alice': 30, 'carol': 41})
+
+    def test_an_index_finds_the_key_at_that_position(self):
+        self.assertEqual(self.gen('find_indices', '1'), 'list(d)[1]')
+        self.assertEqual(eval(self.gen('find_indices', '1'), {'d': self.D}),
+                         'bob')
+
+    def test_a_slice_stays_a_dict(self):
+        code = self.gen('filter', '0:2')
+        self.assertEqual(code, 'dict(list(d.items())[0:2])')
+        self.assertEqual(eval(code, {'d': self.D}), {'alice': 30, 'bob': 25})
+
+    def test_a_slice_delete_keeps_both_ends(self):
+        code = self.gen('delete', '1:2')
+        self.assertEqual(eval(code, {'d': self.D}),
+                         {'alice': 30, 'carol': 41})
+
+    def test_an_open_ended_slice_works_at_both_ends(self):
+        self.assertEqual(eval(self.gen('filter', ':2'), {'d': self.D}),
+                         {'alice': 30, 'bob': 25})
+        self.assertEqual(eval(self.gen('filter', '1:'), {'d': self.D}),
+                         {'bob': 25, 'carol': 41})
+
+    def test_a_slice_finds_the_keys_in_that_run(self):
+        self.assertEqual(eval(self.gen('find_indices', '0:2'), {'d': self.D}),
+                         ['alice', 'bob'])
+
+    def test_the_band_families_stay_cut(self):
+        # multi-index and broadcast-slice want band machinery Pick also wants.
+        self.assertIsNone(self.gen('filter', '[0, 2]'))
+
+    def test_count_and_join_over_a_slice_stay_cut(self):
+        # No dict template for them yet, and a generator that writes what the
+        # grammar cannot read back is the asymmetry both were built to avoid.
+        self.assertIsNone(self.gen('count', '0:2'))
+        self.assertIsNone(self.gen('join', '0:2'))
+
+    def test_both_generators_agree_on_every_positional_action(self):
+        from table_visualizer_grammar import (generate_action as ggen,
+                                              parse_generated_code)
+        for search in ('1', '0:2', ':2', '1:'):
+            for action in ('filter', 'delete', 'find_indices', 'count', 'join'):
+                with self.subTest(search=search, action=action):
+                    ctx = self.ctx(search)
+                    live = generate_action(action, ctx)
+                    gram = ggen(action, ctx)
+                    self.assertEqual(live and live[1], gram and gram[1])
+                    if live:
+                        self.assertIsNotNone(parse_generated_code(live[1]))
+
+    def test_a_list_positional_action_is_unchanged(self):
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model['search'] = '1'
+        ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
+        self.assertEqual(generate_action('filter', ctx)[1], 'data[1]')
+        self.assertEqual(generate_action('delete', ctx)[1],
+                         'data[:1] + data[1+1:]')
 
 
 class TestDictColumnValues(unittest.TestCase):
