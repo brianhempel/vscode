@@ -9993,6 +9993,177 @@ class TestDictPositionalActions(unittest.TestCase):
                          'data[:1] + data[1+1:]')
 
 
+# The dict twin of the worked example: a match in the middle, two columns.
+DICT_PICK_D = {'alice': 30, 'bob': 25, 'carol': 41}
+DICT_PICK_COLUMNS = {'$': {}, '$v': {}}
+DICT_PICK_SEARCH = '$v < 28'
+
+
+def dict_pick_eval(code):
+    return eval(code, {'d': dict(DICT_PICK_D)})
+
+
+def make_dict_pick_model(picked=None, columns=None, search=DICT_PICK_SEARCH,
+                         tool='pick'):
+    """A table model parked in pick mode over DICT_PICK_D."""
+    model = init_model(DICT_PICK_D, mock_get_visualizer_dict_tables,
+                       eval_in_scope=dict_pick_eval, var_and_exp=('d', 'd'))
+    model['columns'] = dict(DICT_PICK_COLUMNS if columns is None else columns)
+    model['search'] = search
+    model['tool'] = tool
+    model['first_match'] = True
+    model['picked'] = list(picked) if picked else None
+    model['pick_expr'] = _build_pick_expr(model, 'd')
+    return model
+
+
+class TestDictPickExpression(unittest.TestCase):
+    """Assembling picked regions of a dict table into one expression.
+
+    A band of rows is a run of PAIRS, so it is read out of list(d.items()) --
+    the same route every positional dict action takes. The inner comprehension
+    binds `k2, v2` rather than `k, v` so it cannot shadow the next(...) that
+    will wrap it."""
+
+    def _expr(self, picked):
+        return make_dict_pick_model(picked=picked)['pick_expr']
+
+    def test_a_matched_cell_is_the_column_itself(self):
+        self.assertEqual(self._expr(['match_col_1']), '$v')
+        self.assertEqual(self._expr(['match_col_0']), '$')
+        self.assertEqual(self._expr(['match_idx']), 'i')
+
+    def test_a_band_reads_through_the_items(self):
+        self.assertEqual(self._expr(['pre_col_1']),
+                         '[v2 for k2, v2 in list(d.items())[:i]]')
+        self.assertEqual(self._expr(['post_col_1']),
+                         '[v2 for k2, v2 in list(d.items())[i + 1:]]')
+
+    def test_a_whole_column_is_what_the_header_hands_over(self):
+        # Not a comprehension: the short spelling a person would recognise, and
+        # the same one the column header drags.
+        self.assertEqual(self._expr(['pre_col_1', 'match_col_1', 'post_col_1']),
+                         'list(d.values())')
+        self.assertEqual(self._expr(['pre_col_0', 'match_col_0', 'post_col_0']),
+                         'list(d.items())')
+
+    def test_the_identity_column_needs_no_comprehension(self):
+        # `$` IS the pair, so a band of it is already the answer.
+        self.assertEqual(self._expr(['pre_col_0']), 'list(d.items())[:i]')
+        self.assertEqual(self._expr(['match_col_0', 'post_col_0']),
+                         'list(d.items())[i:]')
+
+    def test_the_index_column_is_positions_for_a_dict_too(self):
+        self.assertEqual(self._expr(['pre_idx', 'match_idx', 'post_idx']),
+                         'list(range(len(d)))')
+        self.assertEqual(self._expr(['pre_idx']), 'list(range(i))')
+
+    def test_a_column_naming_the_row_number_counts_from_the_band(self):
+        model = make_dict_pick_model(picked=['post_col_1'],
+                                     columns={'$': {}, '($i, $v)': {}})
+        self.assertEqual(
+            model['pick_expr'],
+            '[(i, v2) for i, (k2, v2) in enumerate(list(d.items())[i + 1:], i + 1)]')
+
+    def test_multiple_regions_become_a_tuple(self):
+        self.assertEqual(self._expr(['match_idx', 'match_col_1']), '(i, $v)')
+
+
+class TestDictPickGeneratedCode(unittest.TestCase):
+    """The line a dict pick produces, and what it evaluates to."""
+
+    def _generate(self, picked, action='filter', columns=None):
+        model = make_dict_pick_model(picked=picked, columns=columns)
+        ctx = _get_search_context(model, ('d', 'd'),
+                                  eval_in_scope=dict_pick_eval)
+        result = generate_action(action, ctx)
+        return None if result is None else result[1]
+
+    def test_a_scalar_pick_binds_the_pair(self):
+        code = self._generate(['match_col_1'])
+        self.assertEqual(
+            code, 'next((v for k, v in d.items() if v < 28), None)')
+        self.assertEqual(dict_pick_eval(code), 25)
+
+    def test_an_index_pick_enumerates_the_items(self):
+        code = self._generate(['match_idx'])
+        self.assertEqual(
+            code,
+            'next((i for i, (k, v) in enumerate(d.items()) if v < 28), None)')
+        self.assertEqual(dict_pick_eval(code), 1)
+
+    def test_a_band_pick_runs_over_the_items(self):
+        code = self._generate(['pre_col_1'])
+        self.assertEqual(
+            code,
+            'next(([v2 for k2, v2 in list(d.items())[:i]] '
+            'for i, (k, v) in enumerate(d.items()) if v < 28), None)')
+        self.assertEqual(dict_pick_eval(code), [30])
+
+    def test_the_band_names_do_not_shadow_the_binding(self):
+        # k2/v2 inside, k/v outside: the predicate still reads the matched row.
+        code = self._generate(['post_col_0'])
+        self.assertEqual(dict_pick_eval(code), [('carol', 41)])
+
+    def test_picking_the_whole_row_degenerates_to_the_plain_filter(self):
+        # `$` IS the pair, so this is the ordinary dict first-match filter.
+        self.assertEqual(self._generate(['match_col_0']),
+                         'next(((k, v) for k, v in d.items() if v < 28), None)')
+
+    def test_a_tuple_pick(self):
+        self.assertEqual(dict_pick_eval(self._generate(['match_idx',
+                                                        'match_col_1'])),
+                         (1, 25))
+
+    def test_loop_and_join_run_over_an_array_pick(self):
+        # A band is a list whichever container it came from, so these need no
+        # dict form of their own -- only the binding around them does.
+        self.assertEqual(
+            self._generate(['pre_col_1'], action='loop_no_idx'),
+            'for item in next(([v2 for k2, v2 in list(d.items())[:i]] '
+            'for i, (k, v) in enumerate(d.items()) if v < 28), None):')
+        join = self._generate(['pre_col_1'], action='join')
+        self.assertEqual(dict_pick_eval(join), '30')
+
+    def test_no_pick_generates_the_plain_dict_filter(self):
+        self.assertEqual(self._generate([]),
+                         'next(((k, v) for k, v in d.items() if v < 28), None)')
+
+    def test_both_generators_agree(self):
+        from table_visualizer_grammar import generate_action as ggen
+        for picked in ([], ['match_col_1'], ['match_idx'], ['pre_col_1'],
+                       ['match_idx', 'match_col_1'], ['pre_col_0'],
+                       ['pre_col_1', 'match_col_1', 'post_col_1']):
+            with self.subTest(picked=picked):
+                model = make_dict_pick_model(picked=picked)
+                ctx = _get_search_context(model, ('d', 'd'),
+                                          eval_in_scope=dict_pick_eval)
+                live = generate_action('filter', ctx)
+                self.assertEqual(ggen('filter', ctx)[1], live[1])
+
+    def test_a_dict_pick_relinks_to_the_dict_it_came_from(self):
+        from table_visualizer import _LINK_CONFIG, _ctx_to_model
+        from visualizer_utils import parse_owned_line
+        code = self._generate(['match_col_1'])
+        owned = parse_owned_line(_LINK_CONFIG, code, ('d', 'd'))
+        self.assertIsNotNone(owned)
+        self.assertEqual(owned[0]['source_expr'], 'd')
+        model = make_dict_pick_model(picked=[])
+        _ctx_to_model(owned[0], model)
+        self.assertEqual(model['search'], '$v < 28')
+        self.assertEqual(model['pick_expr'], '$v')
+
+    def test_a_list_pick_is_unchanged(self):
+        model = make_pick_model(picked=['pre_col_1'])
+        ctx = _get_search_context(model, ('strs', 'strs'),
+                                  eval_in_scope=pick_eval)
+        self.assertEqual(model['pick_expr'], '[len(x) for x in strs[:i]]')
+        self.assertEqual(
+            generate_action('filter', ctx)[1],
+            'next(([len(x) for x in strs[:i]] for i, item in enumerate(strs) '
+            'if len(item) > 4), None)')
+
+
 class TestDictRelinkDollarizesItsOwnNames(unittest.TestCase):
     """A dict predicate read back off a line has to return to the search box as
     dollars. It was coming back as the bare comprehension names -- `v > 26`,

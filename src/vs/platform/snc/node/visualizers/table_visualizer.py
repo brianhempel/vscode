@@ -3419,8 +3419,10 @@ def _search_context_for(model: dict, var_and_exp=None,
     # first-match mode and rides along for generate_action to wrap.
     pick_expr = model.get('pick_expr')
     if pick_expr:
+        binds = _model_binds(model)
         ctx['pick_expr'] = replace_dollars_in_py_exp(
-            pick_expr, ['item', _atomize(source_expr)], index_exp='i')
+            pick_expr, _column_dollars(source_expr, _default_item_expr(binds)),
+            index_exp='i', bindings=binds)
         # Either side of the next(...) may want the row's number, and one
         # binding serves both.
         ctx['needs_index'] = _pick_needs_index(pick_expr) or ctx['names_index']
@@ -3590,9 +3592,19 @@ def pick_filter_expr(ctx: dict) -> str:
     index, when the picked regions need one -- for the assembled expression to
     evaluate against. This is what Filter emits; Loop and Join run over it
     directly when the pick is an array.
+
+    The binding is the container's: a dict's row is the pair its .items() gives.
+    Everything inside is already written against those names, so this is the
+    only place the two containers differ.
     """
-    binding = (f'i, item in enumerate({ctx["source_expr"]})'
-               if ctx.get('needs_index') else f'item in {ctx["source_expr"]}')
+    src = ctx['source_expr']
+    if ctx.get('is_dict'):
+        rows = f'{_atomize(src)}.items()'
+        binding = (f'i, (k, v) in enumerate({rows})'
+                   if ctx.get('needs_index') else f'k, v in {rows}')
+    else:
+        binding = (f'i, item in enumerate({src})'
+                   if ctx.get('needs_index') else f'item in {src}')
     return (f'next(({ctx["pick_expr"]} for {binding} '
             f'if {ctx["predicate_expr"]}), None)')
 
@@ -3892,10 +3904,10 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     if ctx.get('is_predicate') and ctx.get('is_dict'):
         pred = ctx['predicate_expr']
-        if ctx.get('pick_expr'):
-            # Pick builds band slices a dict cannot take.
-            return None
-        if first and action not in ('filter', 'find_indices', 'delete'):
+        pick = ctx.get('pick_expr')
+        pick_array = bool(pick) and bool(ctx.get('pick_is_array'))
+        if first and not pick and action not in ('filter', 'find_indices',
+                                                 'delete'):
             return None
         # $i is the ROOT ROW index, so enumerate(d.items()) binds exactly what
         # $i means. The header is the general one either way: narrowing it to
@@ -3903,6 +3915,22 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
         rows = (f'i, (k, v) in enumerate({src}.items())' if ctx.get('names_index')
                 else f'k, v in {src}.items()')
         match action:
+            case 'filter' if pick:
+                code = pick_filter_expr(ctx)
+            case 'loop_no_idx' if pick_array:
+                code = f'for item in {pick_filter_expr(ctx)}:'
+            case 'loop_new_idx' if pick_array:
+                code = f'for i, item in enumerate({pick_filter_expr(ctx)}):'
+            case 'loop_orig_idx' if pick_array:
+                # Same as a list's: an array pick is a projection of a row
+                # range, so there is no original index to hand back.
+                return None
+            case 'join' if pick_array:
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(item) for item in {pick_filter_expr(ctx)})'
+            case _ if pick:
+                # Every other action over a pick is unwritten for a list too.
+                return None
             case 'filter' if first:
                 # The pair is what a row IS, so that is what one match is.
                 code = f'next(((k, v) for {rows} if {pred}), None)'
@@ -4305,11 +4333,25 @@ def _pick_region_ids(columns, first_idx: int, n_rows: int) -> list:
             for band in bands]
 
 
+# What a band's comprehension binds over a dict, and why it is not `k, v`: the
+# band sits inside the next(...) that binds the matched row, and that one has
+# taken those names already. The list's `x` is the same idea for the same
+# reason.
+_PICK_INNER_DICT_BINDS = {'i': 'i', 'k': 'k2', 'v': 'v2'}
+_PICK_INNER_DICT_TARGET = 'k2, v2'
+_PICK_INNER_DICT_ITEM = '(k2, v2)'
+
+
 def _pick_range_expr(col_id: str, columns, source_expr: str,
-                     start: str | None, stop: str | None) -> str | None:
+                     start: str | None, stop: str | None,
+                     binds: 'dict | None' = None) -> str | None:
     """Expression for one column over the row range [start, stop).
 
     start/stop are Python source snippets, or None for the ends of the list.
+
+    A dict's rows are its pairs, so a band of them is a run of list(d.items())
+    -- the same route every positional dict action takes -- while the row
+    NUMBERS the index column reports are positions either way.
     """
     if col_id == PICK_IDX_COLUMN:
         lo = start or '0'
@@ -4318,33 +4360,51 @@ def _pick_range_expr(col_id: str, columns, source_expr: str,
     col = _pick_column_expr(col_id, columns)
     if col is None:
         return None
+    is_dict = _is_dict_binds(binds)
     if start is None and stop is None:
+        # A whole column has a short spelling, and it is the one the header
+        # hands over -- so a full-height pick and a header drag agree.
+        if is_dict:
+            return _column_values_expr(col, source_expr, binds)
         sub = source_expr
+    elif is_dict:
+        sub = f'list({_atomize(source_expr)}.items())[{start or ""}:{stop or ""}]'
     else:
         sub = f'{source_expr}[{start or ""}:{stop or ""}]'
+    item_expr = _PICK_INNER_DICT_ITEM if is_dict else _PICK_INNER_VAR
+    target = _PICK_INNER_DICT_TARGET if is_dict else _PICK_INNER_VAR
     # `$$` is the whole list, not the sublist this region is a band of.
     inner = replace_dollars_in_py_exp(
-        col, _column_dollars(source_expr, _PICK_INNER_VAR), index_exp='i')
-    if inner == _PICK_INNER_VAR:
+        col, _column_dollars(source_expr, item_expr), index_exp='i',
+        bindings=_PICK_INNER_DICT_BINDS if is_dict else None)
+    if inner == item_expr:
         # The identity column (a bare $, which is the default) maps each row to
         # itself, so the sublist is already the answer -- no comprehension.
         return sub
     if not dollar_expr_names_index(col):
-        return f'[{inner} for {_PICK_INNER_VAR} in {sub}]'
+        return f'[{inner} for {target} in {sub}]'
     # `$i` is the row's number in the whole list, not its place in this band, so
     # the count starts where the band does.
     from_row = '' if not start or start == '0' else f', {start}'
-    return f'[{inner} for i, {_PICK_INNER_VAR} in enumerate({sub}{from_row})]'
+    # A tuple target needs its own parens inside the enumerate pair.
+    unpacked = f'({target})' if ',' in target else target
+    return f'[{inner} for i, {unpacked} in enumerate({sub}{from_row})]'
 
 
 def _pick_match_expr(col_id: str, columns) -> str | None:
-    """Expression for one column of the matched row itself (a scalar)."""
+    """Expression for one column of the matched row itself (a scalar).
+
+    Stays in dollar form: the next(...) around it binds the row, so the same
+    substitution the search box's own expressions get is the right one, and it
+    happens once, later.
+    """
     if col_id == PICK_IDX_COLUMN:
         return 'i'
     return _pick_column_expr(col_id, columns)
 
 
-def _pick_region_expr(region_id: str, columns, source_expr: str) -> str | None:
+def _pick_region_expr(region_id: str, columns, source_expr: str,
+                      binds: 'dict | None' = None) -> str | None:
     """Dollar-form expression for a single region, or None if it doesn't exist."""
     parsed = _parse_pick_region_id(region_id)
     if parsed is None:
@@ -4355,7 +4415,7 @@ def _pick_region_expr(region_id: str, columns, source_expr: str) -> str | None:
     band_range = _PICK_BAND_RANGES.get(band)
     if band_range is None:
         return None
-    return _pick_range_expr(col_id, columns, source_expr, *band_range)
+    return _pick_range_expr(col_id, columns, source_expr, *band_range, binds)
 
 
 # Band sets that cover a single contiguous run of rows. A run of rows within ONE
@@ -4420,6 +4480,7 @@ def _build_pick_expr(model: dict, source_expr: str) -> str | None:
         return None
     columns = model.get('columns', [])
     bands_by_column = _pick_bands_by_column(model)
+    binds = _model_binds(model)
 
     parts = []
     for col_id in _pick_column_ids(columns):
@@ -4428,13 +4489,15 @@ def _build_pick_expr(model: dict, source_expr: str) -> str | None:
             continue
         collapsed = _PICK_COLLAPSE_RANGES.get(frozenset(bands))
         if collapsed is not None:
-            expr = _pick_range_expr(col_id, columns, source_expr, *collapsed)
+            expr = _pick_range_expr(col_id, columns, source_expr, *collapsed,
+                                    binds)
             if expr:
                 parts.append(expr)
             continue
         for band in PICK_BANDS:
             if band in bands:
-                expr = _pick_region_expr(f'{band}_{col_id}', columns, source_expr)
+                expr = _pick_region_expr(f'{band}_{col_id}', columns,
+                                         source_expr, binds)
                 if expr:
                     parts.append(expr)
 
@@ -5978,14 +6041,16 @@ def _pick_standalone_exprs(model: dict, source_expr: str, eval_in_scope,
     if not base:
         return {}
     columns = model.get('columns', [])
+    binds = _model_binds(model)
     out = {}
     for region_id in region_ids:
-        expr = _pick_region_expr(region_id, columns, source_expr)
+        expr = _pick_region_expr(region_id, columns, source_expr, binds)
         if not expr:
             continue
         ctx = dict(base)
         ctx['pick_expr'] = replace_dollars_in_py_exp(
-            expr, ['item', _atomize(source_expr)], index_exp='i')
+            expr, _column_dollars(source_expr, _default_item_expr(binds)),
+            index_exp='i', bindings=binds)
         # Either side of the next(...) may want the row's number -- the region
         # or the predicate it is picked out by -- and one binding serves both.
         ctx['needs_index'] = _pick_needs_index(expr) or bool(base.get('names_index'))

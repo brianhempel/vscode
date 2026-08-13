@@ -86,6 +86,14 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     # by Filter and by the Loop forms that run over an array pick.
 
     Alt("PickFirstMatch", [
+        BiTemplate("PickFirstMatchDictPlain",
+                   "next(({pick_expr:AnyPython} for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), None)",
+                   {'is_predicate': True, 'is_first': True, 'needs_index': False,
+                    'is_dict': True}),
+        BiTemplate("PickFirstMatchDictIndexed",
+                   "next(({pick_expr:AnyPython} for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}), None)",
+                   {'is_predicate': True, 'is_first': True, 'needs_index': True,
+                    'is_dict': True}),
         BiTemplate("PickFirstMatchPlain",
                    "next(({pick_expr:AnyPython} for item in {source_expr:VarOrExpr} if {predicate_expr:AnyPython}), None)",
                    {'is_predicate': True, 'is_first': True, 'needs_index': False}),
@@ -492,12 +500,8 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
-    # The same cut as the live generator: Pick has no dict templates, so
-    # without this a dict ctx would fall through to the list ones and write a
-    # comprehension that silently yields keys. (Broadcast slice needs no guard:
-    # it has no templates for ANY container, so nothing here can match it.)
-    if ctx.get('is_dict') and ctx.get('pick_expr'):
-        return None
+    # Broadcast slice needs no guard: it has no templates for ANY container, so
+    # nothing here can match it.
     if ctx.get('is_dict') and action in ('loop_no_idx', 'loop_orig_idx',
                                          'loop_new_idx') and (
             ctx.get('is_multi_index') or ctx.get('is_broadcast_slice')):
