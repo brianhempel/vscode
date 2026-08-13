@@ -27,7 +27,7 @@ pip install pytest
 /Applications/Python\ 3.14/Install\ Certificates.command
 
 # Build, may have to run `npm run watch` the first time to build extensions
-npm run watch-snc
+npm run snc # runs `npm run watch-snc` in a restart loop. agent edits occasionally crash watch-snc
 
 # Launch app. Run in separate terminal from watch-snc
 ./scripts/code.sh
