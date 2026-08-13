@@ -492,14 +492,15 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
-    # The same cut as the live generator: these have no dict templates, so
+    # The same cut as the live generator: Pick has no dict templates, so
     # without this a dict ctx would fall through to the list ones and write a
-    # comprehension that silently yields keys.
-    if ctx.get('is_dict') and (ctx.get('is_broadcast_slice')
-                               or ctx.get('pick_expr')):
+    # comprehension that silently yields keys. (Broadcast slice needs no guard:
+    # it has no templates for ANY container, so nothing here can match it.)
+    if ctx.get('is_dict') and ctx.get('pick_expr'):
         return None
-    if ctx.get('is_dict') and ctx.get('is_multi_index') and action in (
-            'loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
+    if ctx.get('is_dict') and action in ('loop_no_idx', 'loop_orig_idx',
+                                         'loop_new_idx') and (
+            ctx.get('is_multi_index') or ctx.get('is_broadcast_slice')):
         return None
     # Delete-one has no dict form: see the live generator for why.
     if ctx.get('is_dict') and ctx.get('is_first') and action not in (

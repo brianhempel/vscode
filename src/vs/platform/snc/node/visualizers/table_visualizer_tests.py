@@ -9366,23 +9366,14 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         model['search'] = search
         return d, model
 
-    def test_the_positional_searches_now_write_through_the_items(self):
-        for search in ('1', '0:2', '[0, 1]'):
+    def test_every_positional_search_now_writes_through_the_items(self):
+        # All four families: index, slice, multi-index, broadcast slice.
+        for search in ('1', '0:2', '[0, 1]', '[0,1]:[1,2]'):
             with self.subTest(search=search):
                 d, model = self.positional_model(search)
                 ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
                 for action in ('filter', 'delete', 'find_indices'):
                     self.assertIsNotNone(generate_action(action, ctx))
-
-    def test_the_band_family_stays_cut(self):
-        # Only broadcast slice is left: it yields a BAND per pair, which is the
-        # machinery Pick wants, so they land together. Multi-index is not in
-        # this group -- a set of positions needs no ranges -- and it writes.
-        d, model = self.positional_model('[0,1]:[1,2]')
-        ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
-        for action in ('filter', 'delete', 'find_indices'):
-            with self.subTest(action=action):
-                self.assertIsNone(generate_action(action, ctx))
 
     def test_the_first_match_forms_all_write_for_a_dict(self):
         # All three: the pair, the key, and the dict without its first match.
@@ -9401,16 +9392,12 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         html_out = _render_action_buttons(model, d)
         self.assertIn('data-action-expr', html_out)
 
-    def test_a_band_search_still_dims_the_buttons(self):
-        d, model = self.positional_model('[0,1]:[1,2]')
-        html_out = _render_action_buttons(model, d)
-        self.assertIn('dimmed', html_out)
-        self.assertNotIn('data-action-expr', html_out)
-
-    def test_a_multi_index_search_lights_the_buttons_up(self):
-        d, model = self.positional_model('[0, 1]')
-        html_out = _render_action_buttons(model, d)
-        self.assertIn('data-action-expr', html_out)
+    def test_every_positional_search_lights_the_buttons_up(self):
+        for search in ('1', '0:2', '[0, 1]', '[0,1]:[1,2]'):
+            with self.subTest(search=search):
+                d, model = self.positional_model(search)
+                html_out = _render_action_buttons(model, d)
+                self.assertIn('data-action-expr', html_out)
 
     def test_a_list_still_generates_its_actions(self):
         lst = [1, 2, 3]
@@ -9710,6 +9697,12 @@ class TestDictPositionalActions(unittest.TestCase):
         result = generate_action(action, self.ctx(search))
         return None if result is None else result[1]
 
+    def list_ctx(self, search):
+        model = init_model([10, 20, 30], mock_get_visualizer,
+                           var_and_exp=('data', 'data'))
+        model['search'] = search
+        return _get_search_context(model, ('data', 'data'), source_expr='data')
+
     def test_an_index_picks_the_pair_at_that_position(self):
         self.assertEqual(self.gen('filter', '1'), 'list(d.items())[1]')
         self.assertEqual(eval(self.gen('filter', '1'), {'d': self.D}),
@@ -9747,11 +9740,74 @@ class TestDictPositionalActions(unittest.TestCase):
         self.assertEqual(eval(self.gen('find_indices', '0:2'), {'d': self.D}),
                          ['alice', 'bob'])
 
-    def test_the_band_family_stays_cut(self):
-        # Broadcast slice yields BANDS -- a run per pair -- and that is the
-        # machinery Pick wants too. Multi-index is not in this group: it is a
-        # set of positions, no ranges involved, so it lands on its own below.
-        self.assertIsNone(self.gen('filter', '[0,2]:[1,3]'))
+    def test_a_broadcast_slice_yields_one_dict_per_band(self):
+        code = self.gen('filter', '[0,2]:[1,3]')
+        self.assertEqual(
+            code,
+            '[dict(list(d.items())[i:j]) for i, j in zip([0,2], [1,3])]')
+        self.assertEqual(eval(code, {'d': self.D}),
+                         [{'alice': 30}, {'carol': 41}])
+
+    def test_a_broadcast_slice_anchored_at_one_end(self):
+        self.assertEqual(eval(self.gen('filter', '[0,2]:'), {'d': self.D}),
+                         [{'alice': 30, 'bob': 25, 'carol': 41}, {'carol': 41}])
+        self.assertEqual(eval(self.gen('filter', ':[1,3]'), {'d': self.D}),
+                         [{'alice': 30}, {'alice': 30, 'bob': 25, 'carol': 41}])
+
+    def test_a_broadcast_slice_deletes_every_banded_row(self):
+        code = self.gen('delete', '[0,2]:[1,3]')
+        self.assertEqual(eval(code, {'d': self.D}), {'bob': 25})
+
+    def test_a_broadcast_slice_counts_the_bands(self):
+        self.assertEqual(self.gen('count', '[0,2]:[1,3]'), 'len([0,2])')
+        self.assertEqual(self.gen('all', '[0,2]:[1,3]'), 'len([0,2]) == len(d)')
+
+    def test_a_broadcast_slice_finds_the_key_each_band_starts_at(self):
+        code = self.gen('find_indices', '[0,2]:[1,3]')
+        self.assertEqual(code, '[list(d)[i] for i in [0,2]]')
+        self.assertEqual(eval(code, {'d': self.D}), ['alice', 'carol'])
+
+    def test_a_stop_anchored_band_starts_where_it_says(self):
+        # A list answers `[0] * len([2,3])` here even though its bands start at
+        # 1 -- it hardcodes the 0 rather than reading slice_start. That is a
+        # pre-existing list bug, not a shape to copy, so the dict reads the
+        # start it was actually given.
+        code = self.gen('find_indices', '1:[2,3]')
+        self.assertEqual(code, '[list(d)[1]] * len([2,3])')
+        self.assertEqual(eval(code, {'d': self.D}), ['bob', 'bob'])
+        self.assertEqual(eval(self.gen('filter', '1:[2,3]'), {'d': self.D}),
+                         [{'bob': 25}, {'bob': 25, 'carol': 41}])
+
+    def test_a_broadcast_slice_cuts_the_same_actions_a_list_does(self):
+        # No list writes join over a band either, and loops stay unbuilt for
+        # every dict positional family.
+        for action in ('join', 'loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
+            with self.subTest(action=action):
+                self.assertIsNone(self.gen(action, '[0,2]:[1,3]'))
+
+    def test_a_broadcast_slice_is_live_only_for_a_dict_as_it_is_for_a_list(self):
+        # There are no broadcast BiTemplates for any container: the family is
+        # generated live and never parsed back, so a dict having none is parity
+        # rather than a gap. Adding dict-only ones would be the asymmetry.
+        from table_visualizer_grammar import (generate_action as ggen,
+                                              parse_generated_code)
+        for action in ('filter', 'delete', 'find_indices', 'count'):
+            with self.subTest(action=action):
+                ctx = self.ctx('[0,2]:[1,3]')
+                self.assertIsNotNone(generate_action(action, ctx))
+                self.assertIsNone(ggen(action, ctx))
+        lst_ctx = self.list_ctx('[0,2]:[1,3]')
+        self.assertIsNone(ggen('filter', lst_ctx))
+        self.assertIsNone(parse_generated_code(
+            '[dict(list(d.items())[i:j]) for i, j in zip([0,2], [1,3])]'))
+
+    def test_a_list_broadcast_slice_is_unchanged(self):
+        ctx = self.list_ctx('[0,2]:[1,3]')
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         '[data[i:j] for i, j in zip([0,2], [1,3])]')
+        self.assertEqual(generate_action('find_indices', ctx)[1], '[0,2]')
+        self.assertEqual(generate_action('loop_no_idx', ctx)[1],
+                         'for item in [data[i:j] for i, j in zip([0,2], [1,3])]:')
 
     def test_count_over_a_slice_stays_cut(self):
         # Not a dict gap: no list writes count over a slice either, so there is

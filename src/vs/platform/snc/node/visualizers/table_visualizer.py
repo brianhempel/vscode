@@ -3590,20 +3590,14 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     Returns (suggest_name, code_str) or None.
     """
-    # A broadcast slice stays cut for a dict: it yields a BAND per pair, and
-    # bands over list(d.items()) are the machinery Pick wants too, so they land
-    # together. The search still highlights the right rows; only the buttons
-    # dim. Every other dict family below IS written.
-    if ctx.get('is_dict') and ctx.get('is_broadcast_slice'):
-        return None
-
-    # No dict positional search writes a loop. A list's multi-index does, but
-    # its "original index" is a position where a dict's is a key, so
-    # `for i in [0, 2]:` has no honest dict reading -- and building two of the
-    # three loops would leave the family lopsided. None are built, which is what
-    # index and slice already do.
-    if ctx.get('is_dict') and ctx.get('is_multi_index') and action in (
-            'loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
+    # No dict positional search writes a loop. A list's multi-index and
+    # broadcast slice do, but their "original index" is a position where a
+    # dict's is a key, so `for i in [0, 2]:` has no honest dict reading -- and
+    # building some of the three would leave the family lopsided. None are
+    # built, which is what index and slice already do.
+    if ctx.get('is_dict') and action in ('loop_no_idx', 'loop_orig_idx',
+                                         'loop_new_idx') and (
+            ctx.get('is_multi_index') or ctx.get('is_broadcast_slice')):
         return None
 
     src = ctx['source_expr']
@@ -3680,6 +3674,55 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 sep = ctx.get('join_separator', "''")
                 code = f'{sep}.join(str(v) for k, v in [{pairs}[i] for i in {indices}])'
             case _:
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_dict') and ctx.get('is_broadcast_slice'):
+        atom = _atomize(src)
+        pairs = f'list({atom}.items())'
+        has_start = ctx.get('has_start_list')
+        has_stop = ctx.get('has_stop_list')
+        # A band is a run of rows, so each one is its own dict.
+        if has_start and has_stop:
+            starts, stops = ctx['start_list_expr'], ctx['stop_list_expr']
+            iter_expr = f'dict({pairs}[i:j]) for i, j in zip({starts}, {stops})'
+            count_expr = starts
+            ranges = f'range(s, e) for s, e in zip({starts}, {stops})'
+            first_key = f'[list({atom})[i] for i in {starts}]'
+        elif has_start:
+            starts = ctx['start_list_expr']
+            stop = ctx.get('slice_stop', '') or ''
+            iter_expr = f'dict({pairs}[i:{stop}]) for i in {starts}'
+            count_expr = starts
+            stop_expr = stop if stop else f'len({atom})'
+            ranges = f'range(s, {stop_expr}) for s in {starts}'
+            first_key = f'[list({atom})[i] for i in {starts}]'
+        else:
+            stops = ctx['stop_list_expr']
+            start = ctx.get('slice_start', '') or ''
+            iter_expr = f'dict({pairs}[{start}:i]) for i in {stops}'
+            count_expr = stops
+            ranges = f'range({start or "0"}, e) for e in {stops}'
+            # Every band starts in the same place, so every band reports the
+            # same key. A list hardcodes 0 here even when it was given a start;
+            # that is a list bug rather than a shape to copy.
+            first_key = f'[list({atom})[{start or "0"}]] * len({stops})'
+        match action:
+            case 'filter':
+                code = f'[{iter_expr}]'
+            case 'delete':
+                code = (f'{{k: v for j, (k, v) in enumerate({atom}.items()) '
+                        f'if j not in set().union(*[{ranges}])}}')
+            case 'find_indices':
+                code = first_key
+            case 'count':
+                code = f'len({count_expr})'
+            case 'any':
+                code = f'len({count_expr}) > 0'
+            case 'all':
+                code = f'len({count_expr}) == len({atom})'
+            case _:
+                # Join over a band is unwritten for every container.
                 return None
         return (_suggest_name_for_action(action, ctx), code)
 
