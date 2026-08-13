@@ -3227,6 +3227,24 @@ class TestGenerateAction(unittest.TestCase):
         _, code = result
         self.assertEqual(code, '[1,2,4]')
 
+    def test_find_indices_broadcast_stop_starts_at_zero(self):
+        # `:[3,5,7]` -- every band starts at the front, so every band reports 0.
+        _, code = generate_action('find_indices', self._broadcast_stop_ctx())
+        self.assertEqual(code, '[0] * len([3,5,7])')
+        self.assertEqual(eval(code), [0, 0, 0])
+
+    def test_find_indices_broadcast_stop_reads_the_start_it_was_given(self):
+        # `1:[3,5,7]` -- the bands are data[1:3], data[1:5], data[1:7], so they
+        # start at 1. This used to hardcode the 0 and claim they started at 0.
+        _, code = generate_action('find_indices',
+                                  self._broadcast_stop_ctx(start='1'))
+        self.assertEqual(code, '[1] * len([3,5,7])')
+        self.assertEqual(eval(code), [1, 1, 1])
+        # The band expression it has to agree with:
+        _, filter_code = generate_action('filter',
+                                         self._broadcast_stop_ctx(start='1'))
+        self.assertEqual(filter_code, '[data[1:i] for i in [3,5,7]]')
+
     def test_find_indices_multi_pair(self):
         result = generate_action('find_indices', self._multi_pair_ctx())
         self.assertIsNotNone(result)

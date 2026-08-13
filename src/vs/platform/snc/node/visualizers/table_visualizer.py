@@ -3871,7 +3871,11 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 if has_start:
                     code = ctx['start_list_expr']
                 else:
-                    code = f'[0] * len({ctx["stop_list_expr"]})'
+                    # Every band starts in the same place, so every band reports
+                    # the same index -- but that place is the slice's own start,
+                    # not necessarily 0. `1:[3,5]` bands data[1:3] and data[1:5].
+                    start = ctx.get('slice_start', '') or '0'
+                    code = f'[{start}] * len({ctx["stop_list_expr"]})'
             case _:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
