@@ -3638,10 +3638,16 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 code = f'dict({left} + {right})'
             case 'find_indices':
                 code = f'list({atom})[{start}:{stop}]'
+            case 'join':
+                # Values, matching the predicate form -- Join means one thing on
+                # a dict however the rows were chosen. The tuple target is also
+                # what keeps the line out of the list reader, whose slice shape
+                # binds a bare `item`.
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(v) for k, v in {pairs}[{start}:{stop}])'
             case _:
-                # Count and Join over a slice have no dict template yet, and a
-                # generator that writes what the grammar cannot read back is
-                # exactly the asymmetry both were built to avoid.
+                # Count over a slice is not a dict gap: no list writes one
+                # either, so there is nothing here to reach parity with.
                 return None
         return (_suggest_name_for_action(action, ctx), code)
 

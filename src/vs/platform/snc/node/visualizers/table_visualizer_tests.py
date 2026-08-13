@@ -9745,17 +9745,64 @@ class TestDictPositionalActions(unittest.TestCase):
         # multi-index and broadcast-slice want band machinery Pick also wants.
         self.assertIsNone(self.gen('filter', '[0, 2]'))
 
-    def test_count_and_join_over_a_slice_stay_cut(self):
-        # No dict template for them yet, and a generator that writes what the
-        # grammar cannot read back is the asymmetry both were built to avoid.
+    def test_count_over_a_slice_stays_cut(self):
+        # Not a dict gap: no list writes count over a slice either, so there is
+        # nothing to reach parity with. Giving dicts one is a new feature for
+        # both containers, and it lands as one.
         self.assertIsNone(self.gen('count', '0:2'))
-        self.assertIsNone(self.gen('join', '0:2'))
+
+    def test_a_slice_joins_the_values(self):
+        # The same reading the predicate form uses -- `str(v)`, not the pair --
+        # so Join means one thing on a dict however the rows were chosen.
+        code = self.gen('join', '0:2')
+        self.assertEqual(code, "''.join(str(v) for k, v in list(d.items())[0:2])")
+        self.assertEqual(eval(code, {'d': self.D}), '3025')
+
+    def test_a_slice_join_takes_the_separator(self):
+        ctx = self.ctx('0:2')
+        ctx['join_separator'] = "', '"
+        code = generate_action('join', ctx)[1]
+        self.assertEqual(eval(code, {'d': self.D}), '30, 25')
+
+    def test_an_open_ended_slice_join_works_at_both_ends(self):
+        self.assertEqual(eval(self.gen('join', ':2'), {'d': self.D}), '3025')
+        self.assertEqual(eval(self.gen('join', '1:'), {'d': self.D}), '2541')
+
+    def test_a_slice_join_reads_back_as_a_dict_slice(self):
+        from table_visualizer_grammar import parse_generated_code
+        ctx = parse_generated_code(self.gen('join', '0:2'))
+        self.assertEqual(ctx['action'], 'join')
+        self.assertEqual(ctx['source_expr'], 'd')
+        self.assertTrue(ctx['is_dict'])
+        self.assertTrue(ctx['is_slice'])
+        self.assertEqual((ctx['slice_start'], ctx['slice_stop']), ('0', '2'))
+
+    def test_a_slice_join_relinks_to_the_dict_it_came_from(self):
+        # The source_expr guard is what made this fail before: reading the line
+        # as a list over `list(d.items())` never matched the visualizer's `d`.
+        from table_visualizer import _LINK_CONFIG
+        from visualizer_utils import parse_owned_line
+        owned = parse_owned_line(_LINK_CONFIG, self.gen('join', '0:2'), ('d', 'd'))
+        self.assertIsNotNone(owned)
+        self.assertEqual(owned[0]['source_expr'], 'd')
+
+    def test_a_list_slice_join_still_reads_as_a_list(self):
+        # A tuple target is what marks the dict form, so the list's `for item`
+        # shape cannot be caught by it.
+        from table_visualizer_grammar import parse_generated_code
+        ctx = parse_generated_code("''.join(str(item) for item in data[0:2])")
+        self.assertEqual(ctx['source_expr'], 'data')
+        self.assertTrue(ctx['is_slice'])
+        self.assertFalse(ctx.get('is_dict'))
 
     def test_both_generators_agree_on_every_positional_action(self):
+        # Join is exempt: it lives outside the grammar for every container (no
+        # Join templates exist at all), and is read back by the hand-written
+        # AST reader instead. Its contract is tested above, by round-trip.
         from table_visualizer_grammar import (generate_action as ggen,
                                               parse_generated_code)
         for search in ('1', '0:2', ':2', '1:'):
-            for action in ('filter', 'delete', 'find_indices', 'count', 'join'):
+            for action in ('filter', 'delete', 'find_indices', 'count'):
                 with self.subTest(search=search, action=action):
                     ctx = self.ctx(search)
                     live = generate_action(action, ctx)
@@ -9763,6 +9810,16 @@ class TestDictPositionalActions(unittest.TestCase):
                     self.assertEqual(live and live[1], gram and gram[1])
                     if live:
                         self.assertIsNotNone(parse_generated_code(live[1]))
+
+    def test_every_slice_join_shape_round_trips(self):
+        from table_visualizer_grammar import parse_generated_code
+        for search in ('0:2', ':2', '1:'):
+            with self.subTest(search=search):
+                code = self.gen('join', search)
+                ctx = parse_generated_code(code)
+                self.assertIsNotNone(ctx)
+                self.assertEqual(ctx['source_expr'], 'd')
+                self.assertTrue(ctx['is_dict'])
 
     def test_a_list_positional_action_is_unchanged(self):
         lst = [1, 2, 3]

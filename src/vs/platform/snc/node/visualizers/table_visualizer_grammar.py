@@ -521,6 +521,24 @@ def _source_text(code_line: str, node: ast.AST | None) -> str:
     return ast.get_source_segment(code_line, node) or ast.unparse(node)
 
 
+def _dict_items_source(code_line: str, node: ast.AST) -> str | None:
+    """The `d` in `list(d.items())`, or None if that is not the shape.
+
+    Peeling the wrapper is what hands the dict back its own name: the templates
+    write positional dict actions through `list(d.items())`, so the source the
+    user sees is one layer in.
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == 'list' and len(node.args) == 1
+            and not node.keywords):
+        return None
+    inner = node.args[0]
+    if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == 'items' and not inner.args and not inner.keywords):
+        return None
+    return _source_text(code_line, inner.func.value)
+
+
 def _parse_generated_join(code_line: str) -> dict | None:
     try:
         expr = ast.parse(code_line, mode='eval').body
@@ -552,6 +570,36 @@ def _parse_generated_join(code_line: str) -> dict | None:
 
     item_expr = gen.elt.args[0]
     join_separator = _source_text(code_line, expr.func.value)
+
+    # A dict slice joins its values out of `list(d.items())[a:b]`. It comes
+    # first because the bytes are otherwise a legal list reading -- a slice of a
+    # source spelled `list(d.items())` -- and that reading loses the dict: the
+    # wrapper becomes the source expression, which then matches no visualizer's
+    # own variable and quietly drops the line back to unlinked. The `k, v`
+    # target is what tells them apart; the list forms below all bind a bare
+    # `item` or `i`, so nothing they accept can reach here.
+    if (
+        isinstance(comp.target, ast.Tuple) and not comp.ifs
+        and [getattr(e, 'id', None) for e in comp.target.elts] == ['k', 'v']
+        and isinstance(item_expr, ast.Name) and item_expr.id == 'v'
+        and isinstance(comp.iter, ast.Subscript)
+        and isinstance(comp.iter.slice, ast.Slice) and comp.iter.slice.step is None
+    ):
+        pairs = _dict_items_source(code_line, comp.iter.value)
+        if pairs is not None:
+            return {
+                'action': 'join',
+                'source_expr': pairs,
+                'join_separator': join_separator,
+                'is_dict': True,
+                'is_slice': True,
+                'slice_start': _source_text(code_line, comp.iter.slice.lower),
+                'slice_stop': _source_text(code_line, comp.iter.slice.upper),
+                'is_index': False,
+                'is_predicate': False,
+                'is_multi_index': False,
+                'is_first': False,
+            }
 
     if (
         isinstance(comp.target, ast.Name) and comp.target.id == 'item'
