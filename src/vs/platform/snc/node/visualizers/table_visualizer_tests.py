@@ -10035,6 +10035,298 @@ def make_dict_pick_model(picked=None, columns=None, search=DICT_PICK_SEARCH,
     return model
 
 
+from table_visualizer import (
+    _agg_group_depth, _column_group_computes, _set_column_group_computes,
+    _leaf_group_values, _leaf_values, _leaf_columns, _agg_layout, _agg_value,
+    _column_computes, _set_column_computes,
+)
+
+
+class TestGroupAggregationStorage(unittest.TestCase):
+    """Where a per-group aggregation lives, and how it stays apart from the
+    whole-column ones without a second model key.
+
+    A leading run of `*` says how far out to ask it -- one per splat level,
+    innermost first, the way a run of `$` counts scopes outward. Stripping it is
+    the accessor's job, so nothing downstream of one ever sees the marker."""
+
+    def model(self):
+        return init_model({'a': [1, 2]}, mock_get_visualizer_dict_tables,
+                          var_and_exp=('d', 'd'))
+
+    def test_the_depth_is_the_run_of_stars(self):
+        self.assertEqual(_agg_group_depth('sum($)'), 0)
+        self.assertEqual(_agg_group_depth('*sum($)'), 1)
+        self.assertEqual(_agg_group_depth('**sum($)'), 2)
+
+    def test_a_multiplication_inside_is_not_a_marker(self):
+        # Only a LEADING run counts, so an expression that multiplies is safe.
+        self.assertEqual(_agg_group_depth('sum($) * 2'), 0)
+        self.assertEqual(_agg_group_depth('*sum($) * 2'), 1)
+
+    def test_the_two_kinds_live_in_one_map_and_read_apart(self):
+        m = self.model()
+        _set_column_computes(m, '*$v', ['sum($)'])
+        _set_column_group_computes(m, '*$v', ['max($)'])
+        self.assertEqual(_column_computes(m, '*$v'), ['sum($)'])
+        self.assertEqual(_column_group_computes(m, '*$v'), ['max($)'])
+        # One key, not two.
+        self.assertEqual(sorted(m['column_computes']['*$v']),
+                         ['*max($)', 'sum($)'])
+
+    def test_setting_one_kind_leaves_the_other_alone(self):
+        m = self.model()
+        _set_column_group_computes(m, '*$v', ['max($)'])
+        _set_column_computes(m, '*$v', ['sum($)', 'min($)'])
+        self.assertEqual(_column_group_computes(m, '*$v'), ['max($)'])
+        _set_column_group_computes(m, '*$v', [])
+        # Menu order, not the order they were asked in: Sum is above Min.
+        self.assertEqual(_column_computes(m, '*$v'), ['sum($)', 'min($)'])
+        self.assertEqual(_column_group_computes(m, '*$v'), [])
+
+    def test_nothing_downstream_sees_the_marker(self):
+        # _agg_layout drives the tfoot, and a per-group ask is not in it.
+        m = self.model()
+        m['columns'] = {'$k': {}, '*$v': {}}
+        _set_column_group_computes(m, '*$v', ['sum($)'])
+        self.assertEqual(_agg_layout(m['columns'], m), [])
+
+    def test_a_column_with_no_asks_is_dropped_rather_than_stored_empty(self):
+        m = self.model()
+        _set_column_group_computes(m, '*$v', ['sum($)'])
+        _set_column_group_computes(m, '*$v', [])
+        self.assertIsNone(m['column_computes'])
+
+
+class TestGroupAggregationValues(unittest.TestCase):
+    """What a per-group aggregation is asked of: one group's worth of the
+    column, not the whole flattened thing."""
+
+    D = {'a': [1, 2, 3], 'b': [10, 20]}
+
+    def model(self, columns=None):
+        m = init_model(self.D, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = columns or {'$k': {}, '*$v': {}}
+        return m
+
+    def test_each_group_gets_its_own_values(self):
+        m = self.model()
+        leaf = _leaf_columns(m['columns'])[1]
+        self.assertEqual(_leaf_group_values(leaf, 0, self.D, m), [1, 2, 3])
+        self.assertEqual(_leaf_group_values(leaf, 1, self.D, m), [10, 20])
+
+    def test_the_whole_column_is_still_the_flattened_one(self):
+        m = self.model()
+        leaf = _leaf_columns(m['columns'])[1]
+        self.assertEqual(_leaf_values(leaf, self.D, m), [1, 2, 3, 10, 20])
+
+    def test_a_sub_column_reads_through_to_the_element(self):
+        d = {'a': [{'n': 1}, {'n': 2}], 'b': [{'n': 5}]}
+        m = init_model(d, mock_get_visualizer_dict_tables, var_and_exp=('d', 'd'))
+        m['columns'] = {'$k': {}, '*$v': {'cols': {"$['n']": {}}}}
+        leaf = _leaf_columns(m['columns'])[1]
+        self.assertEqual(_leaf_group_values(leaf, 0, d, m), [1, 2])
+        self.assertEqual(_leaf_group_values(leaf, 1, d, m), [5])
+
+    def test_a_group_answer_is_the_aggregation_over_those_values(self):
+        m = self.model()
+        leaf = _leaf_columns(m['columns'])[1]
+        self.assertEqual(_agg_value('sum($)', _leaf_group_values(leaf, 0, self.D, m)), 6)
+        self.assertEqual(_agg_value('sum($)', _leaf_group_values(leaf, 1, self.D, m)), 30)
+
+
+class TestGroupAggregationRendering(unittest.TestCase):
+    """The extra row inside each group's span."""
+
+    D = {'a': [1, 2, 3], 'b': [10, 20]}
+
+    def render(self, group_aggs=('sum($)',), columns=None):
+        m = init_model(self.D, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = columns or {'$k': {}, '*$v': {}}
+        if group_aggs:
+            _set_column_group_computes(m, '*$v', list(group_aggs))
+        return visualize(self.D, m, mock_get_visualizer_dict_tables, None)
+
+    def rows(self, html_out):
+        body = html_out.split('<tfoot')[0]
+        return re.findall(r'<tr[^>]*>.*?</tr>', body, re.S)
+
+    def test_each_group_grows_by_one_row(self):
+        # 3 + 2 data rows + one aggregation row each, plus the header row.
+        plain = self.rows(self.render(group_aggs=()))
+        with_agg = self.rows(self.render())
+        self.assertEqual(len(with_agg), len(plain) + 2)
+
+    def test_the_unsplatted_column_spans_the_aggregation_row_too(self):
+        out = self.render()
+        # Group 'a' is 3 data rows + 1 aggregation row.
+        self.assertIn('rowspan="4"', out)
+        self.assertIn('rowspan="3"', out)  # group 'b': 2 + 1
+
+    def test_the_answer_lands_in_the_splatted_column(self):
+        out = self.render()
+        agg_rows = [r for r in self.rows(out) if 'group-agg' in r]
+        self.assertEqual(len(agg_rows), 2)
+        self.assertIn('6', agg_rows[0])
+        self.assertIn('30', agg_rows[1])
+
+    def test_the_whole_column_answer_still_goes_under_the_table(self):
+        m = init_model(self.D, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = {'$k': {}, '*$v': {}}
+        _set_column_computes(m, '*$v', ['sum($)'])
+        out = visualize(self.D, m, mock_get_visualizer_dict_tables, None)
+        self.assertIn('<tfoot', out)
+        self.assertIn('36', out)  # 1+2+3+10+20, the flattened column
+        self.assertNotIn('group-agg', out)
+
+    def test_both_kinds_at_once(self):
+        m = init_model(self.D, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = {'$k': {}, '*$v': {}}
+        _set_column_computes(m, '*$v', ['sum($)'])
+        _set_column_group_computes(m, '*$v', ['sum($)'])
+        out = visualize(self.D, m, mock_get_visualizer_dict_tables, None)
+        self.assertIn('36', out)   # under the table
+        self.assertIn('group-agg', out)
+        self.assertIn('6', out)    # inside group 'a'
+
+    def test_two_group_asks_stack(self):
+        out = self.render(group_aggs=('min($)', 'max($)'))
+        agg_rows = [r for r in self.rows(out) if 'group-agg' in r]
+        self.assertEqual(len(agg_rows), 4)  # two per group
+        self.assertIn('rowspan="5"', out)   # group 'a': 3 + 2
+
+    def test_a_table_with_no_splat_is_untouched(self):
+        m = init_model(self.D, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = {'$k': {}, '$v': {}}
+        _set_column_group_computes(m, '$v', ['sum($)'])
+        out = visualize(self.D, m, mock_get_visualizer_dict_tables, None)
+        # Nothing groups it, so there is nowhere for a per-group row to go.
+        self.assertNotIn('group-agg', out)
+
+    def test_a_list_is_untouched(self):
+        lst = [1, 2, 3]
+        m = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        before = visualize(lst, m, mock_get_visualizer, None)
+        self.assertNotIn('group-agg', before)
+
+    def test_a_group_cell_is_a_label_not_an_editor(self):
+        # The submenu's boxes name themselves by their column and write back
+        # through it, so one per group would be several inputs claiming the
+        # same name and all writing the whole column's ask.
+        out = self.render(group_aggs=('sum($) / 2',))
+        agg_rows = [r for r in self.rows(out) if 'group-agg' in r]
+        self.assertTrue(agg_rows)
+        for r in agg_rows:
+            self.assertNotIn('<input', r)
+            self.assertNotIn('snc-input', r)
+        self.assertIn('sum($) / 2', html.unescape(agg_rows[0]))
+
+    def test_a_group_cell_hands_over_no_expression(self):
+        # The whole-column read has a name in the user's code; one group of it
+        # does not, so the cell offers nothing rather than something that names
+        # a different set of rows than the one on screen.
+        from table_visualizer import _agg_group_child_key, _agg_child_expr
+        key = _agg_group_child_key('*$v', 'sum($)', 0)
+        self.assertIsNone(_agg_child_expr(key, 'd'))
+        out = self.render()
+        for r in [r for r in self.rows(out) if 'group-agg' in r]:
+            self.assertNotIn('child-expr=d', r)
+
+    def test_each_group_answer_is_its_own_child(self):
+        # Keyed alike, expanding one group's answer would expand every other.
+        from table_visualizer import _agg_group_child_key, _parse_agg_child_key
+        keys = {_agg_group_child_key('*$v', 'sum($)', i) for i in (0, 1)}
+        self.assertEqual(len(keys), 2)
+        asking, template, shown, group = _parse_agg_child_key(
+            _agg_group_child_key('*$v', 'sum($)', 1))
+        self.assertEqual((asking, template, shown, group),
+                         ('*$v', 'sum($)', '*$v', 1))
+
+    def test_a_whole_column_key_still_parses_as_one(self):
+        from table_visualizer import _agg_child_key, _parse_agg_child_key
+        self.assertEqual(
+            _parse_agg_child_key(_agg_child_key('$v', 'sum($)', '$v')),
+            ('$v', 'sum($)', '$v', None))
+
+    def test_a_percentile_shows_its_level(self):
+        out = self.render(group_aggs=('np.percentile($, {{50}})',))
+        agg_rows = [r for r in self.rows(out) if 'group-agg' in r]
+        self.assertIn('50', agg_rows[0])
+
+
+class TestGroupAggregationMenu(unittest.TestCase):
+    """The second checkbox: a splatted column can be asked the same question of
+    the whole column or of each group, so its rows carry two boxes."""
+
+    D = {'a': [1, 2, 3], 'b': [10, 20]}
+
+    def model(self, columns=None):
+        m = init_model(self.D, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = columns or {'$k': {}, '*$v': {}}
+        return m
+
+    def panel(self, model, col_index=1):
+        model = dict(model, openDropdown={'id': f'col-menu-{col_index}'},
+                     col_search_dropdown=f'compute-{col_index}')
+        out = visualize(self.D, model, mock_get_visualizer_dict_tables, None)
+        self.assertIn('col-compute-panel', out)
+        return out[out.index('col-compute-panel'):]
+
+    def toggle(self, model, expr='sum($)', index=1, depth=None):
+        """Click a Compute box the way the markup offers it."""
+        event = (ComputeToggle(index=index, expr=expr) if depth is None
+                 else ComputeToggle(index=index, expr=expr, depth=depth))
+        model, _ = update(make_column_mouse_event(repr(event)), None, model,
+                          self.D, mock_get_visualizer_dict_tables)
+        return model
+
+    def test_a_splatted_column_offers_the_second_box(self):
+        out = self.panel(self.model())
+        self.assertIn('col-compute-group-toggle', out)
+        self.assertIn('depth=1', out)
+
+    def test_a_column_that_did_not_splat_offers_one_box(self):
+        out = self.panel(self.model({'$k': {}, '$v': {}}))
+        self.assertNotIn('col-compute-group-toggle', out)
+        self.assertNotIn('depth=1', out)
+
+    def test_ticking_the_second_box_files_it_per_group(self):
+        m = self.model()
+        m = self.toggle(m, depth=1)
+        self.assertEqual(_column_group_computes(m, '*$v'), ['sum($)'])
+        self.assertEqual(_column_computes(m, '*$v'), [])
+
+    def test_the_two_boxes_are_independent(self):
+        m = self.model()
+        for depth in (0, 1):
+            m = self.toggle(m, depth=depth)
+        self.assertEqual(_column_computes(m, '*$v'), ['sum($)'])
+        self.assertEqual(_column_group_computes(m, '*$v'), ['sum($)'])
+        # Unticking one leaves the other.
+        m = self.toggle(m, depth=0)
+        self.assertEqual(_column_computes(m, '*$v'), [])
+        self.assertEqual(_column_group_computes(m, '*$v'), ['sum($)'])
+
+    def test_the_second_box_reads_back_as_checked(self):
+        m = self.model()
+        _set_column_group_computes(m, '*$v', ['sum($)'])
+        out = self.panel(m)
+        group_boxes = re.findall(
+            r'<span class="col-compute-group-toggle".*?</span>', out, re.S)
+        self.assertTrue(any('checked' in b for b in group_boxes))
+
+    def test_an_old_event_without_a_depth_still_means_the_whole_column(self):
+        m = self.toggle(self.model())
+        self.assertEqual(_column_computes(m, '*$v'), ['sum($)'])
+        self.assertEqual(_column_group_computes(m, '*$v'), [])
+
+
 class TestDictPickExpression(unittest.TestCase):
     """Assembling picked regions of a dict table into one expression.
 
@@ -12477,8 +12769,9 @@ class TestFreeAggregationRendering(ComputePanelCase):
         _set_column_computes(model, '$', ['sorted($)[2]'])
         row = self.free_rows(self.panel(model, lst))[0]
         self.assertIn('checked', row)
-        self.assertIn(html.escape("ComputeToggle(index=0, expr='sorted($)[2]')"),
-                      row)
+        self.assertIn(
+            html.escape("ComputeToggle(index=0, expr='sorted($)[2]', depth=0)"),
+            row)
 
     def test_the_empty_row_has_nothing_to_uncheck(self):
         lst, model = tally_model(COMPUTE_LIST)

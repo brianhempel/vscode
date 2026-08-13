@@ -249,9 +249,15 @@ class ComputeToggle:
 
     Identified by the expression it is showing rather than by a name for it, so
     an aggregation the user wrote themselves needs no event of its own.
+
+    *depth* is which box was ticked: 0 asks the question of the whole column,
+    1 once per splat group. It defaults to 0 so every existing sender -- and
+    every table without a splat, where there are no groups to ask of -- means
+    what it always meant.
     """
     index: int
     expr: str
+    depth: int = 0
 
 @dataclass(frozen=True, slots=True)
 class ComputeHoleInput:
@@ -706,6 +712,32 @@ def _leaf_values(leaf: LeafColumn, lst, model, eval_in_scope=None) -> list:
             pass
     values = []
     for row in _rows(lst, model.get('columns') or {}):
+        element = row.splats.get(leaf.splat)
+        if element is None:
+            continue
+        try:
+            values.append(element if leaf.sub in (None, '$')
+                          else eval_dollar_expr(leaf.sub, element,
+                                                eval_in_scope, outer=(lst,)))
+        except Exception:
+            pass
+    return values
+
+
+def _leaf_group_values(leaf: LeafColumn, root_index: int, lst, model,
+                       eval_in_scope=None) -> list:
+    """One root row's worth of a leaf column's values.
+
+    What a per-group aggregation is asked of. Read off the rows in hand rather
+    than through the source expression: the whole-column read has a name for
+    itself in the user's own code, and one group of it does not.
+    """
+    if leaf.splat is None:
+        return []
+    values = []
+    for row in _rows(lst, model.get('columns') or {}):
+        if row.index != root_index:
+            continue
         element = row.splats.get(leaf.splat)
         if element is None:
             continue
@@ -1545,30 +1577,76 @@ def _remove_column_search(model: dict, col: str) -> None:
     model['column_searches'] = searches or None
 
 
+def _agg_group_depth(expr: str) -> int:
+    """How far out an aggregation is asked: 0 for the whole column, 1 for once
+    per splat group, and under depth one more per level outward.
+
+    A LEADING run of `*`, one per level, innermost first -- the same shape a run
+    of `$` has, and for the same reason: the marker counts scopes rather than
+    naming them, so nothing has to be renamed when a level is added between.
+    Only leading, so `sum($) * 2` is arithmetic and stays arithmetic.
+    """
+    return len(expr) - len(expr.lstrip('*'))
+
+
+def _agg_at_depth(expr: str, depth: int) -> str:
+    """An aggregation written to be asked at *depth*."""
+    return '*' * depth + expr.lstrip('*')
+
+
 def _column_computes(model: dict, col: str) -> List[str]:
-    """The aggregations a column is showing, as the expressions they are."""
-    return list((model.get('column_computes') or {}).get(col) or [])
+    """The aggregations a column shows under the table, as the expressions they
+    are -- the whole-column ones, which is every one a table without a splat can
+    have.
+
+    The per-group asks share the map and are filtered out here, so no reader
+    downstream of this ever sees the marker that tells them apart.
+    """
+    return [expr for expr in (model.get('column_computes') or {}).get(col) or []
+            if _agg_group_depth(expr) == 0]
 
 
-def _set_column_computes(model: dict, col: str, exprs) -> None:
-    """Write a column's aggregations, keeping them in the order the menu lists
-    them so the cells under the column read the same way it does.
+def _column_group_computes(model: dict, col: str, depth: int = 1) -> List[str]:
+    """The aggregations a column shows once per group, marker stripped."""
+    return [expr.lstrip('*')
+            for expr in (model.get('column_computes') or {}).get(col) or []
+            if _agg_group_depth(expr) == depth]
+
+
+def _write_column_computes(model: dict, col: str, exprs, depth: int) -> None:
+    """Replace a column's aggregations at one depth, leaving the others as they
+    were, and keep them in the order the menu lists them so the cells under the
+    column read the same way it does.
 
     A column showing none of them is dropped rather than stored empty, the way
     a search back at its default is.
     """
     computes = dict(model.get('column_computes') or {})
+    kept = [expr for expr in computes.get(col) or []
+            if _agg_group_depth(expr) != depth]
     # fromkeys rather than a set: asking for the same aggregation twice is one
     # cell, and the ones the ordering can't tell apart -- two percentiles --
     # keep the order they were asked in. An empty box is not an aggregation, so
     # it is dropped here rather than kept as a cell with nothing in it.
     ordered = sorted((expr for expr in dict.fromkeys(exprs) if expr.strip()),
                      key=_agg_order)
-    if ordered:
-        computes[col] = ordered
+    merged = kept + [_agg_at_depth(expr, depth) for expr in ordered]
+    if merged:
+        computes[col] = sorted(merged, key=lambda e: (_agg_group_depth(e),
+                                                      _agg_order(e)))
     else:
         computes.pop(col, None)
     model['column_computes'] = computes or None
+
+
+def _set_column_computes(model: dict, col: str, exprs) -> None:
+    """Write a column's whole-column aggregations."""
+    _write_column_computes(model, col, exprs, 0)
+
+
+def _set_column_group_computes(model: dict, col: str, exprs, depth: int = 1) -> None:
+    """Write a column's per-group aggregations."""
+    _write_column_computes(model, col, exprs, depth)
 
 
 def _remove_column_compute(model: dict, col: str) -> None:
@@ -2754,6 +2832,11 @@ ITEM_EXPR_TOOLTIP = '$ is the item from the list, $i its index, $$ the whole lis
 # drawn. The same thing the column search box says of its own, less `$$$`: an
 # aggregation is asked of the whole column, so there is no one item to name.
 COMPUTE_EXPR_TOOLTIP = '$ is this whole column, $$ the whole original list'
+
+# The second box on a splatted column's Compute rows. The first asks the whole
+# column; this one asks each group of it, and the answers sit inside the groups
+# rather than under the table.
+COMPUTE_PER_GROUP_TOOLTIP = 'Answer once per group'
 
 # What the histogram's box says of itself. The other boxes in the submenu read
 # off the name beside them -- the number in Percentile's box is the percentile
@@ -5224,6 +5307,12 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
                    else _column_values_expr(col, source_expr,
                                             _model_binds(model)))
 
+    # A column that splatted can be asked the same question two ways, so its
+    # rows carry a second box: once per group, beside once for the column.
+    # Nothing groups a column that did not splat, so it gets one box as before.
+    per_group = _split_splat(col)[0]
+    group_checked = set(_column_group_computes(model, col)) if per_group else set()
+
     rows = []
     for label, template, checked in _compute_rows(model, col):
         answer = _agg_value(template, values, eval_in_scope, lst, col)
@@ -5249,12 +5338,24 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
         code = (None if unanswered or source_expr is None
                 else _agg_col_code(template, col, source_expr,
                                    _model_binds(model)))
+        # The per-group box asks the same question of one group at a time, so
+        # it is offered even when the whole column can't answer it: a column of
+        # mixed types may still be summable a group at a time.
+        group_box = ''
+        if per_group:
+            group_box = (
+                f'<span class="col-compute-group-toggle" '
+                f'data-tooltip="{html.escape(COMPUTE_PER_GROUP_TOOLTIP)}" '
+                f'snc-mouse-down="'
+                f'{html.escape(repr(ComputeToggle(index=index, expr=template, depth=1)))}">'
+                f'{_render_tally_check(template in group_checked)}</span>')
         rows.append(
             f'<div class="{classes}"{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{html.escape(label)}</span>'
             f'{holes}</span>'
+            f'{group_box}'
             f'<span class="col-compute-preview"'
             f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
             f'</div>')
@@ -6154,13 +6255,29 @@ def _agg_child_key(asking_col: str, template: str, shown_col: str) -> str:
             f'{CELL_KEY_SEP}{shown_col}')
 
 
+def _agg_group_child_key(asking_col: str, template: str, root_index: int) -> str:
+    """The key one group's answer is a child under.
+
+    The group's number is in it because the answers of two groups are two
+    values: keyed alike they would share one child model, and expanding one
+    would expand every other.
+    """
+    return (f'agg{AGG_KEY_SEP}{asking_col}{AGG_KEY_SEP}{template}'
+            f'{AGG_KEY_SEP}{root_index}{CELL_KEY_SEP}{asking_col}')
+
+
 def _parse_agg_child_key(key: str):
-    """(asking column, aggregation, shown column), or None for a cell's key."""
+    """(asking column, aggregation, shown column, group or None), or None for a
+    cell's key. The group is the root row a per-group answer belongs to."""
     head, _, shown_col = key.partition(CELL_KEY_SEP)
     parts = head.split(AGG_KEY_SEP)
-    if len(parts) != 3 or parts[0] != 'agg':
+    if parts[:1] != ['agg']:
         return None
-    return parts[1], parts[2], shown_col
+    if len(parts) == 3:
+        return parts[1], parts[2], shown_col, None
+    if len(parts) == 4 and parts[3].isdigit():
+        return parts[1], parts[2], shown_col, int(parts[3])
+    return None
 
 
 def _agg_child_value(key: str, lst, model, eval_in_scope=None):
@@ -6169,7 +6286,13 @@ def _agg_child_value(key: str, lst, model, eval_in_scope=None):
     The one place an answer is computed for a child, so what a cell showed and
     what an event coming back from that cell is handed are the same value.
     """
-    asking_col, template, shown_col = _parse_agg_child_key(key)
+    asking_col, template, shown_col, group = _parse_agg_child_key(key)
+    if group is not None:
+        leaf = _leaf_for(model.get('columns') or {}, asking_col)
+        if leaf is None:
+            return NO_ANSWER
+        values = _leaf_group_values(leaf, group, lst, model, eval_in_scope)
+        return _agg_display_value(_agg_value(template, values, eval_in_scope))
     if not _agg_is_row(template):
         values = _column_values(asking_col, lst, model, eval_in_scope)
         return _agg_display_value(_agg_value(template, values, eval_in_scope))
@@ -6192,7 +6315,11 @@ def _agg_child_expr(key: str, source_expr, binds: 'dict | None' = None) -> str |
     """
     if source_expr is None:
         return None
-    asking_col, template, shown_col = _parse_agg_child_key(key)
+    asking_col, template, shown_col, group = _parse_agg_child_key(key)
+    if group is not None:
+        # One group of a column has no name in the user's own code, so there is
+        # nothing honest to hand over -- see _render_group_agg_cell.
+        return None
     if not _agg_is_row(template):
         return _agg_code(template, _column_values_expr(asking_col, source_expr))
     item_code = _agg_col_code(template, asking_col, source_expr, binds)
@@ -6338,6 +6465,35 @@ def _render_agg_cell(expr, index, col, level, values, model, get_visualizer,
         f'{_agg_remove_x_html(expr, index)}'
         f'<div class="col-agg-value">'
         f'{_render_agg_answer(expr, answer, key, code, model, get_visualizer, eval_in_scope, max_width)}'
+        f'</div>'
+        f'</div></td>')
+
+
+def _render_group_agg_cell(expr, leaf, root_index, lst, model, get_visualizer,
+                           eval_in_scope=None, max_width=None) -> str:
+    """One group's answer, in a cell inside that group's span.
+
+    No drag expression: the whole-column read has a name for itself in the
+    user's own code, and one group of it does not -- so the cell shows the
+    answer and hands over nothing rather than handing over something that names
+    a different set of rows than the one on screen.
+    """
+    values = _leaf_group_values(leaf, root_index, lst, model, eval_in_scope)
+    answer = _agg_value(expr, values, eval_in_scope)
+    # A LABEL rather than the submenu's boxes. The boxes name themselves by the
+    # column they belong to and write back through it, so one per group would
+    # be several inputs claiming the same name, all writing the whole column's
+    # ask. The place to edit a per-group aggregation is the menu that set it.
+    name = _agg_name(expr)
+    label = name if name is not None else expr
+    holes = ''.join(f' {text}' for text in _agg_holes(expr))
+    key = _agg_group_child_key(leaf.expr, expr, root_index)
+    return (
+        f'<td class="col-agg-cell group-agg-cell">'
+        f'<div class="col-agg">'
+        f'<div class="col-agg-label">{html.escape(label)}{html.escape(holes)}</div>'
+        f'<div class="col-agg-value">'
+        f'{_render_agg_answer(expr, answer, key, None, model, get_visualizer, eval_in_scope, max_width)}'
         f'</div>'
         f'</div></td>')
 
@@ -6652,12 +6808,24 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         return _render_pick_region(row, col_id, model, first_match_row,
                                    len(lst), pick_exprs)
 
+    # Answers asked once per group, hung from the bottom of each group the way
+    # the whole-column ones hang from the floor of the table.
+    group_stacks = [_column_group_computes(model, leaf.expr)
+                    if leaf.splat is not None else []
+                    for leaf in leaves]
+    n_group_aggs = max((len(stack) for stack in group_stacks), default=0)
+    hung_group = [[None] * (n_group_aggs - len(stack)) + stack
+                  for stack in group_stacks]
+
     for row in _rows(lst, columns):
         i = row.index
         # An unsplatted column draws only on the row that owns the group, and
         # spans it. This is where the mockup's key cell comes from: `$k`
         # rowspans because it did not splat, not because it is a key.
-        span_attr = f' rowspan="{row.span}"' if row.span > 1 else ''
+        # The per-group answers are inside the group, so they are inside its
+        # span too -- otherwise the key cell stops short and they shift left.
+        row_span = row.span + n_group_aggs
+        span_attr = f' rowspan="{row_span}"' if row_span > 1 else ''
         is_match = i in matched_indices
         row_class_attr = ''
         scroll_attr = ''
@@ -6765,6 +6933,26 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 strs.append(f'<td{cell_span}>{pick_overlay(i, f"col_{ci}")}</td>')
 
         strs.append('</tr>')
+
+        # The group's own answers, under its last row and inside its span. The
+        # unsplatted columns already reach down here, so these rows carry only
+        # the splatted ones -- a per-group answer about a column that did not
+        # splat would be that column's single value, which is the cell itself.
+        if n_group_aggs and row.bindings.get('j', 0) == row.span - 1:
+            for level in range(n_group_aggs):
+                cells = []
+                for ci, leaf in enumerate(leaves):
+                    expr = hung_group[ci][level]
+                    if leaf.splat is None:
+                        continue
+                    if expr is None:
+                        cells.append('<td class="col-agg-blank"></td>')
+                        continue
+                    cells.append(_render_group_agg_cell(
+                        expr, leaf, i, lst, model, get_visualizer,
+                        eval_in_scope, max_column_width))
+                strs.append(f'<tr class="col-agg-row group-agg-row">'
+                            f'{"".join(cells)}</tr>')
 
     strs.append(_render_agg_rows(columns, model, lst, get_visualizer,
                                  eval_in_scope, source_expr, max_column_width))
@@ -7219,15 +7407,17 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.
-        case ComputeToggle(index=idx, expr=expr):
+        case ComputeToggle(index=idx, expr=expr, depth=depth):
             col = _column_at(model, idx)
             if col is not None:
-                exprs = _column_computes(model, col)
+                read = (_column_computes if depth == 0
+                        else lambda m, c: _column_group_computes(m, c, depth))
+                exprs = read(model, col)
                 if expr in exprs:
                     exprs.remove(expr)
                 else:
                     exprs.append(expr)
-                _set_column_computes(model, col, exprs)
+                _write_column_computes(model, col, exprs, depth)
 
         case ComputeHoleInput(index=idx, expr=expr, hole=hole, value=text):
             col = _column_at(model, idx)

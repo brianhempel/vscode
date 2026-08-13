@@ -1345,6 +1345,23 @@
 		cursor: default;
 	}
 
+	/* The second box, on a splatted column only: the same question asked once
+	   per group instead of once for the column. It does not stretch the way the
+	   first one does -- the name belongs to that one, and this is a box beside
+	   it rather than a row of its own. */
+	.col-compute-group-toggle {
+		display: flex;
+		align-items: center;
+		cursor: pointer;
+		user-select: none;
+		padding: 0 3px;
+		opacity: 0.75;
+	}
+
+	.col-compute-group-toggle:hover {
+		opacity: 1;
+	}
+
 	.col-compute-name {
 		white-space: nowrap;
 	}
@@ -1453,6 +1470,16 @@
 	padding: 0; /* wrapper re-adds padding */
 	vertical-align: top;
 	position: relative; /* for remove x */
+}
+
+/* A per-group answer sits INSIDE the table rather than under it: it belongs to
+   one group of rows, so it is in the body where that group is, not in the foot
+   where the whole column's answers are. Nothing sticky about it for the same
+   reason -- it scrolls with the group it is about. */
+.list-visualizer td.group-agg-cell {
+	background: var(--snc-table-header-bg);
+	padding: 0; /* wrapper re-adds padding */
+	vertical-align: top;
 }
 
 /* Nested lists opt out, like the sticky header: their scrollport often doesn't
