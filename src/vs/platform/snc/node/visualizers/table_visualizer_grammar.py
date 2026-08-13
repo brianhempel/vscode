@@ -66,6 +66,9 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
             BiTemplate("FilterIndex",
                        "{source_expr:VarOrExpr}[{index_expr:IndexExpr}]",
                        {'is_index': True}),
+            BiTemplate("FilterMultiIndexDict",
+                       "dict(list({source_expr:VarOrExpr}.items())[i] for i in {indices_expr:AnyPython})",
+                       {'is_multi_index': True, 'is_dict': True}),
             BiTemplate("FilterMultiIndex",
                        "[{source_expr:VarOrExpr}[i] for i in {indices_expr:AnyPython}]",
                        {'is_multi_index': True}),
@@ -159,6 +162,9 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         BiTemplate("DeleteSlice",
                    "{:DeleteSliceLeft} + {:DeleteSliceRight}",
                    {'is_slice': True}),
+        BiTemplate("DeleteMultiIndexDict",
+                   "{k: v for j, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if j not in set({indices_expr:AnyPython})}",
+                   {'is_multi_index': True, 'is_dict': True}),
         BiTemplate("DeleteMultiIndex",
                    "[item for i, item in enumerate({source_expr:VarOrExpr}) if i not in set({indices_expr:AnyPython})]",
                    {'is_multi_index': True}),
@@ -191,6 +197,13 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
         BiTemplate("FindIndicesSliceDict",
                    "list({source_expr:VarOrExpr})[{slice_start:SliceComponent}:{slice_stop:SliceComponent}]",
                    {'is_slice': True, 'is_dict': True}),
+        # Reads as FilterMultiIndex too, over a source spelled `list(d)`. Find
+        # Indices already gets first refusal on that ambiguity -- see the note
+        # on ActionFindIndices' ordering -- and the dict reading is the one that
+        # hands `d` back its own name.
+        BiTemplate("FindIndicesMultiIndexDict",
+                   "[list({source_expr:VarOrExpr})[i] for i in {indices_expr:AnyPython}]",
+                   {'is_multi_index': True, 'is_dict': True}),
         BiTemplate("FindIndicesPredicateFirstDict",
                    "next((k for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), None)",
                    {'is_predicate': True, 'is_first': True,
@@ -479,12 +492,14 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
-    # The same cut as the live generator: the positional families have no dict
-    # templates, so without this a dict ctx would fall through to the list ones
-    # and write a comprehension that silently yields keys.
-    if ctx.get('is_dict') and (ctx.get('is_multi_index')
-                               or ctx.get('is_broadcast_slice')
+    # The same cut as the live generator: these have no dict templates, so
+    # without this a dict ctx would fall through to the list ones and write a
+    # comprehension that silently yields keys.
+    if ctx.get('is_dict') and (ctx.get('is_broadcast_slice')
                                or ctx.get('pick_expr')):
+        return None
+    if ctx.get('is_dict') and ctx.get('is_multi_index') and action in (
+            'loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
         return None
     # Delete-one has no dict form: see the live generator for why.
     if ctx.get('is_dict') and ctx.get('is_first') and action not in (
@@ -539,6 +554,50 @@ def _dict_items_source(code_line: str, node: ast.AST) -> str | None:
     return _source_text(code_line, inner.func.value)
 
 
+def _dict_rows_source(code_line: str, node: ast.AST) -> dict | None:
+    """The dict, and which rows, behind an iterable of its `(k, v)` pairs.
+
+    Two shapes reach here, and they are the two positional searches a dict can
+    answer: `list(d.items())[a:b]` for a run of rows, and
+    `[list(d.items())[i] for i in xs]` for a set of them. Returns the source and
+    family keys to merge into a ctx, or None if this is not pairs of a dict.
+    """
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice) \
+            and node.slice.step is None:
+        src = _dict_items_source(code_line, node.value)
+        if src is None:
+            return None
+        return {
+            'source_expr': src,
+            'is_slice': True,
+            'slice_start': _source_text(code_line, node.slice.lower),
+            'slice_stop': _source_text(code_line, node.slice.upper),
+            'is_multi_index': False,
+        }
+
+    if isinstance(node, ast.ListComp) and len(node.generators) == 1:
+        comp = node.generators[0]
+        elt = node.elt
+        if comp.is_async or comp.ifs:
+            return None
+        if not (isinstance(comp.target, ast.Name) and comp.target.id == 'i'):
+            return None
+        if not (isinstance(elt, ast.Subscript) and isinstance(elt.slice, ast.Name)
+                and elt.slice.id == 'i'):
+            return None
+        src = _dict_items_source(code_line, elt.value)
+        if src is None:
+            return None
+        return {
+            'source_expr': src,
+            'is_multi_index': True,
+            'indices_expr': _source_text(code_line, comp.iter),
+            'is_slice': False,
+        }
+
+    return None
+
+
 def _parse_generated_join(code_line: str) -> dict | None:
     try:
         expr = ast.parse(code_line, mode='eval').body
@@ -571,7 +630,7 @@ def _parse_generated_join(code_line: str) -> dict | None:
     item_expr = gen.elt.args[0]
     join_separator = _source_text(code_line, expr.func.value)
 
-    # A dict slice joins its values out of `list(d.items())[a:b]`. It comes
+    # A dict joins its VALUES, out of whichever rows the search chose. It comes
     # first because the bytes are otherwise a legal list reading -- a slice of a
     # source spelled `list(d.items())` -- and that reading loses the dict: the
     # wrapper becomes the source expression, which then matches no visualizer's
@@ -582,23 +641,17 @@ def _parse_generated_join(code_line: str) -> dict | None:
         isinstance(comp.target, ast.Tuple) and not comp.ifs
         and [getattr(e, 'id', None) for e in comp.target.elts] == ['k', 'v']
         and isinstance(item_expr, ast.Name) and item_expr.id == 'v'
-        and isinstance(comp.iter, ast.Subscript)
-        and isinstance(comp.iter.slice, ast.Slice) and comp.iter.slice.step is None
     ):
-        pairs = _dict_items_source(code_line, comp.iter.value)
-        if pairs is not None:
+        rows = _dict_rows_source(code_line, comp.iter)
+        if rows is not None:
             return {
                 'action': 'join',
-                'source_expr': pairs,
                 'join_separator': join_separator,
                 'is_dict': True,
-                'is_slice': True,
-                'slice_start': _source_text(code_line, comp.iter.slice.lower),
-                'slice_stop': _source_text(code_line, comp.iter.slice.upper),
                 'is_index': False,
                 'is_predicate': False,
-                'is_multi_index': False,
                 'is_first': False,
+                **rows,
             }
 
     if (

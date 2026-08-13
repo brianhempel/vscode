@@ -9366,18 +9366,19 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         model['search'] = search
         return d, model
 
-    def test_index_and_slice_now_write_through_the_items(self):
-        for search in ('1', '0:2'):
+    def test_the_positional_searches_now_write_through_the_items(self):
+        for search in ('1', '0:2', '[0, 1]'):
             with self.subTest(search=search):
                 d, model = self.positional_model(search)
                 ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
                 for action in ('filter', 'delete', 'find_indices'):
                     self.assertIsNotNone(generate_action(action, ctx))
 
-    def test_the_band_families_stay_cut(self):
-        # multi-index and broadcast-slice want the band machinery Pick wants,
-        # and land with it.
-        d, model = self.positional_model('[0, 1]')
+    def test_the_band_family_stays_cut(self):
+        # Only broadcast slice is left: it yields a BAND per pair, which is the
+        # machinery Pick wants, so they land together. Multi-index is not in
+        # this group -- a set of positions needs no ranges -- and it writes.
+        d, model = self.positional_model('[0,1]:[1,2]')
         ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
         for action in ('filter', 'delete', 'find_indices'):
             with self.subTest(action=action):
@@ -9401,10 +9402,15 @@ class TestDictActionsAreDimmed(unittest.TestCase):
         self.assertIn('data-action-expr', html_out)
 
     def test_a_band_search_still_dims_the_buttons(self):
-        d, model = self.positional_model('[0, 1]')
+        d, model = self.positional_model('[0,1]:[1,2]')
         html_out = _render_action_buttons(model, d)
         self.assertIn('dimmed', html_out)
         self.assertNotIn('data-action-expr', html_out)
+
+    def test_a_multi_index_search_lights_the_buttons_up(self):
+        d, model = self.positional_model('[0, 1]')
+        html_out = _render_action_buttons(model, d)
+        self.assertIn('data-action-expr', html_out)
 
     def test_a_list_still_generates_its_actions(self):
         lst = [1, 2, 3]
@@ -9741,9 +9747,11 @@ class TestDictPositionalActions(unittest.TestCase):
         self.assertEqual(eval(self.gen('find_indices', '0:2'), {'d': self.D}),
                          ['alice', 'bob'])
 
-    def test_the_band_families_stay_cut(self):
-        # multi-index and broadcast-slice want band machinery Pick also wants.
-        self.assertIsNone(self.gen('filter', '[0, 2]'))
+    def test_the_band_family_stays_cut(self):
+        # Broadcast slice yields BANDS -- a run per pair -- and that is the
+        # machinery Pick wants too. Multi-index is not in this group: it is a
+        # set of positions, no ranges involved, so it lands on its own below.
+        self.assertIsNone(self.gen('filter', '[0,2]:[1,3]'))
 
     def test_count_over_a_slice_stays_cut(self):
         # Not a dict gap: no list writes count over a slice either, so there is
@@ -9810,6 +9818,104 @@ class TestDictPositionalActions(unittest.TestCase):
                     self.assertEqual(live and live[1], gram and gram[1])
                     if live:
                         self.assertIsNotNone(parse_generated_code(live[1]))
+
+    def test_a_multi_index_picks_those_rows_into_a_dict(self):
+        code = self.gen('filter', '[0, 2]')
+        self.assertEqual(code, 'dict(list(d.items())[i] for i in [0, 2])')
+        self.assertEqual(eval(code, {'d': self.D}), {'alice': 30, 'carol': 41})
+
+    def test_a_multi_index_deletes_by_position(self):
+        # The same reading the single index uses, widened to a set.
+        code = self.gen('delete', '[0, 2]')
+        self.assertEqual(
+            code,
+            '{k: v for j, (k, v) in enumerate(d.items()) if j not in set([0, 2])}')
+        self.assertEqual(eval(code, {'d': self.D}), {'bob': 25})
+
+    def test_a_multi_index_finds_those_keys(self):
+        code = self.gen('find_indices', '[0, 2]')
+        self.assertEqual(code, '[list(d)[i] for i in [0, 2]]')
+        self.assertEqual(eval(code, {'d': self.D}), ['alice', 'carol'])
+
+    def test_a_multi_index_counts_and_quantifies_like_a_list(self):
+        # These three never touch the container: they are about how many
+        # positions were named, so the list templates are already right.
+        self.assertEqual(self.gen('count', '[0, 2]'), 'len([0, 2])')
+        self.assertEqual(self.gen('any', '[0, 2]'), 'len([0, 2]) > 0')
+        self.assertEqual(self.gen('all', '[0, 2]'), 'len([0, 2]) == len(d)')
+        self.assertFalse(eval(self.gen('all', '[0, 2]'), {'d': self.D}))
+        self.assertTrue(eval(self.gen('all', '[0, 1, 2]'), {'d': self.D}))
+
+    def test_a_multi_index_joins_the_values(self):
+        code = self.gen('join', '[0, 2]')
+        self.assertEqual(
+            code, "''.join(str(v) for k, v in [list(d.items())[i] for i in [0, 2]])")
+        self.assertEqual(eval(code, {'d': self.D}), '3041')
+
+    def test_the_loop_actions_stay_unbuilt_for_every_positional_family(self):
+        # Uniformly: no dict positional search writes a loop. A list's
+        # multi-index does, but its "original index" is a position, and a dict's
+        # is a key -- so `for i in [0, 2]:` has no honest dict reading. Rather
+        # than build two of the three, none are built, matching index and slice.
+        for search in ('1', '0:2', '[0, 2]'):
+            for action in ('loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
+                with self.subTest(search=search, action=action):
+                    self.assertIsNone(self.gen(action, search))
+
+    def test_a_multi_index_reads_back_as_a_dict(self):
+        from table_visualizer_grammar import parse_generated_code
+        for action in ('filter', 'delete', 'find_indices'):
+            with self.subTest(action=action):
+                ctx = parse_generated_code(self.gen(action, '[0, 2]'))
+                self.assertIsNotNone(ctx)
+                self.assertEqual(ctx['action'], action)
+                self.assertEqual(ctx['source_expr'], 'd')
+                self.assertTrue(ctx['is_dict'])
+                self.assertTrue(ctx['is_multi_index'])
+                self.assertEqual(ctx['indices_expr'], '[0, 2]')
+
+    def test_a_multi_index_join_reads_back_as_a_dict(self):
+        from table_visualizer_grammar import parse_generated_code
+        ctx = parse_generated_code(self.gen('join', '[0, 2]'))
+        self.assertEqual(ctx['action'], 'join')
+        self.assertEqual(ctx['source_expr'], 'd')
+        self.assertTrue(ctx['is_dict'])
+        self.assertTrue(ctx['is_multi_index'])
+        self.assertEqual(ctx['indices_expr'], '[0, 2]')
+
+    def test_a_multi_index_relinks_to_the_dict_it_came_from(self):
+        from table_visualizer import _LINK_CONFIG
+        from visualizer_utils import parse_owned_line
+        for action in ('filter', 'delete', 'find_indices', 'join'):
+            with self.subTest(action=action):
+                owned = parse_owned_line(_LINK_CONFIG, self.gen(action, '[0, 2]'),
+                                         ('d', 'd'))
+                self.assertIsNotNone(owned)
+                self.assertEqual(owned[0]['source_expr'], 'd')
+
+    def test_a_list_multi_index_is_unchanged(self):
+        from table_visualizer_grammar import parse_generated_code
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model['search'] = '[0, 2]'
+        ctx = _get_search_context(model, ('data', 'data'), source_expr='data')
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         '[data[i] for i in [0, 2]]')
+        self.assertEqual(generate_action('find_indices', ctx)[1], '[0, 2]')
+        self.assertEqual(generate_action('loop_orig_idx', ctx)[1],
+                         'for i in [0, 2]:')
+        back = parse_generated_code('[data[i] for i in [0, 2]]')
+        self.assertFalse(back.get('is_dict'))
+
+    def test_both_generators_agree_on_the_multi_index_family(self):
+        from table_visualizer_grammar import generate_action as ggen
+        for action in ('filter', 'delete', 'find_indices', 'count', 'any', 'all',
+                       'loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
+            with self.subTest(action=action):
+                ctx = self.ctx('[0, 2]')
+                live = generate_action(action, ctx)
+                gram = ggen(action, ctx)
+                self.assertEqual(live and live[1], gram and gram[1])
 
     def test_every_slice_join_shape_round_trips(self):
         from table_visualizer_grammar import parse_generated_code

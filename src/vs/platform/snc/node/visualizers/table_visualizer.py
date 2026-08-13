@@ -3590,16 +3590,20 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     Returns (suggest_name, code_str) or None.
     """
-    # The positional families stay cut for a dict: d[3] is a key lookup, d[1:5]
-    # a TypeError, and src[:i] + src[i+1:] splices a list. Translating them
-    # means list(d.items()) round-tripping through dict(...) for every action
-    # plus a BiTemplate each; they land with splat, which needs the same
-    # machinery. The search still highlights the right rows -- only the buttons
-    # dim. The predicate and whole-list families below ARE written.
-    if ctx.get('is_dict') and (ctx.get('is_multi_index')
-                               or ctx.get('is_broadcast_slice')):
-        # Both want band machinery over list(d.items()) -- the same machinery
-        # Pick wants, and they land together with it.
+    # A broadcast slice stays cut for a dict: it yields a BAND per pair, and
+    # bands over list(d.items()) are the machinery Pick wants too, so they land
+    # together. The search still highlights the right rows; only the buttons
+    # dim. Every other dict family below IS written.
+    if ctx.get('is_dict') and ctx.get('is_broadcast_slice'):
+        return None
+
+    # No dict positional search writes a loop. A list's multi-index does, but
+    # its "original index" is a position where a dict's is a key, so
+    # `for i in [0, 2]:` has no honest dict reading -- and building two of the
+    # three loops would leave the family lopsided. None are built, which is what
+    # index and slice already do.
+    if ctx.get('is_dict') and ctx.get('is_multi_index') and action in (
+            'loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
         return None
 
     src = ctx['source_expr']
@@ -3648,6 +3652,34 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
             case _:
                 # Count over a slice is not a dict gap: no list writes one
                 # either, so there is nothing here to reach parity with.
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
+
+    if ctx.get('is_dict') and ctx.get('is_multi_index'):
+        indices = ctx['indices_expr']
+        atom = _atomize(src)
+        pairs = f'list({atom}.items())'
+        match action:
+            case 'filter':
+                # Several rows, so a dict -- where one position gave the pair.
+                code = f'dict({pairs}[i] for i in {indices})'
+            case 'delete':
+                code = (f'{{k: v for j, (k, v) in enumerate({atom}.items()) '
+                        f'if j not in set({indices})}}')
+            case 'find_indices':
+                code = f'[list({atom})[i] for i in {indices}]'
+            case 'count':
+                # These three never touch the container: they ask how many
+                # positions were named, so the list forms are already right.
+                code = f'len({indices})'
+            case 'any':
+                code = f'len({indices}) > 0'
+            case 'all':
+                code = f'len({indices}) == len({atom})'
+            case 'join':
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(v) for k, v in [{pairs}[i] for i in {indices}])'
+            case _:
                 return None
         return (_suggest_name_for_action(action, ctx), code)
 
