@@ -59,7 +59,7 @@ from visualizer_utils import (
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
     DOLLARS_RE, SIGILS,
-    strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
+    eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
     new_code_command,
@@ -5764,18 +5764,13 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
     )
 
 
-def _column_header_text(col: str) -> str:
-    """What a column header shows: the expression without its leading `$`, and
-    without the splat star in front of it -- `*$v` reads as `*v`, so the star
-    still says the column spreads while the name matches every other header."""
-    is_splat, inner = _split_splat(col)
-    text = strip_leading_dollar(inner) or inner
-    return f'{SPLAT}{text}' if is_splat else text
-
-
 def _render_column_header(col, index, model, lst, eval_in_scope=None,
                           span_attrs='', extra_classes='', label=None):
     """Render a normal column header with drag handle, column name, and ▾ menu.
+
+    The header shows the expression as written, dollar and all: it is the same
+    text double-clicking it puts in the box, so there is nothing to translate
+    between what a column reads as and what it is.
 
     *label* is what the cell shows when that differs from the column
     expression -- a sub-column is keyed by its composed identity but reads as
@@ -5849,7 +5844,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
-        f'{html.escape(_column_header_text(col) if label is None else label)}</span>'
+        f'{html.escape(col if label is None else label)}</span>'
         f'{menu_html}'
         f'</span>'
         f'</th>'
@@ -7017,7 +7012,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 cell.expr, ci, model, lst, eval_in_scope,
                 span_attrs=span_attrs,
                 extra_classes='col-subheader' if level else None,
-                label=_column_header_text(cell.label) if level else None))
+                label=cell.label if level else None))
 
         if level == 0:
             if model.get('adding_column'):

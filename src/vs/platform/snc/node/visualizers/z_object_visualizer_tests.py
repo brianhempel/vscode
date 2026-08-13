@@ -286,6 +286,17 @@ class TestVisualize(unittest.TestCase):
         self.assertIn('test', html_output)  # value of .name (in repr form)
         self.assertIn('<table', html_output)
 
+    def test_field_name_reads_as_the_expression_the_user_wrote(self):
+        """No abbreviating away the dollar: the row shows the accessor as
+        written, which is also what double-clicking it puts in the box."""
+        obj = TestObj()
+        model = init_model(obj)
+        model['fields'] = ['$.x', '$.name']
+        html_output = visualize(obj, model, _get_visualizer, None)
+
+        self.assertIn('>$.x<', html_output)
+        self.assertIn('>$.name<', html_output)
+
     def test_visualize_shows_add_button(self):
         """HTML should contain a (+) button with snc-mouse-down for AddFieldClick."""
         obj = TestObj()

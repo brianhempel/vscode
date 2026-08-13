@@ -67,7 +67,7 @@ from table_visualizer import (
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _column_groups,
-    _column_header_text, _col_add, _col_at, _col_rename_at, _col_remove_at,
+    _col_add, _col_at, _col_rename_at, _col_remove_at,
     _leaf_values_expr, _menu_targets, _column_at, _col_subs,
     _promote_expr, _adopt_expr,
     _col_move, _col_subs,
@@ -1031,12 +1031,14 @@ class TestSplatSubColumnRendering(unittest.TestCase):
                                {'*$v': ["$['who']", "$['age']"]})
         self.assertIn('rowspan="2"', html_out)
 
-    def test_a_splat_header_reads_as_a_star_and_a_name(self):
-        # `*$v` shows as `*v`: the star still says the column spreads, and the
-        # name matches every other header.
-        self.assertEqual(_column_header_text('*$v'), '*v')
-        self.assertEqual(_column_header_text('$k'), 'k')
-        self.assertEqual(_column_header_text("*$['m']"), "*['m']")
+    def test_a_header_reads_as_the_expression_the_user_wrote(self):
+        # No abbreviating away the dollar: the header shows the expression as
+        # written, which is also what double-clicking it puts in the box.
+        html_out = self.render(self.value(), ['$k', '*$v'],
+                               {'*$v': ["$['who']", "$['age']"]})
+        for text in ('>$k<', '>*$v<', '>' + html.escape("$['who']")):
+            with self.subTest(text=text):
+                self.assertIn(text, html_out)
 
     def test_a_sub_header_hands_over_its_flattened_column(self):
         # Dragging a sub-column header gives the whole column, flattened

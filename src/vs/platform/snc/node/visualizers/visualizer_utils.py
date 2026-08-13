@@ -711,7 +711,10 @@ def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
 
 
 def strip_leading_dollar(name: str) -> str:
-    """Remove a single leading $ for display purposes."""
+    """Remove a single leading $, to read the attribute name out of an accessor.
+
+    Not for display: an expression reads as the user wrote it, dollar included.
+    """
     if name.startswith('$'):
         return name[1:]
     return name

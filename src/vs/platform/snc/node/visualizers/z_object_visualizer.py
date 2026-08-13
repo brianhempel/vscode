@@ -726,7 +726,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 f'class="remove full-opacity-on-hover">'
                 f'<span class="snc-hover-hidden">×</span></td>'
                 f'<td snc-mouse-down="{html.escape(click_event)}" class="field-name">'
-                f'{html.escape(strip_leading_dollar(accessor_code))}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
+                f'{html.escape(accessor_code)}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
                 f'{value_td}'
                 f'</tr>'
             )
