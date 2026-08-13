@@ -40,12 +40,27 @@
 - [x] figure out what table widgets should be per column
 - [x] column tally
 - [x] aggregations
+
+- [ ] need to show list length somewhere
+- [ ] need to show string length somewhere
+- [ ] extract row by grabbing index cell
+- [ ] add column left/right in col menu
+- [ ] need to be able to pick or select columns without a filter predicate first
+- [ ] need to able to select/delete rows
+- [ ] certain drags modify their exp so you can drag into e.g. the col expression
+- [ ] hiding the $ sometimes is a bit funky
+- [ ] $item instead of $, maybe?
+- [ ] col action: convert to int, float
+- [ ] reify as...list of dict etc, to persist transient columns
 - [ ] dictionary visualizer
 - [ ] tuple visualizer
 - [ ] list of tuples
 - [ ] tuple of lists
 - [ ] group by (i.e. dictionaries of lists)
 - [ ] generic object visualizer
+- [ ] visualize sets
+- [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*
+- [ ] make it clearer what is temp state versus reified in code. *jacob: the fact that there is temp state is a little funky too*
 - [ ] make the above work nicely for large, nested JSON blobs (Ultorg lol)
 - [ ] use VS Code debug config to know how to launch python and app
 
@@ -54,3 +69,5 @@
 - [x] col add button: show on visualizer focus rather than on hover
 - [x] close column menu when un-focusing
 - [ ] list visualizer search: be smart so that simple var uses are == rather than treated as simple truthy predicates
+- [ ] below multiline exp
+- [ ] there may be some AI-written parse hacks to avoid figuring out BiTemplates (e.g. `_parse_generated_join`). see if these can be turned into BiTemplates
