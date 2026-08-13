@@ -69,6 +69,7 @@ from table_visualizer import (
     _table_child_value_getter, _leaf_columns, _column_groups,
     _column_header_text, _col_add, _col_at, _col_rename_at, _col_remove_at,
     _leaf_values_expr, _menu_targets, _column_at, _col_subs,
+    _promote_expr, _adopt_expr,
     _col_move, _col_subs,
 )
 
@@ -846,6 +847,101 @@ class TestSubColumnMenuEvents(unittest.TestCase):
         d, model = self.model()
         html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
         self.assertIn('col-menu-1', html_out)
+
+
+class TestPromoteAndAdopt(unittest.TestCase):
+    """Dragging a column across parents. `$` means the element inside a splat
+    and the row outside it, so the expression is rewritten as it moves."""
+
+    def test_promote_reads_the_sub_across_the_splats_list(self):
+        # Out of the splat the column is read per ROOT ROW, and the root row
+        # has a list where the sub had one element.
+        self.assertEqual(_promote_expr("$['who']", '*$v'),
+                         "[el['who'] for el in $v]")
+
+    def test_promoting_the_whole_element_is_just_the_list(self):
+        self.assertEqual(_promote_expr('$', '*$v'), '[el for el in $v]')
+
+    def test_promote_brings_the_root_row_back_a_level(self):
+        # $$ inside a splat is the root row; outside, that is $.
+        self.assertEqual(_promote_expr("$$['n']", '*$v'),
+                         "[$['n'] for el in $v]")
+
+    def test_adopt_deepens_every_run_by_one(self):
+        # Inside the splat $ is the element, so what was the row is now $$.
+        self.assertEqual(_adopt_expr("$['x']"), "$$['x']")
+        self.assertEqual(_adopt_expr('len($) + $$'), 'len($$) + $$$')
+
+    def test_adopt_refuses_a_column_naming_a_sigil(self):
+        # Landing 1's known gap: suffixes bind at depth 1 only, so $$k names
+        # nothing. Refused rather than deepened into silence.
+        for col in ('$k', '$v', '$i', '$v > 3'):
+            with self.subTest(col=col):
+                self.assertIsNone(_adopt_expr(col))
+
+    def test_adopt_leaves_string_content_alone(self):
+        self.assertEqual(_adopt_expr('"$"'), '"$"')
+
+
+class TestCrossParentDrag(unittest.TestCase):
+    """The drag itself, end to end."""
+
+    def model(self):
+        d = {'t1': [{'who': 'ann', 'age': 30}]}
+        m = init_model(d, mock_get_visualizer_dict_tables,
+                       var_and_exp=('d', 'd'))
+        m['columns'] = {'$k': {},
+                        '*$v': {'cols': {"$['who']": {}, "$['age']": {}}}}
+        return d, m
+
+    def drag(self, d, model, frm, to):
+        model['column_drag_from'] = frm
+        model['column_drag_over'] = to
+        event = make_column_mouse_event(repr(ColumnDragEnd(index=to)))
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            new_model, _ = update(event, None, model, d,
+                                  mock_get_visualizer_dict_tables)
+        return new_model
+
+    def test_reordering_within_a_splat_stays_inside_it(self):
+        d, model = self.model()
+        # targets: 0 $k, 1 who, 2 age, 3 *$v
+        new_model = self.drag(d, model, 2, 1)
+        self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
+                         ["$['age']", "$['who']"])
+        self.assertEqual(list(new_model['columns']), ['$k', '*$v'])
+
+    def test_dragging_a_sub_column_out_promotes_it(self):
+        d, model = self.model()
+        new_model = self.drag(d, model, 1, 0)
+        self.assertIn("[el['who'] for el in $v]", new_model['columns'])
+        # and it is gone from the splat
+        self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
+                         ["$['age']"])
+
+    def test_dragging_a_top_level_column_in_adopts_it(self):
+        d = {'t1': [{'who': 'ann'}]}
+        m = init_model(d, mock_get_visualizer_dict_tables, var_and_exp=('d', 'd'))
+        m['columns'] = {"$['meta']": {}, '*$v': {'cols': {"$['who']": {}}}}
+        new_model = self.drag(d, m, 0, 1)
+        self.assertNotIn("$['meta']", new_model['columns'])
+        self.assertIn("$$['meta']", _col_subs(new_model['columns'], '*$v'))
+
+    def test_adopting_a_sigil_column_is_refused(self):
+        d, model = self.model()
+        before = dict(model['columns'])
+        new_model = self.drag(d, model, 0, 1)   # $k onto a sub-column
+        self.assertEqual(list(new_model['columns']), list(before))
+        self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
+                         ["$['who']", "$['age']"])
+
+    def test_the_promoted_expression_actually_evaluates(self):
+        d = {'t1': [{'who': 'ann'}, {'who': 'bo'}]}
+        expr = _promote_expr("$['who']", '*$v')
+        row = _rows(d, {'$k': {}, '*$v': {}})[0]
+        from visualizer_utils import eval_dollar_expr
+        self.assertEqual(eval_dollar_expr(expr, row.item, bindings=row.bindings),
+                         ['ann', 'bo'])
 
 
 class TestLeafDerivedExpressions(unittest.TestCase):

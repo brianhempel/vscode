@@ -1420,6 +1420,97 @@ def _rename_target(columns, target: str, new_name: str) -> bool:
     return _col_rename_at(subs, index, new_name)
 
 
+# A run left as written can't be a replacement (it wouldn't re-parse, and then
+# every token after it would look like code) -- so the root row goes in as a
+# placeholder and becomes a dollar afterwards, the two-pass idiom used wherever
+# a substitution has to produce dollars.
+_PROMOTE_ROOT = '_snc_root_'
+
+
+def _promote_expr(sub: str, splat_col: str) -> str:
+    """A sub-column's expression, read per ROOT ROW instead of per element.
+
+    Out of the splat the column is read once per root row, and the root row has
+    a LIST where the sub had one element -- so the sub is applied across it.
+    Inside the splat `$` was the element and `$$` the root row; outside, the
+    element has no name and the root row is `$`.
+    """
+    inner = _split_splat(splat_col)[1]
+    body = replace_dollars_in_py_exp(sub, [_SPLAT_ELEM, _PROMOTE_ROOT])
+    body = body.replace(_PROMOTE_ROOT, '$')
+    return f'[{body} for {_SPLAT_ELEM} in {inner}]'
+
+
+def _adopt_expr(col: str) -> 'str | None':
+    """A top-level column's expression, read per ELEMENT inside a splat.
+
+    Inside, `$` is the element and `$$` the root row, so every dollar run
+    deepens by one -- the same substitution `unlift_term` performs.
+
+    None when the column names a suffixed dollar. Suffixes bind at depth 1
+    only, so `$k` would deepen to `$$k`, which names nothing by design; the
+    drag is refused rather than turned into an expression that evaluates to
+    silence.
+    """
+    if dollar_expr_sigils(col):
+        return None
+    # Through the substitution rather than a raw regex, so a `$` that is string
+    # content stays string content. unlift_term deepens with a bare regex and
+    # gets away with it only because its round-trip check rejects a bad
+    # reading; there is no such check here.
+    depth = max((len(m[1]) for m in DOLLARS_RE.finditer(col)), default=0)
+    if depth == 0:
+        return col
+    holders = [f'_snc_deep{n}_' for n in range(1, depth + 1)]
+    out = replace_dollars_in_py_exp(col, holders)
+    for n, holder in enumerate(holders, start=1):
+        out = out.replace(holder, '$' * (n + 1))
+    return out
+
+
+def _move_target(columns, from_target: str, to_target: str) -> bool:
+    """Move a column to where another one lives, rewriting it on the way.
+
+    Four cases, and only the two that cross a splat boundary rewrite anything:
+    reordering within one parent is a reorder, and moving between two splats
+    keeps `$` meaning the element either way.
+    """
+    from_parent = _splat_of(columns, from_target)
+    to_parent = _splat_of(columns, to_target)
+
+    def _siblings(parent):
+        return columns if parent is None else _col_subs(columns, parent)
+
+    def _name(target):
+        return target.split(SUBCOL_SEP, 1)[1] if SUBCOL_SEP in target else target
+
+    src_map, dst_map = _siblings(from_parent), _siblings(to_parent)
+    name = _name(from_target)
+
+    if from_parent == to_parent:
+        keys = list(src_map)
+        if name not in keys:
+            return False
+        return _col_move(src_map, keys.index(name), keys.index(_name(to_target)))
+
+    if from_parent is not None and to_parent is None:
+        moved = _promote_expr(name, from_parent)
+    elif from_parent is None and to_parent is not None:
+        moved = _adopt_expr(name)
+    else:
+        # Splat to splat: `$` is the element on both sides.
+        moved = name
+    if moved is None or moved in dst_map:
+        return False
+
+    config = src_map.pop(name, None)
+    _col_add(dst_map, moved, config)
+    # Land it where it was dropped rather than at the end.
+    keys = list(dst_map)
+    _col_move(dst_map, len(keys) - 1, keys.index(_name(to_target)))
+    return True
+
+
 def _column_at(model: dict, index: int) -> str | None:
     return _menu_target_at(model.get('columns') or {}, index)
 
@@ -6714,10 +6805,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ColumnDragEnd(index=idx):
             drag_from = model.get('column_drag_from')
-            if drag_from is not None and 0 <= drag_from < len(model['columns']):
-                target = idx
-                if drag_from != target:
-                    _col_move(model['columns'], drag_from, target)
+            from_target = _column_at(model, drag_from)
+            to_target = _column_at(model, idx)
+            if (from_target is not None and to_target is not None
+                    and from_target != to_target):
+                # Within one parent this reorders; across a splat boundary it
+                # promotes or adopts, rewriting the expression as it moves.
+                # A refusal (a sigil column being adopted) leaves everything
+                # exactly as it was.
+                if _move_target(model['columns'], from_target, to_target):
                     # Column order is term order in the composed search.
                     _recompose_search(model, eval_in_scope)
                     if type_key:
