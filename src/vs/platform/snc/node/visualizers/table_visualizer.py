@@ -3482,20 +3482,41 @@ def _predicate_binds_index(ctx: dict) -> bool:
             or (action == 'delete' and bool(ctx.get('is_first'))))
 
 
-def _dollarize_row_names(expr: str, names_index=False) -> str:
+def _dollarize_row_names(expr: str, names_index=False, is_dict=False) -> str:
     """Generated code read back as the dollars the boxes speak.
 
     The names a comprehension over the rows binds are what `$` and `$i` were
-    written as on the way out, so they say the same thing on the way back.
+    written as on the way out, so they say the same thing on the way back. Which
+    names those are is the container's: a list binds `item`, a dict `k` and `v`.
 
     Only the ones it actually binds, though. `i` is the row's number in a line
     that counts the rows off, and a name from the user's own program in one that
     doesn't -- reading the second as the first would quietly change what the
     search asks. Which line it is, the grammar says: every predicate form has an
     indexed twin, and they differ by `names_index`.
+
+    Names are found by parsing rather than by matching text, so a `v` inside a
+    string literal stays a `v`. A dict makes that matter -- single letters turn
+    up in strings constantly -- but it was always the right reading, and a list
+    gets it too now.
     """
-    out = re.sub(r'\bitem\b', '$', expr)
-    return re.sub(r'\bi\b', '$i', out) if names_index else out
+    names = {'k': '$k', 'v': '$v'} if is_dict else {'item': '$'}
+    if names_index:
+        names['i'] = '$i'
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError:
+        return expr
+
+    lines = expr.split('\n')
+    spots = [(n.lineno, n.col_offset, n.end_col_offset, names[n.id])
+             for n in ast.walk(tree)
+             if isinstance(n, ast.Name) and n.id in names]
+    # From the end, so the offsets ahead of each splice stay where they were.
+    for lineno, start, end, dollar in sorted(spots, reverse=True):
+        line = lines[lineno - 1]
+        lines[lineno - 1] = line[:start] + dollar + line[end:]
+    return '\n'.join(lines)
 
 
 def _ctx_to_model(ctx: dict, model: dict) -> None:
@@ -3510,7 +3531,8 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
         model['search'] = ctx.get('indices_expr', '')
     elif ctx.get('is_predicate'):
         pred = ctx.get('predicate_expr', '')
-        model['search'] = _dollarize_row_names(pred, _predicate_binds_index(ctx))
+        model['search'] = _dollarize_row_names(pred, _predicate_binds_index(ctx),
+                                               bool(ctx.get('is_dict')))
     # A restored search is a search like any other, so the column menus and the
     # tally light up for a filter that came back from a line of code.
     _apply_search_to_columns(model)
@@ -3523,7 +3545,8 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     pick_expr = ctx.get('pick_expr')
     if pick_expr:
         model['pick_expr'] = _dollarize_row_names(pick_expr,
-                                                  _predicate_binds_index(ctx))
+                                                  _predicate_binds_index(ctx),
+                                                  bool(ctx.get('is_dict')))
         model['first_match'] = True
         model['tool'] = 'pick'
     else:

@@ -9993,6 +9993,63 @@ class TestDictPositionalActions(unittest.TestCase):
                          'data[:1] + data[1+1:]')
 
 
+class TestDictRelinkDollarizesItsOwnNames(unittest.TestCase):
+    """A dict predicate read back off a line has to return to the search box as
+    dollars. It was coming back as the bare comprehension names -- `v > 26`,
+    which the box then evaluates against a `v` the user's program does not have
+    -- because the dollarizer only knew a list's `item` and `i`."""
+
+    D = {'alice': 30, 'bob': 25}
+
+    def model_for(self, line):
+        from table_visualizer import _ctx_to_model
+        from table_visualizer_grammar import parse_generated_code
+        model = init_model(self.D, mock_get_visualizer_dict_tables,
+                           var_and_exp=('d', 'd'))
+        _ctx_to_model(parse_generated_code(line), model)
+        return model
+
+    def test_a_value_predicate_comes_back_as_a_dollar(self):
+        m = self.model_for('{k: v for k, v in d.items() if v > 26}')
+        self.assertEqual(m['search'], '$v > 26')
+
+    def test_a_key_predicate_comes_back_as_a_dollar(self):
+        m = self.model_for("{k: v for k, v in d.items() if k != 'bob'}")
+        self.assertEqual(m['search'], "$k != 'bob'")
+
+    def test_the_index_comes_back_only_when_the_line_bound_it(self):
+        m = self.model_for(
+            '{k: v for i, (k, v) in enumerate(d.items()) if i > 0}')
+        self.assertEqual(m['search'], '$i > 0')
+
+    def test_a_users_own_name_is_not_mistaken_for_a_binding(self):
+        # The unindexed form does not bind `i`, so an `i` in it is the user's.
+        m = self.model_for('{k: v for k, v in d.items() if v > i}')
+        self.assertEqual(m['search'], '$v > i')
+
+    def test_names_inside_strings_are_left_alone(self):
+        m = self.model_for("{k: v for k, v in d.items() if k == 'v is k'}")
+        self.assertEqual(m['search'], "$k == 'v is k'")
+
+    def test_a_list_predicate_is_unchanged(self):
+        from table_visualizer import _ctx_to_model
+        from table_visualizer_grammar import parse_generated_code
+        model = init_model([1, 2, 3], mock_get_visualizer,
+                           var_and_exp=('data', 'data'))
+        _ctx_to_model(parse_generated_code('[item for item in data if item > 1]'),
+                      model)
+        self.assertEqual(model['search'], '$ > 1')
+
+    def test_the_search_it_restores_generates_the_line_it_came_from(self):
+        for line in ('{k: v for k, v in d.items() if v > 26}',
+                     "{k: v for k, v in d.items() if k != 'bob'}",
+                     '{k: v for i, (k, v) in enumerate(d.items()) if i > 0}'):
+            with self.subTest(line=line):
+                model = self.model_for(line)
+                ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
+                self.assertEqual(generate_action('filter', ctx)[1], line)
+
+
 class TestDictColumnValues(unittest.TestCase):
     """_column_values' fast path lies for dicts: `$` short-circuits to
     list(lst), which for a dict is the KEYS -- silently wrong for tally, sort
