@@ -9280,18 +9280,17 @@ class TestDictActionsAreDimmed(unittest.TestCase):
                 for action in ('filter', 'delete', 'find_indices'):
                     self.assertIsNone(generate_action(action, ctx))
 
-    def test_only_delete_one_stays_cut_under_first_match(self):
-        # Find One and Find Indices read cleanly for a dict; delete-one does
-        # not, so it alone stays dim.
+    def test_the_first_match_forms_all_write_for_a_dict(self):
+        # All three: the pair, the key, and the dict without its first match.
         d = {'alice': 30, 'bob': 25}
         model = init_model(d, mock_get_visualizer_dict_tables,
                            var_and_exp=('d', 'd'))
         model['search'] = '$v > 28'
         model['first_match'] = True
         ctx = _get_search_context(model, ('d', 'd'), source_expr='d')
-        self.assertIsNotNone(generate_action('filter', ctx))
-        self.assertIsNotNone(generate_action('find_indices', ctx))
-        self.assertIsNone(generate_action('delete', ctx))
+        for action in ('filter', 'find_indices', 'delete'):
+            with self.subTest(action=action):
+                self.assertIsNotNone(generate_action(action, ctx))
 
     def test_the_predicate_actions_now_write_and_their_buttons_are_live(self):
         d, model = self.dict_model()
@@ -9524,17 +9523,45 @@ class TestDictFirstMatch(unittest.TestCase):
         code = generate_action('filter', self.ctx('$v > 999'))[1]
         self.assertIsNone(eval(code, {'d': d}))
 
-    def test_delete_one_stays_cut(self):
-        # A dict has no positional splice, and every expression form of
-        # "remove the first matching entry" either evaluates the predicate
-        # twice or collides on a None key. Left unwritten rather than written
-        # badly -- the button dims.
-        self.assertIsNone(generate_action('delete', self.ctx()))
+    def test_delete_one_removes_the_first_match(self):
+        self.assertEqual(
+            generate_action('delete', self.ctx())[1],
+            'next(({k2: v2 for k2, v2 in d.items() if k2 != k}'
+            ' for k, v in d.items() if v > 28), d)')
+
+    def test_delete_one_runs_and_removes_only_the_first(self):
+        d = {'alice': 30, 'bob': 25, 'carol': 41}
+        code = generate_action('delete', self.ctx())[1]
+        self.assertEqual(eval(code, {'d': d}), {'bob': 25, 'carol': 41})
+
+    def test_delete_one_evaluates_the_predicate_only_to_the_first_match(self):
+        # The whole point of the next(...) idiom, and the same property the
+        # list form has: it stops.
+        seen = []
+        def p(v):
+            seen.append(v)
+            return v > 28
+        d = {'alice': 30, 'bob': 25, 'carol': 41}
+        code = generate_action('delete', self.ctx('p($v)'))[1]
+        eval(code, {'d': d, 'p': p})
+        self.assertEqual(seen, [30])
+
+    def test_delete_one_with_no_match_hands_back_the_dict(self):
+        d = {'alice': 30}
+        code = generate_action('delete', self.ctx('$v > 999'))[1]
+        self.assertEqual(eval(code, {'d': d}), d)
+
+    def test_delete_one_survives_a_none_key(self):
+        # The reason this is written by KEY rather than against a
+        # next(..., None) sentinel: None is a perfectly good dict key.
+        d = {None: 99, 'bob': 25}
+        code = generate_action('delete', self.ctx('$v > 28'))[1]
+        self.assertEqual(eval(code, {'d': d}), {'bob': 25})
 
     def test_both_generators_agree_and_it_parses_back(self):
         from table_visualizer_grammar import (generate_action as ggen,
                                               parse_generated_code)
-        for action in ('filter', 'find_indices'):
+        for action in ('filter', 'find_indices', 'delete'):
             for search in ('$v > 28', '$i > 0'):
                 with self.subTest(action=action, search=search):
                     ctx = self.ctx(search)

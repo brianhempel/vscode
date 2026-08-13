@@ -3658,12 +3658,7 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
         if ctx.get('pick_expr'):
             # Pick builds band slices a dict cannot take.
             return None
-        if first and action not in ('filter', 'find_indices'):
-            # Find One hands back the pair, and a dict's "index" is its key --
-            # both read cleanly. Delete-one does not: a dict has no positional
-            # splice, and every expression form of "remove the first matching
-            # entry" either evaluates the predicate twice or collides on a None
-            # key. Left unwritten rather than written badly.
+        if first and action not in ('filter', 'find_indices', 'delete'):
             return None
         # $i is the ROOT ROW index, so enumerate(d.items()) binds exactly what
         # $i means. The header is the general one either way: narrowing it to
@@ -3676,6 +3671,19 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                 code = f'next(((k, v) for {rows} if {pred}), None)'
             case 'find_indices' if first:
                 code = f'next((k for {rows} if {pred}), None)'
+            case 'delete' if first:
+                # The dict reading of the list's
+                # `next((src[:i] + src[i+1:] for i, item in ...), src)`:
+                # the generator yields the dict without this entry, next takes
+                # the first and stops -- so the predicate runs only as far as
+                # the match -- and the default hands the dict back untouched
+                # when nothing matched.
+                #
+                # Excluded by KEY rather than against a next(..., None)
+                # sentinel, because None is a perfectly good dict key; `k` is
+                # bound by the outer generator, so it is always a real one.
+                code = (f'next(({{k2: v2 for k2, v2 in {_atomize(src)}.items() '
+                        f'if k2 != k}} for {rows} if {pred}), {src})')
             case 'filter':
                 code = f'{{k: v for {rows} if {pred}}}'
             case 'delete':

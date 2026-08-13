@@ -102,6 +102,14 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
     ], {}),
 
     Alt("DeleteAction", [
+        BiTemplate("DeletePredicateFirstDict",
+                   "next(({k2: v2 for k2, v2 in {source_expr:VarOrExpr}.items() if k2 != k} for k, v in {source_expr:VarOrExpr}.items() if {predicate_expr:AnyPython}), {source_expr:VarOrExpr})",
+                   {'is_predicate': True, 'is_first': True,
+                    'names_index': False, 'is_dict': True}),
+        BiTemplate("DeletePredicateFirstDictIndexed",
+                   "next(({k2: v2 for k2, v2 in {source_expr:VarOrExpr}.items() if k2 != k} for i, (k, v) in enumerate({source_expr:VarOrExpr}.items()) if {predicate_expr:AnyPython}), {source_expr:VarOrExpr})",
+                   {'is_predicate': True, 'is_first': True,
+                    'names_index': True, 'is_dict': True}),
         BiTemplate("DeletePredicateAllDict",
                    "{k: v for k, v in {source_expr:VarOrExpr}.items() if not ({predicate_expr:AnyPython})}",
                    {'is_predicate': True, 'names_index': False, 'is_dict': True, 'is_first': False}),
@@ -449,7 +457,7 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
         return None
     # Delete-one has no dict form: see the live generator for why.
     if ctx.get('is_dict') and ctx.get('is_first') and action not in (
-            'filter', 'find_indices'):
+            'filter', 'find_indices', 'delete'):
         return None
     gen_ctx = {k: v for k, v in ctx.items() if v is not None}
     gen_ctx['action'] = action
