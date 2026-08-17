@@ -55,3 +55,4 @@ __pycache__
 .snc_io_cache/
 .vs
 .snc_table_columns.json
+working_examples/

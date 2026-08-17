@@ -40,7 +40,10 @@
 - [x] figure out what table widgets should be per column
 - [x] column tally
 - [x] aggregations
-
+- [ ] snc-py-exp for per-group aggregations
+- [ ] reify as...list of dict etc, to persist transient columns
+- [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*
+- [ ] drag to reorder subcolumns
 - [ ] need to show list length somewhere
 - [ ] need to show string length somewhere
 - [ ] extract row by grabbing index cell
@@ -51,7 +54,6 @@
 - [ ] hiding the $ sometimes is a bit funky
 - [ ] $item instead of $, maybe?
 - [ ] col action: convert to int, float
-- [ ] reify as...list of dict etc, to persist transient columns
 - [ ] dictionary visualizer
 - [ ] tuple visualizer
 - [ ] list of tuples
@@ -59,7 +61,6 @@
 - [x] group by (i.e. dictionaries of lists)
 - [ ] generic object visualizer
 - [ ] visualize sets
-- [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*
 - [ ] make it clearer what is temp state versus reified in code. *jacob: the fact that there is temp state is a little funky too*
 - [ ] make the above work nicely for large, nested JSON blobs (Ultorg lol)
 - [ ] use VS Code debug config to know how to launch python and app
