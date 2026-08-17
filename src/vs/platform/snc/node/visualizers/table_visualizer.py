@@ -311,6 +311,45 @@ class ComputeExprKeyDown:
     pass
 
 @dataclass(frozen=True, slots=True)
+class SubcolToggle:
+    """User checked or unchecked one of a column's Subcolumns rows, which
+    spreads that column's value ACROSS -- one drawn column per field, where the
+    column itself had one cell holding the lot.
+
+    Identified by the expression it is showing, like a Compute row, so one the
+    user wrote themselves needs no event of its own.
+    """
+    index: int
+    expr: str
+
+@dataclass(frozen=True, slots=True)
+class SubcolShowAll:
+    """User clicked Show all, which spreads every field the column's values
+    have."""
+    index: int
+
+@dataclass(frozen=True, slots=True)
+class SubcolHideAll:
+    """User clicked Hide all, which takes every sub-column away -- the ones
+    they wrote as well as the ones detected, since the menu lists both -- and
+    so gives the column back its own cell."""
+    index: int
+
+@dataclass(frozen=True, slots=True)
+class SubcolExprInput:
+    """User typed a sub-column of their own into the empty box at the foot of
+    the Subcolumns submenu, or edited one already there."""
+    index: int
+    expr: str
+    value: str
+
+@dataclass(frozen=True, slots=True)
+class SubcolExprKeyDown:
+    """Enter or Escape in a box holding a sub-column expression. Its own event
+    for the same reason ComputeExprKeyDown is."""
+    pass
+
+@dataclass(frozen=True, slots=True)
 class SearchBoxInput:
     """User typed in the search box."""
     value: str
@@ -603,7 +642,7 @@ def _columns_from_slots(exprs, slot_cols, depth: int = 0) -> dict:
     for expr in exprs:
         subs = slot_cols.get(expr) or []
         config = {}
-        if subs and _split_splat(expr)[0] and depth < MAX_SPLAT_DEPTH:
+        if subs and depth < MAX_SPLAT_DEPTH:
             config['cols'] = _sub_columns_from_entries(subs, depth + 1)
         _col_add(columns, expr, config)
     return columns
@@ -622,7 +661,7 @@ def _sub_columns_from_entries(entries, depth: int) -> dict:
         expr = entry['expr']
         config = {}
         nested = entry.get('cols')
-        if nested and _split_splat(expr)[0] and depth < MAX_SPLAT_DEPTH:
+        if nested and depth < MAX_SPLAT_DEPTH:
             config['cols'] = _sub_columns_from_entries(nested, depth + 1)
         _col_add(out, expr, config)
     return out
@@ -672,51 +711,77 @@ def _column_groups(columns) -> list:
     """
     groups = []
     for col in (columns or {}):
-        subs = tuple(_col_subs(columns, col)) if _split_splat(col)[0] else ()
+        subs = tuple(_col_subs(columns, col))
         width = len(_leaf_columns({col: (columns or {})[col]}))
         groups.append(ColumnGroup(col, max(width, 1), subs))
     return groups
 
 
-def _leaf_columns(columns, chain: tuple = ()) -> list:
+def _sub_expr(col: str, path: tuple, chain: tuple) -> 'str | None':
+    """The expression a leaf reads by, in the scope its innermost splat names:
+    off the element, or off the ROW when no splat is above it.
+
+    Every PLAIN ancestor under that splat is folded in, innermost first -- a
+    sub-column of a plain column is read off whatever its parent reads, which
+    is all a plain parent ever meant. None when there is nothing to fold and no
+    splat either: the leaf's identity is its expression, as it always was.
+    """
+    below = []
+    for ancestor in reversed(path):
+        if _split_splat(ancestor)[0]:
+            break
+        below.append(ancestor)
+    if not below and not chain:
+        return None
+    out = col
+    for parent in below:
+        out = _compose_sub(out, parent)
+    return out
+
+
+def _leaf_columns(columns, path: tuple = (), chain: tuple = ()) -> list:
     """Every drawn column, in order.
 
-    A plain column is its own leaf. A splat with no sub-columns is one leaf
-    showing the whole element. A splat with sub-columns becomes one leaf each,
-    every one of them reading off the same element -- and a sub-column that
-    splats in turn recurses, so its own leaves sit one level deeper again.
+    A column with no sub-columns is its own leaf; a splat with none is one leaf
+    showing the whole element. A column WITH sub-columns is not drawn itself --
+    its subs are, one leaf each, every one of them read off that column's value.
 
-    *chain* is the splats already entered, outermost first. It is what keeps
-    two identically-named sub-columns under different ancestors apart, since
-    the identity joins the whole path.
+    Two tuples rather than one, because the nesting and the row grouping are
+    different axes. *path* is every ancestor, which is what the identity and
+    the header are made of and what keeps two identically-named sub-columns
+    apart. *chain* is the SPLAT ancestors alone, since only a splat spreads a
+    value into rows: a plain parent adds a header level without adding a
+    grouping level, which is exactly the difference between the two.
     """
     leaves = []
     for col in (columns or {}):
         is_splat = _split_splat(col)[0]
         # A bare list of expressions is still a legal `columns`, and carries no
         # sub-columns at all -- _col_subs is what knows both shapes.
-        subs = _col_subs(columns, col) if is_splat else {}
-        prefix = f'{SUBCOL_SEP}'.join(chain)
-        identity = f'{prefix}{SUBCOL_SEP}{col}' if prefix else col
+        subs = _col_subs(columns, col)
+        here_path = path + (col,)
+        identity = f'{SUBCOL_SEP}'.join(here_path)
         if not subs:
             here = chain + (col,) if is_splat else chain
             leaves.append(LeafColumn(
                 expr=identity,
                 splat=here[-1] if here else None,
-                # A splat with no sub-columns shows the element itself. One
-                # that isn't under any splat reads its row the ordinary way.
-                sub='$' if is_splat else (None if not chain else col),
-                header=chain + (col,),
+                # A splat with no sub-columns shows the element itself.
+                sub='$' if is_splat else _sub_expr(col, path, chain),
+                header=here_path,
                 chain=here,
                 depth=len(here)))
             continue
-        leaves.extend(_leaf_columns(subs, chain + (col,)))
+        leaves.extend(_leaf_columns(subs, here_path,
+                                    chain + (col,) if is_splat else chain))
     return leaves
 
 
-# A hand-edited dotfile is a real input, and splat depth is bounded by the
+# A hand-edited dotfile is a real input, and nesting depth is bounded by the
 # config rather than by the data -- so it cannot run away the way a deep value
-# can, but a cap is still cheaper than the header arithmetic going wrong.
+# can, but a cap is still cheaper than the header arithmetic going wrong. It
+# caps sub-columns of any kind, not just splats: the splat levels it bounds are
+# one nesting each. Named for the splat because that is what first needed it.
 MAX_SPLAT_DEPTH = 5
 
 
@@ -748,8 +813,7 @@ def _header_cells(columns) -> list:
 
     def walk(cols, chain, level):
         for col in (cols or {}):
-            is_splat = _split_splat(col)[0]
-            subs = _col_subs(cols, col) if is_splat else {}
+            subs = _col_subs(cols, col)
             path = chain + (col,)
             expr = f'{SUBCOL_SEP}'.join(path)
             if subs:
@@ -778,11 +842,12 @@ def _leaf_values_expr(leaf: LeafColumn, source_expr: str,
 
         [el['who'] for v in d.values() for el in v]
 
-    A leaf that isn't under a splat is the ordinary whole-column expression,
-    unchanged.
+    A leaf that isn't under a splat is the ordinary whole-column expression --
+    of the composition when a plain parent carries it, since that is the column
+    it is, and of the identity otherwise.
     """
     if leaf.splat is None:
-        return _column_values_expr(leaf.expr, source_expr, binds)
+        return _column_values_expr(leaf.sub or leaf.expr, source_expr, binds)
 
     inner = _split_splat(leaf.splat)[1]
     # The splat's own list, written in root-row scope -- `v` for a dict's
@@ -811,7 +876,9 @@ def _column_whole_expr(model, col: str, source_expr: str) -> str:
     """
     binds = _model_binds(model)
     leaf = _leaf_for(model.get('columns') or {}, col)
-    if leaf is not None and leaf.splat is not None:
+    # A leaf under a plain parent is keyed by a composed identity too, and its
+    # `sub` is the column it actually is -- so both kinds go through the leaf.
+    if leaf is not None and (leaf.splat is not None or leaf.sub is not None):
         return _leaf_values_expr(leaf, source_expr, binds)
     return _column_values_expr(col, source_expr, binds)
 
@@ -838,6 +905,18 @@ def _leaf_values(leaf: LeafColumn, lst, model, eval_in_scope=None) -> list:
                 _leaf_values_expr(leaf, source_expr, _binds_for(lst))))
         except Exception:
             pass
+    if leaf.splat is None:
+        # Nothing spread it into rows, so the composition is read off each row
+        # the way any other column is.
+        values = []
+        for row in _rows(lst, model.get('columns') or {}):
+            try:
+                values.append(eval_dollar_expr(
+                    leaf.sub or leaf.expr, row.item, eval_in_scope,
+                    outer=(lst,), bindings=row.bindings))
+            except Exception:
+                pass
+        return values
     values = []
     for row in _rows(lst, model.get('columns') or {}):
         element = row.splats.get(leaf.splat)
@@ -909,6 +988,31 @@ def _splat_value(col: str, row: Row, container, scope=_UNSET) -> list | None:
     except Exception:
         return None
     return value if isinstance(value, list) else None
+
+
+def _splat_elements(lst, columns, target: str) -> list:
+    """Every element the splat a target names spreads, across the rows.
+
+    What its own + asks about: a row here is the whole list a splat holds, and
+    what a sub-column reads is one element of it -- so the fields to suggest
+    are the elements', not the rows'.
+
+    A top-level splat reads off the row and can be sampled without expanding
+    anything; a nested one reads off the element of the splat it is inside,
+    which is what the expanded rows already carry.
+    """
+    chain = target.split(SUBCOL_SEP)
+    if len(chain) == 1:
+        rows = [_row_at(lst, i) for i in _sample_indices(lst)] if lst else []
+    else:
+        rows = _rows(lst, columns)
+    out = []
+    for row in rows:
+        scope = _UNSET if len(chain) == 1 else row.splats.get(chain[-2])
+        if scope is None:
+            continue
+        out.extend(_splat_value(chain[-1], row, lst, scope) or [])
+    return out
 
 
 def _splat_levels(columns) -> list:
@@ -1600,22 +1704,106 @@ def _menu_target_at(columns, index: int) -> 'str | None':
     return targets[index] if index < len(targets) else None
 
 
-def _splat_of(columns, target: str) -> 'str | None':
-    """The splat a target lives under, or None when it is top-level."""
+def _parent_of(columns, target: str) -> 'str | None':
+    """The column a target lives under, or None when it is top-level."""
     if SUBCOL_SEP not in target:
         return None
     return target.split(SUBCOL_SEP, 1)[0]
 
 
+def _subs_at(columns, target: str, create: bool = False) -> 'dict | None':
+    """The sub-columns of the column a target names, or None when there is no
+    such column -- which is what a stale index has to mean.
+
+    A column carries no `cols` until something is put in it, since an empty one
+    would read as a column that draws nothing; so the map is made on the way in
+    for a caller that is about to add, and only then.
+    """
+    node = columns
+    for name in target.split(SUBCOL_SEP):
+        if not isinstance(node, dict):
+            return None
+        config = node.get(name)
+        if not isinstance(config, dict):
+            return None
+        subs = config.get('cols')
+        if subs is None:
+            if not create:
+                return None
+            subs = config['cols'] = {}
+        node = subs
+    return node
+
+
+def _subcol_candidates(col: str, lst, model, get_visualizer,
+                       eval_in_scope=None) -> list:
+    """The fields the Subcolumns submenu offers to spread a column into.
+
+    Of whatever a sub-column of it would be READ against: the element for a
+    splat, which spread its list over rows and whose subs are written against
+    one of them, and the cell's own value for any other column. Sampled and
+    unioned by the same helper the table's own + uses, so a field means the
+    same thing wherever it is offered.
+    """
+    if get_visualizer is None:
+        return []
+    if _split_splat(col)[0]:
+        values = _splat_elements(lst, model.get('columns') or {}, col)
+    else:
+        values = _column_values(col, lst, model, eval_in_scope)
+    return _get_all_possible_columns(values, get_visualizer) or []
+
+
+def _drop_subcolumn(model, col: str, expr: str, eval_in_scope=None) -> None:
+    """Take one sub-column away, and everything that was keyed to it.
+
+    A leaf is a column: it can have been searched on, and asked to compute --
+    both keyed by the identity it had, which nothing else will ever answer to
+    once it is gone. The same clean-up Remove Column does, for the same reason.
+    """
+    subs = _subs_at(model.get('columns') or {}, col)
+    if subs is None or expr not in subs:
+        return
+    del subs[expr]
+    target = f'{col}{SUBCOL_SEP}{expr}'
+    _remove_column_children(model, target)
+    _remove_column_search(model, target)
+    _remove_column_compute(model, target)
+    _recompose_search(model, eval_in_scope)
+
+
+def _save_subcolumns(model, col: str) -> None:
+    """Persist a change to a column's sub-columns."""
+    if model.get('_config_root_type'):
+        _save_slots(model)
+
+
+def _menu_id(kind: str, col: str) -> str:
+    """The id of one of a column's menus or chips -- which names the COLUMN,
+    not where it sits.
+
+    Positions move under the menu that is open on them: a column that gains its
+    first sub-column stops being a leaf, and the leaves come first in the target
+    space. An id that moved with it would leave the open menu drawn on some
+    other column, and would take the focus off a box the moment the first
+    character typed into it added the column that did the moving.
+
+    These ids are compared in Python and never reach the DOM -- the front end
+    finds a panel by where it sits in the markup -- so an expression names one
+    as well as a number does, and says which column it means.
+    """
+    return f'{kind}-{col}'
+
+
 def _remove_target(columns, target: str) -> bool:
     """Remove a column, wherever it lives."""
-    splat = _splat_of(columns, target)
-    if splat is None:
+    parent = _parent_of(columns, target)
+    if parent is None:
         if target not in columns:
             return False
         del columns[target]
         return True
-    subs = _col_subs(columns, splat)
+    subs = _col_subs(columns, parent)
     sub = target.split(SUBCOL_SEP, 1)[1]
     if sub not in subs:
         return False
@@ -1626,11 +1814,11 @@ def _remove_target(columns, target: str) -> bool:
 def _rename_target(columns, target: str, new_name: str) -> bool:
     """Rename a column in place, keeping its position and whatever it lives
     under. False when the name is taken among its own siblings."""
-    splat = _splat_of(columns, target)
-    if splat is None:
+    parent = _parent_of(columns, target)
+    if parent is None:
         index = list(columns).index(target) if target in columns else None
         return False if index is None else _col_rename_at(columns, index, new_name)
-    subs = _col_subs(columns, splat)
+    subs = _col_subs(columns, parent)
     sub = target.split(SUBCOL_SEP, 1)[1]
     if sub not in subs or new_name in subs:
         return False
@@ -1659,11 +1847,35 @@ def _promote_expr(sub: str, splat_col: str) -> str:
     return f'[{body} for {_SPLAT_ELEM} in {inner}]'
 
 
-def _adopt_expr(col: str) -> 'str | None':
-    """A top-level column's expression, read per ELEMENT inside a splat.
+# The sub's own dollar goes in as a placeholder too, for the same reason the
+# root row does: the parent expression it becomes has dollars of its own, and a
+# replacement carrying one would be read again on the next pass.
+_COMPOSE_PARENT = '_snc_parent_'
 
-    Inside, `$` is the element and `$$` the root row, so every dollar run
-    deepens by one -- the same substitution `unlift_term` performs.
+
+def _compose_sub(sub: str, parent: str) -> str:
+    """A sub-column of a PLAIN column, as the ordinary column it is.
+
+    Nothing spread it into rows, so the sub is simply read off what the parent
+    reads: `$[0]` under `$.split(',')` is the column `$.split(',')[0]`. Inside
+    the parent `$` was its value and `$$` the row; outside, the value has no
+    name and the row is `$` -- the same scope rule a splat's sub-column
+    follows, which is why the two compose the same way and differ only in what
+    coming back OUT has to build (see _promote_expr).
+    """
+    out = replace_dollars_in_py_exp(sub, [_COMPOSE_PARENT, _PROMOTE_ROOT])
+    return out.replace(_COMPOSE_PARENT, _atomize(parent)).replace(
+        _PROMOTE_ROOT, '$')
+
+
+def _adopt_expr(col: str) -> 'str | None':
+    """A top-level column's expression, read per PARENT VALUE inside another
+    column -- the splatted element of a splat, the cell value of a plain one.
+
+    Inside, `$` is the parent's value and `$$` the root row, so every dollar
+    run deepens by one -- the same substitution `unlift_term` performs. Which
+    kind of parent it is makes no difference here: both bind `$` to what the
+    parent reads, and a column being dragged in was written against the row.
 
     None when the column names a suffixed dollar. Suffixes bind at depth 1
     only, so `$k` would deepen to `$$k`, which names nothing by design; the
@@ -1689,12 +1901,18 @@ def _adopt_expr(col: str) -> 'str | None':
 def _move_target(columns, from_target: str, to_target: str) -> bool:
     """Move a column to where another one lives, rewriting it on the way.
 
-    Four cases, and only the two that cross a splat boundary rewrite anything:
-    reordering within one parent is a reorder, and moving between two splats
-    keeps `$` meaning the element either way.
+    Four cases, and only the two that cross a parent boundary rewrite anything:
+    reordering within one parent is a reorder, and moving between two parents
+    keeps `$` meaning the parent's value either way.
+
+    Which rewrite is the parent's business rather than the splat's. Going IN
+    always deepens, since `$` is the parent's value under any parent and the
+    column being moved was written against the row. Coming OUT is where the two
+    part: a splat spread its value over rows and has to collect it back into a
+    list, where a plain column's was never spread and simply composes.
     """
-    from_parent = _splat_of(columns, from_target)
-    to_parent = _splat_of(columns, to_target)
+    from_parent = _parent_of(columns, from_target)
+    to_parent = _parent_of(columns, to_target)
 
     def _siblings(parent):
         return columns if parent is None else _col_subs(columns, parent)
@@ -1712,11 +1930,13 @@ def _move_target(columns, from_target: str, to_target: str) -> bool:
         return _col_move(src_map, keys.index(name), keys.index(_name(to_target)))
 
     if from_parent is not None and to_parent is None:
-        moved = _promote_expr(name, from_parent)
+        moved = (_promote_expr(name, from_parent)
+                 if _split_splat(from_parent)[0]
+                 else _compose_sub(name, from_parent))
     elif from_parent is None and to_parent is not None:
         moved = _adopt_expr(name)
     else:
-        # Splat to splat: `$` is the element on both sides.
+        # Parent to parent: `$` is the parent's value on both sides.
         moved = name
     if moved is None or moved in dst_map:
         return False
@@ -1864,8 +2084,11 @@ def _reset_tally_view(model: dict) -> None:
 def _close_column_menus(model: dict) -> None:
     """Close the column ▾ menu along with any chip menu nested inside it.
 
-    Menu ids are index-based, so adding, removing, reordering or renaming a
-    column leaves an open menu pointing at the wrong one.
+    For the callers that have finished with the menu -- a line written, a
+    column removed -- rather than to keep it honest: the ids name their column
+    (see _menu_id), so moving one no longer leaves a menu open on whatever took
+    its place. A rename is the one edit that changes an id, and one whose menu
+    is left open simply finds nothing and draws closed.
     """
     model['openDropdown'] = None
     model['col_search_dropdown'] = None
@@ -2961,6 +3184,76 @@ def _group_by_expr(col: str, source_expr: str,
             f'.append({_default_item_expr(binds)}) '
             f'for {_column_binding(col, source_expr, binds, whole_row=True)}'
             f'])[0]')
+
+
+# The grouped dict lands on a line of its own as a type nothing has ever
+# configured, and what detection would say about one is not what it wants: it
+# asks a dict's VALUES for their fields, and a group answers with a position per
+# element it happens to hold. So the click leaves the columns behind it instead.
+_GROUPED_COLUMNS = ['$k', 'len($v)']
+
+
+def _reads_the_row(col: str) -> bool:
+    """Whether a column of the table being grouped still means what it meant
+    when read off an element of a group.
+
+    A group holds whole ROWS, so inside `*$v` the element is a row and an
+    ordinary column reads it unchanged. A sigil is what doesn't survive: `$i`
+    is the row's number in the list it came from, and an element of a group has
+    none; `$k` and `$v` name the halves of a dict's row, and grouping a dict
+    answers with lists of pairs. `$$` named the list the row was read from, and
+    under a splat it names the root row instead.
+    """
+    if dollar_expr_sigils(col):
+        return False
+    return max((len(m[1]) for m in DOLLARS_RE.finditer(col)), default=0) <= 1
+
+
+def _grouped_slots(col: str, columns) -> list:
+    """The columns the grouped dict opens with: the key, how big the group is,
+    and the group's rows spread across the columns the table already had.
+
+    The column grouped ON is left out of the spread -- it has one value per
+    group by construction, and `$k` is already showing it.
+    """
+    subs = {c: config for c, config in _as_columns(columns).items()
+            if c != col and _reads_the_row(c)}
+    splat = f'{SPLAT}$v'
+    return _GROUPED_COLUMNS + [{'expr': splat, 'cols': _slots_from_columns(subs)}
+                               if subs else splat]
+
+
+def _grouped_type_key(col: str, lst, eval_in_scope) -> 'str | None':
+    """The type key the grouped dict will be drawn under: the column's own
+    values are its keys, and a group is always a list.
+
+    Read off the first row, which is the entry `config_key` will read when the
+    dict is drawn -- and spelled the way it spells it, so a seed cannot land
+    under a key nothing goes looking for.
+    """
+    if not lst:
+        return None
+    row = _row_at(lst, 0)
+    try:
+        key = eval_dollar_expr(col, row.item, eval_in_scope, outer=(lst,),
+                               bindings=row.bindings)
+    except Exception:
+        return None
+    return f'{get_full_class_name(key)}->{get_full_class_name([])}'
+
+
+def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
+    """Leave the grouped dict the columns it wants, for the line just written.
+
+    A seed rather than a save: it is written only where nothing is configured
+    for that type, so it can never overwrite what the user has already said
+    about some other dict of lists.
+    """
+    type_key = _grouped_type_key(col, lst, eval_in_scope)
+    if type_key is None or load_columns_from_dotfile(type_key) is not None:
+        return
+    save_columns_to_dotfile(type_key, [],
+                            _grouped_slots(col, model.get('columns')))
 
 
 # =============================================================================
@@ -5165,14 +5458,14 @@ def _render_column_search_row(col, index, model) -> str:
     open_dropdown = model.get('col_search_dropdown')
 
     compose_html = _render_column_search_chip(
-        f'compose-{index}', row['compose'], COLUMN_SEARCH_COMPOSE,
+        _menu_id('compose', col), row['compose'], COLUMN_SEARCH_COMPOSE,
         lambda v: repr(ColumnSearchComposeSelect(index=index, compose=v)),
         open_dropdown, 'col-search-compose',
         "How this composes with other columns' filters")
     # No tooltip on the operator: it shows the operator, and the box beside it
     # shows what it compares against.
     op_html = _render_column_search_chip(
-        f'op-{index}', row['op'], COLUMN_SEARCH_OPS,
+        _menu_id('op', col), row['op'], COLUMN_SEARCH_OPS,
         lambda v: repr(ColumnSearchOpSelect(index=index, op=v)),
         open_dropdown, 'col-search-op',
         'Search Operation')
@@ -5190,7 +5483,7 @@ def _render_column_search_row(col, index, model) -> str:
     # paint over it, and the input reserves room for them with its left padding.
     return (
         f'<div class="col-search-area"'
-        f'{_column_dwell_attr(model, owns=(f"op-{index}", f"compose-{index}"))}>'
+        f'{_column_dwell_attr(model, owns=(_menu_id("op", col), _menu_id("compose", col)))}>'
         # f'<div class="col-search-label-row"><span>Filter</span> <span>({compose_html} with other columns)</span></div>'
         f'<div class="search-box-wrapper">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
@@ -5261,7 +5554,8 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     # The two chips the tally opens itself: resting on the tally is not a way
     # of leaving a menu the tally put there.
     dwell = _column_dwell_attr(
-        model, owns=(f'tally-sort-{index}', f'tally-count-op-{index}'))
+        model, owns=(_menu_id('tally-sort', col),
+                     _menu_id('tally-count-op', col)))
     tally = _tally(_column_values(col, lst, model, eval_in_scope))
     if tally is None:
         return ''
@@ -5346,7 +5640,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         + f'spellcheck="false"{" disabled" if extreme_op else ""} />'
         f'<span class="col-search-chips">'
         + _render_column_search_chip(
-            f'tally-count-op-{index}', count_op, TALLY_COUNT_OPS,
+            _menu_id('tally-count-op', col), count_op, TALLY_COUNT_OPS,
             lambda v: repr(TallyCountOpSelect(index=index, op=v)),
             model.get('col_search_dropdown'), 'col-tally-count-op',
             label=_tally_count_op_label)
@@ -5356,7 +5650,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     # those say what the search filters on, while these only say which values
     # the menu puts in front of the user, and in what order.
     sort_html = _render_column_search_chip(
-            f'tally-sort-{index}', sort, TALLY_SORTS,
+            _menu_id('tally-sort', col), sort, TALLY_SORTS,
             lambda v: repr(TallySortSelect(index=index, sort=v)),
             model.get('col_search_dropdown'), 'col-tally-sort',
             'Order the values are listed in', _tally_sort_label)
@@ -5412,7 +5706,7 @@ def _render_column_sort(col, index, model) -> str:
     same list of rows and are styled once, and `col-sort-*` is only a hook for
     what differs.
     """
-    dropdown_id = f'sort-{index}'
+    dropdown_id = _menu_id('sort', col)
     is_open = model.get('col_search_dropdown') == dropdown_id
     toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
     panel_html = _render_sort_panel(col, index, model) if is_open else ''
@@ -5525,6 +5819,116 @@ def _render_column_group_by(col, index, model) -> str:
     )
 
 
+# What the box at the foot of the Subcolumns submenu says its dollars mean.
+# `$$$` is left out for the same reason Compute's tooltip leaves it out: a
+# sub-column is read one row at a time, so the whole list has nothing to say
+# here.
+SUBCOL_EXPR_TOOLTIP = "$ is this column's value, $$ the row"
+
+
+def _render_column_subcols(col, index, model, lst, get_visualizer=None,
+                           eval_in_scope=None) -> str:
+    """Render the Subcolumns row of a column's ▾ menu, and its submenu when
+    open.
+
+    A flyout like Compute's, and sharing its one open slot. Offered on every
+    column: there is nothing to detect on a column of numbers, but an
+    expression can still be written against one, and a row that comes and goes
+    with the data would be a worse thing to look for than a row that is always
+    there.
+    """
+    dropdown_id = _menu_id('subcols', col)
+    is_open = model.get('col_search_dropdown') == dropdown_id
+    toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
+    panel_html = (_render_subcol_panel(col, index, model, lst, get_visualizer,
+                                       eval_in_scope) if is_open else '')
+    return (
+        f'<div class="snc-dropdown-trigger col-compute col-subcol"'
+        f'{_column_dwell_attr(model, opens=dropdown_id)}>'
+        f'<div class="snc-dropdown-option col-compute-trigger col-subcol-trigger'
+        f'{" open" if is_open else ""}" '
+        f'data-tooltip="Spread this column across several" '
+        f'snc-mouse-down="{html.escape(toggle_event)}">'
+        f'<span class="snc-dropdown-option-label col-compute-title">'
+        f'Subcolumns</span>'
+        f'<span class="submenu-right-arrow">▸</span>'
+        f'</div>{panel_html}</div>'
+    )
+
+
+def _render_subcol_panel(col, index, model, lst, get_visualizer=None,
+                         eval_in_scope=None) -> str:
+    """Show all and Hide all, then a checkbox per field the column's values
+    have, then whatever the user has written and an empty box to write another.
+
+    What is checked is read back out of the column's own sub-columns rather
+    than stored: the config is the only record of a sub-column, so the box and
+    the table cannot come to disagree.
+    """
+    subs = list(_subs_at(model.get('columns') or {}, col) or {})
+    candidates = _subcol_candidates(col, lst, model, get_visualizer,
+                                    eval_in_scope)
+
+    rows = [
+        f'<div class="col-compute-row col-subcol-row col-subcol-all">'
+        f'<span class="col-compute-toggle" '
+        f'snc-mouse-down="{html.escape(repr(event))}">'
+        f'<span class="col-compute-nocheck"></span>'
+        f'<span class="col-compute-name">{label}</span>'
+        f'</span></div>'
+        for label, event in (('Show all', SubcolShowAll(index=index)),
+                             ('Hide all', SubcolHideAll(index=index)))
+    ]
+
+    if candidates:
+        rows.append('<div class="col-compute-sep"></div>')
+    for expr in candidates:
+        checked = expr in subs
+        rows.append(
+            f'<div class="col-compute-row col-subcol-row'
+            f'{" checked" if checked else ""}">'
+            f'<span class="col-compute-toggle" snc-mouse-down="'
+            f'{html.escape(repr(SubcolToggle(index=index, expr=expr)))}">'
+            f'{_render_tally_check(checked)}'
+            f'<span class="col-compute-name">{html.escape(expr)}</span>'
+            f'</span></div>')
+
+    rows.append('<div class="col-compute-sep"></div>')
+    # A box names itself by where it sits rather than by what it says, for the
+    # reason the aggregation boxes do: the first character typed adds a column
+    # to the table, and a box found again by its place in the list of
+    # everything focusable would lose the rest of the word to it.
+    for i, expr in enumerate([s for s in subs if s not in candidates] + ['']):
+        written = bool(expr.strip())
+        toggle_attr = '' if not written else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(SubcolToggle(index=index, expr=expr)))}"')
+        rows.append(
+            f'<div class="col-compute-row col-subcol-row col-subcol-free'
+            f'{" checked" if written else ""}">'
+            f'<span class="col-compute-toggle"{toggle_attr}>'
+            f'{_render_tally_check(written, disabled=not written)}</span>'
+            f'<input type="text" class="col-compute-expr search-box" '
+            f'snc-input="{html.escape(_subcol_expr_event(index, expr))}" '
+            f'snc-focus-key="subcol-free-{col}-{i}" '
+            f'snc-key-down="{html.escape(repr(SubcolExprKeyDown()))}" '
+            f'data-tooltip="{html.escape(SUBCOL_EXPR_TOOLTIP)}" '
+            f'value="{html.escape(expr)}" placeholder="Add subcolumn" '
+            f'spellcheck="false" />'
+            f'</div>')
+
+    return (f'<div class="snc-dropdown-panel flyout col-compute-panel '
+            f'col-subcol-panel" snc-dropdown-align="flyout">'
+            f'{"".join(rows)}</div>')
+
+
+def _subcol_expr_event(index: int, expr: str) -> str:
+    """The box that holds a whole sub-column expression, at the foot of the
+    submenu."""
+    return (f"lambda e: SubcolExprInput(index={index}, expr={expr!r}, "
+            f"value=e.get('value', ''))")
+
+
 def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
     """Render the Compute row of a column's ▾ menu, and its submenu when open.
 
@@ -5535,7 +5939,7 @@ def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
     Only computed while the submenu is open, which is the one time the whole
     column is worth evaluating for an answer nobody has asked to keep.
     """
-    dropdown_id = f'compute-{index}'
+    dropdown_id = _menu_id('compute', col)
     is_open = model.get('col_search_dropdown') == dropdown_id
     toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
     panel_html = (_render_compute_panel(col, index, model, lst, eval_in_scope)
@@ -5671,7 +6075,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'{_render_tally_check(written, disabled=not written)}</span>'
             f'<input type="text" class="col-compute-expr search-box" '
             f'snc-input="{html.escape(_compute_expr_event(index, template))}" '
-            f'snc-focus-key="compute-free-{index}-{i}" '
+            f'snc-focus-key="compute-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
             f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
             f'value="{html.escape(template)}" placeholder="Add aggregation" '
@@ -5730,7 +6134,8 @@ def _column_dwell_attr(model, *, opens: 'str | None' = None, owns=()) -> str:
             f'{html.escape(repr(ColumnSubmenuDwell(dropdown_id=opens)))}"')
 
 
-def _render_column_menu(col, index, model, lst, eval_in_scope=None):
+def _render_column_menu(col, index, model, lst, eval_in_scope=None,
+                        get_visualizer=None):
     """Render the rows of the per-column ▾ menu.
 
     State-driven (no data-hover-menu), so the TypeScript side hoists the panel out
@@ -5745,6 +6150,10 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove Column</span>'
         f'</div>',
+        # Beside Remove Column: the two rows that decide which columns exist,
+        # ahead of the three that ask questions about the rows.
+        _render_column_subcols(col, index, model, lst, get_visualizer,
+                               eval_in_scope),
         _render_column_sort(col, index, model),
         _render_column_group_by(col, index, model),
         _render_column_compute(col, index, model, lst, eval_in_scope),
@@ -5765,7 +6174,8 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None):
 
 
 def _render_column_header(col, index, model, lst, eval_in_scope=None,
-                          span_attrs='', extra_classes='', label=None):
+                          span_attrs='', extra_classes='', label=None,
+                          get_visualizer=None):
     """Render a normal column header with drag handle, column name, and ▾ menu.
 
     The header shows the expression as written, dollar and all: it is the same
@@ -5775,6 +6185,9 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
     *label* is what the cell shows when that differs from the column
     expression -- a sub-column is keyed by its composed identity but reads as
     the expression the user wrote.
+
+    *get_visualizer* is here for the ▾ menu: the Subcolumns submenu asks the
+    cells' visualizers what fields they have.
     """
     click_event = repr(ColumnClick(index=index))
     drag_start_event = repr(ColumnDragStart(index=index))
@@ -5802,7 +6215,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
     # The ▾ trigger is pinned to the cell's right edge by .col-header-inner's flex
     # layout (which lives on an inner span, never on the <th>: display:flex on a
     # table cell drops it out of table layout and unsyncs header and body widths).
-    menu_id = f'col-menu-{index}'
+    menu_id = _menu_id('col-menu', col)
     open_dropdown = model.get('openDropdown') or {}
     menu_open = open_dropdown.get('id') == menu_id
     toggle_event = repr(DropdownToggle(dropdown_id=menu_id))
@@ -5820,7 +6233,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(toggle_event)}" '
         f'data-tooltip="Column actions" '
         f'class="{" ".join(menu_classes)}">▾</span>'
-        f'{_render_column_menu(col, index, model, lst, eval_in_scope) if menu_open else ""}'
+        f'{_render_column_menu(col, index, model, lst, eval_in_scope, get_visualizer) if menu_open else ""}'
         f'</span>'
     )
 
@@ -5851,8 +6264,8 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
     )
 
 
-def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-1):
-    """Render a column header with input for adding or editing a column name."""
+def _column_input_html(lst, model, get_visualizer, is_editing):
+    """The box a column is written in, with whatever it can suggest."""
     input_value = model.get('column_input_value', '')
     input_event = "lambda e: ColumnInput(value=e.get('value', ''))"
 
@@ -5887,7 +6300,7 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
     if is_editing:
         extra_attrs += ' snc-select-all'
 
-    input_html = (
+    return (
         f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
@@ -5900,7 +6313,10 @@ def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-
         f'</span>'
     )
 
-    return f'<th>{input_html}</th>'
+
+def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-1):
+    """A header cell holding the box, for a column being added or edited."""
+    return f'<th>{_column_input_html(lst, model, get_visualizer, is_editing)}</th>'
 
 
 def _resolve_first_and_index(model, eval_in_scope):
@@ -7012,7 +7428,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 cell.expr, ci, model, lst, eval_in_scope,
                 span_attrs=span_attrs,
                 extra_classes='col-subheader' if level else None,
-                label=cell.label if level else None))
+                label=cell.label if level else None,
+                get_visualizer=get_visualizer))
 
         if level == 0:
             if model.get('adding_column'):
@@ -7110,6 +7527,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
             is_splat = leaf.splat is not None
+            # What an unsplatted leaf reads by: the composition when a plain
+            # parent carries it, and its own identity otherwise -- the two are
+            # the same string until a column carries sub-columns.
+            reads = leaf.sub or col if not is_splat else None
             # A column belongs to the group at the depth it was splatted to, so
             # it is drawn once per group at THAT depth rather than once per
             # rendered row. The innermost depth is a group of one, which is how
@@ -7134,9 +7555,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                             bindings={'j': row.bindings.get('j', 0)})
                 elif read_through and eval_in_scope is not None:
                     cell_value = eval_in_scope(
-                        _column_cell_expr(col, source_expr, i, lst))
+                        _column_cell_expr(reads, source_expr, i, lst))
                 else:
-                    cell_value = eval_dollar_expr(col, row.item, eval_in_scope,
+                    cell_value = eval_dollar_expr(reads, row.item,
+                                                  eval_in_scope,
                                                   outer=(lst,),
                                                   bindings=row.bindings)
             except Exception:
@@ -7163,7 +7585,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                         cell_expr = (f'{_atomize(_column_cell_expr(inner, source_expr, i, lst))}'
                                      f'[{row.bindings["j"]}]')
                     else:
-                        cell_expr = _column_cell_expr(col, source_expr, i, lst)
+                        cell_expr = _column_cell_expr(reads, source_expr, i, lst)
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -7677,6 +8099,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 commands.append(new_code_command(
                     (f'{base}_grouped',
                      _group_by_expr(col, source_expr, _model_binds(model)))))
+                # The dict the line makes has no columns of its own yet, and
+                # the ones to want are the ones in hand.
+                _seed_grouped_columns(col, value, model, eval_in_scope)
 
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.
@@ -7745,6 +8170,64 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 commands.append(new_code_command(
                     (_compute_code_name(expr, source_expr), code),
                     lambda _code: _agg_imports(expr)))
+
+        # Sub-columns leave the menu open, like the tally and Compute: checking
+        # several boxes in a row is what a list of them is for. Every one of
+        # these re-points the menu afterwards, because a column that gains or
+        # loses its sub-columns moves in the target space the ids are made of.
+        case SubcolToggle(index=idx, expr=expr):
+            col = _column_at(model, idx)
+            if col is not None and expr.strip():
+                subs = _subs_at(model['columns'], col, create=True)
+                if subs is not None:
+                    if expr in subs:
+                        _drop_subcolumn(model, col, expr, eval_in_scope)
+                    else:
+                        _col_add(subs, expr)
+                    _save_subcolumns(model, col)
+
+        case SubcolShowAll(index=idx):
+            col = _column_at(model, idx)
+            if col is not None:
+                subs = _subs_at(model['columns'], col, create=True)
+                if subs is not None:
+                    for expr in _subcol_candidates(col, value, model,
+                                                   get_visualizer, eval_in_scope):
+                        _col_add(subs, expr)
+                    _save_subcolumns(model, col)
+
+        case SubcolHideAll(index=idx):
+            col = _column_at(model, idx)
+            if col is not None:
+                for expr in list(_subs_at(model['columns'], col) or {}):
+                    _drop_subcolumn(model, col, expr, eval_in_scope)
+                _save_subcolumns(model, col)
+
+        case SubcolExprInput(index=idx, expr=expr, value=text):
+            col = _column_at(model, idx)
+            if col is not None:
+                subs = _subs_at(model['columns'], col, create=True)
+                if subs is not None:
+                    written = text.strip()
+                    if expr in subs:
+                        # In place, so the column the user is typing at stays
+                        # where it is among its siblings.
+                        index_of = list(subs).index(expr)
+                        _drop_subcolumn(model, col, expr, eval_in_scope)
+                        if written:
+                            _col_add(subs, written)
+                            _col_move(subs, len(subs) - 1, index_of)
+                    elif written:
+                        _col_add(subs, written)
+                    _save_subcolumns(model, col)
+
+        case SubcolExprKeyDown():
+            key = event_json.get('key', '')
+            if key == 'Enter':
+                _close_column_menus(model)
+            elif key == 'Escape':
+                # Innermost first: the submenu sits inside the column menu.
+                model['col_search_dropdown'] = None
 
         # The tally leaves the column menu open: picking several values in a row
         # is the whole point of it.

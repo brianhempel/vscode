@@ -1673,7 +1673,8 @@
 	font-family: inherit;
 	font-size: inherit;
 	outline: none;
-	width: 120px;
+	min-width: 120px;
+	text-align: center;
 }
 
 .list-visualizer .col-suggestion {

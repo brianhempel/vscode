@@ -846,7 +846,9 @@ class TestSubColumnMenuEvents(unittest.TestCase):
     def test_the_sub_header_carries_a_menu_trigger(self):
         d, model = self.model()
         html_out = visualize(d, model, mock_get_visualizer_dict_tables, None)
-        self.assertIn('col-menu-1', html_out)
+        # The sub-column names itself, control character and all, the way
+        # every id that carries an expression is written.
+        self.assertIn(html.escape(repr(menu_id(model, index=1))), html_out)
 
 
 class TestPromoteAndAdopt(unittest.TestCase):
@@ -1872,6 +1874,17 @@ def _first_column_header(output):
     return m.group(0)
 
 
+def menu_id(model, kind='col-menu', index=0):
+    """The id of a menu or chip on the column at *index*.
+
+    The tests' twin of `_menu_id`: the ids name their column, so a test that
+    wants "the menu on the first column" asks for it rather than spelling a
+    position that the column may not keep.
+    """
+    from table_visualizer import _menu_id, _menu_targets
+    return _menu_id(kind, _menu_targets(model['columns'])[index])
+
+
 class TestColumnMenu(unittest.TestCase):
     """The per-column ▾ menu: a click-toggled, state-driven dropdown pinned to the
     right edge of each header. Remove Column lives here rather than as a bare × in
@@ -1899,17 +1912,17 @@ class TestColumnMenu(unittest.TestCase):
     def test_toggle_opens_then_closes(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        opened, _ = update(make_dropdown_toggle_event('col-menu-0'), None, model,
-                           lst, mock_get_visualizer)
-        self.assertEqual(opened['openDropdown'], {'id': 'col-menu-0'})
-        closed, _ = update(make_dropdown_toggle_event('col-menu-0'), None, opened,
-                           lst, mock_get_visualizer)
+        opened, _ = update(make_dropdown_toggle_event(menu_id(model)), None,
+                           model, lst, mock_get_visualizer)
+        self.assertEqual(opened['openDropdown'], {'id': menu_id(opened)})
+        closed, _ = update(make_dropdown_toggle_event(menu_id(opened)), None,
+                           opened, lst, mock_get_visualizer)
         self.assertIsNone(closed['openDropdown'])
 
     def test_toggle_switches_between_columns(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         new_model, _ = update(make_dropdown_toggle_event('col-menu-1'), None, model,
                               lst, mock_get_visualizer)
         self.assertEqual(new_model['openDropdown'], {'id': 'col-menu-1'})
@@ -1917,7 +1930,7 @@ class TestColumnMenu(unittest.TestCase):
     def test_open_menu_renders_flyout_aligned_state_driven_panel(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
         self.assertIn('snc-dropdown-panel flyout col-menu-panel', th)
         self.assertIn('snc-dropdown-align="flyout"', th)
@@ -1932,7 +1945,7 @@ class TestColumnMenu(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         name_idx = list(model['columns']).index("$['name']")
-        model['openDropdown'] = {'id': f'col-menu-{name_idx}'}
+        model['openDropdown'] = {'id': menu_id(model, index=name_idx)}
         event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
@@ -1948,7 +1961,7 @@ class TestColumnMenu(unittest.TestCase):
                       make_column_mouse_event(repr(ColumnDragStart(index=0)))):
             with self.subTest(event=event['pythonEventStr']):
                 model = init_model(lst, mock_get_visualizer)
-                model['openDropdown'] = {'id': 'col-menu-0'}
+                model['openDropdown'] = {'id': menu_id(model)}
                 new_model, _ = update(event, None, model, lst, mock_get_visualizer)
                 self.assertIsNone(new_model['openDropdown'])
 
@@ -2243,7 +2256,9 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn("DropdownToggle(dropdown_id=&#x27;col-menu-0&#x27;)", output)
+        self.assertIn(
+            f'DropdownToggle(dropdown_id={html.escape(repr(menu_id(model)))})',
+            output)
 
     def test_table_headers_have_drag_handle(self):
         lst = [{'name': 'Alice'}]
@@ -5680,7 +5695,9 @@ class TestColumnHeaderTooltips(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
         m = re.search(
-            r'<span snc-mouse-down="DropdownToggle\(dropdown_id=&#x27;col-menu-0&#x27;\)"([^>]*?)>',
+            r'<span snc-mouse-down="DropdownToggle\('
+            + re.escape(f'dropdown_id={html.escape(repr(menu_id(model)))}')
+            + r'\)"([^>]*?)>',
             output,
         )
         self.assertIsNotNone(m, "column menu trigger not found")
@@ -7145,7 +7162,7 @@ class TestColumnSearchEvents(unittest.TestCase):
     def test_choosing_a_compose_operator(self):
         lst, model = self.make_model()
         col = list(model['columns'])[0]
-        model['col_search_dropdown'] = 'compose-0'
+        model['col_search_dropdown'] = menu_id(model, 'compose')
         new_model, _ = update(make_column_search_compose_event(0, 'or'),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(new_model['column_searches'][col]['compose'], 'or')
@@ -7162,13 +7179,15 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_chip_dropdown_toggles_without_closing_the_column_menu(self):
         lst, model = self.make_model()
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        opened, _ = update(make_column_search_toggle_event('op-0'), None, model,
-                           lst, mock_get_visualizer, eval_in_scope=eval)
-        self.assertEqual(opened['col_search_dropdown'], 'op-0')
-        self.assertEqual(opened['openDropdown'], {'id': 'col-menu-0'})
-        closed, _ = update(make_column_search_toggle_event('op-0'), None, opened,
-                           lst, mock_get_visualizer, eval_in_scope=eval)
+        model['openDropdown'] = {'id': menu_id(model)}
+        opened, _ = update(make_column_search_toggle_event(menu_id(model, 'op')),
+                           None, model, lst, mock_get_visualizer,
+                           eval_in_scope=eval)
+        self.assertEqual(opened['col_search_dropdown'], menu_id(opened, 'op'))
+        self.assertEqual(opened['openDropdown'], {'id': menu_id(opened)})
+        closed, _ = update(make_column_search_toggle_event(menu_id(opened, 'op')),
+                           None, opened, lst, mock_get_visualizer,
+                           eval_in_scope=eval)
         self.assertIsNone(closed['col_search_dropdown'])
 
     def test_clearing_the_text_clears_the_main_search(self):
@@ -7357,7 +7376,7 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
     def make_model(self):
         lst = [{'name': 'Alice'}, {'name': 'Bo'}]
         model = init_model(lst, mock_get_visualizer)
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         return lst, model, list(model['columns'])[0]
 
     def pick_op(self, model, lst, op, index=0):
@@ -7450,7 +7469,7 @@ class TestColumnSearchRendering(unittest.TestCase):
     """The search row lives in the per-column ▾ menu, below the action rows."""
 
     def open_menu_html(self, model, lst, column=0):
-        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        model['openDropdown'] = {'id': menu_id(model, index=column)}
         return visualize(lst, model, mock_get_visualizer, None)
 
     def search_row(self, th):
@@ -7510,7 +7529,7 @@ class TestColumnSearchRendering(unittest.TestCase):
         th = _first_column_header(self.open_menu_html(model, lst))
         self.assertNotIn('ColumnSearchOpSelect', th)
 
-        model['col_search_dropdown'] = 'op-0'
+        model['col_search_dropdown'] = menu_id(model, 'op')
         th = _first_column_header(self.open_menu_html(model, lst))
         self.assertIn('ColumnSearchOpSelect', th)
         self.assertIn('(code)', th)
@@ -7525,7 +7544,7 @@ class TestColumnSearchRendering(unittest.TestCase):
     def test_compose_chip_offers_and_or(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        model['col_search_dropdown'] = 'compose-0'
+        model['col_search_dropdown'] = menu_id(model, 'compose')
         th = _first_column_header(self.open_menu_html(model, lst))
         for compose in COLUMN_SEARCH_COMPOSE:
             self.assertIn(html.escape(f'compose={compose!r}'), th)
@@ -7552,12 +7571,12 @@ class TestColumnSearchRendering(unittest.TestCase):
     def test_escape_closes_the_chip_menu_before_the_column_menu(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        model['col_search_dropdown'] = 'op-0'
+        model['openDropdown'] = {'id': menu_id(model)}
+        model['col_search_dropdown'] = menu_id(model, 'op')
         model, _ = update(make_column_key_event('Escape'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['col_search_dropdown'])
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
         model, _ = update(make_column_key_event('Escape'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['openDropdown'])
@@ -7565,8 +7584,8 @@ class TestColumnSearchRendering(unittest.TestCase):
     def test_reopening_a_column_menu_closes_a_stale_chip_menu(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        model['col_search_dropdown'] = 'op-0'
+        model['openDropdown'] = {'id': menu_id(model)}
+        model['col_search_dropdown'] = menu_id(model, 'op')
         model, _ = update(make_dropdown_toggle_event('col-menu-1'), None, model,
                           lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['col_search_dropdown'])
@@ -7931,9 +7950,9 @@ class TestTallyEvents(unittest.TestCase):
     def test_the_menu_stays_open_across_a_click(self):
         # The whole point is picking several values in a row.
         lst, model = tally_model()
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_select_all_checks_every_value(self):
         lst, model = tally_model()
@@ -8035,7 +8054,7 @@ class TestTallyRendering(unittest.TestCase):
     it writes into."""
 
     def open_menu_html(self, model, lst, column=0):
-        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        model['openDropdown'] = {'id': menu_id(model, index=column)}
         return _first_column_header(visualize(lst, model, mock_get_visualizer,
                                               None))
 
@@ -8182,7 +8201,7 @@ class TestTallyRendering(unittest.TestCase):
         lst = []
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ['$']
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         self.assertNotIn('col-tally',
                          visualize(lst, model, mock_get_visualizer, None))
 
@@ -8190,7 +8209,7 @@ class TestTallyRendering(unittest.TestCase):
         lst = [{'name': 'Alice'}, {'name': 'Bo'}, {'name': 'Cy'}]
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ['len($["name"])']
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         eval_in_scope = lambda code: eval(code, {'len': len}, {'data': lst})
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             eval_in_scope))
@@ -8262,7 +8281,7 @@ class TestTallyFilterBox(unittest.TestCase):
         return model
 
     def tally(self, model, lst, column=0):
-        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        model['openDropdown'] = {'id': menu_id(model, index=column)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
         self.assertIn('<div class="col-tally">', th)
@@ -8384,7 +8403,7 @@ class TestTallyFilterBox(unittest.TestCase):
     def test_closing_the_menu_forgets_what_was_typed(self):
         lst, model = tally_model()
         model = self.type(model, lst, 'a')
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
         self.assertEqual(model['tally_filter'], '')
 
@@ -8392,14 +8411,14 @@ class TestTallyFilterBox(unittest.TestCase):
         lst, model = tally_model()
         model['columns'] = ['$', 'len($)']
         model = self.type(model, lst, 'a')
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
         self.assertEqual(model['tally_filter'], '')
 
     def test_escape_forgets_what_was_typed(self):
         lst, model = tally_model()
         model = self.type(model, lst, 'a')
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model, _ = update(make_column_key_event('Escape'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['tally_filter'], '')
@@ -8478,7 +8497,7 @@ class TestTallySortMenu(unittest.TestCase):
         return model
 
     def tally(self, model, lst, column=0):
-        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        model['openDropdown'] = {'id': menu_id(model, index=column)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
         self.assertIn('<div class="col-tally">', th)
@@ -8500,7 +8519,7 @@ class TestTallySortMenu(unittest.TestCase):
         return _column_search_row(model, '$')['text']
 
     def open_chip(self, model, index=0):
-        model['col_search_dropdown'] = f'tally-sort-{index}'
+        model['col_search_dropdown'] = menu_id(model, 'tally-sort', index)
         return model
 
     def test_a_column_starts_in_first_seen_order(self):
@@ -8559,9 +8578,9 @@ class TestTallySortMenu(unittest.TestCase):
     def test_the_column_menu_stays_open_across_a_pick(self):
         # Reordering is a step on the way to picking values, not a way out.
         lst, model = tally_model()
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_an_order_it_does_not_know_is_ignored(self):
         lst, model = tally_model()
@@ -8634,7 +8653,7 @@ class TestTallySortMenu(unittest.TestCase):
         # Like the filter box: a way of reaching a value, not a setting to keep.
         lst, model = tally_model()
         model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
 
@@ -8642,14 +8661,14 @@ class TestTallySortMenu(unittest.TestCase):
         lst, model = tally_model()
         model['columns'] = ['$', 'len($)']
         model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
 
     def test_escape_forgets_the_order(self):
         lst, model = tally_model()
         model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model, _ = update(make_column_key_event('Escape'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
@@ -8796,7 +8815,7 @@ class TestTallyCountFilterNamesTheProgramsValues(unittest.TestCase):
         # 'c' has 5 rows, 'b' 3 and 'aa' 2, so `>= n` with n = 3 drops 'aa'.
         lst, model = tally_model()
         model['tally_count_filter'] = 'n'
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             program_scope(n=3)))
         self.assertEqual(re.findall(r'col-tally-item[ "][^>]*>([^<]*)<', th),
@@ -8869,7 +8888,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         return model
 
     def tally(self, model, lst, column=0):
-        model['openDropdown'] = {'id': f'col-menu-{column}'}
+        model['openDropdown'] = {'id': menu_id(model, index=column)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
         self.assertIn('<div class="col-tally">', th)
@@ -8891,7 +8910,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         return _column_search_row(model, '$')['text']
 
     def open_chip(self, model, index=0):
-        model['col_search_dropdown'] = f'tally-count-op-{index}'
+        model['col_search_dropdown'] = menu_id(model, 'tally-count-op', index)
         return model
 
     def test_a_column_starts_out_comparing_with_at_least(self):
@@ -8966,9 +8985,9 @@ class TestTallyCountFilterBox(unittest.TestCase):
     def test_the_column_menu_stays_open_across_a_pick(self):
         # Narrowing is a step on the way to picking values, not a way out.
         lst, model = tally_model()
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_a_comparison_it_does_not_know_is_ignored(self):
         lst, model = tally_model()
@@ -9157,7 +9176,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         lst, model = tally_model()
         model = self.type(model, lst, '3')
         model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
         self.assertEqual(model['tally_count_filter'], '')
         self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
@@ -9166,14 +9185,14 @@ class TestTallyCountFilterBox(unittest.TestCase):
         lst, model = tally_model()
         model['columns'] = ['$', 'len($)']
         model = self.type(model, lst, '3')
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
         self.assertEqual(model['tally_count_filter'], '')
 
     def test_escape_forgets_the_count_filter(self):
         lst, model = tally_model()
         model = self.type(model, lst, '3')
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model, _ = update(make_column_key_event('Escape'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['tally_count_filter'], '')
@@ -10042,7 +10061,7 @@ from table_visualizer import (
     _leaf_group_values, _leaf_values, _leaf_columns, _agg_layout, _agg_value,
     _column_computes, _set_column_computes, _column_groups, _header_depth,
     _rows, _row_by_key, _slots_from_columns, _columns_from_slots,
-    MAX_SPLAT_DEPTH,
+    MAX_SPLAT_DEPTH, SUBCOL_SEP, _compose_sub, _move_target, _column_values,
 )
 from visualizer_utils import parse_slot_cols
 
@@ -10278,6 +10297,144 @@ class TestNestedRendering(unittest.TestCase):
         self.assertEqual(out.count('blue'), 1)
 
 
+class TestPlainSubColumns(unittest.TestCase):
+    """Splatting and sub-columns are different axes: a splat spreads a value
+    DOWN into rows, sub-columns spread one ACROSS into columns. A column that
+    doesn't splat carries them too -- which is how a CSV line, split into a
+    list, draws as a row of fields instead of a list sitting in one cell."""
+
+    LINES = ['id,name,age', '1,Alice,29', '2,Bob,34']
+    SPLIT = "$.split(',')"
+    COLS = {'$': {}, SPLIT: {'cols': {'$[0]': {}, '$[1]': {}}}}
+
+    def leaves(self):
+        return _leaf_columns(self.COLS)
+
+    def html(self):
+        model = init_model(self.LINES, mock_get_visualizer,
+                           var_and_exp=('data', 'data'))
+        model['columns'] = self.COLS
+        model['_source_expr'] = 'data'
+        return visualize(self.LINES, model, mock_get_visualizer,
+                         lambda code: eval(code, {}, {'data': self.LINES}))
+
+    def test_the_parent_is_not_a_drawn_column(self):
+        # Its sub-columns are what's drawn, the way a splat's are.
+        self.assertEqual([leaf.expr for leaf in self.leaves()],
+                         ['$', f'{self.SPLIT}{SUBCOL_SEP}$[0]',
+                          f'{self.SPLIT}{SUBCOL_SEP}$[1]'])
+
+    def test_a_plain_parent_adds_no_grouping_level(self):
+        # It spread nothing into rows, so every leaf still draws once per row.
+        self.assertEqual([leaf.splat for leaf in self.leaves()], [None] * 3)
+        self.assertEqual([leaf.depth for leaf in self.leaves()], [0, 0, 0])
+
+    def test_a_leaf_reads_by_the_composition(self):
+        self.assertEqual([leaf.sub for leaf in self.leaves()],
+                         [None, "$.split(',')[0]", "$.split(',')[1]"])
+
+    def test_the_header_spans_what_it_carries(self):
+        self.assertEqual([(g.col, g.width) for g in _column_groups(self.COLS)],
+                         [('$', 1), (self.SPLIT, 2)])
+        self.assertEqual(_header_depth(self.COLS), 2)
+
+    def test_the_rows_stay_one_per_item(self):
+        self.assertEqual(len(_rows(self.LINES, self.COLS)), 3)
+
+    def test_every_field_draws_in_its_own_column(self):
+        out = self.html()
+        self.assertIn('colspan="2"', out)
+        for text in ('id', 'name', 'Alice', 'Bob'):
+            self.assertIn(text, out)
+
+    def test_the_column_has_the_values_the_composition_reads(self):
+        model = init_model(self.LINES, mock_get_visualizer)
+        model['columns'] = self.COLS
+        self.assertEqual(
+            _column_values(f'{self.SPLIT}{SUBCOL_SEP}$[0]', self.LINES, model),
+            ['id', '1', '2'])
+
+    def test_the_whole_column_is_the_composed_one(self):
+        # What the header hands to a drag, and what the tally and the
+        # aggregations read: an ordinary column, because that is what it is.
+        self.assertEqual(_leaf_values_expr(self.leaves()[1], 'data'),
+                         "[item.split(',')[0] for item in data]")
+
+    def test_it_round_trips_through_the_dotfile(self):
+        slots = _slots_from_columns(self.COLS)
+        self.assertEqual(slots,
+                         ['$', {'expr': self.SPLIT, 'cols': ['$[0]', '$[1]']}])
+        exprs = [s if isinstance(s, str) else s['expr'] for s in slots]
+        self.assertEqual(
+            _columns_from_slots(exprs, parse_slot_cols(
+                [s for s in slots if isinstance(s, dict)])),
+            self.COLS)
+
+
+class TestSubColumnComposition(unittest.TestCase):
+    """What `$` means inside a sub-column: its parent's value for that row.
+    Under a splat that is the element the row stands for; under a plain column
+    it is the cell's own value, which makes the sub-column a composition. `$$`
+    is the row under either, so the two scopes read the same way."""
+
+    def test_it_reads_the_parents_value(self):
+        self.assertEqual(_compose_sub('$[0]', "$.split(',')"),
+                         "$.split(',')[0]")
+
+    def test_the_row_is_still_reachable(self):
+        self.assertEqual(_compose_sub('$$[1]', "$.split(',')"), '$[1]')
+
+    def test_a_parent_that_needs_parens_gets_them(self):
+        self.assertEqual(_compose_sub('$[0]', '$ + $'), '($ + $)[0]')
+
+    def test_a_dollar_in_a_string_stays_string_content(self):
+        self.assertEqual(_compose_sub("$['a$b']", "$.split(',')"),
+                         "$.split(',')['a$b']")
+
+    def test_plain_parents_nest(self):
+        cols = {'$.a': {'cols': {'$.b': {'cols': {'$.c': {}}}}}}
+        self.assertEqual([leaf.sub for leaf in _leaf_columns(cols)], ['$.a.b.c'])
+
+    def test_a_splat_still_reads_its_element(self):
+        cols = {'*$v': {'cols': {"$['who']": {}}}}
+        leaf = _leaf_columns(cols)[0]
+        self.assertEqual((leaf.splat, leaf.sub), ('*$v', "$['who']"))
+
+
+class TestSubColumnDrags(unittest.TestCase):
+    """Which rewrite a drag needs is the parent's business. Going IN always
+    deepens -- under either kind of parent `$` is the parent's value and `$$`
+    the row, so a column written against the row is one dollar further out.
+    Coming OUT differs: a splat spread its value over rows and has to collect
+    it back into a list, where a plain column's was never spread."""
+
+    SPLIT = "$.split(',')"
+
+    def test_going_in_deepens_under_a_plain_parent(self):
+        cols = {"$['b']": {}, self.SPLIT: {'cols': {'$[0]': {}}}}
+        self.assertTrue(_move_target(cols, "$['b']",
+                                     f'{self.SPLIT}{SUBCOL_SEP}$[0]'))
+        self.assertEqual(list(_col_subs(cols, self.SPLIT)),
+                         ["$$['b']", '$[0]'])
+
+    def test_a_suffixed_dollar_cannot_go_in(self):
+        # `$k` would deepen to `$$k`, which binds nothing by design.
+        cols = {'$k': {}, self.SPLIT: {'cols': {'$[0]': {}}}}
+        self.assertFalse(_move_target(cols, '$k',
+                                      f'{self.SPLIT}{SUBCOL_SEP}$[0]'))
+
+    def test_coming_out_of_a_plain_column_composes(self):
+        cols = {self.SPLIT: {'cols': {'$[0]': {}}}, '$x': {}}
+        self.assertTrue(_move_target(cols, f'{self.SPLIT}{SUBCOL_SEP}$[0]',
+                                     '$x'))
+        self.assertIn("$.split(',')[0]", cols)
+
+    def test_coming_out_of_a_splat_still_collects(self):
+        cols = {'*$v': {'cols': {'$[0]': {}}}, '$x': {}}
+        self.assertTrue(_move_target(cols, f'*$v{SUBCOL_SEP}$[0]', '$x'))
+        self.assertIn('[el[0] for el in $v]', cols)
+
+
 class TestGroupAggregationStorage(unittest.TestCase):
     """Where a per-group aggregation lives, and how it stays apart from the
     whole-column ones without a second model key.
@@ -10508,8 +10665,8 @@ class TestGroupAggregationMenu(unittest.TestCase):
         return m
 
     def panel(self, model, col_index=1):
-        model = dict(model, openDropdown={'id': f'col-menu-{col_index}'},
-                     col_search_dropdown=f'compute-{col_index}')
+        model = dict(model, openDropdown={'id': menu_id(model, index=col_index)},
+                     col_search_dropdown=menu_id(model, 'compute', col_index))
         out = visualize(self.D, model, mock_get_visualizer_dict_tables, None)
         self.assertIn('col-compute-panel', out)
         return out[out.index('col-compute-panel'):]
@@ -11033,8 +11190,8 @@ class TestTallyRowCounts(unittest.TestCase):
     that asks it -- without counting the other values to get there."""
 
     def counts(self, model, lst, col='$'):
-        model = dict(model, _source_expr='data', columns=[col],
-                     openDropdown={'id': 'col-menu-0'})
+        model = dict(model, _source_expr='data', columns=[col])
+        model['openDropdown'] = {'id': menu_id(model)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
         return [html.unescape(m) for m in
@@ -11103,7 +11260,7 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 
     def tally(self, model, lst, column=0):
         model = dict(model, _source_expr='data',
-                     openDropdown={'id': f'col-menu-{column}'})
+                     openDropdown={'id': menu_id(model, index=column)})
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
         self.assertIn('<div class="col-tally">', th)
@@ -11145,7 +11302,7 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 
     def test_a_column_with_no_source_hands_over_nothing(self):
         lst, model = tally_model()
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
         self.assertNotIn('snc-py-exp', th[th.index('<div class="col-tally">'):])
@@ -11752,11 +11909,11 @@ class TestComputeEvents(unittest.TestCase):
     def test_the_menu_stays_open_across_a_click(self):
         # The whole point is checking several in a row.
         lst, model = tally_model(COMPUTE_LIST)
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        model['col_search_dropdown'] = 'compute-0'
+        model['openDropdown'] = {'id': menu_id(model)}
+        model['col_search_dropdown'] = menu_id(model, 'compute')
         model = self.toggle(model, lst, 'min($)')
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
-        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
+        self.assertEqual(model['col_search_dropdown'], menu_id(model, 'compute'))
 
     def test_the_x_on_a_cell_takes_that_aggregation_away(self):
         # Clicked as the cell wrote it, so the ✕ is tested against the event it
@@ -11920,9 +12077,9 @@ class TestComputeMenuRendering(unittest.TestCase):
     so reading one costs no more than opening the menu."""
 
     def header(self, model, lst, column=0, open_submenu=True, source=None):
-        model = dict(model, openDropdown={'id': f'col-menu-{column}'})
+        model = dict(model, openDropdown={'id': menu_id(model, index=column)})
         if open_submenu:
-            model['col_search_dropdown'] = f'compute-{column}'
+            model['col_search_dropdown'] = menu_id(model, 'compute', column)
         if source:
             model['_source_expr'] = source
         return _first_column_header(
@@ -12738,8 +12895,8 @@ class ComputePanelCase(unittest.TestCase):
     """The Compute submenu, opened over a one-column table."""
 
     def panel(self, model, lst, column=0, source=None):
-        model = dict(model, openDropdown={'id': f'col-menu-{column}'},
-                     col_search_dropdown=f'compute-{column}')
+        model = dict(model, openDropdown={'id': menu_id(model, index=column)},
+                     col_search_dropdown=menu_id(model, 'compute', column))
         if source:
             model['_source_expr'] = source
         th = _first_column_header(
@@ -12805,8 +12962,8 @@ class TestComputeCodeEvents(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ['$'] if columns is None else columns
         model['_source_expr'] = source
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        model['col_search_dropdown'] = 'compute-0'
+        model['openDropdown'] = {'id': menu_id(model)}
+        model['col_search_dropdown'] = menu_id(model, 'compute')
         return update(make_column_mouse_event(
             repr(ComputeCodeClick(index=index, expr=expr))),
             ('data', 'data'), model, lst, mock_get_visualizer,
@@ -12935,10 +13092,10 @@ class TestFreeAggregationEvents(unittest.TestCase):
 
     def test_the_menu_stays_open_while_it_is_typed(self):
         lst, model = tally_model(COMPUTE_LIST)
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        model['col_search_dropdown'] = 'compute-0'
+        model['openDropdown'] = {'id': menu_id(model)}
+        model['col_search_dropdown'] = menu_id(model, 'compute')
         model = self.input(model, lst, '', 'sorted($)[2]')
-        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+        self.assertEqual(model['col_search_dropdown'], menu_id(model, 'compute'))
 
     def test_typing_at_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -13211,8 +13368,8 @@ class TestFreeAggregationKeys(unittest.TestCase):
 
     def open_menu(self, lst=None):
         lst, model = tally_model(COMPUTE_LIST if lst is None else lst)
-        model['openDropdown'] = {'id': 'col-menu-0'}
-        model['col_search_dropdown'] = 'compute-0'
+        model['openDropdown'] = {'id': menu_id(model)}
+        model['col_search_dropdown'] = menu_id(model, 'compute')
         _set_column_computes(model, '$', ['sorted($)[2]'])
         return lst, model
 
@@ -13238,12 +13395,12 @@ class TestFreeAggregationKeys(unittest.TestCase):
         lst, model = self.open_menu()
         model, _ = self.press(model, lst, 'Escape')
         self.assertIsNone(model['col_search_dropdown'])
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_any_other_key_is_just_typing(self):
         lst, model = self.open_menu()
         model, _ = self.press(model, lst, 'a')
-        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+        self.assertEqual(model['col_search_dropdown'], menu_id(model, 'compute'))
 
 
 class TestFreeAggregationRemoval(unittest.TestCase):
@@ -13506,8 +13663,8 @@ def sort_model(lst=None, columns=None, span=SPAN, source='data'):
     model['columns'] = ["$['b']"] if columns is None else columns
     model['_source_expr'] = source
     model['_source_span'] = span
-    model['openDropdown'] = {'id': 'col-menu-0'}
-    model['col_search_dropdown'] = 'sort-0'
+    model['openDropdown'] = {'id': menu_id(model)}
+    model['col_search_dropdown'] = menu_id(model, 'sort')
     return lst, model
 
 
@@ -13629,7 +13786,7 @@ class TestSortPanelRendering(SortPanelCase):
 
     def test_only_the_open_submenu_draws_its_panel(self):
         lst, model = sort_model()
-        model['col_search_dropdown'] = 'compute-0'
+        model['col_search_dropdown'] = menu_id(model, 'compute')
         th = _first_column_header(
             visualize(lst, model, mock_get_visualizer,
                       lambda code: eval(code, {}, {'data': lst})))
@@ -13758,6 +13915,284 @@ class TestImpureSourceIsNotReEvaluated(unittest.TestCase):
         self.assertIn('for item in f()', html_out)
 
 
+from table_visualizer import (SubcolToggle, SubcolShowAll, SubcolHideAll,
+                              SubcolExprInput, SubcolExprKeyDown,
+                              _subcol_candidates, _subs_at)
+
+
+class SubcolPanelCase(unittest.TestCase):
+    """The Subcolumns submenu, opened over a column whose values are lists."""
+
+    LINES = ['id,name', '1,Alice']
+    SPLIT = "$.split(',')"
+
+    def model(self, columns=None, lst=None, open_submenu=True, index=0):
+        lst = self.LINES if lst is None else lst
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = {self.SPLIT: {}} if columns is None else columns
+        model['openDropdown'] = {'id': menu_id(model, index=index)}
+        model['col_search_dropdown'] = (menu_id(model, 'subcols', index)
+                                        if open_submenu else None)
+        return model
+
+    def header(self, model, lst=None):
+        return _first_column_header(
+            visualize(self.LINES if lst is None else lst, model,
+                      mock_get_visualizer, None))
+
+    def panel(self, model, lst=None):
+        th = self.header(model, lst)
+        self.assertIn('col-subcol-panel', th)
+        # The Sort row is the next thing in the menu, so that is where this
+        # panel has finished.
+        panel = th[th.index('col-subcol-panel'):]
+        return panel[:panel.index('col-sort')]
+
+    def rows(self, panel):
+        return re.findall(r'<div class="[^"]*col-subcol-row[^"]*".*?'
+                          r'(?=<div class="[^"]*col-subcol-row|$)', panel,
+                          re.DOTALL)
+
+    def names(self, panel):
+        return re.findall(r'col-compute-name">([^<]*)<', panel)
+
+
+class TestSubcolMenuRendering(SubcolPanelCase):
+    """Sub-columns are made here rather than from a button on the header: a
+    checkbox for every field the column's values have, a box for whatever the
+    user writes themselves, and Show all / Hide all over the top."""
+
+    def test_the_row_sits_under_remove_column(self):
+        menu = self.header(self.model(open_submenu=False))
+        self.assertEqual(
+            re.findall(r'>(Remove Column|Subcolumns|Sort|Group By|Compute)<',
+                       menu),
+            ['Remove Column', 'Subcolumns', 'Sort', 'Group By', 'Compute'])
+
+    def test_the_panel_is_only_there_when_the_submenu_is_open(self):
+        self.assertNotIn('col-subcol-panel',
+                         self.header(self.model(open_submenu=False)))
+
+    def test_it_offers_the_fields_the_values_have(self):
+        # A row here is a CSV line; what a sub-column reads is one field of the
+        # list the column splits it into.
+        self.assertEqual(self.names(self.panel(self.model())),
+                         ['Show all', 'Hide all', '$[0]', '$[1]'])
+
+    def test_a_field_already_shown_is_checked(self):
+        model = self.model({self.SPLIT: {'cols': {'$[0]': {}}}}, index=1)
+        rows = self.rows(self.panel(model))
+        self.assertIn('checked', rows[2])
+        self.assertNotIn('checked', rows[3])
+
+    def test_clicking_a_row_toggles_that_field(self):
+        panel = self.panel(self.model())
+        self.assertIn(html.escape(repr(SubcolToggle(index=0, expr='$[0]'))),
+                      panel)
+
+    def test_show_all_and_hide_all_are_the_first_two_rows(self):
+        panel = self.panel(self.model())
+        self.assertIn(html.escape(repr(SubcolShowAll(index=0))), panel)
+        self.assertIn(html.escape(repr(SubcolHideAll(index=0))), panel)
+
+    def test_a_written_sub_column_gets_a_box_of_its_own(self):
+        # No candidate row covers it, so it is listed as what it is.
+        model = self.model({self.SPLIT: {'cols': {'len($)': {}}}}, index=1)
+        panel = self.panel(model)
+        self.assertIn('value="len($)"', panel)
+
+    def test_the_empty_box_at_the_foot_checks_nothing(self):
+        panel = self.panel(self.model())
+        free = [r for r in self.rows(panel) if 'col-subcol-free' in r]
+        self.assertEqual(len(free), 1)
+        self.assertIn('placeholder="Add subcolumn"', free[0])
+        self.assertIn('disabled', free[0])
+        self.assertNotIn('SubcolToggle', free[0])
+
+    def test_each_box_names_itself_for_the_focus(self):
+        # The first character typed adds a column, and a box found again by its
+        # place among everything focusable would lose the rest of the word.
+        self.assertIn(f'snc-focus-key="subcol-free-{self.SPLIT}-0"',
+                      self.panel(self.model()))
+
+    def test_the_box_keeps_its_name_when_the_first_character_lands(self):
+        # That first character makes the column it was typed at stop being a
+        # leaf, which moves it. A name that moved with it would lose the focus
+        # to the very edit that caused the move.
+        model = self.model()
+        key = lambda m: re.search(r'snc-focus-key="([^"]*)"',
+                                  self.panel(m)).group(1)
+        before = key(model)
+        event = {'pythonEventStr': repr(SubcolExprInput(index=0, expr='',
+                                                        value='l')),
+                 'eventJSON': {'type': 'input', 'value': 'l'}}
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            after, _ = update(event, None, model, self.LINES,
+                              mock_get_visualizer)
+        self.assertEqual(key(after), before)
+
+    def test_a_column_with_no_fields_still_offers_the_box(self):
+        # Always enabled: there is nothing to detect on a column of numbers,
+        # but an expression can still be written against it.
+        model = self.model({'$': {}}, lst=[1, 2, 3])
+        panel = self.panel(model, lst=[1, 2, 3])
+        self.assertEqual(self.names(panel), ['Show all', 'Hide all'])
+        self.assertIn('placeholder="Add subcolumn"', panel)
+
+
+class TestSubcolCandidates(unittest.TestCase):
+    """What the menu offers to show: the fields of whatever a sub-column would
+    read -- the cell's value for a plain column, and the ELEMENT for a splat,
+    since that is what a splat's sub-column is written against."""
+
+    def test_a_plain_column_offers_its_values_fields(self):
+        lst = ['id,name', '1,Alice']
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = {"$.split(',')": {}}
+        self.assertEqual(
+            _subcol_candidates("$.split(',')", lst, model, mock_get_visualizer),
+            ['$[0]', '$[1]'])
+
+    def test_a_splat_offers_its_elements_fields(self):
+        groups = {'eng': [['1', 'Alice']], 'mkt': [['2', 'Bob']]}
+        model = init_model(groups, mock_get_visualizer)
+        model['columns'] = {'$k': {}, '*$v': {}}
+        self.assertEqual(
+            _subcol_candidates('*$v', groups, model, mock_get_visualizer),
+            ['$[0]', '$[1]'])
+
+
+class TestSubcolEvents(unittest.TestCase):
+    """Checking a box is the whole edit: what is checked is read back out of
+    the column's own sub-columns, so there is nothing else to keep in step."""
+
+    LINES = ['id,name', '1,Alice']
+    SPLIT = "$.split(',')"
+
+    def model(self, columns=None, index=0):
+        model = init_model(self.LINES, mock_get_visualizer)
+        model['columns'] = {self.SPLIT: {}} if columns is None else columns
+        model['openDropdown'] = {'id': menu_id(model, index=index)}
+        model['col_search_dropdown'] = menu_id(model, 'subcols', index)
+        return model
+
+    def click(self, model, event):
+        with patch('table_visualizer.save_columns_to_dotfile') as saved:
+            out, _cmds = update(make_column_mouse_event(repr(event)), None,
+                                model, self.LINES, mock_get_visualizer)
+        return out, saved
+
+    def subs(self, model):
+        return list(_subs_at(model['columns'], self.SPLIT) or {})
+
+    def test_checking_a_field_makes_it_a_sub_column(self):
+        model, saved = self.click(self.model(), SubcolToggle(index=0, expr='$[0]'))
+        self.assertEqual(self.subs(model), ['$[0]'])
+        saved.assert_called()
+
+    def test_unchecking_takes_it_away(self):
+        model, _ = self.click(self.model({self.SPLIT: {'cols': {'$[0]': {}}}},
+                                         index=1),
+                              SubcolToggle(index=1, expr='$[0]'))
+        self.assertEqual(self.subs(model), [])
+
+    def test_show_all_takes_every_field(self):
+        model, _ = self.click(self.model(), SubcolShowAll(index=0))
+        self.assertEqual(self.subs(model), ['$[0]', '$[1]'])
+
+    def test_hide_all_takes_the_written_ones_too(self):
+        # Everything the menu lists is what it reaches. The parent is target 2
+        # here: its two leaves come first, and it is not one of them.
+        model, _ = self.click(
+            self.model({self.SPLIT: {'cols': {'$[0]': {}, 'len($)': {}}}},
+                       index=2),
+            SubcolHideAll(index=2))
+        self.assertEqual(self.subs(model), [])
+
+    def test_hiding_them_all_gives_the_column_back_its_own_cell(self):
+        model, _ = self.click(
+            self.model({self.SPLIT: {'cols': {'$[0]': {}}}}, index=1),
+            SubcolHideAll(index=1))
+        self.assertEqual([leaf.expr for leaf in _leaf_columns(model['columns'])],
+                         [self.SPLIT])
+
+    def test_the_menu_stays_on_the_column_it_was_opened_on(self):
+        # A column that gains sub-columns stops being a leaf and moves in the
+        # target space. The ids name the column rather than where it sits, so
+        # there is nothing to move and nothing to re-point.
+        before = self.model()
+        model, _ = self.click(before, SubcolToggle(index=0, expr='$[0]'))
+        self.assertEqual(model['openDropdown'], before['openDropdown'])
+        self.assertEqual(model['col_search_dropdown'],
+                         before['col_search_dropdown'])
+
+    def test_a_written_box_adds_a_sub_column(self):
+        model = self.model()
+        event = {'pythonEventStr': repr(SubcolExprInput(index=0, expr='',
+                                                        value='len($)')),
+                 'eventJSON': {'type': 'input', 'value': 'len($)'}}
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
+        self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}),
+                         ['len($)'])
+
+    def test_editing_a_box_keeps_the_columns_place(self):
+        model = self.model(
+            {self.SPLIT: {'cols': {'len($)': {}, '$[1]': {}}}}, index=2)
+        event = {'pythonEventStr': repr(SubcolExprInput(index=2, expr='len($)',
+                                                        value='len($) * 2')),
+                 'eventJSON': {'type': 'input', 'value': 'len($) * 2'}}
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
+        self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}),
+                         ['len($) * 2', '$[1]'])
+
+    def test_a_search_goes_away_with_the_column_it_was_set_on(self):
+        # A leaf is a column: it can have been searched on, under an identity
+        # nothing will answer to once the sub-column is gone.
+        model = self.model({self.SPLIT: {'cols': {'$[0]': {}}}}, index=1)
+        target = f'{self.SPLIT}{SUBCOL_SEP}$[0]'
+        model['column_searches'] = {target: {'op': '==', 'text': "'id'",
+                                             'compose': 'and'}}
+        out, _ = self.click(model, SubcolToggle(index=1, expr='$[0]'))
+        self.assertIsNone(out['column_searches'])
+
+    def test_emptying_a_box_drops_it(self):
+        model = self.model({self.SPLIT: {'cols': {'len($)': {}}}}, index=1)
+        event = {'pythonEventStr': repr(SubcolExprInput(index=1, expr='len($)',
+                                                        value='')),
+                 'eventJSON': {'type': 'input', 'value': ''}}
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
+        self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}), [])
+
+    def test_the_menu_stays_open_across_a_toggle(self):
+        # Checking several boxes in a row is the point of a list of them.
+        model, _ = self.click(self.model(), SubcolToggle(index=0, expr='$[0]'))
+        self.assertIsNotNone(model['openDropdown'])
+
+    def test_enter_says_the_column_is_written(self):
+        model = self.model()
+        model['col_search_dropdown'] = menu_id(model, 'subcols')
+        event = {'pythonEventStr': repr(SubcolExprKeyDown()),
+                 'eventJSON': {'type': 'keydown', 'key': 'Enter'}}
+        out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
+        self.assertIsNone(out['openDropdown'])
+
+    def test_escape_leaves_the_column_menu_open(self):
+        # Innermost first, like the aggregation box.
+        model = self.model()
+        event = {'pythonEventStr': repr(SubcolExprKeyDown()),
+                 'eventJSON': {'type': 'keydown', 'key': 'Escape'}}
+        out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
+        self.assertIsNone(out['col_search_dropdown'])
+        self.assertIsNotNone(out['openDropdown'])
+
+    def test_a_stale_index_is_a_noop(self):
+        model, _ = self.click(self.model(), SubcolToggle(index=7, expr='$[0]'))
+        self.assertEqual(self.subs(model), [])
+
+
 from table_visualizer import ColumnSubmenuDwell
 
 
@@ -13775,7 +14210,7 @@ class TestColumnMenuDwell(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ["$['b']"]
         model['_source_expr'] = 'data'
-        model['openDropdown'] = {'id': 'col-menu-0'}
+        model['openDropdown'] = {'id': menu_id(model)}
         model['col_search_dropdown'] = open_dropdown
         th = _first_column_header(
             visualize(lst, model, mock_get_visualizer,
@@ -13790,16 +14225,16 @@ class TestColumnMenuDwell(unittest.TestCase):
 
     def test_sort_and_compute_offer_to_open_themselves(self):
         dwells = self.dwells(self.menu())
-        self.assertIn(self.opens('sort-0'), dwells)
-        self.assertIn(self.opens('compute-0'), dwells)
+        self.assertIn(self.opens("sort-$['b']"), dwells)
+        self.assertIn(self.opens("compute-$['b']"), dwells)
 
     def test_a_submenu_already_open_offers_nothing(self):
-        dwells = self.dwells(self.menu(open_dropdown='sort-0'))
-        self.assertNotIn(self.opens('sort-0'), dwells)
-        self.assertIn(self.opens('compute-0'), dwells)
+        dwells = self.dwells(self.menu(open_dropdown="sort-$['b']"))
+        self.assertNotIn(self.opens("sort-$['b']"), dwells)
+        self.assertIn(self.opens("compute-$['b']"), dwells)
 
     def test_the_other_rows_offer_to_close_what_is_open(self):
-        self.assertIn(self.opens(None), self.dwells(self.menu(open_dropdown='sort-0')))
+        self.assertIn(self.opens(None), self.dwells(self.menu(open_dropdown="sort-$['b']")))
 
     def test_with_nothing_open_there_is_nothing_to_close(self):
         self.assertNotIn(self.opens(None), self.dwells(self.menu()))
@@ -13810,15 +14245,15 @@ class TestColumnMenuDwell(unittest.TestCase):
     def test_a_row_does_not_offer_to_close_its_own_chip_menu(self):
         # The operator chip lives in the search row; resting the pointer on the
         # row it opened from is not a way of leaving it.
-        menu = self.menu(open_dropdown='op-0')
+        menu = self.menu(open_dropdown="op-$['b']")
         self.assertEqual(self.dwells(self.search_row(menu)), [])
 
     def test_but_it_does_close_a_submenu_that_is_not_its_own(self):
-        menu = self.menu(open_dropdown='sort-0')
+        menu = self.menu(open_dropdown="sort-$['b']")
         self.assertEqual(self.dwells(self.search_row(menu)), [self.opens(None)])
 
     def test_and_another_row_still_closes_its_chip_menu(self):
-        menu = self.menu(open_dropdown='op-0')
+        menu = self.menu(open_dropdown="op-$['b']")
         remove_row = menu[:menu.index('col-sort')]
         self.assertIn(self.opens(None), self.dwells(remove_row))
 
@@ -13885,23 +14320,23 @@ class TestColumnSubmenuDwellEvent(unittest.TestCase):
         return model, commands
 
     def test_it_opens_the_submenu_it_names(self):
-        model, _ = self.dwell('sort-0')
-        self.assertEqual(model['col_search_dropdown'], 'sort-0')
+        model, _ = self.dwell("sort-$['b']")
+        self.assertEqual(model['col_search_dropdown'], menu_id(model, 'sort'))
 
     def test_it_replaces_whatever_was_open(self):
-        model, _ = self.dwell('compute-0', open_dropdown='sort-0')
-        self.assertEqual(model['col_search_dropdown'], 'compute-0')
+        model, _ = self.dwell("compute-$['b']", open_dropdown="sort-$['b']")
+        self.assertEqual(model['col_search_dropdown'], menu_id(model, 'compute'))
 
     def test_naming_none_closes(self):
-        model, _ = self.dwell(None, open_dropdown='sort-0')
+        model, _ = self.dwell(None, open_dropdown="sort-$['b']")
         self.assertIsNone(model['col_search_dropdown'])
 
     def test_it_leaves_the_column_menu_itself_open(self):
-        model, _ = self.dwell('sort-0')
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
+        model, _ = self.dwell("sort-$['b']")
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_it_writes_no_code(self):
-        _, commands = self.dwell('sort-0')
+        _, commands = self.dwell("sort-$['b']")
         self.assertEqual(commands, [])
 
 
@@ -13947,8 +14382,8 @@ class TestSortClick(SortEventCase):
     def test_the_menu_stays_open(self):
         # A checkbox, and flipping the direction is the common next act.
         model, _ = self.click(SortClick(index=0, direction='asc'))
-        self.assertEqual(model['openDropdown'], {'id': 'col-menu-0'})
-        self.assertEqual(model['col_search_dropdown'], 'sort-0')
+        self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
+        self.assertEqual(model['col_search_dropdown'], menu_id(model, 'sort'))
 
     def test_with_no_span_there_is_nothing_to_rewrite(self):
         _, commands = self.click(SortClick(index=0, direction='asc'), span=None)
@@ -14211,6 +14646,75 @@ class TestGroupByClick(unittest.TestCase):
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
         _, commands = self.click(GroupByClick(index=7))
         self.assertEqual(commands, [])
+
+
+class TestGroupBySeedsTheGroupedTable(unittest.TestCase):
+    """The grouped dict lands on a line of its own, as a type nothing has ever
+    configured -- and what it wants is not what detection would say, which
+    reads a group's own length as its fields.
+
+    So the click leaves the columns behind it. A group holds whole ROWS of the
+    table being grouped, so inside `*$v` the element is a row and the columns
+    that read one read the other: they come along as they are written."""
+
+    ROWS = [['1', 'Alice', 'eng'], ['2', 'Bob', 'mkt'], ['5', 'Eva', 'eng']]
+
+    def seed(self, columns, index, lst=None, loaded=None, source='data'):
+        lst = self.ROWS if lst is None else lst
+        lst, model = group_by_model(lst, columns=columns, source=source)
+        with patch('table_visualizer.load_columns_from_dotfile',
+                   return_value=loaded), \
+             patch('table_visualizer.save_columns_to_dotfile') as saved:
+            update(make_column_mouse_event(repr(GroupByClick(index=index))),
+                   ('data', 'data'), model, lst, mock_get_visualizer,
+                   eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+        return saved
+
+    def test_it_seeds_the_key_the_size_and_the_group_spread(self):
+        saved = self.seed(['$[0]', '$[1]', '$[2]'], index=2)
+        self.assertEqual(
+            saved.call_args[0][:3],
+            ('builtins.str->builtins.list', [],
+             ['$k', 'len($v)', {'expr': '*$v', 'cols': ['$[0]', '$[1]']}]))
+
+    def test_the_column_grouped_on_is_the_key_rather_than_a_column_again(self):
+        # It has one value per group by construction, and $k already says it.
+        saved = self.seed(['$[0]', '$[2]'], index=1)
+        self.assertEqual(saved.call_args[0][2][2]['cols'], ['$[0]'])
+
+    def test_the_key_type_is_the_columns_own_rather_than_the_rows(self):
+        # The keys are what the column answers, and the value is always a list.
+        saved = self.seed(['int($[0])'], index=0)
+        self.assertEqual(saved.call_args[0][0], 'builtins.int->builtins.list')
+
+    def test_a_type_someone_has_already_configured_is_left_alone(self):
+        # A seed is a default for a type nobody has said anything about.
+        saved = self.seed(['$[0]', '$[2]'], index=1, loaded=['$k'])
+        saved.assert_not_called()
+
+    def test_a_column_that_names_the_row_number_stays_behind(self):
+        # `$i` is the row's number in the list it was read from, and an element
+        # of a group has no such number; `$$` named that list itself.
+        saved = self.seed(['$i', 'len($$)', '$[0]', '$[2]'], index=3)
+        self.assertEqual(saved.call_args[0][2][2]['cols'], ['$[0]'])
+
+    def test_a_splat_brings_its_own_sub_columns_along(self):
+        # The leaves come first in the menu-target space, so `$[2]` is 1 here:
+        # the splat carrying a sub-column is not itself a leaf.
+        saved = self.seed({'*$[1]': {'cols': {'$[0]': {}}}, '$[2]': {}},
+                          index=1)
+        self.assertEqual(saved.call_args[0][2][2]['cols'],
+                         [{'expr': '*$[1]', 'cols': ['$[0]']}])
+
+    def test_a_dicts_rows_are_pairs_so_its_columns_stay_behind(self):
+        # Grouping a dict answers with lists of the pairs `.items()` gives, and
+        # a sigil binds to the row it was written for rather than to a pair.
+        saved = self.seed(['$k', '$v'], index=1, lst={'a': 1, 'b': 2})
+        self.assertEqual(saved.call_args[0][2],
+                         ['$k', 'len($v)', '*$v'])
+
+    def test_a_click_that_writes_no_line_seeds_nothing(self):
+        self.seed(['$[0]'], index=0, source=None).assert_not_called()
 
 
 class TestSourceSpanAndExprRefresh(unittest.TestCase):
