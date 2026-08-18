@@ -172,7 +172,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// nothing, short enough to feel like the menu is following the pointer.
 	private static readonly DWELL_MS = 150;
 
-	// How long the mouse must rest on a snc-py-exp handle before its expression
+	// How long the mouse must rest on a snc-py-exps handle before its expression
 	// tooltip appears.
 	private static readonly PY_EXP_TOOLTIP_SHOW_DELAY_MS = 100;
 
@@ -312,7 +312,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this._register(d);
 		}
 
-		// Allow snc-input elements to accept snc-py-exp drops
+		// Allow snc-input elements to accept snc-py-exps drops
 		this._register(dom.addDisposableListener(this.domNode, 'dragover', (ev: DragEvent) => {
 			const input = this.findAncestorWithAttr(ev.target as Node, 'snc-input');
 			if (input) {
@@ -403,7 +403,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Hover tooltip, highlight and drag for snc-py-exp handles.
+	 * Hover tooltip, highlight and drag for snc-py-exps handles.
 	 *
 	 * Only activates over the draggable border/padding of the handle, not over
 	 * inner content (marked draggable="false"), so a nested visualizer's own
@@ -417,7 +417,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private pyExpListeners(root: HTMLElement, stopAt: Element): IDisposable[] {
 		return [
 			dom.addDisposableListener(root, 'dragstart', (ev: DragEvent) => {
-				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp', stopAt);
+				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps', stopAt);
 				if (pyExpEl && ev.dataTransfer) {
 					if (this.lastMouseDownTarget) {
 						let el: Element | null = this.lastMouseDownTarget instanceof Element
@@ -432,8 +432,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						}
 					}
 
-					const expression = pyExpEl.getAttribute('snc-py-exp') ?? '';
-					setPyExpDragData(ev.dataTransfer, expression, importsOf(pyExpEl));
+					// The first is the primary: what a handle offering several
+					// hands over when it is dragged as a whole, the rest being
+					// the tooltip's to offer.
+					const primary = pyExpsOf(pyExpEl, 'snc-py-exps')[0];
+					if (!primary) { return; }
+					const expression = primary.expr;
+					setPyExpDragData(ev.dataTransfer, expression, primary.imports);
 					this.hidePyExpTooltip();
 
 					const dragGhost = document.createElement('div');
@@ -445,7 +450,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}
 			}),
 			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
-				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp', stopAt);
+				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps', stopAt);
 				const inDraggableZone = pyExpEl ? this.isInDraggableZone(ev.target as Node, pyExpEl) : false;
 
 				if (inDraggableZone) {
@@ -473,8 +478,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
 					return;
 				}
-				// Don't clean up if moving within the same snc-py-exp (mouseover will handle it)
-				if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exp', stopAt)) {
+				// Don't clean up if moving within the same snc-py-exps (mouseover will handle it)
+				if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exps', stopAt)) {
 					return;
 				}
 				if (this.pyExpCurrentTarget) {
@@ -647,21 +652,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Show a tooltip with the Python expression and a copy button near the given element.
+	 * One expression's row in a tooltip: copy it, insert it as new code, or drag
+	 * it out. A handle offering several gets one row each, stacked in the order
+	 * the visualizer listed them.
+	 *
+	 * `onDragStart`/`onDragEnd` are how the py-exp tooltip keeps itself alive
+	 * across a drag that starts inside it; the action tooltip has nothing to do
+	 * there and passes nothing.
 	 */
-	private showPyExpTooltip(target: Element): void {
-		// Remove any existing tooltip DOM without clearing highlight/tracking state
-		if (this.pyExpTooltip) {
-			this.pyExpTooltip.remove();
-			this.pyExpTooltip = null;
-		}
-
-		const expression = target.getAttribute('snc-py-exp');
-		if (!expression) { return; }
-
-		const rect = target.getBoundingClientRect();
-		const tooltip = document.createElement('div');
-		tooltip.className = 'snc-tooltip snc-py-exp-tooltip';
+	private pyExpRow(exp: IPyExp, hideTooltip: () => void,
+		onDragStart?: () => void, onDragEnd?: () => void): HTMLElement {
+		const row = document.createElement('div');
+		row.className = 'snc-py-exp-row';
 
 		const copyBtn = document.createElement('button');
 		copyBtn.className = 'snc-copy-btn';
@@ -670,38 +672,78 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		copyBtn.addEventListener('mousedown', (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			this.clipboardService.writeText(expression);
+			this.clipboardService.writeText(exp.expr);
 			copyBtn.textContent = '\u2713';
 			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
 		});
-		tooltip.appendChild(copyBtn);
+		row.appendChild(copyBtn);
 
-		const imports = importsOf(target);
-		tooltip.appendChild(this.createNewVarButton(expression, imports, () => this.hidePyExpTooltip()));
+		row.appendChild(this.createNewVarButton(exp.expr, exp.imports, hideTooltip));
+
+		// What the expression reads as, when the visualizer said: two readings
+		// of one thing are often two different values, and the code alone
+		// doesn't always say which is which.
+		if (exp.label) {
+			const labelSpan = document.createElement('span');
+			labelSpan.className = 'snc-py-exp-row-label';
+			labelSpan.textContent = exp.label;
+			row.appendChild(labelSpan);
+		}
 
 		const exprSpan = document.createElement('span');
-		exprSpan.textContent = expression;
+		exprSpan.className = 'snc-py-exp-row-expr';
+		exprSpan.textContent = exp.expr;
 		exprSpan.draggable = true;
 		exprSpan.style.cursor = 'grab';
 		exprSpan.addEventListener('dragstart', (e) => {
 			if (e.dataTransfer) {
-				this.pyExpTooltipDragInProgress = true;
-				clearTimeout(this.pyExpTooltipHideTimer);
-				setPyExpDragData(e.dataTransfer, expression, imports);
+				onDragStart?.();
+				setPyExpDragData(e.dataTransfer, exp.expr, exp.imports);
 
 				const dragGhost = document.createElement('div');
-				dragGhost.textContent = expression;
+				dragGhost.textContent = exp.expr;
 				dragGhost.className = 'snc-py-exp-drag-ghost';
 				document.body.appendChild(dragGhost);
 				e.dataTransfer.setDragImage(dragGhost, 0, 0);
 				setTimeout(() => dragGhost.remove(), 0);
 			}
 		});
-		exprSpan.addEventListener('dragend', () => {
-			this.pyExpTooltipDragInProgress = false;
-			this.hidePyExpTooltip();
-		});
-		tooltip.appendChild(exprSpan);
+		if (onDragEnd) {
+			exprSpan.addEventListener('dragend', onDragEnd);
+		}
+		row.appendChild(exprSpan);
+		return row;
+	}
+
+	/**
+	 * Show a tooltip with the handle's Python expressions, a row each, near the
+	 * given element.
+	 */
+	private showPyExpTooltip(target: Element): void {
+		// Remove any existing tooltip DOM without clearing highlight/tracking state
+		if (this.pyExpTooltip) {
+			this.pyExpTooltip.remove();
+			this.pyExpTooltip = null;
+		}
+
+		const exps = pyExpsOf(target, 'snc-py-exps');
+		if (!exps.length) { return; }
+
+		const rect = target.getBoundingClientRect();
+		const tooltip = document.createElement('div');
+		tooltip.className = 'snc-tooltip snc-py-exp-tooltip';
+
+		for (const exp of exps) {
+			tooltip.appendChild(this.pyExpRow(exp, () => this.hidePyExpTooltip(),
+				() => {
+					this.pyExpTooltipDragInProgress = true;
+					clearTimeout(this.pyExpTooltipHideTimer);
+				},
+				() => {
+					this.pyExpTooltipDragInProgress = false;
+					this.hidePyExpTooltip();
+				}));
+		}
 
 		// Keep tooltip alive while hovering it; also keep hover menu alive
 		tooltip.addEventListener('mouseenter', () => {
@@ -723,28 +765,28 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const align = target.getAttribute('snc-py-exp-align')
 			?? (wrapsWholeWidget ? 'right' : null);
 
+		// Measured rather than assumed a line tall: a handle offering several
+		// expressions is as tall as it has rows, and a guess would sit the
+		// tooltip on top of the thing it belongs to.
+		tooltip.style.visibility = 'hidden';
+		this.editor.getContainerDomNode().appendChild(tooltip);
+		const tooltipRect = tooltip.getBoundingClientRect();
+
 		if (align === 'right') {
 			// Position to the right of the target, vertically centered
-			tooltip.style.visibility = 'hidden';
-			this.editor.getContainerDomNode().appendChild(tooltip);
-			const tooltipRect = tooltip.getBoundingClientRect();
 			let left = rect.right + 4;
 			if (left + tooltipRect.width > window.innerWidth) {
 				left = rect.left - tooltipRect.width - 4;
 			}
 			tooltip.style.left = `${left}px`;
 			tooltip.style.top = `${rect.top + (rect.height - tooltipRect.height) / 2}px`;
-			tooltip.style.visibility = '';
 		} else {
-			// Position above the target element
+			// Position above the target element, or below it when there's no room
+			const above = rect.top - tooltipRect.height - 4;
 			tooltip.style.left = `${rect.left}px`;
-			tooltip.style.top = `${rect.top - 28}px`;
-			this.editor.getContainerDomNode().appendChild(tooltip);
-			const tooltipRect = tooltip.getBoundingClientRect();
-			if (tooltipRect.top < 0) {
-				tooltip.style.top = `${rect.bottom + 4}px`;
-			}
+			tooltip.style.top = `${above < 0 ? rect.bottom + 4 : above}px`;
 		}
+		tooltip.style.visibility = '';
 
 		this.pyExpTooltip = tooltip;
 	}
@@ -783,46 +825,16 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private showActionTooltip(target: Element): void {
 		this.hideActionTooltip();
 
-		const expression = target.getAttribute('data-action-expr');
-		if (!expression) { return; }
+		const exps = pyExpsOf(target, 'data-action-expr');
+		if (!exps.length) { return; }
 
 		const rect = target.getBoundingClientRect();
 		const tooltip = document.createElement('div');
 		tooltip.className = 'snc-tooltip snc-action-tooltip';
 
-		const copyBtn = document.createElement('button');
-		copyBtn.className = 'snc-copy-btn';
-		copyBtn.textContent = '\u{29C9}';
-		copyBtn.title = 'Copy to clipboard';
-		copyBtn.addEventListener('mousedown', (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			this.clipboardService.writeText(expression);
-			copyBtn.textContent = '\u2713';
-			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
-		});
-		tooltip.appendChild(copyBtn);
-
-		const imports = importsOf(target);
-		tooltip.appendChild(this.createNewVarButton(expression, imports, () => this.hideActionTooltip()));
-
-		const exprSpan = document.createElement('span');
-		exprSpan.className = 'snc-action-tooltip-expr';
-		exprSpan.textContent = expression;
-		exprSpan.draggable = true;
-		exprSpan.style.cursor = 'grab';
-		exprSpan.addEventListener('dragstart', (e) => {
-			if (e.dataTransfer) {
-				setPyExpDragData(e.dataTransfer, expression, imports);
-				const dragGhost = document.createElement('div');
-				dragGhost.textContent = expression;
-				dragGhost.className = 'snc-py-exp-drag-ghost';
-				document.body.appendChild(dragGhost);
-				e.dataTransfer.setDragImage(dragGhost, 0, 0);
-				setTimeout(() => dragGhost.remove(), 0);
-			}
-		});
-		tooltip.appendChild(exprSpan);
+		for (const exp of exps) {
+			tooltip.appendChild(this.pyExpRow(exp, () => this.hideActionTooltip()));
+		}
 
 		tooltip.addEventListener('mouseenter', () => {
 			clearTimeout(this.actionTooltipHideTimer);
@@ -831,16 +843,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.scheduleActionTooltipHide();
 		});
 
-		tooltip.style.left = `${rect.left}px`;
-		tooltip.style.top = `${rect.top - 32}px`;
-
+		tooltip.style.visibility = 'hidden';
 		this.editor.getContainerDomNode().appendChild(tooltip);
-		this.actionTooltip = tooltip;
-
 		const tooltipRect = tooltip.getBoundingClientRect();
-		if (tooltipRect.top < 0) {
-			tooltip.style.top = `${rect.bottom + 4}px`;
-		}
+		const above = rect.top - tooltipRect.height - 4;
+		tooltip.style.left = `${rect.left}px`;
+		tooltip.style.top = `${above < 0 ? rect.bottom + 4 : above}px`;
+		tooltip.style.visibility = '';
+
+		this.actionTooltip = tooltip;
 	}
 
 	private scheduleActionTooltipHide(): void {
@@ -872,7 +883,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		tooltip.className = 'snc-tooltip snc-simple-tooltip';
 		tooltip.textContent = text;
 
-		// Same placement convention as snc-py-exp tooltips:
+		// Same placement convention as snc-py-exps tooltips:
 		//   data-tooltip-align="right" -> render to the right of the target,
 		//                                 vertically centered (with a fallback
 		//                                 to the left if it would overflow)
@@ -995,7 +1006,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		});
 
 		clone.addEventListener('mouseover', (ev: MouseEvent) => {
-			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exp');
+			const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps');
 			if (pyExpEl) {
 				clearTimeout(this.pyExpTooltipHideTimer);
 				if (pyExpEl !== this.pyExpCurrentTarget) {
@@ -1015,7 +1026,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
 				return;
 			}
-			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exp')) {
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exps')) {
 				return;
 			}
 			if (this.pyExpCurrentTarget) {
@@ -1050,7 +1061,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Check if target is in the draggable zone of an snc-py-exp element
+	 * Check if target is in the draggable zone of an snc-py-exps element
 	 * (i.e., not inside a descendant marked draggable="false").
 	 */
 	private isInDraggableZone(target: Node, pyExpEl: Element): boolean {
@@ -2160,18 +2171,43 @@ function editLineCount(edit: NewCodeEdit): number {
 }
 
 /**
- * The imports an expression handle declares (`snc-py-exp-imports`, written by
- * `py_exp_attrs` in visualizer_utils.py). Empty when the expression runs on
- * what the file already has.
+ * One expression a handle offers: the code, whatever it can't run without, and
+ * what it reads as when the code alone doesn't say.
  */
-function importsOf(el: Element | null): string[] {
-	const raw = el?.getAttribute('snc-py-exp-imports');
+interface IPyExp {
+	readonly expr: string;
+	readonly imports: string[];
+	readonly label?: string;
+}
+
+/**
+ * What an expression handle offers, in the order the visualizer listed it
+ * (`snc-py-exps`, or `data-action-expr` on an action button -- both written by
+ * `py_exp_attrs` in visualizer_utils.py). The first is the one the handle
+ * itself drags; the rest are the tooltip's to show.
+ *
+ * Empty for a handle with nothing to hand over, so a caller can ask without
+ * checking first.
+ */
+function pyExpsOf(el: Element | null, attr: string): IPyExp[] {
+	const raw = el?.getAttribute(attr);
 	if (!raw) {
 		return [];
 	}
 	try {
 		const parsed = JSON.parse(raw);
-		return Array.isArray(parsed) ? parsed.filter(entry => typeof entry === 'string') : [];
+		if (!Array.isArray(parsed)) {
+			return [];
+		}
+		return parsed
+			.filter(entry => entry && typeof entry.expr === 'string')
+			.map(entry => ({
+				expr: entry.expr as string,
+				imports: Array.isArray(entry.imports)
+					? entry.imports.filter((i: unknown) => typeof i === 'string')
+					: [],
+				label: typeof entry.label === 'string' ? entry.label : undefined,
+			}));
 	} catch {
 		return [];
 	}
@@ -2193,9 +2229,10 @@ function setPyExpDragData(dataTransfer: DataTransfer, expression: string, import
  * anything the file already has.
  *
  * The visualizer that wrote the code declares the imports — on a NewCode
- * command, or in `snc-py-exp-imports` on a drag handle. Where they go is
- * pythonImportInsertion's single answer, so the two ways in agree; several
- * missing imports share one edit, landing in the order they were declared.
+ * command, or beside the expression they belong to in `snc-py-exps` on a drag
+ * handle. Where they go is pythonImportInsertion's single answer, so the two
+ * ways in agree; several missing imports share one edit, landing in the order
+ * they were declared.
  */
 function importEdits(model: ITextModel, imports: readonly string[] | undefined): NewCodeEdit[] {
 	if (!imports?.length) {

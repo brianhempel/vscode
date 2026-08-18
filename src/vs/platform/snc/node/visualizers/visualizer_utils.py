@@ -9,7 +9,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 
 # =============================================================================
@@ -989,29 +989,63 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
         model['last_linked_expr'] = written
 
 
-def py_exp_attrs(expr, *, imports=(), draggable: bool = True,
-                 align: str = None, attr: str = 'snc-py-exp') -> str:
-    """The attributes that hand a Python expression to the editor, ready to be
+class PyExp(NamedTuple):
+    """One expression a handle offers, and what it needs to be understood.
+
+    *imports* is what the visualizer producing the code knows it can't run
+    without, declared per expression because the editor adds the imports of the
+    one the user actually took -- a handle offering both `Counter(data)` and
+    `min(data)` must not import Counter for the second.
+
+    *label* is what the expression reads as, for a handle whose expressions are
+    different values rather than different spellings of one value ("count" and
+    "matching items", say). None where the code speaks for itself.
+    """
+    expr: Optional[str]
+    imports: Tuple[str, ...] = ()
+    label: Optional[str] = None
+
+
+def py_exp_attrs(exprs, *, draggable: bool = True,
+                 align: str = None, attr: str = 'snc-py-exps') -> str:
+    """The attributes that hand Python expressions to the editor, ready to be
     dropped into a tag (they lead with a space).
 
-    An expression that can't run on its own says so here: *imports* is what the
-    visualizer producing the code knows it needs, and the front end decides
-    whether the file already has them and where they would go. Nothing in
-    between reads the expression to guess.
+    *exprs* is one expression or several -- a string, a PyExp, or a list of
+    either. Several because one thing on screen can have more than one
+    reasonable reading: a tally row is both how many times a value occurs and
+    which rows it occurs in. They are offered in the order given, and the first
+    is the one the handle itself drags; the rest are the tooltip's to show,
+    stacked under it.
 
-    *attr* is which tooltip system picks the expression up -- the py-exp one by
-    default, or `data-action-expr` for an action button, whose tooltip offers
-    the same copy, insert and drag. Either way the imports ride along under the
-    one name, so the editor has a single place to look.
+    Always the same shape, a JSON list, whether there is one expression or
+    five, so nothing downstream has a second form to know about. Nothing in
+    between reads the expression itself to guess at imports.
+
+    *attr* is which tooltip system picks them up -- the py-exp one by default,
+    or `data-action-expr` for an action button, whose tooltip offers the same
+    copy, insert and drag.
 
     Renders nothing without an expression, so a caller with no access path to
-    offer can drop this in unconditionally.
+    offer can drop this in unconditionally -- and pass None among several for
+    the one reading it hasn't got.
     """
-    if not expr:
+    if isinstance(exprs, (str, PyExp)) or exprs is None:
+        exprs = [exprs]
+    entries = []
+    for exp in exprs:
+        exp = exp if isinstance(exp, PyExp) else PyExp(exp)
+        if not exp.expr:
+            continue
+        entry = {'expr': exp.expr}
+        if exp.imports:
+            entry['imports'] = list(exp.imports)
+        if exp.label:
+            entry['label'] = exp.label
+        entries.append(entry)
+    if not entries:
         return ''
-    attrs = f' {attr}="{html.escape(expr)}"'
-    if imports:
-        attrs += f' snc-py-exp-imports="{html.escape(json.dumps(list(imports)))}"'
+    attrs = f' {attr}="{html.escape(json.dumps(entries))}"'
     if draggable:
         attrs += ' draggable="true"'
     if align:
@@ -1020,7 +1054,7 @@ def py_exp_attrs(expr, *, imports=(), draggable: bool = True,
 
 
 def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
-    """Wrap a visualizer's whole output in a draggable snc-py-exp grab span.
+    """Wrap a visualizer's whole output in a draggable snc-py-exps grab span.
 
     Only for visualizers with no content of their own to hover - the generic
     and static ones. A visualizer that renders its own handles (list cells,

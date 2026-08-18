@@ -33,6 +33,14 @@ from python_runner import (
     split_leading_imports,
     transform_code_to_ast,
 )
+# python_runner puts the built-in visualizers on the path.
+from visualizer_utils import py_exp_attrs
+
+
+def exp_attr(*exprs):
+    """The `snc-py-exps` attribute a handle offering these expressions carries,
+    as it reads inside the tag it was written into."""
+    return py_exp_attrs(list(exprs), draggable=False).strip()
 
 
 class TestSplitLeadingImports(unittest.TestCase):
@@ -427,7 +435,7 @@ class _StaticVisStub:
 
 class TestLogValueForwardsVarAndExp(unittest.TestCase):
     """log_value must pass var_and_exp into visualize so top-level generic
-    values (e.g. stop_idx = 33) get an snc-py-exp drag handle. A generic
+    values (e.g. stop_idx = 33) get an snc-py-exps drag handle. A generic
     visualizer has no interactions in either size, so its whole area is the
     handle; the interactive visualizers self-wrap only when small."""
 
@@ -454,7 +462,7 @@ class TestLogValueForwardsVarAndExp(unittest.TestCase):
 
     def test_log_value_generic_int_emits_snc_py_exp(self):
         html_out = self._log_html(33, var_and_exp=('stop_idx', 'stop_idx'))
-        self.assertIn('snc-py-exp="stop_idx"', html_out)
+        self.assertIn(exp_attr('stop_idx'), html_out)
         self.assertIn('draggable="true"', html_out)
         self.assertIn('class="py-exp-grab"', html_out)
         self.assertIn('33', html_out)
@@ -462,45 +470,45 @@ class TestLogValueForwardsVarAndExp(unittest.TestCase):
     def test_log_value_generic_int_emits_snc_py_exp_when_small(self):
         # Another line is focused, so line 1 renders small.
         html_out = self._log_html(33, var_and_exp=('stop_idx', 'stop_idx'), focused_line=2)
-        self.assertIn('snc-py-exp="stop_idx"', html_out)
+        self.assertIn(exp_attr('stop_idx'), html_out)
         self.assertIn('class="py-exp-grab"', html_out)
 
     def test_log_value_without_var_and_exp_has_no_snc_py_exp(self):
         html_out = self._log_html(33)
-        self.assertNotIn('snc-py-exp', html_out)
+        self.assertNotIn('snc-py-exps', html_out)
         self.assertIn('33', html_out)
 
 
 class TestGenericVisualizerDrag(unittest.TestCase):
     """The generic/static visualizers should wrap their output in a draggable
-    snc-py-exp grab span when given an access-path expression via var_and_exp,
+    snc-py-exps grab span when given an access-path expression via var_and_exp,
     so nested (non-interactive) values are draggable to extract."""
 
     def test_generic_wraps_with_py_exp_when_var_and_exp_given(self):
         out = GenericVisualizer.visualize(
             42, None, None, None, var_and_exp=(None, 'x[0]'))
-        self.assertIn('snc-py-exp="x[0]"', out)
+        self.assertIn(exp_attr('x[0]'), out)
         self.assertIn('draggable="true"', out)
         self.assertIn('class="py-exp-grab"', out)
         self.assertIn('42', out)
 
     def test_generic_no_wrap_without_var_and_exp(self):
         out = GenericVisualizer.visualize(42, None, None, None)
-        self.assertNotIn('snc-py-exp', out)
+        self.assertNotIn('snc-py-exps', out)
         self.assertNotIn('py-exp-grab', out)
         self.assertEqual(out, '<span class="snc-generic-visualizer">42</span>')
 
     def test_generic_wraps_in_small_mode_too(self):
         out = GenericVisualizer.visualize(
             42, None, None, None, small=True, var_and_exp=(None, 'x[0]'))
-        self.assertIn('snc-py-exp="x[0]"', out)
+        self.assertIn(exp_attr('x[0]'), out)
         self.assertIn('class="py-exp-grab"', out)
 
     def test_generic_escapes_expression_and_value(self):
         out = GenericVisualizer.visualize(
             '<a>', None, None, None, var_and_exp=(None, 'd["<k>"]'))
         # Expression is HTML-escaped inside the attribute.
-        self.assertIn('snc-py-exp="d[&quot;&lt;k&gt;&quot;]"', out)
+        self.assertIn(exp_attr('d["<k>"]'), out)
         # repr value is escaped (note repr adds quotes).
         self.assertIn('&lt;a&gt;', out)
         self.assertNotIn('<a>', out)
@@ -508,7 +516,7 @@ class TestGenericVisualizerDrag(unittest.TestCase):
     def test_static_visualizer_wraps_with_py_exp(self):
         vis = VisualizerOfStaticVisualizer(_StaticVisStub())
         out = vis.visualize(7, None, None, None, var_and_exp=(None, 'items[2]'))
-        self.assertIn('snc-py-exp="items[2]"', out)
+        self.assertIn(exp_attr('items[2]'), out)
         self.assertIn('draggable="true"', out)
         self.assertIn('class="py-exp-grab"', out)
         # Inner static-visualizer output is preserved.
@@ -517,7 +525,7 @@ class TestGenericVisualizerDrag(unittest.TestCase):
     def test_static_visualizer_no_wrap_without_var_and_exp(self):
         vis = VisualizerOfStaticVisualizer(_StaticVisStub())
         out = vis.visualize(7, None, None, None)
-        self.assertNotIn('snc-py-exp', out)
+        self.assertNotIn('snc-py-exps', out)
         self.assertEqual(out, '<b>7</b>')
 
 

@@ -71,8 +71,8 @@ PICK TOOL:
 - Each chip carries:
     * snc-mouse-down="SegmentToggle(segment_id=...)" so a click toggles
       the segment in/out of model['selectedSegments'].
-    * snc-py-exp="<expr>" so the existing tooltip + drag plumbing pick
-      it up as a draggable expression source.
+    * snc-py-exps="[{"expr": ...}]" so the existing tooltip + drag plumbing
+      pick it up as a draggable expression source.
 - Selecting segments rebuilds model['replace_text']:
     * Single item   -> just the expression
     * Adjacent strs -> joined with " + " (concatenation)
@@ -129,7 +129,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
 from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
-                              LinkConfig, handle_relink, new_code_command, py_exp_attrs,
+                              LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
                               dollar_expr_parses, is_nested,
                               nerd_font_icon, render_tool_toolbar,
@@ -806,7 +806,7 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
             else:
                 slice_center_label = pat_str
 
-        # Segment-mode highlights: NO floating chip above. The snc-py-exp,
+        # Segment-mode highlights: NO floating chip above. The snc-py-exps,
         # draggable, and SegmentToggle handler all live on the wrapper itself
         # (added below alongside mouse_listener) so the highlighted chars BECOME
         # the clickable/draggable element. Only the match-start / match-end
@@ -902,7 +902,7 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
     # In segment mode, override the wrapper's mouse-down to toggle the segment
     # selection instead of starting a literal/fuzzy drag. snc-mouse-down beats
     # snc-mouse in the dispatcher's attribute lookup, so we just append it.
-    # We also attach snc-py-exp + draggable so the highlighted char itself is
+    # We also attach snc-py-exps + draggable so the highlighted char itself is
     # the hover-tooltip / drag-source for the segment's expression.
     if (highlight is not None
             and highlight[2] in ('segment-region', 'segment-group')
@@ -3119,7 +3119,7 @@ def _action_btn(label: str, action: str, enabled: bool = True,
         cls += ' dimmed'
     if linked:
         cls += ' linked'
-    expr_attr = py_exp_attrs(expr, imports=code_imports(expr), draggable=False,
+    expr_attr = py_exp_attrs(PyExp(expr, code_imports(expr)), draggable=False,
                              attr='data-action-expr')
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
             f'{expr_attr}>{label}</span>')
@@ -3145,7 +3145,7 @@ def _preview_expr(model: dict, action: str, eval_in_scope) -> str:
 def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '') -> str:
     act_event = repr(ActionButtonClick(action=action, copy=False))
     disabled = '' if enabled else ' dimmed'
-    exp_attrs = py_exp_attrs(expr, imports=code_imports(expr), draggable=False,
+    exp_attrs = py_exp_attrs(PyExp(expr, code_imports(expr)), draggable=False,
                              align='right')
     return (
         f'<div class="snc-dropdown-option{disabled}"{exp_attrs}>'
@@ -3409,7 +3409,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # .string-visualizer renders the literal \n / \t correctly.
     #
     # The preview gets no whole-area drag handle: its characters carry their own
-    # snc-py-exp, and a handle around them would claim every hover over the
+    # snc-py-exps, and a handle around them would claim every hover over the
     # string. Only the generic visualizers self-wrap.
     if small:
         # Non-focused preview: wrap the string in leading/trailing ' quotes so
@@ -4713,8 +4713,8 @@ def _segment_chip_html(seg_id: str, expr: str, label: str, *,
     The chip carries:
       - snc-mouse-down="SegmentToggle(segment_id=...)" so a click toggles
         the selection in the visualizer model.
-      - snc-py-exp="<expr>" so the existing tooltip/drag plumbing can pick
-        the chip up as a draggable expression source.
+      - snc-py-exps="[{"expr": ...}]" so the existing tooltip/drag plumbing
+        can pick the chip up as a draggable expression source.
       - label text (typically the numeric index, e.g. '6' or '11').
       - .selected CSS class when the segment is in model['selectedSegments'].
 
@@ -4803,7 +4803,7 @@ def _get_segment_expressions(model: dict, value: str, eval_in_scope,
         ALWAYS the first-match flavor ($.start(), $[1], ...). Action buttons
         like Loop / Map Matches wrap this into the all-matches form, so
         building list comprehensions here would just double-wrap.
-      - 'chip_exprs' (drives snc-py-exp on chips and segment chars):
+      - 'chip_exprs' (drives snc-py-exps on chips and segment chars):
         Multi-match list-comprehension form when the search has no '1' flag,
         so DRAGGING a chip out of the visualizer (or hovering its tooltip)
         gives a self-contained, fully-evaluable expression. With '1' on, it
@@ -4945,7 +4945,7 @@ def _segment_id_to_replace_expression(seg_id: str, seg_ctx: dict) -> str:
 
 def _segment_id_to_chip_expression(seg_id: str, seg_ctx: dict, value: str,
                                     eval_in_scope) -> str:
-    """Resolve segment ID -> Python expression for snc-py-exp (multi-match
+    """Resolve segment ID -> Python expression for snc-py-exps (multi-match
     list-comp form when applicable; first-match form otherwise).
 
     Handles the dynamic group_N case.
@@ -5086,7 +5086,7 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
 
     # start/end index chips: rendered as standalone inline chips at the match
     # boundaries. Chip LABELS show the numeric position of the first match
-    # (e.g. "6" / "11"); snc-py-exp carries the actual expression ($.start()
+    # (e.g. "6" / "11"); snc-py-exps carries the actual expression ($.start()
     # in 1st mode, list-comp otherwise). The start chip is inserted BEFORE
     # the match's first char so it floats over the left edge; the end chip
     # is inserted AFTER the match's last char so it floats over the right edge.
@@ -5115,7 +5115,7 @@ def _chip_label(seg_id: str, source_expr: str, is_first: bool) -> str:
     """Short, human-readable label for a segment chip.
 
     Kept minimal so chips don't visually dominate the visualization. The full
-    expression is still available via snc-py-exp / drag.
+    expression is still available via snc-py-exps / drag.
     """
     if seg_id == 'start':
         return 'start'

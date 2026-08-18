@@ -542,7 +542,7 @@ def _is_dunder(key):
 
 
 def render_small_field(display_key: str, val_repr: str, expr: str, add_target: str = None) -> str:
-    """Render a single interactive field chip: key=value, draggable with snc-py-exp."""
+    """Render a single interactive field chip: key=value, draggable with snc-py-exps."""
     exp_attr = py_exp_attrs(expr)
     add_attr = ''
     if add_target:
@@ -650,7 +650,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
 
     if small:
         # No whole-area drag handle for the object expression: the field chips
-        # carry their own snc-py-exp, and a handle around them would claim every
+        # carry their own snc-py-exps, and a handle around them would claim every
         # hover over them. Only the generic visualizers self-wrap.
         return _visualize_small(obj, model, eval_in_scope, max_width, max_height)
 

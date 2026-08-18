@@ -6,11 +6,11 @@
 /**
  * Where an auto-added Python import goes, for every way SNC writes one in.
  *
- * A visualizer says what its code needs to run — on a NewCode command, or in
- * `snc-py-exp-imports` on whatever the user is dragging. Deciding whether the
- * file already has that import, and where a missing one would land, is the
- * editor's alone: it is the only side that knows the file as it stands now, so
- * this is the one place that answers it.
+ * A visualizer says what its code needs to run — on a NewCode command, or
+ * beside the expression itself in `snc-py-exps` on whatever the user is
+ * dragging. Deciding whether the file already has that import, and where a
+ * missing one would land, is the editor's alone: it is the only side that knows
+ * the file as it stands now, so this is the one place that answers it.
  */
 
 /** Where a missing import goes; undefined when the file already has it. */

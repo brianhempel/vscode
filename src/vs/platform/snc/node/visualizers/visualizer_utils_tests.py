@@ -18,7 +18,7 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               aggregate_handled_keys, eval_dollar_expr,
                               replace_dollars_in_py_exp, dollar_expr_parses,
                               dollar_expr_names_index, dollar_expr_sigils,
-                              py_exp_attrs, nest_child_command,
+                              py_exp_attrs, PyExp, nest_child_command,
                               wrap_drag_grab, defer_drag_grab,
                               CHILD_SOURCE_BINDER)
 from visualizer_utils import (
@@ -1024,45 +1024,82 @@ class TestNestChildCommandKeepsTheDeclaration(unittest.TestCase):
 
 
 class TestPyExpAttrs(unittest.TestCase):
-    """The attributes that hand an expression to the editor: the tooltip that
-    shows it, the drag that carries it, and the imports it can't run without."""
+    """The attributes that hand expressions to the editor: the tooltip that
+    lists them, the drag that carries the first, and the imports each one can't
+    run without."""
+
+    def exps(self, attrs, attr='snc-py-exps'):
+        """What the editor reads back off the handle."""
+        match = re.search(rf'{attr}="([^"]*)"', attrs)
+        return json.loads(html.unescape(match.group(1))) if match else None
+
+    def test_one_expression_is_a_list_of_one(self):
+        # One shape for one expression and for five, so nothing downstream has
+        # a second form to know about.
+        self.assertEqual(py_exp_attrs('xs[0]', draggable=False),
+                         ' snc-py-exps="[{&quot;expr&quot;: &quot;xs[0]&quot;}]"')
 
     def test_the_expression_comes_out_escaped(self):
-        self.assertEqual(py_exp_attrs('d["<k>"]'),
-                         ' snc-py-exp="d[&quot;&lt;k&gt;&quot;]" draggable="true"')
+        self.assertEqual(self.exps(py_exp_attrs('d["<k>"]')),
+                         [{'expr': 'd["<k>"]'}])
 
     def test_a_handle_that_is_only_hovered_is_not_draggable(self):
-        self.assertEqual(py_exp_attrs('xs[0]', draggable=False),
-                         ' snc-py-exp="xs[0]"')
+        self.assertNotIn('draggable', py_exp_attrs('xs[0]', draggable=False))
 
     def test_a_handle_at_the_right_edge_reads_leftwards(self):
         self.assertIn(' snc-py-exp-align="right"',
                       py_exp_attrs('xs[0]', draggable=False, align='right'))
 
-    def test_an_expression_says_which_imports_it_needs(self):
-        # Declared by whatever produced the code; nothing downstream re-derives
-        # it from the text. JSON so one statement per entry survives intact.
-        attrs = py_exp_attrs('re.findall(p, s)',
-                             imports=('import re', 'import os'))
-        match = re.search(r'snc-py-exp-imports="([^"]*)"', attrs)
-        self.assertIsNotNone(match)
-        self.assertEqual(json.loads(html.unescape(match.group(1))),
-                         ['import re', 'import os'])
+    def test_several_expressions_keep_the_order_they_were_given(self):
+        # The first is the one the handle itself drags, so a caller puts the
+        # one most likely wanted first and the rest are the tooltip's to offer.
+        attrs = py_exp_attrs(['data.count("c")', 'set(data)'])
+        self.assertEqual(self.exps(attrs),
+                         [{'expr': 'data.count("c")'}, {'expr': 'set(data)'}])
 
-    def test_an_action_buttons_expression_rides_on_its_own_attribute(self):
-        # A different tooltip system picks it up, but the imports keep one name.
-        attrs = py_exp_attrs("re.findall(p, s)", imports=('import re',),
+    def test_each_expression_says_which_imports_it_needs(self):
+        # Declared by whatever produced the code; nothing downstream re-derives
+        # it from the text. Per expression, because the editor adds the imports
+        # of the one that was actually taken -- a union would import Counter
+        # for a dragged `min(data)`.
+        attrs = py_exp_attrs([PyExp('Counter(data)',
+                                    ('from collections import Counter',)),
+                              'min(data)'])
+        self.assertEqual(self.exps(attrs),
+                         [{'expr': 'Counter(data)',
+                           'imports': ['from collections import Counter']},
+                          {'expr': 'min(data)'}])
+
+    def test_an_expression_can_say_what_it_reads_as(self):
+        # Two expressions on one handle are often two different values rather
+        # than two spellings of one, and the tooltip has room to say which.
+        attrs = py_exp_attrs([PyExp('data.count("c")', label='count'),
+                              PyExp('[i for i in data if i == "c"]',
+                                    label='matching items')])
+        self.assertEqual([e.get('label') for e in self.exps(attrs)],
+                         ['count', 'matching items'])
+
+    def test_an_action_buttons_expressions_ride_on_their_own_attribute(self):
+        # A different tooltip system picks them up; same list underneath.
+        attrs = py_exp_attrs(PyExp('re.findall(p, s)', ('import re',)),
                              draggable=False, attr='data-action-expr')
-        self.assertIn(' data-action-expr="re.findall(p, s)"', attrs)
-        self.assertIn(' snc-py-exp-imports=', attrs)
-        self.assertNotIn(' snc-py-exp=', attrs)
+        self.assertEqual(self.exps(attrs, 'data-action-expr'),
+                         [{'expr': 're.findall(p, s)',
+                           'imports': ['import re']}])
+        self.assertNotIn('snc-py-exps', attrs)
 
     def test_an_expression_needing_nothing_says_nothing(self):
-        self.assertNotIn('snc-py-exp-imports', py_exp_attrs('xs[0]'))
+        self.assertEqual(self.exps(py_exp_attrs('xs[0]')), [{'expr': 'xs[0]'}])
 
     def test_no_expression_means_no_attributes_at_all(self):
-        self.assertEqual(py_exp_attrs(''), '')
-        self.assertEqual(py_exp_attrs(None), '')
+        for nothing in ('', None, [], (), [None, ''], [PyExp(None)]):
+            self.assertEqual(py_exp_attrs(nothing), '')
+
+    def test_an_expression_the_caller_has_none_of_drops_out(self):
+        # A caller with nothing to offer for one of them passes None for it,
+        # the way a caller with nothing at all passes None for the lot.
+        self.assertEqual(self.exps(py_exp_attrs(['xs[0]', None])),
+                         [{'expr': 'xs[0]'}])
 
 
 class TestDeferDragGrab(unittest.TestCase):
@@ -1089,8 +1126,8 @@ class TestDeferDragGrab(unittest.TestCase):
     def test_handles_inside_the_child_are_left_alone(self):
         # A child that draws its own handles keeps every one of them: only a
         # wrapper around the whole thing is what the parent duplicates.
-        html_str = ('<div><span snc-py-exp="min(data)" draggable="true" '
-                    'class="py-exp-grab">5</span></div>')
+        html_str = (f'<div><span{py_exp_attrs("min(data)")} '
+                    f'class="py-exp-grab">5</span></div>')
         self.assertEqual(defer_drag_grab(html_str, 'min(data)'), html_str)
 
     def test_two_wrapped_things_side_by_side_are_left_alone(self):

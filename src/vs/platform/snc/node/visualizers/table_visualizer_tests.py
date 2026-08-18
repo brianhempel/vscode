@@ -16,8 +16,29 @@ import shutil
 import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
-                              replace_dollars_in_py_exp, CHILD_SOURCE_BINDER)
+                              replace_dollars_in_py_exp, py_exp_attrs, PyExp,
+                              CHILD_SOURCE_BINDER)
 import table_visualizer
+
+
+def exp_attr(*exprs):
+    """The `snc-py-exps` attribute a handle offering these expressions carries,
+    as it reads inside the tag it was written into."""
+    return py_exp_attrs(list(exprs), draggable=False).strip()
+
+
+def handles_in(html_str):
+    """Every handle in *html_str* as the editor reads it back: one list of
+    `{expr, imports?, label?}` entries per handle."""
+    return [json.loads(html.unescape(attr))
+            for attr in re.findall(r'snc-py-exps="([^"]*)"', html_str)]
+
+
+def exps_in(html_str):
+    """The same, kept to the expressions: one list per handle."""
+    return [[entry['expr'] for entry in handle]
+            for handle in handles_in(html_str)]
+
 
 
 # Isolate the entire test module from the user's cwd so that stray
@@ -2389,35 +2410,34 @@ class TestColumnManagementForStringLists(unittest.TestCase):
 
 
 class TestColumnHeaderExpression(unittest.TestCase):
-    """Test that column headers in table mode have draggable snc-py-exp."""
+    """Test that column headers in table mode have draggable snc-py-exps."""
 
     def test_column_header_no_snc_py_exp_without_source(self):
-        """Column headers do not have snc-py-exp when var_and_exp is not provided."""
+        """Column headers do not have snc-py-exps when var_and_exp is not provided."""
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertNotIn('snc-py-exp', html_output)
+        self.assertNotIn('snc-py-exps', html_output)
 
     def test_column_header_has_snc_py_exp_with_source(self):
-        """Column headers have snc-py-exp with list comprehension expression."""
+        """Column headers have snc-py-exps with list comprehension expression."""
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         self.assertEqual(model['display_mode'], 'table')
         self.assertEqual(model.get('_source_expr'), 'people')
         html_output = visualize(lst, model, mock_get_visualizer, None)
         # Column $['name'] -> [item['name'] for item in people]
-        self.assertIn("snc-py-exp", html_output)
-        expected_expr = html.escape("[item['name'] for item in people]")
-        self.assertIn(f'snc-py-exp="{expected_expr}"', html_output)
+        self.assertIn(exp_attr("[item['name'] for item in people]"),
+                      html_output)
 
     def test_column_header_is_draggable(self):
-        """Column header snc-py-exp span should have draggable=true."""
+        """Column header snc-py-exps span should have draggable=true."""
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        expected_expr = html.escape("[item['name'] for item in people]")
-        self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
+        self.assertIn(f'{exp_attr("[item[\'name\'] for item in people]")} '
+                      'draggable="true"', html_output)
 
     def test_column_header_bare_expression(self):
         """For a bare expression line (no assignment), uses the whole expression."""
@@ -2425,19 +2445,19 @@ class TestColumnHeaderExpression(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer, var_and_exp=(None, 'get_items()'))
         self.assertEqual(model.get('_source_expr'), 'get_items()')
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        expected_expr = html.escape("[item['x'] for item in get_items()]")
-        self.assertIn(f'snc-py-exp="{expected_expr}"', html_output)
+        self.assertIn(exp_attr("[item['x'] for item in get_items()]"),
+                      html_output)
 
 
 class TestCellDraggablePyExp(unittest.TestCase):
-    """Test that table cells have draggable snc-py-exp attributes."""
+    """Test that table cells have draggable snc-py-exps attributes."""
 
     def test_no_snc_py_exp_without_source(self):
-        """Cells do not have snc-py-exp when var_and_exp is not provided."""
+        """Cells do not have snc-py-exps when var_and_exp is not provided."""
         lst = [{'age': 25}, {'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertNotIn('snc-py-exp', html_output)
+        self.assertNotIn('snc-py-exps', html_output)
 
     def test_generic_cell_delegates_drag_to_child(self):
         """Generic cells (int, model=None) get NO parent-emitted wrapper; the
@@ -2458,8 +2478,8 @@ class TestCellDraggablePyExp(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        expected_expr = html.escape("people[0]['name']")
-        self.assertIn(f'snc-py-exp="{expected_expr}" draggable="true"', html_output)
+        self.assertIn(f'{exp_attr("people[0][\'name\']")} draggable="true"',
+                      html_output)
         self.assertIn('class="py-exp-grab"', html_output)
         # The bulky border pattern is gone.
         self.assertNotIn('class="py-exp-cell"', html_output)
@@ -2472,9 +2492,8 @@ class TestCellDraggablePyExp(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         model['focused_child'] = f"0{CELL_KEY_SEP}$['name']"
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        expected_expr = html.escape("people[0]['name']")
         # No drag wrapper around the focused cell.
-        self.assertNotIn(f'snc-py-exp="{expected_expr}"', html_output)
+        self.assertNotIn(exp_attr("people[0]['name']"), html_output)
         self.assertNotIn('class="py-exp-grab"', html_output)
         self.assertNotIn('class="py-exp-cell"', html_output)
 
@@ -2498,7 +2517,7 @@ class TestListNeverSelfWraps(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
         html_output = visualize(lst, model, mock_get_visualizer, None,
                                 small=True, var_and_exp=(None, 'nums'))
-        self.assertFalse(html_output.startswith('<span snc-py-exp'))
+        self.assertFalse(html_output.startswith('<span snc-py-exps'))
         # The $ column header does hand over the whole list -- that is the
         # column -- but from inside the table, not from a wrapper around it.
         self.assertNotIn('py-exp-grab', html_output)
@@ -2515,7 +2534,7 @@ class TestListNeverSelfWraps(unittest.TestCase):
         html_output = visualize(lst, model, mock_get_visualizer, None,
                                 small=False, var_and_exp=(None, 'nums'))
         # The list container itself is not a drag handle in full mode.
-        self.assertFalse(html_output.startswith('<span snc-py-exp'))
+        self.assertFalse(html_output.startswith('<span snc-py-exps'))
 
     def test_depth_capped_leaf_renders_bare(self):
         lst = [1, 2, 3]
@@ -5980,7 +5999,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         ])
         get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
         rendered = visualize(rows, model, get_vis, eval_in_scope)
-        chips = {html.unescape(m) for m in re.findall(r'snc-py-exp="([^"]*)"', rendered)}
+        chips = {expr for handle in exps_in(rendered) for expr in handle}
         placeholder = [c for c in chips if c.startswith('str[')]
         self.assertEqual(placeholder, [],
                          'cell chips fell back to the literal name "str"')
@@ -6251,9 +6270,9 @@ class TestPickRegions(unittest.TestCase):
         self.assertEqual(len(selected), 1)
 
     def test_regions_carry_self_contained_expressions(self):
-        output = html.unescape(
-            visualize(PICK_STRS, make_pick_model(), mock_get_visualizer, pick_eval))
-        exprs = re.findall(r'snc-py-exp="([^"]*)"', output)
+        output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
+                           pick_eval)
+        exprs = [expr for handle in exps_in(output) for expr in handle]
         # Every region offers a draggable expression that stands on its own.
         pre_col1 = ('next(([len(x) for x in strs[:i]] for i, item in '
                     'enumerate(strs) if len(item) > 4), None)')
@@ -11222,20 +11241,19 @@ class TestTallyRowCounts(unittest.TestCase):
         model['openDropdown'] = {'id': menu_id(model)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
-        return [html.unescape(m) for m in
-                re.findall(r'<span class="col-tally-count"([^>]*)>', th)]
+        return re.findall(r'<span class="col-tally-count"([^>]*)>', th)
 
     def test_the_item_column_asks_the_list_itself(self):
         lst, model = tally_model()
-        self.assertIn('snc-py-exp="data.count(\'c\')"', self.counts(model, lst)[0])
+        self.assertEqual(exps_in(self.counts(model, lst)[0]),
+                         [["data.count('c')"]])
 
     def test_a_computed_column_counts_what_matches(self):
         lst = [{'species': s} for s in ('cat', 'dog', 'cat')]
         _, model = tally_model(lst)
-        self.assertIn(
-            'snc-py-exp="sum(1 for item in data '
-            'if item[\'species\'] == \'cat\')"',
-            self.counts(model, lst, "$['species']")[0])
+        self.assertEqual(
+            exps_in(self.counts(model, lst, "$['species']")[0]),
+            [["sum(1 for item in data if item['species'] == 'cat')"]])
 
     def test_the_count_reads_leftwards_from_the_rows_edge(self):
         lst, model = tally_model()
@@ -11244,10 +11262,9 @@ class TestTallyRowCounts(unittest.TestCase):
     def test_the_counts_are_what_the_rows_show(self):
         lst = [{'species': s} for s in ('cat', 'dog', 'cat', 'bird', 'cat')]
         _, model = tally_model(lst)
-        exprs = [re.search(r'snc-py-exp="([^"]*)"', attrs).group(1)
+        exprs = [exps_in(attrs)[0][0]
                  for attrs in self.counts(model, lst, "$['species']")]
-        self.assertEqual([eval(html.unescape(e), {'data': lst}) for e in exprs],
-                         [3, 1, 1])
+        self.assertEqual([eval(e, {'data': lst}) for e in exprs], [3, 1, 1])
 
     def test_a_value_with_no_literal_has_nothing_to_ask_with(self):
         class Thing:
@@ -11256,15 +11273,15 @@ class TestTallyRowCounts(unittest.TestCase):
         lst = ['c', Thing()]
         _, model = tally_model(lst)
         counts = self.counts(model, lst)
-        self.assertIn('snc-py-exp', counts[0])
-        self.assertNotIn('snc-py-exp', counts[1])
+        self.assertIn('snc-py-exps', counts[0])
+        self.assertNotIn('snc-py-exps', counts[1])
 
     def test_a_column_with_no_source_hands_over_nothing(self):
         lst, model = tally_model()
         model = dict(model, openDropdown={'id': 'col-menu-0'})
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
-        self.assertNotIn('snc-py-exp', th)
+        self.assertNotIn('snc-py-exps', th)
 
     def test_only_a_sequence_is_asked_to_count_its_own(self):
         # `.count` is the list's way of answering this, so it needs a value
@@ -11302,16 +11319,16 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
     def test_the_title_hands_over_the_tally(self):
         lst, model = tally_model()
         title = self.exp_of(self.tally(model, lst), 'col-tally-title-text')
-        self.assertIn('snc-py-exp="Counter(data)"', title)
+        self.assertEqual(exps_in(title), [['Counter(data)']])
         self.assertIn('draggable="true"', title)
 
     def test_the_headers_hand_over_the_values_and_the_counts(self):
         lst, model = tally_model()
         tally = self.tally(model, lst)
-        self.assertIn('snc-py-exp="list(Counter(data))"',
-                      self.exp_of(tally, 'col-tally-item-header'))
-        self.assertIn('snc-py-exp="list(Counter(data).values())"',
-                      self.exp_of(tally, 'col-tally-count-header'))
+        self.assertEqual(exps_in(self.exp_of(tally, 'col-tally-item-header')),
+                         [['list(Counter(data))']])
+        self.assertEqual(exps_in(self.exp_of(tally, 'col-tally-count-header')),
+                         [['list(Counter(data).values())']])
 
     def test_the_counts_tooltip_stays_inside_the_menu(self):
         # It sits at the panel's right edge, so it reads leftwards.
@@ -11323,9 +11340,7 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
     def test_the_expressions_say_which_import_they_need(self):
         lst, model = tally_model()
         attrs = self.exp_of(self.tally(model, lst), 'col-tally-title-text')
-        imports = re.search(r'snc-py-exp-imports="([^"]*)"', attrs)
-        self.assertIsNotNone(imports)
-        self.assertEqual(json.loads(html.unescape(imports.group(1))),
+        self.assertEqual(handles_in(attrs)[0][0]['imports'],
                          ['from collections import Counter'])
 
     def test_a_column_with_no_source_hands_over_nothing(self):
@@ -11333,29 +11348,29 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
         model['openDropdown'] = {'id': menu_id(model)}
         th = _first_column_header(visualize(lst, model, mock_get_visualizer,
                                             None))
-        self.assertNotIn('snc-py-exp', th[th.index('<div class="col-tally">'):])
+        self.assertNotIn('snc-py-exps', th[th.index('<div class="col-tally">'):])
 
     def test_a_tally_too_long_to_list_still_hands_over_its_count(self):
         lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
         _, model = tally_model(lst)
         tally = self.tally(model, lst)
         self.assertIn('col-tally-note', tally)
-        self.assertIn('snc-py-exp="Counter(data)"',
-                      self.exp_of(tally, 'col-tally-title-text'))
+        self.assertEqual(exps_in(self.exp_of(tally, 'col-tally-title-text')),
+                         [['Counter(data)']])
 
     def test_values_that_cannot_be_counted_hand_over_nothing(self):
         lst = [{'a': 1}, {'a': 2}]
         _, model = tally_model(lst)
         tally = self.tally(model, lst)
         self.assertIn('col-tally-note', tally)
-        self.assertNotIn('snc-py-exp', tally)
+        self.assertNotIn('snc-py-exps', tally)
 
     def test_a_menu_showing_nothing_hands_over_nothing(self):
         lst, model = tally_model()
         model['tally_filter'] = 'zzz'
         tally = self.tally(model, lst)
         self.assertIn('col-tally-note', tally)
-        self.assertNotIn('snc-py-exp', tally)
+        self.assertNotIn('snc-py-exps', tally)
 
 
 # === Column compute tests ===
@@ -12203,9 +12218,8 @@ class TestComputeMenuRendering(unittest.TestCase):
     def test_the_histogram_row_hands_over_the_line_it_writes(self):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst, source='data')
-        self.assertIn(
-            f'snc-py-exp="{html.escape("counts, edges = np.histogram(data, bins=10)")}"',
-            panel)
+        self.assertIn(['counts, edges = np.histogram(data, bins=10)'],
+                      exps_in(panel))
 
     def test_a_checked_row_says_so(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -12253,27 +12267,23 @@ class TestComputeMenuRendering(unittest.TestCase):
     def test_a_row_hands_over_the_code_behind_its_preview(self):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst, source='data')
-        self.assertIn('snc-py-exp="np.mean(data)"', panel)
-        self.assertIn('snc-py-exp="min(data)"', panel)
-        self.assertIn('snc-py-exp="np.percentile(data, 90)"', panel)
-        self.assertIn('snc-py-exp="min(data, key=lambda item: item)"', panel)
+        offered = exps_in(panel)
+        for expr in ('np.mean(data)', 'min(data)', 'np.percentile(data, 90)',
+                     'min(data, key=lambda item: item)'):
+            self.assertIn([expr], offered)
 
     def test_the_expressions_say_which_import_they_need(self):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst, source='data')
-        mean = panel[panel.index('snc-py-exp="np.mean(data)"'):]
-        imports = re.search(r'snc-py-exp-imports="([^"]*)"', mean)
-        self.assertIsNotNone(imports)
-        self.assertEqual(json.loads(html.unescape(imports.group(1))),
-                         ['import numpy as np'])
+        declared = {handle[0]['expr']: handle[0].get('imports')
+                    for handle in handles_in(panel)}
+        self.assertEqual(declared['np.mean(data)'], ['import numpy as np'])
         # min is a builtin and needs nothing said about it.
-        after_min = panel[panel.index('snc-py-exp="min(data)"'):]
-        self.assertNotIn('snc-py-exp-imports',
-                         after_min[:after_min.index('</div>')])
+        self.assertIsNone(declared['min(data)'])
 
     def test_a_column_with_no_source_hands_over_nothing(self):
         lst, model = tally_model(COMPUTE_LIST)
-        self.assertNotIn('snc-py-exp', self.panel(model, lst))
+        self.assertNotIn('snc-py-exps', self.panel(model, lst))
 
     def test_a_preview_tooltip_stays_inside_the_menu(self):
         # It sits at the panel's right edge, so it reads leftwards.
@@ -12425,7 +12435,7 @@ class TestComputeCellRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['np.mean($)'])
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
-        self.assertIn('snc-py-exp="np.mean(data)"', cell)
+        self.assertIn(['np.mean(data)'], exps_in(cell))
         self.assertIn('draggable="true"', cell)
 
     # --- The ✕ that takes an aggregation away ---
@@ -12536,10 +12546,9 @@ class TestComputeCellRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', [HISTOGRAM_AGG])
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
-        self.assertIn(
-            f'snc-py-exp="{html.escape("counts, edges = np.histogram(data, bins=10)")}"',
-            cell)
-        self.assertIn('snc-py-exp-imports', cell)
+        self.assertIn(['counts, edges = np.histogram(data, bins=10)'],
+                      exps_in(cell))
+        self.assertIn('import numpy as np', handles_in(cell)[0][0]['imports'])
 
     def test_a_histogram_is_a_cell_rather_than_a_row_of_the_list(self):
         # It reads `$` and never `$$`, so it answers about the column rather
@@ -12601,8 +12610,7 @@ class TestAggCellHandsTheAnswerOverOnce(unittest.TestCase):
         # MockStringVisualizer self-wraps when it is small, the way the generic
         # visualizer does.
         cell = self.cell(['b', 'a', 'c'], 'min($)')
-        self.assertEqual(cell.count(f'snc-py-exp="{html.escape("min(data)")}"'),
-                         1)
+        self.assertEqual(cell.count(exp_attr('min(data)')), 1)
 
     def test_the_answer_is_still_a_handle_to_look_at_and_to_drag(self):
         # No expression of its own to say, but the wrapper is what draws the
@@ -12613,8 +12621,8 @@ class TestAggCellHandsTheAnswerOverOnce(unittest.TestCase):
 
     def test_the_cell_is_the_one_that_keeps_it(self):
         cell = self.cell(['b', 'a', 'c'], 'min($)')
-        self.assertIn(f'<div class="col-agg" snc-py-exp='
-                      f'"{html.escape("min(data)")}" draggable="true">', cell)
+        self.assertIn(f'<div class="col-agg" {exp_attr("min(data)")} '
+                      'draggable="true">', cell)
 
     def test_the_answer_itself_is_still_drawn(self):
         cell = self.cell(['b', 'a', 'c'], 'min($)')
@@ -12629,7 +12637,7 @@ class TestAggCellHandsTheAnswerOverOnce(unittest.TestCase):
 
     def test_a_cell_with_nothing_to_hand_over_still_draws_its_answer(self):
         cell = self.cell(['b', 'a', 'c'], 'min($)', source=None)
-        self.assertNotIn('snc-py-exp', cell)
+        self.assertNotIn('snc-py-exps', cell)
         self.assertEqual(agg_answers(cell), ['a'])
 
 
@@ -12786,15 +12794,14 @@ class TestComputeItemRowRendering(unittest.TestCase):
                                 lst=[{'a': 'x', 'b': 2}, {'a': 'y', 'b': 1}])
         row = self.item_rows(model, lst, source='data')[0]
         self.assertIn('<span class="py-exp-grab">', row)
-        self.assertEqual(
-            row.count(f'snc-py-exp="{html.escape(self.LEAST_BY_B)}[&#x27;a&#x27;]"'),
-            1)
+        self.assertEqual(row.count(exp_attr(f"{self.LEAST_BY_B}['a']")), 1)
 
     def test_the_row_costs_no_imports(self):
         # min and max are builtins, so nothing has to be added to the file.
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         row = self.item_rows(model, lst, source='data')[0]
-        self.assertNotIn('snc-py-exp-imports', row)
+        self.assertEqual([handle[0].get('imports') for handle in handles_in(row)],
+                         [None] * len(handles_in(row)))
 
     def test_only_the_column_that_asked_is_labelled(self):
         # The other cells are that row's values, not minima of their own.
@@ -12846,11 +12853,11 @@ class TestComputeItemRowRendering(unittest.TestCase):
         row = self.item_rows(model, lst)[0]
         self.assertEqual(self.values(row), [''])
         self.assertIn('>Min Item<', row)
-        self.assertNotIn('snc-py-exp', row)
+        self.assertNotIn('snc-py-exps', row)
 
     def test_a_list_with_no_source_hands_over_nothing(self):
         lst, model = self.model({"$['b']": [MIN_ITEM]})
-        self.assertNotIn('snc-py-exp', self.item_rows(model, lst)[0])
+        self.assertNotIn('snc-py-exps', self.item_rows(model, lst)[0])
 
     def test_the_item_column_hands_over_the_row_itself(self):
         lst, model = self.model({'$': [MIN_ITEM]}, lst=[3, 1, 4],
@@ -12872,13 +12879,13 @@ class TestComputeItemRowRendering(unittest.TestCase):
         row = self.item_rows(model, lst, source='data')[0]
         label = re.search(r'<div class="col-agg-label col-agg-item-label"([^>]*)>',
                           row).group(1)
-        self.assertIn(f'snc-py-exp="{html.escape(self.LEAST_BY_B)}"', label)
+        self.assertIn(exp_attr(self.LEAST_BY_B), label)
         self.assertIn('draggable="true"', label)
 
     def test_the_label_hands_over_nothing_with_no_row_to_point_at(self):
         lst, model = self.model({'$': [MIN_ITEM]}, lst=[], columns=['$'])
         row = self.item_rows(model, lst, source='data')[0]
-        self.assertNotIn('snc-py-exp', row)
+        self.assertNotIn('snc-py-exps', row)
 
     def test_every_cell_of_the_row_is_a_child_like_any_other(self):
         # The values are the row's, so each is drawn by whichever visualizer
@@ -12968,17 +12975,15 @@ class TestComputeCodeRendering(ComputePanelCase):
     def test_a_code_row_hands_over_the_line_it_would_write(self):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst, source='data')
-        self.assertIn('snc-py-exp="set(data)"', panel)
-        self.assertIn('snc-py-exp="Counter(data)"', panel)
+        self.assertIn(['set(data)'], exps_in(panel))
+        self.assertIn(['Counter(data)'], exps_in(panel))
 
     def test_the_tally_row_says_it_needs_counter(self):
         lst, model = tally_model(COMPUTE_LIST)
         panel = self.panel(model, lst, source='data')
-        after = panel[panel.index('snc-py-exp="Counter(data)"'):]
-        imports = re.search(r'snc-py-exp-imports="([^"]*)"', after)
-        self.assertIsNotNone(imports)
-        self.assertEqual(json.loads(html.unescape(imports.group(1))),
-                         list(TALLY_IMPORTS))
+        declared = {handle[0]['expr']: handle[0].get('imports')
+                    for handle in handles_in(panel)}
+        self.assertEqual(declared['Counter(data)'], list(TALLY_IMPORTS))
 
     def test_with_no_source_there_is_no_line_to_write(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -13171,7 +13176,7 @@ class TestFreeAggregationRendering(ComputePanelCase):
     def test_a_free_row_hands_over_its_code(self):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)[2]'])
-        self.assertIn('snc-py-exp="sorted(data)[2]"',
+        self.assertIn(exp_attr('sorted(data)[2]'),
                       self.panel(model, lst, source='data'))
 
     def test_the_empty_row_says_what_it_is_for(self):
@@ -13261,7 +13266,7 @@ class TestFreeAggregationCell(unittest.TestCase):
         _set_column_computes(model, '$', ['sorted($)[2]'])
         cell = self.cells(self.rows(model, lst, source='data')[0])[0]
         self.assertEqual(agg_answers(cell), ['3'])
-        self.assertIn('snc-py-exp="sorted(data)[2]"', cell)
+        self.assertIn(exp_attr('sorted(data)[2]'), cell)
 
     def test_the_box_says_what_the_dollars_mean_here_too(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -13756,8 +13761,9 @@ class TestSortPanelRendering(SortPanelCase):
     def test_the_rewriting_rows_hand_over_what_they_would_make_the_line(self):
         lst, model = sort_model()
         rows = self.rows(self.panel(model, lst))
-        self.assertIn('snc-py-exp="sorted(json.load(f), '
-                      'key=lambda item: item[&#x27;b&#x27;])"', rows[0])
+        self.assertIn(
+            exp_attr("sorted(json.load(f), key=lambda item: item['b'])"),
+            rows[0])
         self.assertIn('reverse=True', rows[1])
 
     def test_a_checked_row_still_names_its_own_sort(self):
@@ -13767,14 +13773,15 @@ class TestSortPanelRendering(SortPanelCase):
             span=("sorted(json.load(f), key=lambda item: item['b'])",
                   4, 7, 4, 56))
         rows = self.rows(self.panel(model, lst))
-        self.assertIn('snc-py-exp="sorted(json.load(f), '
-                      'key=lambda item: item[&#x27;b&#x27;])"', rows[0])
+        self.assertIn(
+            exp_attr("sorted(json.load(f), key=lambda item: item['b'])"),
+            rows[0])
 
     def test_with_no_span_they_have_no_expression_to_hand_over(self):
         lst, model = sort_model(span=None)
         rows = self.rows(self.panel(model, lst))
-        self.assertNotIn('snc-py-exp', rows[0])
-        self.assertNotIn('snc-py-exp', rows[1])
+        self.assertNotIn('snc-py-exps', rows[0])
+        self.assertNotIn('snc-py-exps', rows[1])
 
     def test_the_direction_the_line_sorts_in_is_the_checked_row(self):
         lst, model = sort_model(
@@ -14669,8 +14676,8 @@ class TestGroupByRow(unittest.TestCase):
     def test_it_hands_over_the_line_it_writes(self):
         lst, model = group_by_model()
         self.assertIn(
-            'snc-py-exp="(_d := {}, [_d.setdefault(item[&#x27;b&#x27;], [])'
-            '.append(item) for item in data])[0]"',
+            exp_attr("(_d := {}, [_d.setdefault(item['b'], [])"
+                     ".append(item) for item in data])[0]"),
             self.row(model, lst))
 
     def test_it_hands_it_out_to_the_right(self):
@@ -14699,7 +14706,7 @@ class TestGroupByRow(unittest.TestCase):
         lst, model = group_by_model(source=None)
         row = self.row(model, lst)
         self.assertIn('unselectable', row)
-        self.assertNotIn('snc-py-exp', row)
+        self.assertNotIn('snc-py-exps', row)
         self.assertNotIn('GroupByClick', row)
 
 

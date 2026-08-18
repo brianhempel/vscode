@@ -625,7 +625,34 @@
 	pointer-events: none;
 }
 
-.snc-action-tooltip-expr {
+/* One expression per row: copy, insert, and the code itself to drag. A handle
+   with one reading is one row, and reads exactly as it did when a tooltip
+   could only hold one; several stack in the order the visualizer listed them,
+   the first being the one the handle itself drags. */
+.snc-tooltip.snc-py-exp-tooltip,
+.snc-tooltip.snc-action-tooltip {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 2px;
+}
+
+.snc-py-exp-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* What the expression reads as, where the code doesn't say it -- a label, so
+   the UI font rather than the code font around it. */
+.snc-py-exp-row-label {
+	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
+	color: var(--snc-text-muted);
+}
+
+/* An action button's expression is the code a click would write, and reads as
+   the string it is. */
+.snc-action-tooltip .snc-py-exp-row-expr {
 	color: var(--snc-string-color);
 }
 

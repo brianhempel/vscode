@@ -27,9 +27,17 @@ from z_object_visualizer import (
     load_fields_from_dotfile, save_fields_to_dotfile,
     _get_autocomplete_suggestions, _resolve_fields,
 )
-from visualizer_utils import ChildEvent, get_full_class_name as _get_full_class_name, wrap_drag_grab, MAX_NEST_DEPTH
+from visualizer_utils import (ChildEvent, get_full_class_name as _get_full_class_name,
+                             wrap_drag_grab, py_exp_attrs, MAX_NEST_DEPTH)
 import z_object_visualizer
 import table_visualizer
+
+
+def exp_attr(*exprs):
+    """The `snc-py-exps` attribute a handle offering these expressions carries,
+    as it reads inside the tag it was written into."""
+    return py_exp_attrs(list(exprs), draggable=False).strip()
+
 
 
 class _GenericVis:
@@ -39,12 +47,9 @@ class _GenericVis:
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
         return None
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
-        inner = html_module.escape(repr(value))
-        expr = var_and_exp[1] if var_and_exp else None
-        if expr:
-            return (f'<span snc-py-exp="{html_module.escape(expr)}" draggable="true" '
-                    f'class="py-exp-grab">{inner}</span>')
-        return inner
+        # The same wrapper the real one writes, from the same place, so the
+        # handles these tests look for are the handles the editor would get.
+        return wrap_drag_grab(html_module.escape(repr(value)), var_and_exp)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return (model, [])
 
@@ -1594,8 +1599,8 @@ class TestSmallObjectSelfWrap(unittest.TestCase):
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         html_out = visualize(obj, model, _get_visualizer, None, small=True,
                              var_and_exp=(None, 'obj'))
-        self.assertFalse(html_out.startswith('<span snc-py-exp'))
-        self.assertNotIn('snc-py-exp="obj"', html_out)
+        self.assertFalse(html_out.startswith('<span snc-py-exps'))
+        self.assertNotIn(exp_attr('obj'), html_out)
 
     def test_depth_capped_leaf_not_self_wrapped(self):
         obj = TestObj()
@@ -1609,18 +1614,18 @@ class TestSmallObjectSelfWrap(unittest.TestCase):
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         html_out = visualize(obj, model, _get_visualizer, None, small=True)
-        self.assertFalse(html_out.startswith('<span snc-py-exp'))
+        self.assertFalse(html_out.startswith('<span snc-py-exps'))
 
     def test_full_mode_object_not_self_wrapped(self):
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         html_out = visualize(obj, model, _get_visualizer, None, small=False,
                              var_and_exp=(None, 'obj'))
-        self.assertFalse(html_out.startswith('<span snc-py-exp'))
+        self.assertFalse(html_out.startswith('<span snc-py-exps'))
 
 
 class TestSmallViewPyExp(unittest.TestCase):
-    """Test snc-py-exp on the compact small=True visualization."""
+    """Test snc-py-exps on the compact small=True visualization."""
 
     def _small(self, obj, model=None, max_width=None, max_height=None):
         if model is None:
@@ -1629,22 +1634,22 @@ class TestSmallViewPyExp(unittest.TestCase):
                          max_width=max_width, max_height=max_height, small=True)
 
     def test_no_py_exp_without_source_expr(self):
-        """Without _source_expr, small view should not have snc-py-exp."""
+        """Without _source_expr, small view should not have snc-py-exps."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
         model['fields'] = ['$.x', '$.name']
         html_out = self._small(obj, model)
-        self.assertNotIn('snc-py-exp', html_out)
+        self.assertNotIn('snc-py-exps', html_out)
         self.assertNotIn('draggable', html_out)
 
     def test_py_exp_with_source_expr(self):
-        """With _source_expr, each field pair gets snc-py-exp and draggable."""
+        """With _source_expr, each field pair gets snc-py-exps and draggable."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         model['fields'] = ['$.x', '$.name']
         html_out = self._small(obj, model)
-        self.assertIn('snc-py-exp="obj.x"', html_out)
-        self.assertIn('snc-py-exp="obj.name"', html_out)
+        self.assertIn(exp_attr('obj.x'), html_out)
+        self.assertIn(exp_attr('obj.name'), html_out)
         self.assertIn('draggable="true"', html_out)
 
     def test_py_exp_with_dollar_source(self):
@@ -1656,9 +1661,9 @@ class TestSmallViewPyExp(unittest.TestCase):
             '_source_expr': '$',
         }
         html_out = self._small(m, model)
-        self.assertIn('snc-py-exp="$[0]"', html_out)
-        self.assertIn('snc-py-exp="$.start()"', html_out)
-        self.assertIn('snc-py-exp="$.end()"', html_out)
+        self.assertIn(exp_attr('$[0]'), html_out)
+        self.assertIn(exp_attr('$.start()'), html_out)
+        self.assertIn(exp_attr('$.end()'), html_out)
 
     def test_add_at_cursor_with_add_target(self):
         """With _add_target, fields also get snc-add-at-cursor and snc-add-target."""
@@ -1679,13 +1684,13 @@ class TestSmallViewPyExp(unittest.TestCase):
         self.assertNotIn('snc-add-at-cursor', html_out)
 
     def test_no_py_exp_on_error_fields(self):
-        """Error fields should not get snc-py-exp."""
+        """Error fields should not get snc-py-exps."""
         obj = ErrorFieldObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         model['fields'] = ['$.bad', '$.x']
         html_out = self._small(obj, model)
-        self.assertNotIn('snc-py-exp="obj.bad"', html_out)
-        self.assertIn('snc-py-exp="obj.x"', html_out)
+        self.assertNotIn(exp_attr('obj.bad'), html_out)
+        self.assertIn(exp_attr('obj.x'), html_out)
 
     def test_py_exp_uses_py_exp_grab_class(self):
         """Draggable fields in small view use the py-exp-grab class."""
@@ -1696,7 +1701,7 @@ class TestSmallViewPyExp(unittest.TestCase):
         self.assertIn('py-exp-grab', html_out)
 
     def test_match_object_fields(self):
-        """re.Match with custom fields shows group data with snc-py-exp."""
+        """re.Match with custom fields shows group data with snc-py-exps."""
         import re
         m = re.search(r'(hel)(lo)', 'hello world')
         model = {
@@ -1705,9 +1710,9 @@ class TestSmallViewPyExp(unittest.TestCase):
             '_add_target': '.search-box-replace',
         }
         html_out = self._small(m, model)
-        self.assertIn('snc-py-exp="$[0]"', html_out)
-        self.assertIn('snc-py-exp="$[1]"', html_out)
-        self.assertIn('snc-py-exp="$[2]"', html_out)
+        self.assertIn(exp_attr('$[0]'), html_out)
+        self.assertIn(exp_attr('$[1]'), html_out)
+        self.assertIn(exp_attr('$[2]'), html_out)
         self.assertIn('snc-add-at-cursor="$[0]"', html_out)
         self.assertIn('hello', html_out)
         self.assertIn('hel', html_out)
@@ -1719,23 +1724,23 @@ class TestSmallViewPyExp(unittest.TestCase):
 # =============================================================================
 
 class TestPyExpExtractable(unittest.TestCase):
-    """Test snc-py-exp drag-to-extract on object field values."""
+    """Test snc-py-exps drag-to-extract on object field values."""
 
     def test_no_py_exp_without_var_and_exp(self):
-        """Without var_and_exp, no snc-py-exp attributes should appear."""
+        """Without var_and_exp, no snc-py-exps attributes should appear."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer)
         model['fields'] = ['$.x', '$.name']
         html_out = visualize(obj, model, _get_visualizer, None)
-        self.assertNotIn('snc-py-exp', html_out)
+        self.assertNotIn('snc-py-exps', html_out)
 
     def test_py_exp_on_plain_value(self):
-        """Plain text values get snc-py-exp with the correct expression."""
+        """Plain text values get snc-py-exps with the correct expression."""
         obj = TestObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
-        self.assertIn('snc-py-exp="obj.x"', html_out)
+        self.assertIn(exp_attr('obj.x'), html_out)
         self.assertIn('draggable="true"', html_out)
 
     def test_py_exp_uses_var_name(self):
@@ -1744,8 +1749,8 @@ class TestPyExpExtractable(unittest.TestCase):
         model = init_model(obj, _get_visualizer, var_and_exp=('my_point', 'my_point'))
         model['fields'] = ['$.x', '$.name']
         html_out = visualize(obj, model, _get_visualizer, None)
-        self.assertIn('snc-py-exp="my_point.x"', html_out)
-        self.assertIn('snc-py-exp="my_point.name"', html_out)
+        self.assertIn(exp_attr('my_point.x'), html_out)
+        self.assertIn(exp_attr('my_point.name'), html_out)
 
     def test_py_exp_uses_expression_when_no_var_name(self):
         """When var_and_exp has no var_name, use the expression."""
@@ -1753,7 +1758,7 @@ class TestPyExpExtractable(unittest.TestCase):
         model = init_model(obj, _get_visualizer, var_and_exp=(None, 'get_obj()'))
         model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
-        self.assertIn('snc-py-exp="get_obj().x"', html_out)
+        self.assertIn(exp_attr('get_obj().x'), html_out)
 
     def test_py_exp_on_small_child_visualizer_uses_whole_area_grab(self):
         """Non-focused (small) child visualizer values use whole-area grab,
@@ -1763,7 +1768,7 @@ class TestPyExpExtractable(unittest.TestCase):
                            var_and_exp=('obj', 'obj'))
         model['fields'] = ['$.name']
         html_out = visualize(obj, model, _interactive_get_visualizer, None)
-        self.assertIn('snc-py-exp="obj.name"', html_out)
+        self.assertIn(exp_attr('obj.name'), html_out)
         self.assertIn('class="py-exp-grab"', html_out)
         # The bulky border pattern is gone.
         self.assertNotIn('class="py-exp-cell"', html_out)
@@ -1779,7 +1784,7 @@ class TestPyExpExtractable(unittest.TestCase):
         model['fields'] = ['$.name']
         model['focused_child'] = '$.name'
         html_out = visualize(obj, model, _interactive_get_visualizer, None)
-        self.assertNotIn('snc-py-exp="obj.name"', html_out)
+        self.assertNotIn(exp_attr('obj.name'), html_out)
         self.assertNotIn('class="py-exp-grab"', html_out)
         self.assertNotIn('class="py-exp-cell"', html_out)
 
@@ -1792,22 +1797,22 @@ class TestPyExpExtractable(unittest.TestCase):
         self.assertIn('class="py-exp-grab"', html_out)
 
     def test_no_py_exp_on_callable_fields(self):
-        """Callable fields should not get snc-py-exp."""
+        """Callable fields should not get snc-py-exps."""
         obj = CallableFieldObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         model['fields'] = ['$.my_method', '$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
-        self.assertNotIn('snc-py-exp="obj.my_method"', html_out)
-        self.assertIn('snc-py-exp="obj.x"', html_out)
+        self.assertNotIn(exp_attr('obj.my_method'), html_out)
+        self.assertIn(exp_attr('obj.x'), html_out)
 
     def test_no_py_exp_on_error_fields(self):
-        """Error fields should not get snc-py-exp."""
+        """Error fields should not get snc-py-exps."""
         obj = ErrorFieldObj()
         model = init_model(obj, _get_visualizer, var_and_exp=('obj', 'obj'))
         model['fields'] = ['$.bad', '$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
-        self.assertNotIn('snc-py-exp="obj.bad"', html_out)
-        self.assertIn('snc-py-exp="obj.x"', html_out)
+        self.assertNotIn(exp_attr('obj.bad'), html_out)
+        self.assertIn(exp_attr('obj.x'), html_out)
 
     def test_source_expr_stored_in_model(self):
         """init_model should store _source_expr from var_and_exp."""
@@ -1828,7 +1833,7 @@ class TestPyExpExtractable(unittest.TestCase):
         model = init_model(match, _get_visualizer, var_and_exp=('m', 'm'))
         model['fields'] = ['$[0]']
         html_out = visualize(match, model, _get_visualizer, None)
-        self.assertIn('snc-py-exp="m[0]"', html_out)
+        self.assertIn(exp_attr('m[0]'), html_out)
 
 
 class TestGetFields(unittest.TestCase):

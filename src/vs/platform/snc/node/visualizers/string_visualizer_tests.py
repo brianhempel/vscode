@@ -77,6 +77,18 @@ from string_visualizer import (
     _action_btn,
     _dropdown_row,
 )
+from visualizer_utils import py_exp_attrs
+
+
+# The list-comprehension form a multi-match regex hands over, `{}` being how
+# each match is read.
+FINDITER = "[m{} for m in re.finditer(r'(a)(b)', str1, flags=re.M)]"
+
+
+def exp_attr(*exprs):
+    """The `snc-py-exps` attribute a handle offering these expressions carries,
+    as it reads inside the tag it was written into."""
+    return py_exp_attrs(list(exprs), draggable=False).strip()
 
 
 # =============================================================================
@@ -5569,8 +5581,8 @@ class TestSmallParameter(unittest.TestCase):
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True,
                            var_and_exp=(None, 'words[0]'))
-        self.assertFalse(output.startswith('<span snc-py-exp'))
-        self.assertNotIn('snc-py-exp="words[0]"', output)
+        self.assertFalse(output.startswith('<span snc-py-exps'))
+        self.assertNotIn(exp_attr('words[0]'), output)
 
     def test_small_no_self_wrap_without_var_and_exp(self):
         """Small mode without an expression renders bare (no drag wrapper)."""
@@ -9846,21 +9858,21 @@ class TestLenIndicator(unittest.TestCase):
         """init_model extracts var name from assignment and visualize uses it."""
         model = init_model("hello", var_and_exp=('str1', 'str1'))
         html_output = visualize("hello", model, None, None)
-        self.assertIn('snc-py-exp="len(str1)"', html_output)
+        self.assertIn(exp_attr('len(str1)'), html_output)
         self.assertNotIn('_snc_temp', html_output)
         self.assertIn('>5<', html_output)
 
     def test_len_indicator_absent_without_var_and_exp(self):
-        """Without var_and_exp, no len snc-py-exp should appear."""
+        """Without var_and_exp, no len snc-py-exps should appear."""
         model = init_model("hello")
         html_output = visualize("hello", model, None, None)
-        self.assertNotIn('snc-py-exp', html_output)
+        self.assertNotIn('snc-py-exps', html_output)
 
     def test_len_indicator_empty_string(self):
         """Empty string should show len indicator with 0."""
         model = init_model("", var_and_exp=('s', 's'))
         html_output = visualize("", model, None, None)
-        self.assertIn('snc-py-exp="len(s)"', html_output)
+        self.assertIn(exp_attr('len(s)'), html_output)
         self.assertIn('>0<', html_output)
 
     def test_len_indicator_small_mode(self):
@@ -9868,14 +9880,14 @@ class TestLenIndicator(unittest.TestCase):
         model = init_model("hi", var_and_exp=('s', 's'))
         html_output = visualize("hi", model, None, None, small=True)
         self.assertNotIn('len-indicator', html_output)
-        self.assertNotIn('snc-py-exp="len(s)"', html_output)
+        self.assertNotIn(exp_attr('len(s)'), html_output)
 
     def test_len_indicator_draggable(self):
         """The len indicator element should have draggable=true."""
         model = init_model("abc", var_and_exp=('x', 'x'))
         html_output = visualize("abc", model, None, None)
         self.assertIn('draggable="true"', html_output)
-        self.assertIn('snc-py-exp="len(x)"', html_output)
+        self.assertIn(exp_attr('len(x)'), html_output)
 
     def test_len_indicator_bare_expression(self):
         """For a bare expression line, _source_expr is the whole expression."""
@@ -11640,7 +11652,8 @@ class TestActionBtn(unittest.TestCase):
     def test_expr_attr_still_present(self):
         """data-action-expr should still be emitted when expr is given."""
         result = _action_btn('Count', 'count', enabled=True, expr='len(x)')
-        self.assertIn('data-action-expr="len(x)"', result)
+        self.assertIn(py_exp_attrs('len(x)', draggable=False,
+                                   attr='data-action-expr').strip(), result)
 
     def test_no_expr_attr_when_empty(self):
         result = _action_btn('Count', 'count', enabled=True)
@@ -11655,9 +11668,9 @@ class TestDropdownRow(unittest.TestCase):
         self.assertNotIn('⧉', result)
 
     def test_has_snc_py_exp(self):
-        """_dropdown_row should emit snc-py-exp with the expression."""
+        """_dropdown_row should emit snc-py-exps with the expression."""
         result = _dropdown_row('Any', 'any', True, expr='any(x)')
-        self.assertIn('snc-py-exp="any(x)"', result)
+        self.assertIn(exp_attr('any(x)'), result)
 
     def test_has_right_align(self):
         """_dropdown_row should emit snc-py-exp-align=right (tooltip to the right of the row)."""
@@ -11665,9 +11678,9 @@ class TestDropdownRow(unittest.TestCase):
         self.assertIn('snc-py-exp-align="right"', result)
 
     def test_no_py_exp_when_no_expr(self):
-        """No snc-py-exp attribute when expr is empty."""
+        """No snc-py-exps attribute when expr is empty."""
         result = _dropdown_row('Any', 'any', True)
-        self.assertNotIn('snc-py-exp', result)
+        self.assertNotIn('snc-py-exps', result)
 
     def test_still_has_mouse_down(self):
         """Click action should still be wired up."""
@@ -12686,7 +12699,7 @@ class TestSegmentSelection(unittest.TestCase):
     With the segment tool active, only the first match is highlighted, and
     each visible feature of that match (start/end indices, prefix/suffix
     substrings, and capture groups) becomes a clickable chip with an
-    snc-py-exp. Clicking chips toggles them into model['selectedSegments']
+    snc-py-exps. Clicking chips toggles them into model['selectedSegments']
     and overwrites the Replace box with a simplified concat/tuple expression.
     """
 
@@ -13042,13 +13055,13 @@ class TestSegmentSelection(unittest.TestCase):
                         f"Expected only first match highlighted, got {non_first_count} 'highlight literal' classes")
 
     def test_visualize_segment_mode_renders_start_chip_with_snc_py_exp(self):
-        """Match start has a chip with snc-py-exp = '$.start()' (1st mode)."""
+        """Match start has a chip with snc-py-exps = '$.start()' (1st mode)."""
         value = "hello world"
         model = init_model(value)
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        self.assertIn('snc-py-exp="$.start()"', html_str)
+        self.assertIn(exp_attr('$.start()'), html_str)
 
     def test_visualize_segment_mode_renders_end_chip_with_snc_py_exp(self):
         value = "hello world"
@@ -13056,7 +13069,7 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        self.assertIn('snc-py-exp="$.end()"', html_str)
+        self.assertIn(exp_attr('$.end()'), html_str)
 
     def test_visualize_segment_mode_chips_have_segment_toggle_handlers(self):
         value = "hello world"
@@ -13206,11 +13219,11 @@ class TestSegmentSelection(unittest.TestCase):
         # group_0 char wrapper carries the slice expression.
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="str\[2:7\]"',
+            rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("str[2:7]"))}',
         )
         # start chip carries the literal start index.
-        self.assertIn('snc-py-exp="2"', html_str)
-        self.assertIn('snc-py-exp="7"', html_str)
+        self.assertIn(exp_attr('2'), html_str)
+        self.assertIn(exp_attr('7'), html_str)
 
     def test_segment_visualize_renders_for_index_search(self):
         value = "hello world"
@@ -13220,13 +13233,13 @@ class TestSegmentSelection(unittest.TestCase):
         html_str = visualize(value, model, None, None)
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="str\[5\]"',
+            rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("str[5]"))}',
         )
 
-    # --- snc-py-exp vs Replace box differ for multi-match regex -------------
+    # --- snc-py-exps vs Replace box differ for multi-match regex -------------
 
     def test_chip_snc_py_exp_uses_list_comp_for_multi_match_regex(self):
-        """For regex without '1' flag, snc-py-exp on chips should use the
+        """For regex without '1' flag, snc-py-exps on chips should use the
         list-comp form so a dragged-out expression is fully self-contained.
 
         (The Replace box content from CLICKING the chip stays first-match flavor,
@@ -13238,27 +13251,21 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'(a)(b)'c"   # no '1' flag => multi-match
         html_str = visualize(value, model, ('str1', 'str1'), None)
-        # Each capture group's wrapper carries a list-comprehension snc-py-exp.
-        self.assertRegex(
-            html_str,
-            r'snc-py-exp="\[m\[1\] for m in re\.finditer\(r&#x27;\(a\)\(b\)&#x27;, str1, flags=re\.M\)\]"',
-        )
+        # Each capture group's wrapper carries a list-comprehension snc-py-exps.
+        self.assertIn(exp_attr(FINDITER.format('[1]')), html_str)
         # And the start/end chips also carry list-comp form.
-        self.assertRegex(
-            html_str,
-            r'snc-py-exp="\[m\.start\(\) for m in re\.finditer\(r&#x27;\(a\)\(b\)&#x27;, str1, flags=re\.M\)\]"',
-        )
+        self.assertIn(exp_attr(FINDITER.format('.start()')), html_str)
 
     def test_chip_snc_py_exp_uses_first_match_form_with_1_flag(self):
-        """With '1' flag, snc-py-exp matches the Replace-box first-match form."""
+        """With '1' flag, snc-py-exps matches the Replace-box first-match form."""
         value = "ab ab ab"
         model = init_model(value)
         model['_source_expr'] = 'str1'
         model['tool'] = 'pick'
         model['search'] = r"r'(a)(b)'1c"
         html_str = visualize(value, model, ('str1', 'str1'), None)
-        self.assertIn('snc-py-exp="$[1]"', html_str)
-        self.assertIn('snc-py-exp="$.start()"', html_str)
+        self.assertIn(exp_attr('$[1]'), html_str)
+        self.assertIn(exp_attr('$.start()'), html_str)
 
     def test_replace_text_uses_first_match_even_for_multi_match_search(self):
         """Even when the search has no '1' flag, the Replace box uses first-match
@@ -13314,7 +13321,7 @@ class TestSegmentSelection(unittest.TestCase):
         self.assertIn('segment-selected', html_str)
 
     def test_visualize_segment_mode_snc_py_exp_on_char_wrappers_not_chips(self):
-        """Per spec: snc-py-exp for prefix/group/suffix segments goes on the
+        """Per spec: snc-py-exps for prefix/group/suffix segments goes on the
         highlighted char-span-container itself, not as a floating chip above.
 
         Only the start/end indices remain as floating labels.
@@ -13324,27 +13331,30 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        # Wrapper for first match's chars carries snc-py-exp pointing at $[0].
+        # Wrapper for first match's chars carries snc-py-exps pointing at $[0].
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="\$\[0\]"',
+            rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("$[0]"))}',
         )
-        # Wrapper for prefix chars carries snc-py-exp for the slice expression.
+        # Wrapper for prefix chars carries snc-py-exps for the slice expression.
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="str\[:\$\.start\(\)\]"',
+            rf'<span class="char-span-container"[^>]*'
+            rf'{re.escape(exp_attr("str[:$.start()]"))}',
         )
-        # Wrapper for suffix chars carries snc-py-exp for the tail slice.
+        # Wrapper for suffix chars carries snc-py-exps for the tail slice.
         self.assertRegex(
             html_str,
-            r'<span class="char-span-container"[^>]*snc-py-exp="str\[\$\.end\(\):\]"',
+            rf'<span class="char-span-container"[^>]*'
+            rf'{re.escape(exp_attr("str[$.end():]"))}',
         )
         # No floating chip with the segment's label expression text - only the
         # bare 'start' / 'end' index chips are allowed as floating labels.
         # Confirm no segment-chip element carries the prefix/suffix expressions.
         self.assertNotRegex(
             html_str,
-            r'<span class="segment-chip[^"]*"[^>]*snc-py-exp="str\[:\$\.start\(\)\]"',
+            rf'<span class="segment-chip[^"]*"[^>]*'
+            rf'{re.escape(exp_attr("str[:$.start()]"))}',
         )
 
 

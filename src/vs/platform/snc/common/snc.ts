@@ -35,7 +35,7 @@ export interface IProcessOptions {
 }
 
 /**
- * Mime type an snc-py-exp drag carries alongside `text/plain`, holding
+ * Mime type an snc-py-exps drag carries alongside `text/plain`, holding
  * `{ expr, imports }` as JSON. `text/plain` stays the expression on its own, so
  * dropping anywhere else still works; this is what lets a drop into a Python
  * editor bring the imports the expression needs with it.

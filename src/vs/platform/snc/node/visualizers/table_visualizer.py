@@ -60,7 +60,7 @@ from visualizer_utils import (
     wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
     DOLLARS_RE, SIGILS,
     eval_dollar_expr, replace_dollars_in_py_exp,
-    py_exp_attrs,
+    py_exp_attrs, PyExp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
     new_code_command,
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
@@ -5585,7 +5585,7 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         # code for what it names, so what the user reads is what they can drag
         # into the file.
         return (f'<div class="col-tally-title"><span class="col-tally-title-text"'
-                f'{py_exp_attrs(expr, imports=TALLY_IMPORTS)}>Tally</span></div>')
+                f'{py_exp_attrs(PyExp(expr, TALLY_IMPORTS))}>Tally</span></div>')
 
     source_expr = model.get('_source_expr')
     # The two chips the tally opens itself: resting on the tally is not a way
@@ -5716,11 +5716,11 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         body = (
             f'<div class="col-tally-list-header">'
             f'<span class="col-tally-item-header"'
-            f'{py_exp_attrs(items_expr, imports=TALLY_IMPORTS)}>Items</span>'
+            f'{py_exp_attrs(PyExp(items_expr, TALLY_IMPORTS))}>Items</span>'
             # Counts sits at the panel's right edge, so its tooltip reads
             # leftwards rather than off the side of the menu.
             f'<span class="col-tally-count-header"'
-            f'{py_exp_attrs(counts_expr, imports=TALLY_IMPORTS, align="right")}'
+            f'{py_exp_attrs(PyExp(counts_expr, TALLY_IMPORTS), align="right")}'
             f'>Counts</span>'
             f'</div>'
             f'<div class="col-tally-list">{"".join(rows)}</div>'
@@ -6055,7 +6055,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
                 f'{html.escape(repr(ComputeToggle(col=col, expr=template, depth=1)))}">'
                 f'{_render_tally_check(template in group_checked)}</span>')
         rows.append(
-            f'<div class="{classes}"{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
+            f'<div class="{classes}"{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{html.escape(label)}</span>'
@@ -6077,7 +6077,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
         rows.append(
             f'<div class="col-compute-row col-compute-code'
             f'{"" if code else " unselectable"}"'
-            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
+            f'{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
             f'<span class="col-compute-toggle"{click_attr}>'
             f'<span class="col-compute-nocheck"></span>'
             f'<span class="col-compute-name">{html.escape(label)}</span>'
@@ -6106,7 +6106,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
             f'{html.escape(repr(ComputeToggle(col=col, expr=template)))}"')
         rows.append(
             f'<div class="col-compute-row col-compute-free{" checked" if written else ""}"'
-            f'{py_exp_attrs(code, imports=_agg_imports(template), align="right") if written else ""}'
+            f'{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right") if written else ""}'
             f'>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(written, disabled=not written)}</span>'
@@ -6434,7 +6434,7 @@ def _is_plain_slice_search(model: dict, eval_in_scope) -> bool:
 def _preview_expr(model, action, eval_in_scope):
     """Pre-compute the Python expression an action would generate.
 
-    Used to populate `data-action-expr` (action buttons) and `snc-py-exp`
+    Used to populate `data-action-expr` (action buttons) and `snc-py-exps`
     (dropdown rows) so the existing snc-action-tooltip / py-exp-tooltip systems
     can show + copy + drag the expression on hover.
     """
@@ -6466,7 +6466,7 @@ def _preview_py_exp_attrs(model, action, eval_in_scope, **kwargs) -> str:
     it is when the same action is clicked rather than dragged.
     """
     expr = _preview_expr(model, action, eval_in_scope)
-    return py_exp_attrs(expr, imports=code_imports(expr), **kwargs)
+    return py_exp_attrs(PyExp(expr, code_imports(expr)), **kwargs)
 
 
 def _compute_predicate_previews(model: dict, eval_in_scope) -> tuple:
@@ -6572,7 +6572,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     .snc-dropdown-option classes shared with the string visualizer. Each
     .action-button carries data-action-expr so the snc-action-tooltip system
     handles copy + drag-to-extract on hover; each .snc-dropdown-option
-    carries snc-py-exp for the same purpose.
+    carries snc-py-exps for the same purpose.
     """
     search = model.get('search')
     has_search = search is not None and search != ''
@@ -7181,7 +7181,7 @@ def _render_agg_cell(expr, col, level, values, model, get_visualizer,
             else _agg_child_expr(key, source_expr, _model_binds(model)))
     return (
         f'<td class="col-agg-cell snc-hover-hidden-parent">'
-        f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
+        f'<div class="col-agg"{py_exp_attrs(PyExp(code, _agg_imports(expr)))}>'
         f'{_agg_label_html(expr, col, level)}'
         f'{_agg_remove_x_html(expr, col)}'
         f'<div class="col-agg-value">'
@@ -7265,9 +7265,9 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
                                          asking, binds))
 
     cells = [f'<td class="row-index col-agg-cell">'
-             f'<div class="col-agg"{py_exp_attrs(idx_code, imports=_agg_imports(expr))}>'
+             f'<div class="col-agg"{py_exp_attrs(PyExp(idx_code, _agg_imports(expr)))}>'
              f'<div class="col-agg-label col-agg-item-label"'
-             f'{py_exp_attrs(item_code, imports=_agg_imports(expr))}>'
+             f'{py_exp_attrs(PyExp(item_code, _agg_imports(expr)))}>'
              f'{_agg_name(expr)} by {asking}</div>'
              f'<div class="col-agg-label"></div>' # needed for spacing, the above is position: absolute to overflow
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
@@ -7285,7 +7285,7 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
         side_value_class = ' not-agg-col' if cj != ci else ''
         cells.append(
             f'<td class="col-agg-cell snc-hover-hidden-parent">'
-            f'<div class="col-agg{side_value_class}"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
+            f'<div class="col-agg{side_value_class}"{py_exp_attrs(PyExp(code, _agg_imports(expr)))}>'
             f'{label}<div class="col-agg-value">'
             f'{_render_agg_answer(expr, value, key, code, model, get_visualizer, eval_in_scope, max_width)}'
             f'</div>'
@@ -7727,7 +7727,7 @@ def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=N
         return f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
 
     # No whole-area drag handle in either size: the cells and column headers
-    # carry their own snc-py-exp, and a handle wrapping all of them would claim
+    # carry their own snc-py-exps, and a handle wrapping all of them would claim
     # every hover in between. Only the generic visualizers self-wrap.
     return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
 
