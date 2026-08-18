@@ -5574,15 +5574,25 @@ class TestSmallParameter(unittest.TestCase):
         output = visualize("hello", model, None, None)
         self.assertIn('Search', output)
 
-    def test_small_does_not_self_wrap_with_var_and_exp(self):
-        """The string visualizer is never itself a drag handle: a handle over
-        its whole area claims every hover inside it, popping the expression
-        tooltip over the characters (which carry their own handles)."""
+    def test_small_self_wraps_with_var_and_exp(self):
+        """The preview has nothing of its own to hover -- no per-character
+        anchors, no chips -- so the whole of it is the handle for the string,
+        the way a generic visualizer's whole output is."""
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True,
                            var_and_exp=(None, 'words[0]'))
-        self.assertFalse(output.startswith('<span snc-py-exps'))
-        self.assertNotIn(exp_attr('words[0]'), output)
+        self.assertTrue(output.startswith(f'<span {exp_attr("words[0]")} '
+                                          'draggable="true" '
+                                          'class="py-exp-grab">'))
+        self.assertTrue(output.endswith('</span>'))
+
+    def test_small_self_wrap_is_the_only_handle(self):
+        """One handle over the preview, not one per piece of it."""
+        model = init_model("hello")
+        output = visualize("hello", model, None, None, small=True,
+                           var_and_exp=(None, 'words[0]'))
+        self.assertEqual(output.count('py-exp-grab'), 1)
+        self.assertEqual(output.count('snc-py-exps'), 1)
 
     def test_small_no_self_wrap_without_var_and_exp(self):
         """Small mode without an expression renders bare (no drag wrapper)."""
@@ -5590,8 +5600,20 @@ class TestSmallParameter(unittest.TestCase):
         output = visualize("hello", model, None, None, small=True)
         self.assertNotIn('py-exp-grab', output)
 
+    def test_small_expand_toggle_stays_out_of_the_drag_zone(self):
+        """The one control the preview still offers is a click target, so it
+        opts out of the handle wrapped around it (see render_expand_toggle)."""
+        model = init_model("a\nb\nc\nd\ne")
+        output = visualize("a\nb\nc\nd\ne", model, None, None, small=True,
+                           var_and_exp=(None, 'words[0]'))
+        self.assertIn('class="py-exp-grab"', output)
+        self.assertIn('expand-toggle', output)
+        self.assertIn('draggable="false"', output)
+
     def test_full_mode_not_draggable_even_with_var_and_exp(self):
-        """Full (interactive) mode is never wrapped as a drag handle."""
+        """Full (interactive) mode is never wrapped as a drag handle: the
+        characters carry their own handles, and one over the whole area would
+        claim every hover inside it."""
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=False,
                            var_and_exp=(None, 'words[0]'))

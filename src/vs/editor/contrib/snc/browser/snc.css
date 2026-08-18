@@ -1907,6 +1907,15 @@
 	background: var(--snc-hover-bg);
 }
 
+/* A handle around a whole small visualizer (the string preview, inside a table
+   cell or a field) holds a block child, so it has to be a box of its own --
+   an inline one lets the block break out and paints the border as a stray
+   strip beside it. Same reason the widget-root rule below is inline-block. */
+.py-exp-grab:has(> .visualizer-container) {
+	display: inline-block;
+	margin: -1px; /* Cancel out our border so strings don't take up more space in the table. */
+}
+
 /* A handle wrapping a whole visualizer (one with no interactions of its own)
    sits immediately inside the widget's frame, so its own border and hover fill
    would double the widget's. The widget's frame is the highlight instead.

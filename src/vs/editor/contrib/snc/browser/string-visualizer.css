@@ -13,7 +13,7 @@
 
 .small .string-visualizer {
 	scrollbar-width: none;
-	padding-right: 4px
+	padding-right: 4px;
 }
 .small.expanded .string-visualizer {
 	scrollbar-width: var(--snc-scrollbar-width);

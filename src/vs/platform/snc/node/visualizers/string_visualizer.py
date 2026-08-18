@@ -133,7 +133,7 @@ from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncat
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
                               dollar_expr_parses, is_nested,
                               nerd_font_icon, render_tool_toolbar,
-                              render_expand_toggle)
+                              render_expand_toggle, wrap_drag_grab)
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -3408,9 +3408,12 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # mode has no search/selection so they'd add nothing. white-space:pre on
     # .string-visualizer renders the literal \n / \t correctly.
     #
-    # The preview gets no whole-area drag handle: its characters carry their own
-    # snc-py-exps, and a handle around them would claim every hover over the
-    # string. Only the generic visualizers self-wrap.
+    # The preview does get a whole-area drag handle, which the focused render
+    # does not: dropping the per-character anchors drops their snc-py-exps with
+    # them, so there is nothing inside for an outer handle to claim the hover
+    # from, and without one the string would be the one value on the screen that
+    # can't be dragged out. Same wrapper the generic visualizers use, for the
+    # same reason -- no content of its own to hover.
     if small:
         # Non-focused preview: wrap the string in leading/trailing ' quotes so
         # it reads as a string literal. Each newline after the first gets a
@@ -3443,13 +3446,15 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
         # One mousedown for the whole preview, standing in for the per-character
         # ones the focused render has. A nested preview is focused by clicking
-        # it, and that is all this has to carry.
+        # it, and that is all this has to carry. The expand toggle sits inside
+        # the handle but opts out of it (see render_expand_toggle), so a slipped
+        # click on the chevron isn't read as a drag of the string.
         small_html = (
             f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" class="visualizer-container literal-tool-selected small{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
             f'{display_html}'
             f'</div></div>{expand_toggle_html}</div>'
         )
-        return [small_html]
+        return [wrap_drag_grab(small_html, var_and_exp)]
 
     # Build highlight_by_index from highlights (uses preview regex to include in-progress selection)
     preview_regex = build_preview_regex(model, value)
