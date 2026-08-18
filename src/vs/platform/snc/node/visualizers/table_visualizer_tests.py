@@ -68,7 +68,7 @@ from table_visualizer import (
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _column_groups,
     _col_add, _col_at, _col_rename_at, _col_remove_at,
-    _leaf_values_expr, _menu_targets, _column_at, _col_subs,
+    _leaf_values_expr, _menu_targets, _named_column, _col_subs,
     _promote_expr, _adopt_expr,
     _col_move, _col_subs,
 )
@@ -790,12 +790,18 @@ class TestMenuTargets(unittest.TestCase):
         self.assertEqual(targets[2], "*$v\x01$['age']")
         self.assertEqual(targets[3], '*$v')
 
-    def test_column_at_reads_the_target_space(self):
+    def test_named_column_answers_for_a_column_that_is_there(self):
+        # An event names its column; what the table has to say is whether it
+        # still has one by that name -- a splat and its sub-columns alike.
         model = {'columns': {'$k': {}, '*$v': {'cols': {"$['x']": {}}}}}
-        self.assertEqual(_column_at(model, 0), '$k')
-        self.assertEqual(_column_at(model, 1), "*$v\x01$['x']")
-        self.assertEqual(_column_at(model, 2), '*$v')
-        self.assertIsNone(_column_at(model, 3))
+        for target in ('$k', "*$v\x01$['x']", '*$v'):
+            self.assertEqual(_named_column(model, target), target)
+
+    def test_a_column_that_is_gone_answers_nothing(self):
+        # Where a stale POSITION would have landed on whoever took its place.
+        model = {'columns': {'$k': {}, '*$v': {'cols': {"$['x']": {}}}}}
+        self.assertIsNone(_named_column(model, "$['was here']"))
+        self.assertIsNone(_named_column(model, None))
 
 
 class TestSubColumnMenuEvents(unittest.TestCase):
@@ -812,7 +818,7 @@ class TestSubColumnMenuEvents(unittest.TestCase):
 
     def test_removing_a_sub_column_leaves_the_splat_standing(self):
         d, model = self.model()
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=1)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, 1))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
         self.assertEqual(list(new_model['columns']), ['$k', '*$v'])
@@ -821,14 +827,14 @@ class TestSubColumnMenuEvents(unittest.TestCase):
 
     def test_removing_the_splat_takes_its_sub_columns_with_it(self):
         d, model = self.model()
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=3)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, 3))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
         self.assertEqual(list(new_model['columns']), ['$k'])
 
     def test_renaming_a_sub_column_keeps_it_under_its_splat(self):
         d, model = self.model()
-        model['editing_column_index'] = 1
+        model['editing_column'] = col_at(model, 1)
         model['column_input_value'] = "$['name']"
         event = make_column_key_event('Enter')
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -897,9 +903,9 @@ class TestCrossParentDrag(unittest.TestCase):
         return d, m
 
     def drag(self, d, model, frm, to):
-        model['column_drag_from'] = frm
-        model['column_drag_over'] = to
-        event = make_column_mouse_event(repr(ColumnDragEnd(index=to)))
+        model['column_drag_from'] = col_at(model, frm)
+        model['column_drag_over'] = col_at(model, to)
+        event = make_column_mouse_event(repr(ColumnDragEnd(col=col_at(model, to))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, d,
                                   mock_get_visualizer_dict_tables)
@@ -1646,7 +1652,7 @@ class TestColumnManagementInitModel(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertIsNone(model['editing_column_index'])
+        self.assertIsNone(model['editing_column'])
         self.assertFalse(model['adding_column'])
         self.assertEqual(model['column_input_value'], '')
         self.assertIsNone(model['selected_suggestion_index'])
@@ -1657,7 +1663,7 @@ class TestColumnManagementInitModel(unittest.TestCase):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertIsNone(model['editing_column_index'])
+        self.assertIsNone(model['editing_column'])
         self.assertFalse(model['adding_column'])
         self.assertEqual(model['column_input_value'], '')
 
@@ -1673,7 +1679,7 @@ class TestColumnManagementInitModel(unittest.TestCase):
     def test_no_get_visualizer_has_column_management_fields(self):
         lst = [1, 2, 3]
         model = init_model(lst)
-        self.assertIn('editing_column_index', model)
+        self.assertIn('editing_column', model)
         self.assertIn('adding_column', model)
 
 
@@ -1687,7 +1693,7 @@ class TestColumnAdd(unittest.TestCase):
         new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
         self.assertTrue(new_model['adding_column'])
         self.assertEqual(new_model['column_input_value'], '')
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertIsNone(new_model['editing_column'])
 
     def test_column_select_adds_column_when_adding(self):
         lst = [{'name': 'Alice', 'age': 30, 'city': 'NYC'}]
@@ -1740,18 +1746,18 @@ class TestColumnEdit(unittest.TestCase):
     def test_double_click_starts_editing(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        event = make_column_mouse_event(repr(ColumnClick(index=0)), detail=2)
+        event = make_column_mouse_event(repr(ColumnClick(col=col_at(model))), detail=2)
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['editing_column_index'], 0)
+        self.assertEqual(new_model['editing_column'], col_at(model))
         self.assertEqual(new_model['column_input_value'], list(model['columns'])[0])
         self.assertFalse(new_model['adding_column'])
 
     def test_single_click_does_not_start_editing(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        event = make_column_mouse_event(repr(ColumnClick(index=0)), detail=1)
+        event = make_column_mouse_event(repr(ColumnClick(col=col_at(model))), detail=1)
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertIsNone(new_model['editing_column'])
 
     def test_column_select_replaces_column_when_editing(self):
         # The suggestion list only ever offers columns the table doesn't
@@ -1759,24 +1765,24 @@ class TestColumnEdit(unittest.TestCase):
         # a name already in the table is refused, since columns are a map.
         lst = [{'name': 'Alice', 'age': 30, 'city': 'NYC'}]
         model = init_model(lst, mock_get_visualizer)
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['zi"
         event = make_column_mouse_event(repr(ColumnSelect(name="$['zip']")))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], "$['zip']")
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertIsNone(new_model['editing_column'])
 
     def test_enter_commits_edit(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['nick']"
         event = make_column_key_event('Enter')
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], "$['nick']")
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertIsNone(new_model['editing_column'])
 
     def test_committing_a_name_the_table_already_has_is_refused(self):
         # `columns` is a map, so two columns cannot share a name -- and they
@@ -1785,7 +1791,7 @@ class TestColumnEdit(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         before = list(model['columns'])
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -1796,11 +1802,11 @@ class TestColumnEdit(unittest.TestCase):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         original_col = list(model['columns'])[0]
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['bogus']"
         event = make_column_key_event('Escape')
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertIsNone(new_model['editing_column'])
         self.assertEqual(new_model['column_input_value'], '')
         self.assertEqual(list(new_model['columns'])[0], original_col)
 
@@ -1813,7 +1819,7 @@ class TestColumnRemove(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         self.assertIn("$['name']", model['columns'])
         name_idx = list(model['columns']).index("$['name']")
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, name_idx))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("$['name']", new_model['columns'])
@@ -1821,7 +1827,7 @@ class TestColumnRemove(unittest.TestCase):
     def test_remove_column_saves_dotfile(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
         with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
@@ -1831,7 +1837,7 @@ class TestColumnRemove(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         name_idx = list(model['columns']).index("$['name']")
         self.assertIn("0\x00$['name']", model['children'])
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, name_idx))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("0\x00$['name']", new_model['children'])
@@ -1841,30 +1847,33 @@ class TestColumnRemove(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         original_cols = list(model['columns'])
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=99)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col='$.gone')))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), original_cols)
 
     def test_remove_cancels_editing_if_index_matches(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['name']"
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertIsNone(new_model['editing_column_index'])
+        self.assertIsNone(new_model['editing_column'])
         self.assertEqual(new_model['column_input_value'], '')
 
-    def test_remove_adjusts_editing_index_when_before_editing(self):
+    def test_removing_another_column_leaves_the_open_box_alone(self):
+        # Nothing to adjust: what is being edited is named, so a column going
+        # from in front of it doesn't move it.
         lst = [{'a': 1, 'b': 2, 'c': 3}]
         model = init_model(lst, mock_get_visualizer)
-        model['editing_column_index'] = 2
-        model['column_input_value'] = list(model['columns'])[2]
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
+        edited = col_at(model, 2)
+        model['editing_column'] = edited
+        model['column_input_value'] = edited
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['editing_column_index'], 1)
+        self.assertEqual(new_model['editing_column'], edited)
 
 
 def _first_column_header(output):
@@ -1872,6 +1881,16 @@ def _first_column_header(output):
     m = re.search(r'<th class="[^"]*col-header[^"]*".*?</th>', output, re.DOTALL)
     assert m is not None, 'no column header found'
     return m.group(0)
+
+
+def col_at(model, index=0):
+    """The column at a position -- what a test means by "the first column".
+
+    Events name their column, so a test that wants to click the first one asks
+    what it is called rather than spelling a position the table may not keep.
+    """
+    from table_visualizer import _menu_targets
+    return _menu_targets(model['columns'])[index]
 
 
 def menu_id(model, kind='col-menu', index=0):
@@ -1946,21 +1965,22 @@ class TestColumnMenu(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         name_idx = list(model['columns']).index("$['name']")
         model['openDropdown'] = {'id': menu_id(model, index=name_idx)}
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=name_idx)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, name_idx))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("$['name']", new_model['columns'])
         self.assertIsNone(new_model['openDropdown'])
 
     def test_column_edits_close_an_open_menu(self):
-        # Menu ids are index-based, so anything that shifts or renames columns
-        # leaves an open menu pointing at the wrong one.
+        # Not because the menu could land on the wrong column any more -- the
+        # ids name theirs -- but because an edit is finished with the menu.
         lst = [{'name': 'Alice', 'age': 30}]
-        for event in (make_column_mouse_event(repr(ColumnClick(index=0)), detail=2),
-                      make_column_mouse_event(repr(AddColumnClick())),
-                      make_column_mouse_event(repr(ColumnDragStart(index=0)))):
+        for make_event, detail in ((lambda m: ColumnClick(col=col_at(m)), 2),
+                                   (lambda m: AddColumnClick(), 1),
+                                   (lambda m: ColumnDragStart(col=col_at(m)), 1)):
+            model = init_model(lst, mock_get_visualizer)
+            event = make_column_mouse_event(repr(make_event(model)), detail=detail)
             with self.subTest(event=event['pythonEventStr']):
-                model = init_model(lst, mock_get_visualizer)
                 model['openDropdown'] = {'id': menu_id(model)}
                 new_model, _ = update(event, None, model, lst, mock_get_visualizer)
                 self.assertIsNone(new_model['openDropdown'])
@@ -1972,25 +1992,28 @@ class TestColumnReorder(unittest.TestCase):
     def test_drag_start_sets_drag_from(self):
         lst = [{'a': 1, 'b': 2, 'c': 3}]
         model = init_model(lst, mock_get_visualizer)
-        event = make_column_mouse_event(repr(ColumnDragStart(index=1)))
+        dragged = col_at(model, 1)
+        event = make_column_mouse_event(repr(ColumnDragStart(col=dragged)))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['column_drag_from'], 1)
-        self.assertEqual(new_model['column_drag_over'], 1)
+        # The column being dragged, by name: it is held across the moves that
+        # follow, and a position could go out of date under it.
+        self.assertEqual(new_model['column_drag_from'], dragged)
+        self.assertEqual(new_model['column_drag_over'], dragged)
 
     def test_drag_over_sets_drag_over(self):
         lst = [{'a': 1, 'b': 2, 'c': 3}]
         model = init_model(lst, mock_get_visualizer)
-        model['column_drag_from'] = 2
-        event = make_column_mouse_move_event(repr(ColumnDragOver(index=0)), buttons=1)
+        model['column_drag_from'] = col_at(model, 2)
+        event = make_column_mouse_move_event(repr(ColumnDragOver(col=col_at(model))), buttons=1)
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
-        self.assertEqual(new_model['column_drag_over'], 0)
+        self.assertEqual(new_model['column_drag_over'], col_at(model))
 
     def test_drag_over_cancels_on_button_release(self):
         lst = [{'a': 1, 'b': 2}]
         model = init_model(lst, mock_get_visualizer)
-        model['column_drag_from'] = 0
-        model['column_drag_over'] = 1
-        event = make_column_mouse_move_event(repr(ColumnDragOver(index=1)), buttons=0)
+        model['column_drag_from'] = col_at(model, 0)
+        model['column_drag_over'] = col_at(model, 1)
+        event = make_column_mouse_move_event(repr(ColumnDragOver(col=col_at(model, 1))), buttons=0)
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model['column_drag_from'])
         self.assertIsNone(new_model['column_drag_over'])
@@ -1999,9 +2022,9 @@ class TestColumnReorder(unittest.TestCase):
         lst = [{'a': 1, 'b': 2, 'c': 3}]
         model = init_model(lst, mock_get_visualizer)
         original = list(model['columns'])
-        model['column_drag_from'] = 0
-        model['column_drag_over'] = 2
-        event = make_column_mouse_up_event(repr(ColumnDragEnd(index=2)))
+        model['column_drag_from'] = col_at(model, 0)
+        model['column_drag_over'] = col_at(model, 2)
+        event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model, 2))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], original[1])
@@ -2014,9 +2037,9 @@ class TestColumnReorder(unittest.TestCase):
         lst = [{'a': 1, 'b': 2, 'c': 3}]
         model = init_model(lst, mock_get_visualizer)
         original = list(model['columns'])
-        model['column_drag_from'] = 2
-        model['column_drag_over'] = 0
-        event = make_column_mouse_up_event(repr(ColumnDragEnd(index=0)))
+        model['column_drag_from'] = col_at(model, 2)
+        model['column_drag_over'] = col_at(model, 0)
+        event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], original[2])
@@ -2027,18 +2050,18 @@ class TestColumnReorder(unittest.TestCase):
         lst = [{'a': 1, 'b': 2}]
         model = init_model(lst, mock_get_visualizer)
         original = list(model['columns'])
-        model['column_drag_from'] = 0
-        model['column_drag_over'] = 0
-        event = make_column_mouse_up_event(repr(ColumnDragEnd(index=0)))
+        model['column_drag_from'] = col_at(model, 0)
+        model['column_drag_over'] = col_at(model, 0)
+        event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model))))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), original)
 
     def test_drag_end_saves_dotfile(self):
         lst = [{'a': 1, 'b': 2}]
         model = init_model(lst, mock_get_visualizer)
-        model['column_drag_from'] = 0
-        model['column_drag_over'] = 1
-        event = make_column_mouse_up_event(repr(ColumnDragEnd(index=1)))
+        model['column_drag_from'] = col_at(model, 0)
+        model['column_drag_over'] = col_at(model, 1)
+        event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model, 1))))
         with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
@@ -2047,7 +2070,7 @@ class TestColumnReorder(unittest.TestCase):
         lst = [{'a': 1, 'b': 2}]
         model = init_model(lst, mock_get_visualizer)
         original = list(model['columns'])
-        event = make_column_mouse_up_event(repr(ColumnDragEnd(index=1)))
+        event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model, 1))))
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), original)
 
@@ -2264,21 +2287,21 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('ColumnDragStart(index=0)', output)
-        self.assertIn('ColumnDragEnd(index=0)', output)
+        self.assertIn(html.escape(repr(ColumnDragStart(col=col_at(model)))), output)
+        self.assertIn(html.escape(repr(ColumnDragEnd(col=col_at(model)))), output)
         # Movement is only tracked once a drag has started -- see
         # TestHeaderTracksTheMouseOnlyWhileDragging.
-        self.assertNotIn('ColumnDragOver(index=0)', output)
-        model['column_drag_from'] = 0
-        self.assertIn('ColumnDragOver(index=0)',
+        self.assertNotIn(html.escape(repr(ColumnDragOver(col=col_at(model)))), output)
+        model['column_drag_from'] = col_at(model, 0)
+        self.assertIn(html.escape(repr(ColumnDragOver(col=col_at(model)))),
                       visualize(lst, model, mock_get_visualizer, None))
 
     def test_table_headers_have_click_handler(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('ColumnClick(index=0)', output)
-        self.assertIn('ColumnClick(index=1)', output)
+        self.assertIn(html.escape(repr(ColumnClick(col=col_at(model)))), output)
+        self.assertIn(html.escape(repr(ColumnClick(col=col_at(model, 1)))), output)
 
     def test_table_has_key_down_handler(self):
         lst = [{'name': 'Alice'}]
@@ -2300,7 +2323,7 @@ class TestColumnVisualize(unittest.TestCase):
     def test_table_shows_input_when_editing(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['name']"
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('<input', output)
@@ -2327,7 +2350,7 @@ class TestColumnVisualize(unittest.TestCase):
     def test_input_has_autofocus_when_editing(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
-        model['editing_column_index'] = 0
+        model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['name']"
         output = visualize(lst, model, mock_get_visualizer, None)
         self.assertIn('autofocus', output)
@@ -2359,7 +2382,7 @@ class TestColumnManagementForStringLists(unittest.TestCase):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(list(model['columns']), ['$'])
-        event = make_column_mouse_event(repr(RemoveColumnClick(index=0)))
+        event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
         with patch('table_visualizer.save_columns_to_dotfile'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), [])
@@ -6683,25 +6706,25 @@ from table_visualizer import (
 )
 
 
-def make_column_search_input_event(index, value):
+def make_column_search_input_event(col, value):
     """Create a ColumnSearchInput event for the column at *index*."""
     return {
-        'pythonEventStr': (f"lambda e: ColumnSearchInput(index={index}, "
+        'pythonEventStr': (f"lambda e: ColumnSearchInput(col={col!r}, "
                            f"value=e.get('value', ''))"),
         'eventJSON': {'type': 'input', 'value': value},
     }
 
 
-def make_column_search_op_event(index, op):
+def make_column_search_op_event(col, op):
     return {
-        'pythonEventStr': repr(ColumnSearchOpSelect(index=index, op=op)),
+        'pythonEventStr': repr(ColumnSearchOpSelect(col=col, op=op)),
         'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
     }
 
 
-def make_column_search_compose_event(index, compose):
+def make_column_search_compose_event(col, compose):
     return {
-        'pythonEventStr': repr(ColumnSearchComposeSelect(index=index, compose=compose)),
+        'pythonEventStr': repr(ColumnSearchComposeSelect(col=col, compose=compose)),
         'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1},
     }
 
@@ -7132,7 +7155,7 @@ class TestColumnSearchEvents(unittest.TestCase):
     def test_typing_stores_the_text_and_recomposes_the_main_search(self):
         lst, model = self.make_model()
         col = list(model['columns'])[0]
-        new_model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        new_model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(new_model['column_searches'][col]['text'], "'Alice'")
         self.assertEqual(new_model['search'], f"{col} == 'Alice'")
@@ -7141,7 +7164,7 @@ class TestColumnSearchEvents(unittest.TestCase):
     def test_default_operator_is_equality_and_default_compose_is_and(self):
         lst, model = self.make_model()
         col = list(model['columns'])[0]
-        new_model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        new_model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         row = new_model['column_searches'][col]
         self.assertEqual(row['op'], '==')
@@ -7150,10 +7173,10 @@ class TestColumnSearchEvents(unittest.TestCase):
     def test_choosing_an_operator_recomposes_and_closes_the_chip_menu(self):
         lst, model = self.make_model()
         col = list(model['columns'])[1]
-        model, _ = update(make_column_search_input_event(1, '25'),
+        model, _ = update(make_column_search_input_event(col_at(model, 1), '25'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model['col_search_dropdown'] = 'op-1'
-        new_model, _ = update(make_column_search_op_event(1, '>='),
+        new_model, _ = update(make_column_search_op_event(col_at(model, 1), '>='),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(new_model['column_searches'][col]['op'], '>=')
         self.assertEqual(new_model['search'], f'{col} >= 25')
@@ -7163,17 +7186,17 @@ class TestColumnSearchEvents(unittest.TestCase):
         lst, model = self.make_model()
         col = list(model['columns'])[0]
         model['col_search_dropdown'] = menu_id(model, 'compose')
-        new_model, _ = update(make_column_search_compose_event(0, 'or'),
+        new_model, _ = update(make_column_search_compose_event(col_at(model), 'or'),
                               None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(new_model['column_searches'][col]['compose'], 'or')
         self.assertIsNone(new_model['col_search_dropdown'])
 
     def test_only_offered_values_are_accepted(self):
         lst, model = self.make_model()
-        model, _ = update(make_column_search_op_event(0, 'DROP TABLE'),
+        model, _ = update(make_column_search_op_event(col_at(model), 'DROP TABLE'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertFalse(model.get('column_searches'))
-        model, _ = update(make_column_search_compose_event(0, 'xor'),
+        model, _ = update(make_column_search_compose_event(col_at(model), 'xor'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertFalse(model.get('column_searches'))
 
@@ -7192,35 +7215,35 @@ class TestColumnSearchEvents(unittest.TestCase):
 
     def test_clearing_the_text_clears_the_main_search(self):
         lst, model = self.make_model()
-        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_search_input_event(0, ''),
+        model, _ = update(make_column_search_input_event(col_at(model), ''),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['search'])
 
     def test_removing_a_column_drops_its_search_and_recomposes(self):
         lst, model = self.make_model()
         first, second = list(model['columns'])[0], list(model['columns'])[1]
-        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_search_input_event(1, '30'),
+        model, _ = update(make_column_search_input_event(col_at(model, 1), '30'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model)))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertNotIn(first, model['column_searches'])
         self.assertEqual(model['search'], f'{second} == 30')
 
     def test_removing_the_last_searched_column_clears_the_main_search(self):
         lst, model = self.make_model()
-        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model)))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['search'])
 
     def re_express(self, model, lst, index, expr):
         """Double-click a header and commit a new expression for the column."""
-        model['editing_column_index'] = index
+        model['editing_column'] = col_at(model, index)
         model['column_input_value'] = expr
         return update(make_column_key_event('Enter'), None, model, lst,
                       mock_get_visualizer, eval_in_scope=eval)[0]
@@ -7229,7 +7252,7 @@ class TestColumnSearchEvents(unittest.TestCase):
         # The search was written against the old expression, so it goes with it
         # -- out of the menu and out of the main box both.
         lst, model = self.make_model()
-        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model = self.re_express(model, lst, 0, 'len($)')
         self.assertFalse(model.get('column_searches'))
@@ -7238,9 +7261,9 @@ class TestColumnSearchEvents(unittest.TestCase):
     def test_re_expressing_a_column_leaves_the_other_columns_alone(self):
         lst, model = self.make_model()
         second = list(model['columns'])[1]
-        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_search_input_event(1, '30'),
+        model, _ = update(make_column_search_input_event(col_at(model, 1), '30'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model = self.re_express(model, lst, 0, 'len($)')
         self.assertEqual(model['column_searches'][second]['text'], '30')
@@ -7258,12 +7281,12 @@ class TestColumnSearchEvents(unittest.TestCase):
     def test_reordering_columns_recomposes_in_the_new_order(self):
         lst, model = self.make_model()
         first, second = list(model['columns'])[0], list(model['columns'])[1]
-        model, _ = update(make_column_search_input_event(0, "'Alice'"),
+        model, _ = update(make_column_search_input_event(col_at(model), "'Alice'"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_search_input_event(1, '30'),
+        model, _ = update(make_column_search_input_event(col_at(model, 1), '30'),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        model['column_drag_from'] = 1
-        model, _ = update(make_column_mouse_event(repr(ColumnDragEnd(index=0))),
+        model['column_drag_from'] = col_at(model, 1)
+        model, _ = update(make_column_mouse_event(repr(ColumnDragEnd(col=col_at(model)))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['search'], f"{second} == 30 and {first} == 'Alice'")
 
@@ -7273,7 +7296,7 @@ class TestColumnSearchEvents(unittest.TestCase):
         lst, model = self.make_model()
         model, _ = update(make_search_input_event('$ == 3'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
-        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model)))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['search'], '$ == 3')
 
@@ -7282,7 +7305,7 @@ class TestColumnSearchEvents(unittest.TestCase):
         a = init_model(lst, mock_get_visualizer)
         b = init_model(lst, mock_get_visualizer)
         self.assertIsNone(a['column_searches'])
-        a, _ = update(make_column_search_input_event(0, "'Alice'"), None, a, lst,
+        a, _ = update(make_column_search_input_event(col_at(a), "'Alice'"), None, a, lst,
                       mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(b['column_searches'])
 
@@ -7344,7 +7367,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
         age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30 and len($) > 1')
         self.assertEqual(_column_search_row(model, age)['text'], '30')
-        model, _ = update(make_column_search_input_event(1, '25'), None, model,
+        model, _ = update(make_column_search_input_event(col_at(model, 1), '25'), None, model,
                           lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['search'], f'{age} >= 25 and len($) > 1')
 
@@ -7354,7 +7377,7 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
         lst, model = self.make_model()
         age = list(model['columns'])[1]
         model = self.search(model, lst, f'{age} >= 30 and len($) > 1')
-        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(index=1))),
+        model, _ = update(make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, 1)))),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['search'], 'len($) > 1')
 
@@ -7380,7 +7403,8 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
         return lst, model, list(model['columns'])[0]
 
     def pick_op(self, model, lst, op, index=0):
-        return update(make_column_search_op_event(index, op), None, model, lst,
+        col = col_at(model, index)
+        return update(make_column_search_op_event(col, op), None, model, lst,
                       mock_get_visualizer, eval_in_scope=eval)[0]
 
     def test_picking_a_membership_operator_inserts_the_brackets(self):
@@ -7392,7 +7416,7 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
 
     def test_the_brackets_do_not_overwrite_what_the_user_typed(self):
         lst, model, col = self.make_model()
-        model, _ = update(make_column_search_input_event(0, "'ATG'"), None,
+        model, _ = update(make_column_search_input_event(col_at(model), "'ATG'"), None,
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         model = self.pick_op(model, lst, 'in')
         self.assertEqual(model['column_searches'][col]['text'], "'ATG'")
@@ -7424,7 +7448,7 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
     def test_filling_in_the_brackets_searches(self):
         lst, model, col = self.make_model()
         model = self.pick_op(model, lst, 'in')
-        model, _ = update(make_column_search_input_event(0, "['Alice', 'Bo']"),
+        model, _ = update(make_column_search_input_event(col_at(model), "['Alice', 'Bo']"),
                           None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['search'], f"{col} in ['Alice', 'Bo']")
 
@@ -7437,7 +7461,7 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
     def test_leaving_membership_keeps_a_filled_in_collection(self):
         lst, model, col = self.make_model()
         model = self.pick_op(model, lst, 'in')
-        model, _ = update(make_column_search_input_event(0, "['Alice']"), None,
+        model, _ = update(make_column_search_input_event(col_at(model), "['Alice']"), None,
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         model = self.pick_op(model, lst, '==')
         self.assertEqual(model['column_searches'][col]['text'], "['Alice']")
@@ -7459,7 +7483,7 @@ class TestColumnSearchMembershipBrackets(unittest.TestCase):
         self.assertNotIn('autofocus', th)
 
         model = self.pick_op(model, lst, 'in')
-        model, _ = update(make_column_search_input_event(0, "['a']"), None,
+        model, _ = update(make_column_search_input_event(col_at(model), "['a']"), None,
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         th = _first_column_header(visualize(lst, model, mock_get_visualizer, None))
         self.assertNotIn('autofocus', th)
@@ -7490,7 +7514,7 @@ class TestColumnSearchRendering(unittest.TestCase):
         self.assertIn('col-search-compose', th)
         self.assertIn('col-search-op', th)
         self.assertIn('col-search-input', th)
-        self.assertIn('ColumnSearchInput(index=0', th)
+        self.assertIn(html.escape(f'ColumnSearchInput(col={col_at(model)!r}'), th)
         # The search row comes after the action rows, per the menu's TODO order.
         self.assertLess(th.index('Remove Column'), th.index('col-search-area'))
 
@@ -7625,7 +7649,7 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
         # Same as typing into the main box: the first meaningful edit inserts a
         # line of code and links it.
         lst, model, eval_in_scope = self.column_search_model()
-        model, commands = update(make_column_search_input_event(0, '3'),
+        model, commands = update(make_column_search_input_event(col_at(model), '3'),
                                  ('data', 'data'), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval_in_scope)
         self.assertEqual(model['search'], 'len($["name"]) == 3')
@@ -7635,10 +7659,10 @@ class TestColumnSearchDrivesTheExistingSearch(unittest.TestCase):
 
     def test_editing_a_column_search_rewrites_the_linked_line(self):
         lst, model, eval_in_scope = self.column_search_model()
-        model, _ = update(make_column_search_input_event(0, '3'),
+        model, _ = update(make_column_search_input_event(col_at(model), '3'),
                           ('data', 'data'), model, lst, mock_get_visualizer,
                           eval_in_scope=eval_in_scope)
-        model, commands = update(make_column_search_op_event(0, '>='),
+        model, commands = update(make_column_search_op_event(col_at(model), '>='),
                                  ('data', 'data'), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval_in_scope)
         self.assertEqual([c.expression for c in commands
@@ -7740,7 +7764,7 @@ class TestTally(unittest.TestCase):
     def test_no_rows_is_no_tally(self):
         self.assertIsNone(_tally([]))
 
-    def test_a_column_at_the_cardinality_limit_still_tallies(self):
+    def test_a_named_column_the_cardinality_limit_still_tallies(self):
         tally = _tally(list(range(TALLY_MAX_CARDINALITY)))
         self.assertEqual(len(tally), TALLY_MAX_CARDINALITY)
 
@@ -7910,40 +7934,40 @@ class TestTallyEvents(unittest.TestCase):
 
     def test_checking_one_value_compares_against_it(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('==', "'c'"))
         self.assertEqual(model['search'], "$ == 'c'")
 
     def test_checking_a_second_value_switches_to_membership(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'b'"))
         self.assertEqual(self.row(model)['text'], "['c', 'b']")
         self.assertEqual(model['search'], "$ in ['c', 'b']")
 
     def test_the_membership_list_follows_the_tally_order_not_the_click_order(self):
         # So the generated search is the same however the user got there.
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'b'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         self.assertEqual(self.row(model)['text'], "['c', 'b']")
 
     def test_unchecking_back_down_to_one_compares_again(self):
         lst, model = tally_model()
         for literal in ("'c'", "'aa'", "'b'"):
             model, _ = self.click(model, lst,
-                                  TallyItemToggle(index=0, literal=literal))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+                                  TallyItemToggle(col=col_at(model), literal=literal))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
         self.assertEqual(self.row(model)['text'], "['c', 'b']")
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'b'"))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('==', "'c'"))
 
     def test_unchecking_the_last_value_clears_the_filter(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         self.assertIsNone(model['column_searches'])
         self.assertIsNone(model['search'])
 
@@ -7951,79 +7975,79 @@ class TestTallyEvents(unittest.TestCase):
         # The whole point is picking several values in a row.
         lst, model = tally_model()
         model['openDropdown'] = {'id': menu_id(model)}
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_select_all_checks_every_value(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        model, _ = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.row(model)['text'], "['c', 'aa', 'b']")
 
     def test_select_all_then_unchecking_a_few_is_the_quick_way_to_most_of_them(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallySelectAll(index=0))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model, _ = self.click(model, lst, TallySelectAll(col=col_at(model)))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
         self.assertEqual(self.row(model)['text'], "['c', 'b']")
 
     def test_select_all_under_exclude_rejects_every_value(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
-        model, _ = self.click(model, lst, TallySelectAll(index=0))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
+        model, _ = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('not in', "['c', 'aa', 'b']"))
 
     def test_select_none_clears_the_filter(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallySelectAll(index=0))
-        model, _ = self.click(model, lst, TallySelectNone(index=0))
+        model, _ = self.click(model, lst, TallySelectAll(col=col_at(model)))
+        model, _ = self.click(model, lst, TallySelectNone(col=col_at(model)))
         self.assertIsNone(model['search'])
 
     def test_select_none_keeps_exclude_and_compose(self):
         lst, model = tally_model()
         _set_column_search(model, '$', compose='or')
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
-        model, _ = self.click(model, lst, TallySelectAll(index=0))
-        model, _ = self.click(model, lst, TallySelectNone(index=0))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
+        model, _ = self.click(model, lst, TallySelectAll(col=col_at(model)))
+        model, _ = self.click(model, lst, TallySelectNone(col=col_at(model)))
         self.assertTrue(self.row(model)['exclude'])
         self.assertEqual(self.row(model)['compose'], 'or')
 
     def test_excluding_a_selection_negates_the_operator_and_keeps_the_values(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('!=', "'c'"))
         self.assertEqual(model['search'], "$ != 'c'")
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'b'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'b'"))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('not in', "['c', 'b']"))
 
     def test_unexcluding_puts_the_operator_back(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
         self.assertEqual((self.row(model)['op'], self.row(model)['text']),
                          ('==', "'c'"))
 
     def test_excluding_before_picking_anything_filters_nothing_yet(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
         self.assertTrue(self.row(model)['exclude'])
         self.assertIsNone(model['search'])
         self.assertFalse(_column_search_active(model, '$'))
 
     def test_exclude_ticked_first_is_honored_by_the_next_click(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyExcludeToggle(index=0))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model, _ = self.click(model, lst, TallyExcludeToggle(col=col_at(model)))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         self.assertEqual(model['search'], "$ != 'c'")
 
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model()
-        for event in [TallyItemToggle(index=7, literal="'c'"),
-                      TallySelectAll(index=7), TallySelectNone(index=7),
-                      TallyExcludeToggle(index=7)]:
+        for event in [TallyItemToggle(col='$.gone', literal="'c'"),
+                      TallySelectAll(col='$.gone'), TallySelectNone(col='$.gone'),
+                      TallyExcludeToggle(col='$.gone')]:
             with self.subTest(event=event):
                 model, _ = self.click(model, lst, event)
                 self.assertIsNone(model['column_searches'])
@@ -8034,7 +8058,7 @@ class TestTallyEvents(unittest.TestCase):
         lst, model = tally_model()
         eval_in_scope = lambda code: eval(code, {}, {'data': lst})
         model, commands = update(
-            make_column_mouse_event(repr(TallyItemToggle(index=0, literal="'c'"))),
+            make_column_mouse_event(repr(TallyItemToggle(col=col_at(model), literal="'c'"))),
             ('data', 'data'), model, lst, mock_get_visualizer,
             eval_in_scope=eval_in_scope)
         self.assertEqual([c[1] for c in commands if isinstance(c, tuple)],
@@ -8043,8 +8067,8 @@ class TestTallyEvents(unittest.TestCase):
 
     def test_the_tally_filters_the_rows_it_counted(self):
         lst, model = tally_model()
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        model, _ = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
+        model, _ = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
         self.assertEqual(_get_matching_indices(model['search'], lst, eval),
                          [0, 1, 3, 5, 6, 7, 8])
 
@@ -8118,7 +8142,7 @@ class TestTallyRendering(unittest.TestCase):
     def test_each_row_carries_its_own_literal(self):
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertIn(html.escape(repr(TallyItemToggle(index=0, literal="'c'"))),
+        self.assertIn(html.escape(repr(TallyItemToggle(col=col_at(model), literal="'c'"))),
                       tally)
 
     def test_every_row_carries_a_real_checkbox(self):
@@ -8163,9 +8187,9 @@ class TestTallyRendering(unittest.TestCase):
     def test_the_header_offers_select_all_select_none_and_exclude(self):
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertIn(html.escape(repr(TallySelectAll(index=0))), tally)
-        self.assertIn(html.escape(repr(TallySelectNone(index=0))), tally)
-        self.assertIn(html.escape(repr(TallyExcludeToggle(index=0))), tally)
+        self.assertIn(html.escape(repr(TallySelectAll(col=col_at(model)))), tally)
+        self.assertIn(html.escape(repr(TallySelectNone(col=col_at(model)))), tally)
+        self.assertIn(html.escape(repr(TallyExcludeToggle(col=col_at(model)))), tally)
         self.assertIn('Exclude', tally)
         # The header reads before the values it acts on.
         self.assertLess(tally.index('col-tally-controls'),
@@ -8228,10 +8252,10 @@ class TestTallyRendering(unittest.TestCase):
         self.assertIn(html.escape(repr('x' * 200)), tally)
 
 
-def make_tally_filter_event(index, value):
+def make_tally_filter_event(col, value):
     """Create a TallyFilterInput event for the column at *index*."""
     return {
-        'pythonEventStr': (f"lambda e: TallyFilterInput(index={index}, "
+        'pythonEventStr': (f"lambda e: TallyFilterInput(col={col!r}, "
                            f"value=e.get('value', ''))"),
         'eventJSON': {'type': 'input', 'value': value},
     }
@@ -8270,8 +8294,9 @@ class TestTallyFilterBox(unittest.TestCase):
     of finding a value to click, not a filter on the table: nothing it does
     reaches the column search."""
 
-    def type(self, model, lst, text, index=0):
-        model, _ = update(make_tally_filter_event(index, text), None, model,
+    def type(self, model, lst, text, index=0, col=None):
+        col = col_at(model, index) if col is None else col
+        model, _ = update(make_tally_filter_event(col, text), None, model,
                           lst, mock_get_visualizer, eval_in_scope=eval)
         return model
 
@@ -8300,7 +8325,7 @@ class TestTallyFilterBox(unittest.TestCase):
         lst, model = tally_model()
         tally = self.tally(model, lst)
         self.assertIn('col-tally-filter', tally)
-        self.assertIn('TallyFilterInput(index=0', tally)
+        self.assertIn(html.escape(f'TallyFilterInput(col={col_at(model)!r}'), tally)
         self.assertLess(tally.index('col-tally-filter'),
                         tally.index('col-tally-row'))
 
@@ -8361,7 +8386,7 @@ class TestTallyFilterBox(unittest.TestCase):
 
     def test_a_checked_value_stays_checked_while_it_is_hidden(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         model = self.type(model, lst, 'aa')
         self.assertEqual(model['search'], "$ == 'c'")
 
@@ -8369,35 +8394,35 @@ class TestTallyFilterBox(unittest.TestCase):
         # Narrowing down and then ticking a few is the whole point of it.
         lst, model = tally_model()
         model = self.type(model, lst, 'a')
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
         self.assertEqual(model['tally_filter'], 'a')
         self.assertEqual(model['search'], "$ == 'aa'")
 
     def test_select_all_takes_only_the_values_on_show(self):
         lst, model = tally_model()
         model = self.type(model, lst, 'a')
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), "'aa'")
 
     def test_select_all_leaves_a_hidden_selection_alone(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
         model = self.type(model, lst, 'b')
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), "['c', 'b']")
 
     def test_select_none_only_unchecks_what_is_on_show(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         model = self.type(model, lst, 'b')
-        model = self.click(model, lst, TallySelectNone(index=0))
+        model = self.click(model, lst, TallySelectNone(col=col_at(model)))
         self.assertEqual(self.text(model), "['c', 'aa']")
 
     def test_an_empty_box_still_reaches_every_value(self):
         lst, model = tally_model()
         model = self.type(model, lst, 'b')
         model = self.type(model, lst, '')
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), "['c', 'aa', 'b']")
 
     def test_closing_the_menu_forgets_what_was_typed(self):
@@ -8431,7 +8456,7 @@ class TestTallyFilterBox(unittest.TestCase):
 
     def test_typing_into_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model()
-        model = self.type(model, lst, 'a', index=7)
+        model = self.type(model, lst, 'a', col='$.gone')
         self.assertEqual(model['tally_filter'], '')
 
 
@@ -8555,7 +8580,7 @@ class TestTallySortMenu(unittest.TestCase):
         for sort in TALLY_SORTS:
             with self.subTest(sort=sort):
                 self.assertIn(
-                    html.escape(repr(TallySortSelect(index=0, sort=sort))),
+                    html.escape(repr(TallySortSelect(col=col_at(model), sort=sort))),
                     tally)
         self.assertEqual(TALLY_SORTS,
                          ('first', 'common', 'rare', 'item asc', 'item desc'))
@@ -8571,7 +8596,7 @@ class TestTallySortMenu(unittest.TestCase):
     def test_picking_an_order_records_it_and_closes_the_chip(self):
         lst, model = tally_model()
         model = self.open_chip(model)
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         self.assertEqual(model['tally_sort'], 'common')
         self.assertIsNone(model['col_search_dropdown'])
 
@@ -8579,28 +8604,28 @@ class TestTallySortMenu(unittest.TestCase):
         # Reordering is a step on the way to picking values, not a way out.
         lst, model = tally_model()
         model['openDropdown'] = {'id': menu_id(model)}
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_an_order_it_does_not_know_is_ignored(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='sideways'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='sideways'))
         self.assertEqual(model['tally_sort'], 'first')
 
     def test_picking_on_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=7, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col='$.gone', sort='common'))
         self.assertEqual(model['tally_sort'], 'first')
 
     def test_reordering_is_not_a_filter_on_the_table(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         self.assertIsNone(model['column_searches'])
         self.assertIsNone(model['search'])
 
     def test_the_rows_are_listed_in_the_chosen_order(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         tally = self.tally(model, lst)
         self.assertEqual(self.items(tally),
                          [html.escape(repr(v)) for v in ('c', 'b', 'aa')])
@@ -8608,8 +8633,8 @@ class TestTallySortMenu(unittest.TestCase):
 
     def test_reordering_leaves_the_checked_rows_checked(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         rows = re.findall(r'<div class="col-tally-row[^"]*".*?</div>',
                           self.tally(model, lst), re.DOTALL)
         self.assertEqual([' checked' in row for row in rows],
@@ -8625,21 +8650,21 @@ class TestTallySortMenu(unittest.TestCase):
     def test_the_membership_list_follows_the_chosen_order(self):
         # The search reads the way the list the user clicked through read.
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='rare'))
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'c'"))
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='rare'))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'c'"))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
         self.assertEqual(self.text(model), "['aa', 'c']")
 
     def test_select_all_follows_the_chosen_order(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), "['c', 'b', 'aa']")
 
     def test_the_filter_box_narrows_whatever_order_is_in_force(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='item asc'))
-        model, _ = update(make_tally_filter_event(0, 'a'), None, model, lst,
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='item asc'))
+        model, _ = update(make_tally_filter_event(col_at(model), 'a'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(self.items(self.tally(model, lst)),
                          [html.escape(repr('aa'))])
@@ -8652,7 +8677,7 @@ class TestTallySortMenu(unittest.TestCase):
     def test_closing_the_menu_forgets_the_order(self):
         # Like the filter box: a way of reaching a value, not a setting to keep.
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
@@ -8660,14 +8685,14 @@ class TestTallySortMenu(unittest.TestCase):
     def test_another_column_starts_in_first_seen_order(self):
         lst, model = tally_model()
         model['columns'] = ['$', 'len($)']
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-1'))
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
 
     def test_escape_forgets_the_order(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         model['openDropdown'] = {'id': menu_id(model)}
         model, _ = update(make_column_key_event('Escape'), None, model, lst,
                           mock_get_visualizer, eval_in_scope=eval)
@@ -8675,15 +8700,15 @@ class TestTallySortMenu(unittest.TestCase):
 
     def test_a_menu_the_columns_moved_out_from_under_forgets_it_too(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='common'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='common'))
         model = self.click(model, lst, AddColumnClick())
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
 
 
-def make_tally_count_filter_event(index, value):
+def make_tally_count_filter_event(col, value):
     """Create a TallyCountFilterInput event for the column at *index*."""
     return {
-        'pythonEventStr': (f"lambda e: TallyCountFilterInput(index={index}, "
+        'pythonEventStr': (f"lambda e: TallyCountFilterInput(col={col!r}, "
                            f"value=e.get('value', ''))"),
         'eventJSON': {'type': 'input', 'value': value},
     }
@@ -8824,7 +8849,7 @@ class TestTallyCountFilterNamesTheProgramsValues(unittest.TestCase):
     def test_all_reaches_only_what_the_expression_leaves_on_show(self):
         lst, model = tally_model()
         model['tally_count_filter'] = 'n'
-        model, _ = update(make_column_mouse_event(repr(TallySelectAll(index=0))),
+        model, _ = update(make_column_mouse_event(repr(TallySelectAll(col=col_at(model)))),
                           None, model, lst, mock_get_visualizer,
                           eval_in_scope=program_scope(n=3))
         self.assertEqual(_column_search_row(model, '$')['text'], "['c', 'b']")
@@ -8872,13 +8897,15 @@ class TestTallyCountFilterBox(unittest.TestCase):
     a given frequency. Display only, like the boxes around it: it decides which
     values the menu lists, never what the column search says."""
 
-    def type(self, model, lst, text, index=0):
-        model, _ = update(make_tally_count_filter_event(index, text), None,
+    def type(self, model, lst, text, index=0, col=None):
+        col = col_at(model, index) if col is None else col
+        model, _ = update(make_tally_count_filter_event(col, text), None,
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         return model
 
-    def type_value(self, model, lst, text, index=0):
-        model, _ = update(make_tally_filter_event(index, text), None, model,
+    def type_value(self, model, lst, text, index=0, col=None):
+        col = col_at(model, index) if col is None else col
+        model, _ = update(make_tally_filter_event(col, text), None, model,
                           lst, mock_get_visualizer, eval_in_scope=eval)
         return model
 
@@ -8923,7 +8950,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         lst, model = tally_model()
         tally = self.tally(model, lst)
         self.assertIn('col-tally-count-filter', tally)
-        self.assertIn('TallyCountFilterInput(index=0', tally)
+        self.assertIn(html.escape(f'TallyCountFilterInput(col={col_at(model)!r}'), tally)
         self.assertLess(tally.index('col-tally-count-filter'),
                         tally.index('col-tally-row'))
 
@@ -8953,12 +8980,12 @@ class TestTallyCountFilterBox(unittest.TestCase):
         for op in TALLY_COUNT_OPS:
             with self.subTest(op=op):
                 self.assertIn(
-                    html.escape(repr(TallyCountOpSelect(index=0, op=op))), tally)
+                    html.escape(repr(TallyCountOpSelect(col=col_at(model), op=op))), tally)
         self.assertEqual(TALLY_COUNT_OPS, ('>=', '==', '<=', 'min', 'max'))
         for op in ('>', '<', '!=', 'in', 'not in'):
             with self.subTest(op=op):
                 self.assertNotIn(
-                    html.escape(repr(TallyCountOpSelect(index=0, op=op))), tally)
+                    html.escape(repr(TallyCountOpSelect(col=col_at(model), op=op))), tally)
 
     def test_the_comparison_in_force_is_the_marked_option(self):
         lst, model = tally_model()
@@ -8971,14 +8998,14 @@ class TestTallyCountFilterBox(unittest.TestCase):
     def test_picking_a_comparison_records_it_and_closes_the_chip(self):
         lst, model = tally_model()
         model = self.open_chip(model)
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='=='))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='=='))
         self.assertEqual(model['tally_count_op'], '==')
         self.assertIsNone(model['col_search_dropdown'])
 
     def test_picking_a_comparison_narrows_what_was_already_typed(self):
         lst, model = tally_model()
         model = self.type(model, lst, '3')
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='=='))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='=='))
         self.assertEqual(self.items(self.tally(model, lst)),
                          [html.escape(repr('b'))])
 
@@ -8986,25 +9013,25 @@ class TestTallyCountFilterBox(unittest.TestCase):
         # Narrowing is a step on the way to picking values, not a way out.
         lst, model = tally_model()
         model['openDropdown'] = {'id': menu_id(model)}
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='<='))
         self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
 
     def test_a_comparison_it_does_not_know_is_ignored(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='>'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='>'))
         self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
 
     def test_acting_on_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model()
-        model = self.type(model, lst, '3', index=7)
+        model = self.type(model, lst, '3', col='$.gone')
         self.assertEqual(model['tally_count_filter'], '')
-        model = self.click(model, lst, TallyCountOpSelect(index=7, op='=='))
+        model = self.click(model, lst, TallyCountOpSelect(col='$.gone', op='=='))
         self.assertEqual(model['tally_count_op'], TALLY_COUNT_OP_DEFAULT)
 
     def test_narrowing_by_count_is_not_a_filter_on_the_table(self):
         lst, model = tally_model()
         model = self.type(model, lst, '3')
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='<='))
         self.assertIsNone(model['column_searches'])
         self.assertIsNone(model['search'])
 
@@ -9044,21 +9071,21 @@ class TestTallyCountFilterBox(unittest.TestCase):
 
     def test_a_checked_value_stays_checked_while_it_is_hidden(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyItemToggle(index=0, literal="'aa'"))
+        model = self.click(model, lst, TallyItemToggle(col=col_at(model), literal="'aa'"))
         model = self.type(model, lst, '3')
         self.assertEqual(model['search'], "$ == 'aa'")
 
     def test_select_all_takes_only_the_values_on_show(self):
         lst, model = tally_model()
         model = self.type(model, lst, '3')
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), "['c', 'b']")
 
     def test_select_none_only_unchecks_what_is_on_show(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         model = self.type(model, lst, '3')
-        model = self.click(model, lst, TallySelectNone(index=0))
+        model = self.click(model, lst, TallySelectNone(col=col_at(model)))
         self.assertEqual(self.text(model), "'aa'")
 
     def box(self, tally):
@@ -9068,14 +9095,14 @@ class TestTallyCountFilterBox(unittest.TestCase):
 
     def test_min_shows_the_least_common_values(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='min'))
         tally = self.tally(model, lst)
         self.assertEqual(self.items(tally), [html.escape(repr('aa'))])
         self.assertEqual(self.counts(tally), ['2'])
 
     def test_max_shows_the_most_common_values(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         tally = self.tally(model, lst)
         self.assertEqual(self.items(tally), [html.escape(repr('c'))])
         self.assertEqual(self.counts(tally), ['5'])
@@ -9083,7 +9110,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
     def test_values_that_tie_for_extreme_all_show(self):
         lst = ['a', 'a', 'b', 'b', 'c']
         _, model = tally_model(lst)
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         self.assertEqual(self.items(self.tally(model, lst)),
                          [html.escape(repr(v)) for v in ('a', 'b')])
 
@@ -9095,37 +9122,37 @@ class TestTallyCountFilterBox(unittest.TestCase):
         for op in TALLY_COUNT_EXTREME_OPS:
             with self.subTest(op=op):
                 picked = self.click(model, lst,
-                                    TallyCountOpSelect(index=0, op=op))
+                                    TallyCountOpSelect(col=col_at(model), op=op))
                 self.assertIn('disabled', self.box(self.tally(picked, lst)))
 
     def test_the_disabled_box_shows_nothing_but_remembers(self):
         lst, model = tally_model()
         model = self.type(model, lst, '3')
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         self.assertIn('value=""', self.box(self.tally(model, lst)))
         self.assertEqual(model['tally_count_filter'], '3')
         # And the number comes back with the next comparison.
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='>='))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='>='))
         self.assertIn('value="3"', self.box(self.tally(model, lst)))
 
     def test_the_chip_reads_min_and_max_as_words(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='min'))
         self.assertIn('Min', self.chip(self.tally(model, lst)))
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         self.assertIn('Max', self.chip(self.tally(model, lst)))
 
     def test_the_find_box_narrows_before_min_and_max(self):
         lst, model = tally_model()
         model = self.type_value(model, lst, 'a')
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         self.assertEqual(self.items(self.tally(model, lst)),
                          [html.escape(repr('aa'))])
 
     def test_the_order_in_force_does_not_change_which_values_are_extreme(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySortSelect(index=0, sort='rare'))
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallySortSelect(col=col_at(model), sort='rare'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         self.assertEqual(self.items(self.tally(model, lst)),
                          [html.escape(repr('c'))])
 
@@ -9135,38 +9162,38 @@ class TestTallyCountFilterBox(unittest.TestCase):
                 return '<thing>'
         lst = ['c', 'c', Thing()]
         _, model = tally_model(lst)
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='min'))
         tally = self.tally(model, lst)
         self.assertEqual(self.items(tally), ['&lt;thing&gt;'])
         self.assertIn('unselectable', tally)
         # And what All acts on can't come apart from what the menu lists: the
         # one row on show has nothing to select.
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), '')
 
     def test_select_all_takes_only_the_extreme_values(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
-        model = self.click(model, lst, TallySelectAll(index=0))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
         self.assertEqual(self.text(model), "'c'")
 
     def test_select_none_only_unchecks_the_extreme_values(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallySelectAll(index=0))
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
-        model = self.click(model, lst, TallySelectNone(index=0))
+        model = self.click(model, lst, TallySelectAll(col=col_at(model)))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
+        model = self.click(model, lst, TallySelectNone(col=col_at(model)))
         self.assertEqual(self.text(model), "['aa', 'b']")
 
     def test_narrowing_to_the_extreme_is_not_a_filter_on_the_table(self):
         lst, model = tally_model()
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='min'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='min'))
         self.assertIsNone(model['column_searches'])
         self.assertIsNone(model['search'])
 
     def test_nothing_left_to_be_extreme_says_so(self):
         lst, model = tally_model()
         model = self.type_value(model, lst, 'zz')
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='max'))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='max'))
         tally = self.tally(model, lst)
         self.assertEqual(self.items(tally), [])
         self.assertIn('col-tally-note', tally)
@@ -9175,7 +9202,7 @@ class TestTallyCountFilterBox(unittest.TestCase):
         # Like the boxes around it: a way of reaching a value, not a setting.
         lst, model = tally_model()
         model = self.type(model, lst, '3')
-        model = self.click(model, lst, TallyCountOpSelect(index=0, op='<='))
+        model = self.click(model, lst, TallyCountOpSelect(col=col_at(model), op='<='))
         model['openDropdown'] = {'id': menu_id(model)}
         model = self.click(model, lst, DropdownToggle(dropdown_id='col-menu-0'))
         self.assertEqual(model['tally_count_filter'], '')
@@ -10672,9 +10699,10 @@ class TestGroupAggregationMenu(unittest.TestCase):
         return out[out.index('col-compute-panel'):]
 
     def toggle(self, model, expr='sum($)', index=1, depth=None):
+        col = col_at(model, index)
         """Click a Compute box the way the markup offers it."""
-        event = (ComputeToggle(index=index, expr=expr) if depth is None
-                 else ComputeToggle(index=index, expr=expr, depth=depth))
+        event = (ComputeToggle(col=col, expr=expr) if depth is None
+                 else ComputeToggle(col=col, expr=expr, depth=depth))
         model, _ = update(make_column_mouse_event(repr(event)), None, model,
                           self.D, mock_get_visualizer_dict_tables)
         return model
@@ -11837,10 +11865,10 @@ def agg_x_events(html_str):
         r'<span class="col-agg-x[^>]*snc-mouse-down="([^"]*)"', html_str)]
 
 
-def make_compute_hole_event(index, expr, hole, value):
+def make_compute_hole_event(col, expr, hole, value):
     """Create a ComputeHoleInput event for one of a row's boxes."""
     return {
-        'pythonEventStr': (f"lambda e: ComputeHoleInput(index={index}, "
+        'pythonEventStr': (f"lambda e: ComputeHoleInput(col={col!r}, "
                            f"expr={expr!r}, hole={hole}, "
                            f"value=e.get('value', ''))"),
         'eventJSON': {'type': 'input', 'value': value},
@@ -11855,8 +11883,11 @@ class TestComputeEvents(unittest.TestCase):
         return update(make_column_mouse_event(repr(event)), None, model, lst,
                       mock_get_visualizer, eval_in_scope=eval)
 
-    def toggle(self, model, lst, expr, index=0):
-        model, _ = self.click(model, lst, ComputeToggle(index=index, expr=expr))
+    def toggle(self, model, lst, expr, index=0, col=None):
+        model, _ = self.click(
+            model, lst,
+            ComputeToggle(col=col_at(model, index) if col is None else col,
+                          expr=expr))
         return model
 
     def test_checking_a_row_stores_its_expression(self):
@@ -11903,7 +11934,7 @@ class TestComputeEvents(unittest.TestCase):
 
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
-        model = self.toggle(model, lst, 'min($)', index=7)
+        model = self.toggle(model, lst, 'min($)', col='$.gone')
         self.assertIsNone(model['column_computes'])
 
     def test_the_menu_stays_open_across_a_click(self):
@@ -11950,7 +11981,7 @@ class TestComputeEvents(unittest.TestCase):
         model['columns'] = ["$['a']"]
         model = self.toggle(model, lst, 'min($)')
         model, _ = update(
-            make_column_mouse_event(repr(ColumnClick(index=0)), detail=2),
+            make_column_mouse_event(repr(ColumnClick(col=col_at(model))), detail=2),
             None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         model['column_input_value'] = "$['b']"
         model, _ = update(make_column_key_event('Enter'), None, model, lst,
@@ -11964,7 +11995,7 @@ class TestComputeEvents(unittest.TestCase):
         model['columns'] = ["$['a']"]
         model = self.toggle(model, lst, 'min($)')
         model, _ = update(
-            make_column_mouse_event(repr(RemoveColumnClick(index=0))),
+            make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model)))),
             None, model, lst, mock_get_visualizer, eval_in_scope=eval)
         self.assertIsNone(model['column_computes'])
 
@@ -11972,8 +12003,9 @@ class TestComputeEvents(unittest.TestCase):
 class TestComputeHoleEvents(unittest.TestCase):
     """Typing in a box edits the expression, because the box is part of it."""
 
-    def input(self, model, lst, expr, value, hole=0, index=0):
-        model, _ = update(make_compute_hole_event(index, expr, hole, value),
+    def input(self, model, lst, expr, value, hole=0, col=None):
+        col = col_at(model) if col is None else col
+        model, _ = update(make_compute_hole_event(col, expr, hole, value),
                           None, model, lst, mock_get_visualizer,
                           eval_in_scope=eval)
         return model
@@ -12008,7 +12040,7 @@ class TestComputeHoleEvents(unittest.TestCase):
 
     def test_typing_at_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
-        model = self.input(model, lst, P10, '25', index=7)
+        model = self.input(model, lst, P10, '25', col='$.gone')
         self.assertIsNone(model['column_computes'])
 
 
@@ -12404,15 +12436,15 @@ class TestComputeCellRendering(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['min($)', 'max($)'])
         self.assertEqual(agg_x_events(self.table(model, lst)),
-                         [ComputeToggle(index=0, expr='min($)'),
-                          ComputeToggle(index=0, expr='max($)')])
+                         [ComputeToggle(col=col_at(model), expr='min($)'),
+                          ComputeToggle(col=col_at(model), expr='max($)')])
 
     def test_the_x_asks_for_the_expression_the_cell_is_showing(self):
         # Boxes and all, since that is what the column has stored.
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['np.percentile($, {{25}})'])
         self.assertEqual(agg_x_events(self.table(model, lst)),
-                         [ComputeToggle(index=0, expr='np.percentile($, {{25}})')])
+                         [ComputeToggle(col=col_at(model), expr='np.percentile($, {{25}})')])
 
     def test_a_drag_off_the_x_hands_over_nothing(self):
         # The cell around it is a drag handle, and a drag begun on the ✕ is a
@@ -12780,7 +12812,7 @@ class TestComputeItemRowRendering(unittest.TestCase):
         # theirs for an ✕ to take away.
         lst, model = self.model({"$['b']": [MIN_ITEM]})
         self.assertEqual(agg_x_events(self.item_rows(model, lst)[0]),
-                         [ComputeToggle(index=1, expr=MIN_ITEM)])
+                         [ComputeToggle(col=col_at(model, 1), expr=MIN_ITEM)])
 
     def test_min_item_and_max_item_are_a_row_each(self):
         lst, model = self.model({"$['b']": [MIN_ITEM, MAX_ITEM]})
@@ -12958,14 +12990,15 @@ class TestComputeCodeRendering(ComputePanelCase):
 class TestComputeCodeEvents(unittest.TestCase):
     """Clicking a code row writes the line, the way an action button does."""
 
-    def click(self, lst, expr, index=0, source='data', columns=None):
+    def click(self, lst, expr, index=0, source='data', columns=None, col=None):
         model = init_model(lst, mock_get_visualizer)
         model['columns'] = ['$'] if columns is None else columns
         model['_source_expr'] = source
         model['openDropdown'] = {'id': menu_id(model)}
         model['col_search_dropdown'] = menu_id(model, 'compute')
         return update(make_column_mouse_event(
-            repr(ComputeCodeClick(index=index, expr=expr))),
+            repr(ComputeCodeClick(col=col_at(model, index) if col is None else col,
+                                  expr=expr))),
             ('data', 'data'), model, lst, mock_get_visualizer,
             eval_in_scope=(lambda code: eval(code, {}, {'data': lst})))
 
@@ -12998,7 +13031,7 @@ class TestComputeCodeEvents(unittest.TestCase):
         self.assertEqual(commands, [])
 
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
-        _, commands = self.click(COMPUTE_LIST, 'set($)', index=7)
+        _, commands = self.click(COMPUTE_LIST, 'set($)', col='$.gone')
         self.assertEqual(commands, [])
 
 
@@ -13046,10 +13079,10 @@ class TestFreeAggregations(unittest.TestCase):
         self.assertIsNone(model['column_computes'])
 
 
-def make_compute_expr_event(index, expr, value):
+def make_compute_expr_event(col, expr, value):
     """Create a ComputeExprInput event for a free-form aggregation's box."""
     return {
-        'pythonEventStr': (f"lambda e: ComputeExprInput(index={index}, "
+        'pythonEventStr': (f"lambda e: ComputeExprInput(col={col!r}, "
                            f"expr={expr!r}, value=e.get('value', ''))"),
         'eventJSON': {'type': 'input', 'value': value},
     }
@@ -13058,8 +13091,9 @@ def make_compute_expr_event(index, expr, value):
 class TestFreeAggregationEvents(unittest.TestCase):
     """The box is the aggregation: what is typed in it is the expression."""
 
-    def input(self, model, lst, expr, value, index=0):
-        model, _ = update(make_compute_expr_event(index, expr, value), None,
+    def input(self, model, lst, expr, value, col=None):
+        col = col_at(model) if col is None else col
+        model, _ = update(make_compute_expr_event(col, expr, value), None,
                           model, lst, mock_get_visualizer, eval_in_scope=eval)
         return model
 
@@ -13099,7 +13133,7 @@ class TestFreeAggregationEvents(unittest.TestCase):
 
     def test_typing_at_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
-        model = self.input(model, lst, '', 'sorted($)[2]', index=7)
+        model = self.input(model, lst, '', 'sorted($)[2]', col='$.gone')
         self.assertIsNone(model['column_computes'])
 
     def test_writing_the_catalogs_own_expression_checks_its_row(self):
@@ -13163,7 +13197,7 @@ class TestFreeAggregationRendering(ComputePanelCase):
         row = self.free_rows(self.panel(model, lst))[0]
         self.assertIn('checked', row)
         self.assertIn(
-            html.escape("ComputeToggle(index=0, expr='sorted($)[2]', depth=0)"),
+            html.escape(f"ComputeToggle(col={col_at(model)!r}, expr='sorted($)[2]', depth=0)"),
             row)
 
     def test_the_empty_row_has_nothing_to_uncheck(self):
@@ -13212,7 +13246,7 @@ class TestFreeAggregationCell(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)[2]'])
         cell = self.cells(self.rows(model, lst)[0])[0]
-        self.assertIn(html.escape('ComputeExprInput(index=0'), cell)
+        self.assertIn(html.escape("ComputeExprInput(col='$'"), cell)
         self.assertIn(html.escape("expr='sorted($)[2]'"), cell)
 
     def test_a_named_aggregation_keeps_its_name(self):
@@ -13279,7 +13313,7 @@ class TestAggregationCellHoles(unittest.TestCase):
 
     def test_the_box_edits_the_aggregation_it_labels(self):
         cell = self.cell([P10])
-        self.assertIn(html.escape('ComputeHoleInput(index=0'), cell)
+        self.assertIn(html.escape("ComputeHoleInput(col='$'"), cell)
         self.assertIn(html.escape(f'expr={P10!r}'), cell)
         self.assertIn(html.escape('hole=0'), cell)
 
@@ -13344,7 +13378,7 @@ class TestAggregationCellHoles(unittest.TestCase):
 
     def test_the_cell_can_still_be_taken_away(self):
         self.assertEqual(agg_x_events(self.cell([P10])),
-                         [ComputeToggle(index=0, expr=P10)])
+                         [ComputeToggle(col='$', expr=P10)])
 
 
 def make_compute_expr_key_event(key):
@@ -13408,8 +13442,9 @@ class TestFreeAggregationRemoval(unittest.TestCase):
     is the only record that it was there, so there is nothing left to keep."""
 
     def toggle(self, model, lst, expr, index=0):
+        col = col_at(model, index)
         model, _ = update(make_column_mouse_event(
-            repr(ComputeToggle(index=index, expr=expr))), None, model, lst,
+            repr(ComputeToggle(col=col, expr=expr))), None, model, lst,
             mock_get_visualizer, eval_in_scope=eval)
         return model
 
@@ -13826,6 +13861,70 @@ class TestHeaderTracksTheMouseOnlyWhileDragging(unittest.TestCase):
         self.assertIn('snc-mouse-up', self.header(column_drag_from=0))
 
 
+class TestTheDropLineGoesOnTheEdgeTheColumnIsComingFrom(unittest.TestCase):
+    """The line drawn while a column is dragged over another sits on the edge
+    the dragged column would land against: its left when it is coming from the
+    right, its right when it is coming from the left.
+
+    Which edge that is, is the one thing in a drag that is about position
+    rather than identity -- so it has to be read off where the columns are
+    DRAWN. `_menu_targets` orders by kind, every leaf and then the parents
+    that span them, so a column carrying sub-columns is last in that order
+    however far left it is drawn; asking it which side it is on would put the
+    line on the same edge every time.
+    """
+
+    def header(self, over, frm):
+        lst = [{'a': 1, 'b': [10, 20], 'c': 3},
+               {'a': 2, 'b': [30, 40], 'c': 4}]
+        model = init_model(lst, mock_get_visualizer)
+        # Drawn a | b[0] b[1] | c, with b a spanning header over two.
+        model['columns'] = {"$['a']": {},
+                            "$['b']": {'cols': {'$[0]': {}, '$[1]': {}}},
+                            "$['c']": {}}
+        model['_source_expr'] = 'data'
+        model['column_drag_from'] = frm
+        model['column_drag_over'] = over
+        out = visualize(lst, model, mock_get_visualizer,
+                        lambda code: eval(code, {}, {'data': lst}))
+        for m in re.finditer(r'<th class="[^"]*col-header[^"]*".*?</th>',
+                             out, re.DOTALL):
+            if f'class="col-name">{html.escape(over)}</span>' in m.group(0):
+                return m.group(0)
+        raise AssertionError(f'no header drawn for {over!r}')
+
+    def test_a_column_from_the_left_marks_the_right_edge(self):
+        th = self.header(over="$['c']", frm="$['a']")
+        self.assertIn('col-drag-after', th)
+        self.assertNotIn('col-drag-before', th)
+
+    def test_a_column_from_the_right_marks_the_left_edge(self):
+        th = self.header(over="$['a']", frm="$['c']")
+        self.assertIn('col-drag-before', th)
+        self.assertNotIn('col-drag-after', th)
+
+    def test_a_spanning_header_takes_the_line_on_its_left_too(self):
+        # The reported bug: `$['c']` is drawn to the right of `$['b']`, but is
+        # earlier than it in menu-target order, so the drop line landed on the
+        # right edge -- the side the column was coming from.
+        th = self.header(over="$['b']", frm="$['c']")
+        self.assertIn('col-drag-before', th)
+        self.assertNotIn('col-drag-after', th)
+
+    def test_and_on_its_right_when_the_column_comes_from_the_left(self):
+        th = self.header(over="$['b']", frm="$['a']")
+        self.assertIn('col-drag-after', th)
+        self.assertNotIn('col-drag-before', th)
+
+    def test_a_spanning_header_sits_where_its_first_sub_column_sits(self):
+        # A sub-column dragged out to a column on the parent's right is coming
+        # from the left, even though the leaf it left is drawn inside a header
+        # whose own order-of-kind index is last.
+        th = self.header(over="$['c']", frm=f"$['b']{SUBCOL_SEP}$[0]")
+        self.assertIn('col-drag-after', th)
+        self.assertNotIn('col-drag-before', th)
+
+
 from table_visualizer import _is_pure_ref
 
 
@@ -13986,14 +14085,15 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         self.assertNotIn('checked', rows[3])
 
     def test_clicking_a_row_toggles_that_field(self):
-        panel = self.panel(self.model())
-        self.assertIn(html.escape(repr(SubcolToggle(index=0, expr='$[0]'))),
-                      panel)
+        model = self.model()
+        panel = self.panel(model)
+        self.assertIn(
+            html.escape(repr(SubcolToggle(col=self.SPLIT, expr='$[0]'))), panel)
 
     def test_show_all_and_hide_all_are_the_first_two_rows(self):
         panel = self.panel(self.model())
-        self.assertIn(html.escape(repr(SubcolShowAll(index=0))), panel)
-        self.assertIn(html.escape(repr(SubcolHideAll(index=0))), panel)
+        self.assertIn(html.escape(repr(SubcolShowAll(col=self.SPLIT))), panel)
+        self.assertIn(html.escape(repr(SubcolHideAll(col=self.SPLIT))), panel)
 
     def test_a_written_sub_column_gets_a_box_of_its_own(self):
         # No candidate row covers it, so it is listed as what it is.
@@ -14023,7 +14123,7 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         key = lambda m: re.search(r'snc-focus-key="([^"]*)"',
                                   self.panel(m)).group(1)
         before = key(model)
-        event = {'pythonEventStr': repr(SubcolExprInput(index=0, expr='',
+        event = {'pythonEventStr': repr(SubcolExprInput(col=col_at(model), expr='',
                                                         value='l')),
                  'eventJSON': {'type': 'input', 'value': 'l'}}
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -14086,18 +14186,18 @@ class TestSubcolEvents(unittest.TestCase):
         return list(_subs_at(model['columns'], self.SPLIT) or {})
 
     def test_checking_a_field_makes_it_a_sub_column(self):
-        model, saved = self.click(self.model(), SubcolToggle(index=0, expr='$[0]'))
+        model, saved = self.click(self.model(), SubcolToggle(col=self.SPLIT, expr='$[0]'))
         self.assertEqual(self.subs(model), ['$[0]'])
         saved.assert_called()
 
     def test_unchecking_takes_it_away(self):
         model, _ = self.click(self.model({self.SPLIT: {'cols': {'$[0]': {}}}},
                                          index=1),
-                              SubcolToggle(index=1, expr='$[0]'))
+                              SubcolToggle(col=self.SPLIT, expr='$[0]'))
         self.assertEqual(self.subs(model), [])
 
     def test_show_all_takes_every_field(self):
-        model, _ = self.click(self.model(), SubcolShowAll(index=0))
+        model, _ = self.click(self.model(), SubcolShowAll(col=self.SPLIT))
         self.assertEqual(self.subs(model), ['$[0]', '$[1]'])
 
     def test_hide_all_takes_the_written_ones_too(self):
@@ -14106,13 +14206,13 @@ class TestSubcolEvents(unittest.TestCase):
         model, _ = self.click(
             self.model({self.SPLIT: {'cols': {'$[0]': {}, 'len($)': {}}}},
                        index=2),
-            SubcolHideAll(index=2))
+            SubcolHideAll(col=self.SPLIT))
         self.assertEqual(self.subs(model), [])
 
     def test_hiding_them_all_gives_the_column_back_its_own_cell(self):
         model, _ = self.click(
             self.model({self.SPLIT: {'cols': {'$[0]': {}}}}, index=1),
-            SubcolHideAll(index=1))
+            SubcolHideAll(col=self.SPLIT))
         self.assertEqual([leaf.expr for leaf in _leaf_columns(model['columns'])],
                          [self.SPLIT])
 
@@ -14121,14 +14221,14 @@ class TestSubcolEvents(unittest.TestCase):
         # target space. The ids name the column rather than where it sits, so
         # there is nothing to move and nothing to re-point.
         before = self.model()
-        model, _ = self.click(before, SubcolToggle(index=0, expr='$[0]'))
+        model, _ = self.click(before, SubcolToggle(col=self.SPLIT, expr='$[0]'))
         self.assertEqual(model['openDropdown'], before['openDropdown'])
         self.assertEqual(model['col_search_dropdown'],
                          before['col_search_dropdown'])
 
     def test_a_written_box_adds_a_sub_column(self):
         model = self.model()
-        event = {'pythonEventStr': repr(SubcolExprInput(index=0, expr='',
+        event = {'pythonEventStr': repr(SubcolExprInput(col=self.SPLIT, expr='',
                                                         value='len($)')),
                  'eventJSON': {'type': 'input', 'value': 'len($)'}}
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -14139,7 +14239,7 @@ class TestSubcolEvents(unittest.TestCase):
     def test_editing_a_box_keeps_the_columns_place(self):
         model = self.model(
             {self.SPLIT: {'cols': {'len($)': {}, '$[1]': {}}}}, index=2)
-        event = {'pythonEventStr': repr(SubcolExprInput(index=2, expr='len($)',
+        event = {'pythonEventStr': repr(SubcolExprInput(col=self.SPLIT, expr='len($)',
                                                         value='len($) * 2')),
                  'eventJSON': {'type': 'input', 'value': 'len($) * 2'}}
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -14154,12 +14254,12 @@ class TestSubcolEvents(unittest.TestCase):
         target = f'{self.SPLIT}{SUBCOL_SEP}$[0]'
         model['column_searches'] = {target: {'op': '==', 'text': "'id'",
                                              'compose': 'and'}}
-        out, _ = self.click(model, SubcolToggle(index=1, expr='$[0]'))
+        out, _ = self.click(model, SubcolToggle(col=self.SPLIT, expr='$[0]'))
         self.assertIsNone(out['column_searches'])
 
     def test_emptying_a_box_drops_it(self):
         model = self.model({self.SPLIT: {'cols': {'len($)': {}}}}, index=1)
-        event = {'pythonEventStr': repr(SubcolExprInput(index=1, expr='len($)',
+        event = {'pythonEventStr': repr(SubcolExprInput(col=self.SPLIT, expr='len($)',
                                                         value='')),
                  'eventJSON': {'type': 'input', 'value': ''}}
         with patch('table_visualizer.save_columns_to_dotfile'):
@@ -14168,7 +14268,7 @@ class TestSubcolEvents(unittest.TestCase):
 
     def test_the_menu_stays_open_across_a_toggle(self):
         # Checking several boxes in a row is the point of a list of them.
-        model, _ = self.click(self.model(), SubcolToggle(index=0, expr='$[0]'))
+        model, _ = self.click(self.model(), SubcolToggle(col=self.SPLIT, expr='$[0]'))
         self.assertIsNotNone(model['openDropdown'])
 
     def test_enter_says_the_column_is_written(self):
@@ -14189,7 +14289,7 @@ class TestSubcolEvents(unittest.TestCase):
         self.assertIsNotNone(out['openDropdown'])
 
     def test_a_stale_index_is_a_noop(self):
-        model, _ = self.click(self.model(), SubcolToggle(index=7, expr='$[0]'))
+        model, _ = self.click(self.model(), SubcolToggle(col='$.gone', expr='$[0]'))
         self.assertEqual(self.subs(model), [])
 
 
@@ -14352,7 +14452,7 @@ class TestSortClick(SortEventCase):
     """Clicking a direction rewrites the line the table is showing."""
 
     def test_it_wraps_the_lines_own_expression(self):
-        _, commands = self.click(SortClick(index=0, direction='asc'))
+        _, commands = self.click(SortClick(col="$['b']", direction='asc'))
         self.assertEqual(
             commands,
             [ChangeSourceExpr(
@@ -14360,37 +14460,37 @@ class TestSortClick(SortEventCase):
                 start_line=4, start_col=7, end_line=4, end_col=19)])
 
     def test_descending_asks_for_the_reverse(self):
-        _, commands = self.click(SortClick(index=0, direction='desc'))
+        _, commands = self.click(SortClick(col="$['b']", direction='desc'))
         self.assertIn('reverse=True', commands[0].expression)
 
     def test_the_row_itself_sorts_without_a_key(self):
-        _, commands = self.click(SortClick(index=0, direction='asc'),
+        _, commands = self.click(SortClick(col='$', direction='asc'),
                                  lst=[3, 1, 2], columns=['$'])
         self.assertEqual(commands[0].expression, 'sorted(json.load(f))')
 
     def test_clicking_the_checked_direction_takes_the_sort_off(self):
         span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
-        _, commands = self.click(SortClick(index=0, direction='asc'), span=span)
+        _, commands = self.click(SortClick(col="$['b']", direction='asc'), span=span)
         self.assertEqual(commands[0].expression, 'json.load(f)')
 
     def test_the_other_direction_replaces_rather_than_nests(self):
         span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
-        _, commands = self.click(SortClick(index=0, direction='desc'), span=span)
+        _, commands = self.click(SortClick(col="$['b']", direction='desc'), span=span)
         self.assertEqual(commands[0].expression.count('sorted('), 1)
         self.assertIn('reverse=True', commands[0].expression)
 
     def test_the_menu_stays_open(self):
         # A checkbox, and flipping the direction is the common next act.
-        model, _ = self.click(SortClick(index=0, direction='asc'))
+        model, _ = self.click(SortClick(col="$['b']", direction='asc'))
         self.assertEqual(model['openDropdown'], {'id': menu_id(model)})
         self.assertEqual(model['col_search_dropdown'], menu_id(model, 'sort'))
 
     def test_with_no_span_there_is_nothing_to_rewrite(self):
-        _, commands = self.click(SortClick(index=0, direction='asc'), span=None)
+        _, commands = self.click(SortClick(col="$['b']", direction='asc'), span=None)
         self.assertEqual(commands, [])
 
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
-        _, commands = self.click(SortClick(index=7, direction='asc'))
+        _, commands = self.click(SortClick(col='$.gone', direction='asc'))
         self.assertEqual(commands, [])
 
 
@@ -14398,40 +14498,40 @@ class TestSortCodeClick(SortEventCase):
     """The other two rows write a line instead, the way Unique and Tally do."""
 
     def test_it_writes_the_sorted_list_as_a_new_line(self):
-        _, commands = self.click(SortCodeClick(index=0, direction='asc'))
+        _, commands = self.click(SortCodeClick(col="$['b']", direction='asc'))
         self.assertEqual(
             commands[0][:2],
             ('data_sorted', "sorted(data, key=lambda item: item['b'])"))
 
     def test_descending(self):
-        _, commands = self.click(SortCodeClick(index=0, direction='desc'))
+        _, commands = self.click(SortCodeClick(col="$['b']", direction='desc'))
         self.assertIn('reverse=True', commands[0][1])
 
     def test_sorted_is_a_builtin_so_it_needs_no_import(self):
-        _, commands = self.click(SortCodeClick(index=0, direction='asc'))
+        _, commands = self.click(SortCodeClick(col="$['b']", direction='asc'))
         self.assertEqual(len(commands[0]), 2)
 
     def test_it_sorts_the_whole_list_rather_than_the_lines_expression(self):
         # The new line names the list, the way every Compute row does; only the
         # rewriting rows care what the line itself says.
         span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
-        _, commands = self.click(SortCodeClick(index=0, direction='asc'),
+        _, commands = self.click(SortCodeClick(col="$['b']", direction='asc'),
                                  span=span)
         self.assertEqual(commands[0][1],
                          "sorted(data, key=lambda item: item['b'])")
 
     def test_the_name_falls_back_when_the_list_has_no_name(self):
-        _, commands = self.click(SortCodeClick(index=0, direction='asc'),
+        _, commands = self.click(SortCodeClick(col="$['b']", direction='asc'),
                                  source='data[0]')
         self.assertEqual(commands[0][0], 'result_sorted')
 
     def test_the_menu_closes_behind_it(self):
-        model, _ = self.click(SortCodeClick(index=0, direction='asc'))
+        model, _ = self.click(SortCodeClick(col="$['b']", direction='asc'))
         self.assertIsNone(model['openDropdown'])
         self.assertIsNone(model['col_search_dropdown'])
 
     def test_a_list_with_no_source_writes_nothing(self):
-        _, commands = self.click(SortCodeClick(index=0, direction='asc'),
+        _, commands = self.click(SortCodeClick(col="$['b']", direction='asc'),
                                  source=None)
         self.assertEqual(commands, [])
 
@@ -14580,7 +14680,7 @@ class TestGroupByRow(unittest.TestCase):
 
     def test_clicking_it_asks_to_group(self):
         lst, model = group_by_model()
-        self.assertIn(html.escape(repr(GroupByClick(index=0))),
+        self.assertIn(html.escape(repr(GroupByClick(col="$['b']"))),
                       self.row(model, lst))
 
     def test_it_names_the_list_rather_than_the_lines_own_expression(self):
@@ -14613,7 +14713,7 @@ class TestGroupByClick(unittest.TestCase):
                       eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
 
     def test_it_writes_the_grouped_list_as_a_new_line(self):
-        _, commands = self.click(GroupByClick(index=0))
+        _, commands = self.click(GroupByClick(col="$['b']"))
         self.assertEqual(
             commands[0][:2],
             ('data_grouped',
@@ -14621,30 +14721,30 @@ class TestGroupByClick(unittest.TestCase):
              "for item in data])[0]"))
 
     def test_setdefault_is_a_builtin_so_it_needs_no_import(self):
-        _, commands = self.click(GroupByClick(index=0))
+        _, commands = self.click(GroupByClick(col="$['b']"))
         self.assertEqual(len(commands[0]), 2)
 
     def test_it_groups_the_whole_list_rather_than_the_lines_expression(self):
         span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
-        _, commands = self.click(GroupByClick(index=0), span=span)
+        _, commands = self.click(GroupByClick(col="$['b']"), span=span)
         self.assertIn('for item in data', commands[0][1])
 
     def test_the_name_falls_back_when_the_list_has_no_name(self):
-        _, commands = self.click(GroupByClick(index=0), source='data[0]')
+        _, commands = self.click(GroupByClick(col="$['b']"), source='data[0]')
         self.assertEqual(commands[0][0], 'result_grouped')
 
     def test_the_menu_closes_behind_it(self):
         # One line written, unlike checking a box, which invites the next.
-        model, _ = self.click(GroupByClick(index=0))
+        model, _ = self.click(GroupByClick(col="$['b']"))
         self.assertIsNone(model['openDropdown'])
         self.assertIsNone(model['col_search_dropdown'])
 
     def test_a_list_with_no_source_writes_nothing(self):
-        _, commands = self.click(GroupByClick(index=0), source=None)
+        _, commands = self.click(GroupByClick(col="$['b']"), source=None)
         self.assertEqual(commands, [])
 
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
-        _, commands = self.click(GroupByClick(index=7))
+        _, commands = self.click(GroupByClick(col='$.gone'))
         self.assertEqual(commands, [])
 
 
@@ -14665,7 +14765,7 @@ class TestGroupBySeedsTheGroupedTable(unittest.TestCase):
         with patch('table_visualizer.load_columns_from_dotfile',
                    return_value=loaded), \
              patch('table_visualizer.save_columns_to_dotfile') as saved:
-            update(make_column_mouse_event(repr(GroupByClick(index=index))),
+            update(make_column_mouse_event(repr(GroupByClick(col=col_at(model, index)))),
                    ('data', 'data'), model, lst, mock_get_visualizer,
                    eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
         return saved
@@ -14731,7 +14831,7 @@ class TestSourceSpanAndExprRefresh(unittest.TestCase):
     def test_update_records_it_too(self):
         lst, model = sort_model(span=None)
         model, _ = update(make_column_mouse_event(
-            repr(SortClick(index=0, direction='asc'))),
+            repr(SortClick(col=col_at(model), direction='asc'))),
             ('data', 'data'), model, lst, mock_get_visualizer,
             eval_in_scope=lambda code: eval(code, {}, {'data': lst}),
             source_span=SPAN)
@@ -15150,7 +15250,7 @@ class TestColumnDollarIIsTheRowIndex(unittest.TestCase):
         lst = [1, 2, 3]
         model, _scope = self.named_source(lst)
         model['_source_span'] = ('data', 0, 4)
-        panel = _render_sort_panel('$ * $i', 0, model)
+        panel = _render_sort_panel('$ * $i', model)
         self.assertNotIn('snc-mouse-down', panel)
         self.assertEqual(panel.count('unselectable'), 4)
 
@@ -15158,7 +15258,7 @@ class TestColumnDollarIIsTheRowIndex(unittest.TestCase):
         lst = [1, 2, 3]
         model, _scope = self.named_source(lst)
         model['_source_span'] = ('data', 0, 4)
-        panel = _render_sort_panel('$', 0, model)
+        panel = _render_sort_panel('$', model)
         self.assertIn('snc-mouse-down', panel)
 
 

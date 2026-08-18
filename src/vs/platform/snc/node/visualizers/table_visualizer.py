@@ -98,27 +98,27 @@ class ColumnSelect:
 @dataclass(frozen=True, slots=True)
 class ColumnClick:
     """User clicked on an existing column header (double-click to edit)."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class RemoveColumnClick:
     """User clicked the (x) button to remove a column."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnDragStart:
     """User pressed mouse down on a column drag handle to start reordering."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnDragOver:
     """Mouse moved over a column header while dragging (reorder target)."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnDragEnd:
     """User released mouse to drop a column at the target position."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnKeyDown:
@@ -128,19 +128,19 @@ class ColumnKeyDown:
 @dataclass(frozen=True, slots=True)
 class ColumnSearchInput:
     """User typed in a column's search box (inside that column's ▾ menu)."""
-    index: int
+    col: str
     value: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnSearchOpSelect:
     """User picked a comparison operator for a column's search."""
-    index: int
+    col: str
     op: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnSearchComposeSelect:
     """User picked how a column's search composes with the other columns'."""
-    index: int
+    col: str
     compose: str
 
 @dataclass(frozen=True, slots=True)
@@ -160,49 +160,49 @@ class TallyItemToggle:
     Identified by the value's literal rather than its position, so a click can't
     land on a different value than the one it was aimed at.
     """
-    index: int
+    col: str
     literal: str
 
 @dataclass(frozen=True, slots=True)
 class TallySelectAll:
     """User clicked Select All on a column's tally."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class TallySelectNone:
     """User clicked Select None on a column's tally."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class TallyExcludeToggle:
     """User toggled Exclude on a column's tally, turning the values it has
     selected into the ones to leave out."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class TallyFilterInput:
     """User typed in a column tally's filter box, narrowing which of the
     column's values the menu lists."""
-    index: int
+    col: str
     value: str
 
 @dataclass(frozen=True, slots=True)
 class TallySortSelect:
     """User picked the order a column tally lists its values in."""
-    index: int
+    col: str
     sort: str
 
 @dataclass(frozen=True, slots=True)
 class TallyCountFilterInput:
     """User typed in a column tally's count box, narrowing the menu to the
     values of that frequency."""
-    index: int
+    col: str
     value: str
 
 @dataclass(frozen=True, slots=True)
 class TallyCountOpSelect:
     """User picked how a column tally's count box compares."""
-    index: int
+    col: str
     op: str
 
 @dataclass(frozen=True, slots=True)
@@ -233,14 +233,14 @@ class SortClick:
     Clicking the direction the line already sorts in takes the sort off, so one
     row is both the way in and the way out.
     """
-    index: int
+    col: str
     direction: str
 
 @dataclass(frozen=True, slots=True)
 class SortCodeClick:
     """User clicked one of the Sort submenu's `(new code)` rows, which writes
     the sorted list as a line of its own and leaves the original alone."""
-    index: int
+    col: str
     direction: str
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +253,7 @@ class GroupByClick:
     becomes a dict of lists -- so it is written beside the original rather than
     over it.
     """
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class ComputeToggle:
@@ -267,7 +267,7 @@ class ComputeToggle:
     every table without a splat, where there are no groups to ask of -- means
     what it always meant.
     """
-    index: int
+    col: str
     expr: str
     depth: int = 0
 
@@ -275,7 +275,7 @@ class ComputeToggle:
 class ComputeHoleInput:
     """User typed in one of the boxes inside a Compute row's expression, e.g.
     the level of a percentile."""
-    index: int
+    col: str
     expr: str
     hole: int
     value: str
@@ -285,7 +285,7 @@ class ComputeCodeClick:
     """User clicked one of the Compute submenu's code rows -- Unique, Tally --
     which answer with a whole list, so they write a line rather than keep a cell
     on screen."""
-    index: int
+    col: str
     expr: str
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +296,7 @@ class ComputeExprInput:
     Both boxes hold the whole expression rather than part of one, which is what
     tells this from ComputeHoleInput.
     """
-    index: int
+    col: str
     expr: str
     value: str
 
@@ -319,27 +319,27 @@ class SubcolToggle:
     Identified by the expression it is showing, like a Compute row, so one the
     user wrote themselves needs no event of its own.
     """
-    index: int
+    col: str
     expr: str
 
 @dataclass(frozen=True, slots=True)
 class SubcolShowAll:
     """User clicked Show all, which spreads every field the column's values
     have."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class SubcolHideAll:
     """User clicked Hide all, which takes every sub-column away -- the ones
     they wrote as well as the ones detected, since the menu lists both -- and
     so gives the column back its own cell."""
-    index: int
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class SubcolExprInput:
     """User typed a sub-column of their own into the empty box at the foot of
     the Subcolumns submenu, or edited one already there."""
-    index: int
+    col: str
     expr: str
     value: str
 
@@ -551,9 +551,15 @@ def _as_columns(columns) -> dict:
 
 
 def _col_at(columns, index: int) -> 'str | None':
-    """The column at a position, or None -- what an event carrying an index
-    means. Negative indices are out of range rather than counting back: an
-    event naming column -1 is a stale event, not a request for the last one."""
+    """The column at a position, or None.
+
+    For the places that genuinely count -- rename and remove within one map,
+    and the aggregation rows, which are drawn column by column. An EVENT names
+    its column instead (see _named_column): a position it was given could only be
+    checked for being in range, and one out of date would land on whichever
+    column had since taken that place. Negative indices are out of range here
+    rather than counting back from the end, for the same reason.
+    """
     if index is None or index < 0:
         return None
     keys = list(columns or [])
@@ -1704,6 +1710,25 @@ def _menu_target_at(columns, index: int) -> 'str | None':
     return targets[index] if index < len(targets) else None
 
 
+def _drawn_positions(columns) -> dict:
+    """Where each menu target sits horizontally: the index of the leftmost
+    drawn column at or under it.
+
+    `_menu_targets` orders by kind -- every leaf, then the parents that span
+    them -- because that is the order an index named them in. Left to right is
+    a different order, and a column carrying sub-columns is last in the first
+    one however far left it is drawn. A parent sits where its first sub-column
+    sits, which is where its header starts.
+    """
+    positions = {}
+    for i, leaf in enumerate(_leaf_columns(columns)):
+        parts = leaf.expr.split(SUBCOL_SEP)
+        for n in range(1, len(parts) + 1):
+            # setdefault: an ancestor keeps the first sub-column that claimed it.
+            positions.setdefault(SUBCOL_SEP.join(parts[:n]), i)
+    return positions
+
+
 def _parent_of(columns, target: str) -> 'str | None':
     """The column a target lives under, or None when it is top-level."""
     if SUBCOL_SEP not in target:
@@ -1949,8 +1974,18 @@ def _move_target(columns, from_target: str, to_target: str) -> bool:
     return True
 
 
-def _column_at(model: dict, index: int) -> str | None:
-    return _menu_target_at(model.get('columns') or {}, index)
+def _named_column(model: dict, col: 'str | None') -> 'str | None':
+    """The column an event names, or None when the table no longer has it.
+
+    Events carry the column's own expression rather than where it sat, so an
+    event from a render the table has moved on from either names a column that
+    is still there -- and means it -- or names nothing and does nothing. A
+    position could only ever be checked for being in range, which is why a
+    stale one used to land on whoever had taken that place.
+    """
+    if not isinstance(col, str):
+        return None
+    return col if col in _menu_targets(model.get('columns') or {}) else None
 
 
 def _column_search_row(model: dict, col: str) -> dict:
@@ -5220,7 +5255,9 @@ def _detect_table_columns(lst, get_visualizer):
 
 
 _COLUMN_MGMT_DEFAULTS = {
-    'editing_column_index': None,
+    # The column whose header is a box right now, by name -- see _menu_id:
+    # what is being edited does not change when the columns move.
+    'editing_column': None,
     'adding_column': False,
     'column_input_value': '',
     'selected_suggestion_index': None,
@@ -5447,7 +5484,7 @@ def _render_column_search_chip(dropdown_id, current, options, make_event,
     )
 
 
-def _render_column_search_row(col, index, model) -> str:
+def _render_column_search_row(col, model) -> str:
     """Render one column's search: [and|or] [comparison] (text).
 
     The text is written in column scope, where $ is the column value, $$ the row
@@ -5459,18 +5496,18 @@ def _render_column_search_row(col, index, model) -> str:
 
     compose_html = _render_column_search_chip(
         _menu_id('compose', col), row['compose'], COLUMN_SEARCH_COMPOSE,
-        lambda v: repr(ColumnSearchComposeSelect(index=index, compose=v)),
+        lambda v: repr(ColumnSearchComposeSelect(col=col, compose=v)),
         open_dropdown, 'col-search-compose',
         "How this composes with other columns' filters")
     # No tooltip on the operator: it shows the operator, and the box beside it
     # shows what it compares against.
     op_html = _render_column_search_chip(
         _menu_id('op', col), row['op'], COLUMN_SEARCH_OPS,
-        lambda v: repr(ColumnSearchOpSelect(index=index, op=v)),
+        lambda v: repr(ColumnSearchOpSelect(col=col, op=v)),
         open_dropdown, 'col-search-op',
         'Search Operation')
 
-    input_event = (f"lambda e: ColumnSearchInput(index={index}, "
+    input_event = (f"lambda e: ColumnSearchInput(col={col!r}, "
                    f"value=e.get('value', ''))")
     # Focus is only ever taken right after the brackets were handed over, and
     # then the cursor belongs between them - never on merely opening the menu.
@@ -5537,7 +5574,7 @@ def _tally_count_op_label(value: str) -> str:
     return _column_search_value_label(value)
 
 
-def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
+def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
     """Render one column's tally: each distinct value and how many rows have it.
 
     Only computed while the menu is open, which is the one time the whole column
@@ -5599,7 +5636,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
                 f'</div>')
             continue
         checked = literal in selected
-        toggle_event = repr(TallyItemToggle(index=index, literal=literal))
+        toggle_event = repr(TallyItemToggle(col=col, literal=literal))
         count_expr = (_tally_row_count_expr(col, source_expr, literal, lst,
                                             _model_binds(model))
                       if source_expr else None)
@@ -5614,7 +5651,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
 
     # A way of reaching a value in a long list, so it reads before them -- and
     # before All and None, which it decides the reach of.
-    filter_event = (f"lambda e: TallyFilterInput(index={index}, "
+    filter_event = (f"lambda e: TallyFilterInput(col={col!r}, "
                     f"value=e.get('value', ''))")
     filter_html = (
         f'<input type="text" class="col-tally-filter search-box" '
@@ -5627,7 +5664,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     # A second way of reaching a value: how often it occurs rather than how it
     # reads. The chip sits on top of the box the way the column search's
     # operator does, since it reads before the number the same way.
-    count_event = (f"lambda e: TallyCountFilterInput(index={index}, "
+    count_event = (f"lambda e: TallyCountFilterInput(col={col!r}, "
                    f"value=e.get('value', ''))")
     count_html = (
         f'<div class="search-box-wrapper col-tally-count-box">'
@@ -5641,7 +5678,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
         f'<span class="col-search-chips">'
         + _render_column_search_chip(
             _menu_id('tally-count-op', col), count_op, TALLY_COUNT_OPS,
-            lambda v: repr(TallyCountOpSelect(index=index, op=v)),
+            lambda v: repr(TallyCountOpSelect(col=col, op=v)),
             model.get('col_search_dropdown'), 'col-tally-count-op',
             label=_tally_count_op_label)
         + '</span></div>'
@@ -5651,22 +5688,22 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
     # the menu puts in front of the user, and in what order.
     sort_html = _render_column_search_chip(
             _menu_id('tally-sort', col), sort, TALLY_SORTS,
-            lambda v: repr(TallySortSelect(index=index, sort=v)),
+            lambda v: repr(TallySortSelect(col=col, sort=v)),
             model.get('col_search_dropdown'), 'col-tally-sort',
             'Order the values are listed in', _tally_sort_label)
     controls_html = (
         f'<div class="col-tally-controls">'
         f'<span class="col-search-chip" '
         f'data-tooltip="Select every value shown" '
-        f'snc-mouse-down="{html.escape(repr(TallySelectAll(index=index)))}">'
+        f'snc-mouse-down="{html.escape(repr(TallySelectAll(col=col)))}">'
         f'All</span>'
         f'<span class="col-search-chip" '
         f'data-tooltip="Select none of the values shown" '
-        f'snc-mouse-down="{html.escape(repr(TallySelectNone(index=index)))}">'
+        f'snc-mouse-down="{html.escape(repr(TallySelectNone(col=col)))}">'
         f'None</span>'
         f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
         f'data-tooltip="Filter to everything but the selected values" '
-        f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(index=index)))}">'
+        f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(col=col)))}">'
         f'{_render_tally_check(exclude)} Exclude</span>'
         f'<div class="col-tally-sort-box">Sort:'
         f'{sort_html}'
@@ -5695,7 +5732,7 @@ def _render_column_tally(col, index, model, lst, eval_in_scope=None) -> str:
             f'</div>')
 
 
-def _render_column_sort(col, index, model) -> str:
+def _render_column_sort(col, model) -> str:
     """Render the Sort row of a column's ▾ menu, and its submenu when open.
 
     A flyout out of the already-hoisted column menu, like Compute, and sharing
@@ -5709,7 +5746,7 @@ def _render_column_sort(col, index, model) -> str:
     dropdown_id = _menu_id('sort', col)
     is_open = model.get('col_search_dropdown') == dropdown_id
     toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
-    panel_html = _render_sort_panel(col, index, model) if is_open else ''
+    panel_html = _render_sort_panel(col, model) if is_open else ''
     return (
         f'<div class="snc-dropdown-trigger col-compute col-sort"'
         f'{_column_dwell_attr(model, opens=dropdown_id)}>'
@@ -5723,7 +5760,7 @@ def _render_column_sort(col, index, model) -> str:
     )
 
 
-def _render_sort_panel(col, index, model) -> str:
+def _render_sort_panel(col, model) -> str:
     """Two rows that sort the line the table is showing, and two that write the
     sorted list as a line of its own.
 
@@ -5754,7 +5791,7 @@ def _render_sort_panel(col, index, model) -> str:
                    + (' unselectable' if inert else ''))
         toggle_attr = '' if inert else (
             f' snc-mouse-down="'
-            f'{html.escape(repr(SortClick(index=index, direction=direction)))}"')
+            f'{html.escape(repr(SortClick(col=col, direction=direction)))}"')
         # What the row would make the line read, which is the code it names --
         # so a row already checked hands over the line as it stands rather than
         # the unsort a click there would write. Rightwards, like every handle in
@@ -5776,7 +5813,7 @@ def _render_sort_panel(col, index, model) -> str:
                                 _model_binds(model)))
         click_attr = '' if code is None else (
             f' snc-mouse-down="'
-            f'{html.escape(repr(SortCodeClick(index=index, direction=direction)))}"')
+            f'{html.escape(repr(SortCodeClick(col=col, direction=direction)))}"')
         rows.append(
             f'<div class="col-compute-row col-compute-code col-sort-code'
             f'{"" if code else " unselectable"}"'
@@ -5791,7 +5828,7 @@ def _render_sort_panel(col, index, model) -> str:
             f'col-sort-panel" snc-dropdown-align="flyout">{"".join(rows)}</div>')
 
 
-def _render_column_group_by(col, index, model) -> str:
+def _render_column_group_by(col, model) -> str:
     """Render the Group By row of a column's ▾ menu.
 
     A plain row rather than a flyout: there is one thing to write, and it writes
@@ -5807,7 +5844,7 @@ def _render_column_group_by(col, index, model) -> str:
     code = (None if source_expr is None
             else _group_by_expr(col, source_expr, _model_binds(model)))
     click_attr = '' if code is None else (
-        f' snc-mouse-down="{html.escape(repr(GroupByClick(index=index)))}"')
+        f' snc-mouse-down="{html.escape(repr(GroupByClick(col=col)))}"')
     # Rightwards, like every handle in these menus: a tooltip above one would
     # cover the rows around it.
     return (
@@ -5826,7 +5863,7 @@ def _render_column_group_by(col, index, model) -> str:
 SUBCOL_EXPR_TOOLTIP = "$ is this column's value, $$ the row"
 
 
-def _render_column_subcols(col, index, model, lst, get_visualizer=None,
+def _render_column_subcols(col, model, lst, get_visualizer=None,
                            eval_in_scope=None) -> str:
     """Render the Subcolumns row of a column's ▾ menu, and its submenu when
     open.
@@ -5840,7 +5877,7 @@ def _render_column_subcols(col, index, model, lst, get_visualizer=None,
     dropdown_id = _menu_id('subcols', col)
     is_open = model.get('col_search_dropdown') == dropdown_id
     toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
-    panel_html = (_render_subcol_panel(col, index, model, lst, get_visualizer,
+    panel_html = (_render_subcol_panel(col, model, lst, get_visualizer,
                                        eval_in_scope) if is_open else '')
     return (
         f'<div class="snc-dropdown-trigger col-compute col-subcol"'
@@ -5856,7 +5893,7 @@ def _render_column_subcols(col, index, model, lst, get_visualizer=None,
     )
 
 
-def _render_subcol_panel(col, index, model, lst, get_visualizer=None,
+def _render_subcol_panel(col, model, lst, get_visualizer=None,
                          eval_in_scope=None) -> str:
     """Show all and Hide all, then a checkbox per field the column's values
     have, then whatever the user has written and an empty box to write another.
@@ -5876,8 +5913,8 @@ def _render_subcol_panel(col, index, model, lst, get_visualizer=None,
         f'<span class="col-compute-nocheck"></span>'
         f'<span class="col-compute-name">{label}</span>'
         f'</span></div>'
-        for label, event in (('Show all', SubcolShowAll(index=index)),
-                             ('Hide all', SubcolHideAll(index=index)))
+        for label, event in (('Show all', SubcolShowAll(col=col)),
+                             ('Hide all', SubcolHideAll(col=col)))
     ]
 
     if candidates:
@@ -5888,7 +5925,7 @@ def _render_subcol_panel(col, index, model, lst, get_visualizer=None,
             f'<div class="col-compute-row col-subcol-row'
             f'{" checked" if checked else ""}">'
             f'<span class="col-compute-toggle" snc-mouse-down="'
-            f'{html.escape(repr(SubcolToggle(index=index, expr=expr)))}">'
+            f'{html.escape(repr(SubcolToggle(col=col, expr=expr)))}">'
             f'{_render_tally_check(checked)}'
             f'<span class="col-compute-name">{html.escape(expr)}</span>'
             f'</span></div>')
@@ -5902,14 +5939,14 @@ def _render_subcol_panel(col, index, model, lst, get_visualizer=None,
         written = bool(expr.strip())
         toggle_attr = '' if not written else (
             f' snc-mouse-down="'
-            f'{html.escape(repr(SubcolToggle(index=index, expr=expr)))}"')
+            f'{html.escape(repr(SubcolToggle(col=col, expr=expr)))}"')
         rows.append(
             f'<div class="col-compute-row col-subcol-row col-subcol-free'
             f'{" checked" if written else ""}">'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(written, disabled=not written)}</span>'
             f'<input type="text" class="col-compute-expr search-box" '
-            f'snc-input="{html.escape(_subcol_expr_event(index, expr))}" '
+            f'snc-input="{html.escape(_subcol_expr_event(col, expr))}" '
             f'snc-focus-key="subcol-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(SubcolExprKeyDown()))}" '
             f'data-tooltip="{html.escape(SUBCOL_EXPR_TOOLTIP)}" '
@@ -5922,14 +5959,14 @@ def _render_subcol_panel(col, index, model, lst, get_visualizer=None,
             f'{"".join(rows)}</div>')
 
 
-def _subcol_expr_event(index: int, expr: str) -> str:
+def _subcol_expr_event(col: str, expr: str) -> str:
     """The box that holds a whole sub-column expression, at the foot of the
     submenu."""
-    return (f"lambda e: SubcolExprInput(index={index}, expr={expr!r}, "
+    return (f"lambda e: SubcolExprInput(col={col!r}, expr={expr!r}, "
             f"value=e.get('value', ''))")
 
 
-def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
+def _render_column_compute(col, model, lst, eval_in_scope=None) -> str:
     """Render the Compute row of a column's ▾ menu, and its submenu when open.
 
     A flyout out of an already-hoisted panel, like the chip menus on the search
@@ -5942,7 +5979,7 @@ def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
     dropdown_id = _menu_id('compute', col)
     is_open = model.get('col_search_dropdown') == dropdown_id
     toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
-    panel_html = (_render_compute_panel(col, index, model, lst, eval_in_scope)
+    panel_html = (_render_compute_panel(col, model, lst, eval_in_scope)
                   if is_open else '')
     return (
         f'<div class="snc-dropdown-trigger col-compute"'
@@ -5957,7 +5994,7 @@ def _render_column_compute(col, index, model, lst, eval_in_scope=None) -> str:
     )
 
 
-def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
+def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
     """One row per aggregation: a checkbox, its name, a box for each hole in
     its expression, and the answer.
 
@@ -5992,12 +6029,12 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
                    + (' unselectable' if inert else ''))
         toggle_attr = '' if inert else (
             f' snc-mouse-down="'
-            f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
+            f'{html.escape(repr(ComputeToggle(col=col, expr=template)))}"')
         # The boxes and the answer sit outside the part that toggles: typing a
         # level, or dragging the answer out, is not a way of checking the row.
         holes = ''.join(
             f'<input type="text" class="col-compute-hole search-box" '
-            f'snc-input="{html.escape(_compute_hole_event(index, template, i))}" '
+            f'snc-input="{html.escape(_compute_hole_event(col, template, i))}" '
             f'{_agg_hole_tooltip(template)}'
             f'value="{html.escape(text)}" spellcheck="false" />'
             for i, text in enumerate(_agg_holes(template)))
@@ -6015,7 +6052,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
                 f'<span class="col-compute-group-toggle" '
                 f'data-tooltip="{html.escape(COMPUTE_PER_GROUP_TOOLTIP)}" '
                 f'snc-mouse-down="'
-                f'{html.escape(repr(ComputeToggle(index=index, expr=template, depth=1)))}">'
+                f'{html.escape(repr(ComputeToggle(col=col, expr=template, depth=1)))}">'
                 f'{_render_tally_check(template in group_checked)}</span>')
         rows.append(
             f'<div class="{classes}"{py_exp_attrs(code, imports=_agg_imports(template), align="right")}>'
@@ -6036,7 +6073,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
                 else _agg_code(template, values_expr, source_expr))
         click_attr = '' if code is None else (
             f' snc-mouse-down='
-            f'"{html.escape(repr(ComputeCodeClick(index=index, expr=template)))}"')
+            f'"{html.escape(repr(ComputeCodeClick(col=col, expr=template)))}"')
         rows.append(
             f'<div class="col-compute-row col-compute-code'
             f'{"" if code else " unselectable"}"'
@@ -6066,7 +6103,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
         written = bool(template.strip())
         toggle_attr = '' if not written else (
             f' snc-mouse-down="'
-            f'{html.escape(repr(ComputeToggle(index=index, expr=template)))}"')
+            f'{html.escape(repr(ComputeToggle(col=col, expr=template)))}"')
         rows.append(
             f'<div class="col-compute-row col-compute-free{" checked" if written else ""}"'
             f'{py_exp_attrs(code, imports=_agg_imports(template), align="right") if written else ""}'
@@ -6074,7 +6111,7 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(written, disabled=not written)}</span>'
             f'<input type="text" class="col-compute-expr search-box" '
-            f'snc-input="{html.escape(_compute_expr_event(index, template))}" '
+            f'snc-input="{html.escape(_compute_expr_event(col, template))}" '
             f'snc-focus-key="compute-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
             f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
@@ -6088,8 +6125,8 @@ def _render_compute_panel(col, index, model, lst, eval_in_scope=None) -> str:
             f'snc-dropdown-align="flyout">{"".join(rows)}</div>')
 
 
-def _compute_hole_event(index: int, template: str, hole: int) -> str:
-    return (f"lambda e: ComputeHoleInput(index={index}, expr={template!r}, "
+def _compute_hole_event(col: str, template: str, hole: int) -> str:
+    return (f"lambda e: ComputeHoleInput(col={col!r}, expr={template!r}, "
             f"hole={hole}, value=e.get('value', ''))")
 
 
@@ -6105,10 +6142,10 @@ def _agg_hole_tooltip(template: str) -> str:
     return ''
 
 
-def _compute_expr_event(index: int, template: str) -> str:
+def _compute_expr_event(col: str, template: str) -> str:
     """The box that holds a whole aggregation, wherever it is drawn: at the foot
     of the submenu, or as the label of the cell it made."""
-    return (f"lambda e: ComputeExprInput(index={index}, expr={template!r}, "
+    return (f"lambda e: ComputeExprInput(col={col!r}, expr={template!r}, "
             f"value=e.get('value', ''))")
 
 
@@ -6134,7 +6171,7 @@ def _column_dwell_attr(model, *, opens: 'str | None' = None, owns=()) -> str:
             f'{html.escape(repr(ColumnSubmenuDwell(dropdown_id=opens)))}"')
 
 
-def _render_column_menu(col, index, model, lst, eval_in_scope=None,
+def _render_column_menu(col, model, lst, eval_in_scope=None,
                         get_visualizer=None):
     """Render the rows of the per-column ▾ menu.
 
@@ -6144,7 +6181,7 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None,
     belonging to the trigger rather than to the table row beneath it. The hoisting
     code mirrors it to the ▾'s left when there isn't room on the right.
     """
-    remove_event = repr(RemoveColumnClick(index=index))
+    remove_event = repr(RemoveColumnClick(col=col))
     rows = [
         f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
@@ -6152,13 +6189,13 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None,
         f'</div>',
         # Beside Remove Column: the two rows that decide which columns exist,
         # ahead of the three that ask questions about the rows.
-        _render_column_subcols(col, index, model, lst, get_visualizer,
+        _render_column_subcols(col, model, lst, get_visualizer,
                                eval_in_scope),
-        _render_column_sort(col, index, model),
-        _render_column_group_by(col, index, model),
-        _render_column_compute(col, index, model, lst, eval_in_scope),
-        _render_column_search_row(col, index, model),
-        _render_column_tally(col, index, model, lst, eval_in_scope),
+        _render_column_sort(col, model),
+        _render_column_group_by(col, model),
+        _render_column_compute(col, model, lst, eval_in_scope),
+        _render_column_search_row(col, model),
+        _render_column_tally(col, model, lst, eval_in_scope),
     ]
     # Says what a click outside the menu means, so the front end doesn't have to
     # know which of these panels is a menu or what closing one entails. The
@@ -6173,7 +6210,7 @@ def _render_column_menu(col, index, model, lst, eval_in_scope=None,
     )
 
 
-def _render_column_header(col, index, model, lst, eval_in_scope=None,
+def _render_column_header(col, model, lst, eval_in_scope=None,
                           span_attrs='', extra_classes='', label=None,
                           get_visualizer=None):
     """Render a normal column header with drag handle, column name, and ▾ menu.
@@ -6189,21 +6226,29 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
     *get_visualizer* is here for the ▾ menu: the Subcolumns submenu asks the
     cells' visualizers what fields they have.
     """
-    click_event = repr(ColumnClick(index=index))
-    drag_start_event = repr(ColumnDragStart(index=index))
-    drag_over_event = repr(ColumnDragOver(index=index))
-    drag_end_event = repr(ColumnDragEnd(index=index))
+    click_event = repr(ColumnClick(col=col))
+    drag_start_event = repr(ColumnDragStart(col=col))
+    drag_over_event = repr(ColumnDragOver(col=col))
+    drag_end_event = repr(ColumnDragEnd(col=col))
 
     drag_from = model.get('column_drag_from')
     drag_over = model.get('column_drag_over')
-    is_drag_source = (drag_from == index)
-    is_drag_target = (drag_from is not None and drag_over == index and drag_from != index)
+    is_drag_source = (drag_from == col)
+    is_drag_target = (drag_from is not None and drag_over == col and drag_from != col)
 
     th_classes = ['snc-hover-hidden-parent', 'col-header']
     if is_drag_source:
         th_classes.append('col-drag-source')
     if is_drag_target:
-        th_classes.append('col-drag-before' if drag_from > drag_over else 'col-drag-after')
+        # Which edge the drop line goes on is the one thing in a drag that is
+        # genuinely about position rather than identity -- whether the column
+        # is coming from the right or from the left. Read off where the columns
+        # are DRAWN, in the model in hand, so neither a column that moved since
+        # the drag began nor one whose header spans sub-columns can answer with
+        # somewhere it isn't.
+        at = _drawn_positions(model.get('columns') or {})
+        from_right = at.get(drag_from, -1) > at.get(drag_over, -1)
+        th_classes.append('col-drag-before' if from_right else 'col-drag-after')
     is_filtered = _column_search_active(model, col)
     if is_filtered:
         th_classes.append('col-filtered')
@@ -6233,7 +6278,7 @@ def _render_column_header(col, index, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(toggle_event)}" '
         f'data-tooltip="Column actions" '
         f'class="{" ".join(menu_classes)}">▾</span>'
-        f'{_render_column_menu(col, index, model, lst, eval_in_scope, get_visualizer) if menu_open else ""}'
+        f'{_render_column_menu(col, model, lst, eval_in_scope, get_visualizer) if menu_open else ""}'
         f'</span>'
     )
 
@@ -6314,7 +6359,7 @@ def _column_input_html(lst, model, get_visualizer, is_editing):
     )
 
 
-def _render_column_input(lst, model, get_visualizer, is_editing, editing_index=-1):
+def _render_column_input(lst, model, get_visualizer, is_editing):
     """A header cell holding the box, for a column being added or edited."""
     return f'<th>{_column_input_html(lst, model, get_visualizer, is_editing)}</th>'
 
@@ -7071,7 +7116,7 @@ def _render_agg_answer(template, answer, key, code, model, get_visualizer,
     return f'{wrap_child_prefix(key)}{drawn}{wrap_child_suffix}'
 
 
-def _agg_label_html(expr: str, index: int, level: int) -> str:
+def _agg_label_html(expr: str, col: str, level: int) -> str:
     """What names a cell: the catalog's word for the aggregation, or a box
     holding the expression when the aggregation is the user's own.
 
@@ -7090,16 +7135,16 @@ def _agg_label_html(expr: str, index: int, level: int) -> str:
     name = _agg_name(expr)
     if name is None:
         return (f'<input type="text" class="col-agg-label col-agg-expr" '
-                f'snc-input="{html.escape(_compute_expr_event(index, expr))}" '
-                f'snc-focus-key="agg-expr-{index}-{level}" '
+                f'snc-input="{html.escape(_compute_expr_event(col, expr))}" '
+                f'snc-focus-key="agg-expr-{col}-{level}" '
                 f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
                 f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
                 f'value="{html.escape(expr)}" size="{max(len(expr), 4)}" '
                 f'draggable="false" spellcheck="false" />')
     holes = ''.join(
         f' <input type="text" class="col-agg-hole" '
-        f'snc-input="{html.escape(_compute_hole_event(index, expr, i))}" '
-        f'snc-focus-key="agg-hole-{index}-{level}-{i}" '
+        f'snc-input="{html.escape(_compute_hole_event(col, expr, i))}" '
+        f'snc-focus-key="agg-hole-{col}-{level}-{i}" '
         f'{_agg_hole_tooltip(expr)}'
         f'value="{html.escape(text)}" size="{max(len(text), 1)}" '
         f'draggable="false" spellcheck="false" />'
@@ -7107,7 +7152,7 @@ def _agg_label_html(expr: str, index: int, level: int) -> str:
     return f'<div class="col-agg-label">{html.escape(name)}{holes}</div>'
 
 
-def _agg_remove_x_html(expr: str, index: int) -> str:
+def _agg_remove_x_html(expr: str, col: str) -> str:
     """The ✕ that takes a cell's aggregation away.
 
     The submenu's own checkbox event, because an aggregation is checked by being
@@ -7120,11 +7165,11 @@ def _agg_remove_x_html(expr: str, index: int) -> str:
     slipped on rather than an ask for the code.
     """
     return ('<span class="col-agg-x snc-hover-hidden" '
-            f'snc-mouse-down="{html.escape(repr(ComputeToggle(index=index, expr=expr)))}" '
+            f'snc-mouse-down="{html.escape(repr(ComputeToggle(col=col, expr=expr)))}" '
             'draggable="false" data-tooltip="Remove aggregation">✕</span>')
 
 
-def _render_agg_cell(expr, index, col, level, values, model, get_visualizer,
+def _render_agg_cell(expr, col, level, values, model, get_visualizer,
                      eval_in_scope=None, source_expr=None,
                      max_width=None) -> str:
     """One answer, in a cell of its own."""
@@ -7137,8 +7182,8 @@ def _render_agg_cell(expr, index, col, level, values, model, get_visualizer,
     return (
         f'<td class="col-agg-cell snc-hover-hidden-parent">'
         f'<div class="col-agg"{py_exp_attrs(code, imports=_agg_imports(expr))}>'
-        f'{_agg_label_html(expr, index, level)}'
-        f'{_agg_remove_x_html(expr, index)}'
+        f'{_agg_label_html(expr, col, level)}'
+        f'{_agg_remove_x_html(expr, col)}'
         f'<div class="col-agg-value">'
         f'{_render_agg_answer(expr, answer, key, code, model, get_visualizer, eval_in_scope, max_width)}'
         f'</div>'
@@ -7235,8 +7280,8 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
         code = (None if value is NO_ANSWER or item_code is None
                 else _agg_child_expr(key, source_expr, binds))
         label = ('<div class="col-agg-label"></div>' if cj != ci else
-                 f'{_agg_label_html(expr, ci, level)}'
-                 f'{_agg_remove_x_html(expr, ci)}')
+                 f'{_agg_label_html(expr, asking, level)}'
+                 f'{_agg_remove_x_html(expr, asking)}')
         side_value_class = ' not-agg-col' if cj != ci else ''
         cells.append(
             f'<td class="col-agg-cell snc-hover-hidden-parent">'
@@ -7322,7 +7367,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
             if expr is None:
                 cells.append('<td class="col-agg-blank"></td>')
             else:
-                cells.append(_render_agg_cell(expr, ci, _col_at(columns, ci), level,
+                cells.append(_render_agg_cell(expr, _col_at(columns, ci), level,
                                               reads[ci], model, get_visualizer,
                                               eval_in_scope, source_expr,
                                               max_width))
@@ -7401,20 +7446,13 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     strs.append('<table><tr>')
     strs.append(f'<th{f" rowspan=\"{n_header}\"" if n_header > 1 else ""}></th>')
 
-    # Header cells carry the index of what their menu acts on, which is the
-    # menu-target space -- leaves first, then the splats that carry others. For
-    # a table with no sub-columns that is position-for-position what it was.
-    target_index = {t: n for n, t in enumerate(_menu_targets(columns))}
-
     for level, cells in enumerate(header_rows):
         if level:
             strs.append('<tr>')
         for cell in cells:
-            ci = target_index.get(cell.expr, 0)
-            if model.get('editing_column_index') == ci:
+            if model.get('editing_column') == cell.expr:
                 strs.append(_render_column_input(
-                    lst, model, get_visualizer, is_editing=True,
-                    editing_index=ci))
+                    lst, model, get_visualizer, is_editing=True))
                 continue
             span_attrs = ''
             if cell.colspan > 1:
@@ -7425,7 +7463,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             # menu -- search, tally, sort and Compute all key on the column
             # expression, and a leaf's is one _column_values understands.
             strs.append(_render_column_header(
-                cell.expr, ci, model, lst, eval_in_scope,
+                cell.expr, model, lst, eval_in_scope,
                 span_attrs=span_attrs,
                 extra_classes='col-subheader' if level else None,
                 label=cell.label if level else None,
@@ -7805,7 +7843,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             _close_column_menus(model)
             model['adding_column'] = True
             model['column_input_value'] = ''
-            model['editing_column_index'] = None
+            model['editing_column'] = None
 
         case ColumnInput(value=val):
             model['column_input_value'] = val
@@ -7822,9 +7860,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['column_input_value'] = ''
                 if type_key:
                     _save_slots(model)
-            elif model.get('editing_column_index') is not None:
-                idx = model['editing_column_index']
-                old_name = _column_at(model, idx)
+            elif model.get('editing_column') is not None:
+                old_name = _named_column(model, model['editing_column'])
                 if old_name is not None and _rename_target(model['columns'],
                                                            old_name, name):
                     if old_name != name:
@@ -7835,18 +7872,18 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         _remove_column_search(model, old_name)
                         _rename_column_compute(model, old_name, name)
                         _recompose_search(model, eval_in_scope)
-                model['editing_column_index'] = None
+                model['editing_column'] = None
                 model['column_input_value'] = ''
                 if type_key:
                     _save_slots(model)
 
-        case ColumnClick(index=idx):
+        case ColumnClick(col=named):
             _close_column_menus(model)
             detail = event_json.get('detail', 1)
             if detail >= 2:
-                target = _column_at(model, idx)
+                target = _named_column(model, named)
                 if target is not None:
-                    model['editing_column_index'] = idx
+                    model['editing_column'] = target
                     # A sub-column is edited as the expression it is, not as
                     # the composed identity it is keyed by.
                     model['column_input_value'] = (
@@ -7854,42 +7891,42 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         if SUBCOL_SEP in target else target)
                     model['adding_column'] = False
 
-        case RemoveColumnClick(index=idx):
+        case RemoveColumnClick(col=named):
             _close_column_menus(model)
-            removed_col = _column_at(model, idx)
+            removed_col = _named_column(model, named)
             if removed_col is not None and _remove_target(model['columns'],
                                                           removed_col):
                 _remove_column_children(model, removed_col)
                 _remove_column_search(model, removed_col)
                 _remove_column_compute(model, removed_col)
                 _recompose_search(model, eval_in_scope)
-                if model.get('editing_column_index') is not None:
-                    if model['editing_column_index'] == idx:
-                        model['editing_column_index'] = None
-                        model['column_input_value'] = ''
-                    elif model['editing_column_index'] > idx:
-                        model['editing_column_index'] -= 1
+                # The box was open on the column that just went; the others
+                # keep their names, so nothing else has to be adjusted.
+                if model.get('editing_column') == removed_col:
+                    model['editing_column'] = None
+                    model['column_input_value'] = ''
                 if type_key:
                     _save_slots(model)
 
-        case ColumnDragStart(index=idx):
+        case ColumnDragStart(col=named):
             _close_column_menus(model)
-            if 0 <= idx < len(model['columns']):
-                model['column_drag_from'] = idx
-                model['column_drag_over'] = idx
+            target = _named_column(model, named)
+            if target is not None:
+                model['column_drag_from'] = target
+                model['column_drag_over'] = target
 
-        case ColumnDragOver(index=idx):
+        case ColumnDragOver(col=named):
             if model.get('column_drag_from') is not None:
                 if event_json.get('buttons', 0) == 0:
                     model['column_drag_from'] = None
                     model['column_drag_over'] = None
                 else:
-                    model['column_drag_over'] = idx
+                    model['column_drag_over'] = named
 
-        case ColumnDragEnd(index=idx):
+        case ColumnDragEnd(col=named):
             drag_from = model.get('column_drag_from')
-            from_target = _column_at(model, drag_from)
-            to_target = _column_at(model, idx)
+            from_target = _named_column(model, drag_from)
+            to_target = _named_column(model, named)
             if (from_target is not None and to_target is not None
                     and from_target != to_target):
                 # Within one parent this reorders; across a splat boundary it
@@ -7906,7 +7943,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ColumnKeyDown():
             key = event_json.get('key', '')
-            is_input_active = model.get('adding_column') or model.get('editing_column_index') is not None
+            is_input_active = model.get('adding_column') or model.get('editing_column') is not None
 
             if key == 'ArrowDown' and is_input_active:
                 suggestions = _get_column_suggestions(value, get_visualizer, model.get('columns', []), model.get('column_input_value', '')) if get_visualizer else []
@@ -7947,9 +7984,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['adding_column'] = False
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
-                elif model.get('editing_column_index') is not None:
-                    idx = model['editing_column_index']
-                    old_name = _column_at(model, idx)
+                elif model.get('editing_column') is not None:
+                    old_name = _named_column(model, model['editing_column'])
                     if commit_val and old_name is not None and _rename_target(
                             model['columns'], old_name, commit_val):
                         if old_name != commit_val:
@@ -7959,7 +7995,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             _recompose_search(model, eval_in_scope)
                         if type_key:
                             _save_slots(model)
-                    model['editing_column_index'] = None
+                    model['editing_column'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
                 elif key == 'Enter':
@@ -8009,18 +8045,18 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['pick_expr'] = None
                 else:
                     model['adding_column'] = False
-                    model['editing_column_index'] = None
+                    model['editing_column'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
 
-        case ColumnSearchInput(index=idx, value=val):
-            col = _column_at(model, idx)
+        case ColumnSearchInput(col=named, value=val):
+            col = _named_column(model, named)
             if col is not None:
                 _set_column_search(model, col, text=val)
                 _recompose_search(model, eval_in_scope)
 
-        case ColumnSearchOpSelect(index=idx, op=op):
-            col = _column_at(model, idx)
+        case ColumnSearchOpSelect(col=named, op=op):
+            col = _named_column(model, named)
             if col is not None and op in COLUMN_SEARCH_OPS:
                 text = _column_search_row(model, col)['text'].strip()
                 if op in COLUMN_SEARCH_MEMBERSHIP_OPS and not text:
@@ -8040,8 +8076,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['col_search_dropdown'] = None
                 _recompose_search(model, eval_in_scope)
 
-        case ColumnSearchComposeSelect(index=idx, compose=compose):
-            col = _column_at(model, idx)
+        case ColumnSearchComposeSelect(col=named, compose=compose):
+            col = _named_column(model, named)
             if col is not None and compose in COLUMN_SEARCH_COMPOSE:
                 _set_column_search(model, col, compose=compose)
                 model['col_search_dropdown'] = None
@@ -8049,8 +8085,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # Sort leaves the menu open for the same reason Compute does: it is a
         # checkbox, and flipping the direction is the common next act.
-        case SortClick(index=idx, direction=direction):
-            col = _column_at(model, idx)
+        case SortClick(col=named, direction=direction):
+            col = _named_column(model, named)
             span = model.get('_source_span')
             # A column naming `$i` has no sort to write -- see _render_sort_panel,
             # which draws no handle for one. Checked here too, since a click can
@@ -8070,8 +8106,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # One line written, unlike checking a box, which invites the next -- so
         # this closes the menu the way the Compute code rows do.
-        case SortCodeClick(index=idx, direction=direction):
-            col = _column_at(model, idx)
+        case SortCodeClick(col=named, direction=direction):
+            col = _named_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and dollar_expr_names_index(col):
                 col = None
@@ -8088,8 +8124,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # One line written, like the Sort code rows, so this closes the menu.
         # The list, named -- the line the table is showing has no say in it,
         # the same way the Compute rows ask after the whole column.
-        case GroupByClick(index=idx):
-            col = _column_at(model, idx)
+        case GroupByClick(col=named):
+            col = _named_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and source_expr is not None:
                 _close_column_menus(model)
@@ -8105,8 +8141,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.
-        case ComputeToggle(index=idx, expr=expr, depth=depth):
-            col = _column_at(model, idx)
+        case ComputeToggle(col=named, expr=expr, depth=depth):
+            col = _named_column(model, named)
             if col is not None:
                 read = (_column_computes if depth == 0
                         else lambda m, c: _column_group_computes(m, c, depth))
@@ -8117,8 +8153,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     exprs.append(expr)
                 _write_column_computes(model, col, exprs, depth)
 
-        case ComputeHoleInput(index=idx, expr=expr, hole=hole, value=text):
-            col = _column_at(model, idx)
+        case ComputeHoleInput(col=named, expr=expr, hole=hole, value=text):
+            col = _named_column(model, named)
             if col is not None:
                 exprs = _column_computes(model, col)
                 edited = _agg_set_hole(expr, hole, text)
@@ -8143,8 +8179,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # menu -- and this box is only drawn while the submenu is open.
                 model['col_search_dropdown'] = None
 
-        case ComputeExprInput(index=idx, expr=expr, value=text):
-            col = _column_at(model, idx)
+        case ComputeExprInput(col=named, expr=expr, value=text):
+            col = _named_column(model, named)
             if col is not None:
                 exprs = _column_computes(model, col)
                 if expr in exprs:
@@ -8158,8 +8194,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # One line written, unlike checking a box, which invites the next -- so
         # this closes the menu the way an action button's dropdown closes.
-        case ComputeCodeClick(index=idx, expr=expr):
-            col = _column_at(model, idx)
+        case ComputeCodeClick(col=named, expr=expr):
+            col = _named_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and source_expr is not None:
                 _close_column_menus(model)
@@ -8175,8 +8211,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # several boxes in a row is what a list of them is for. Every one of
         # these re-points the menu afterwards, because a column that gains or
         # loses its sub-columns moves in the target space the ids are made of.
-        case SubcolToggle(index=idx, expr=expr):
-            col = _column_at(model, idx)
+        case SubcolToggle(col=named, expr=expr):
+            col = _named_column(model, named)
             if col is not None and expr.strip():
                 subs = _subs_at(model['columns'], col, create=True)
                 if subs is not None:
@@ -8186,8 +8222,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         _col_add(subs, expr)
                     _save_subcolumns(model, col)
 
-        case SubcolShowAll(index=idx):
-            col = _column_at(model, idx)
+        case SubcolShowAll(col=named):
+            col = _named_column(model, named)
             if col is not None:
                 subs = _subs_at(model['columns'], col, create=True)
                 if subs is not None:
@@ -8196,15 +8232,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         _col_add(subs, expr)
                     _save_subcolumns(model, col)
 
-        case SubcolHideAll(index=idx):
-            col = _column_at(model, idx)
+        case SubcolHideAll(col=named):
+            col = _named_column(model, named)
             if col is not None:
                 for expr in list(_subs_at(model['columns'], col) or {}):
                     _drop_subcolumn(model, col, expr, eval_in_scope)
                 _save_subcolumns(model, col)
 
-        case SubcolExprInput(index=idx, expr=expr, value=text):
-            col = _column_at(model, idx)
+        case SubcolExprInput(col=named, expr=expr, value=text):
+            col = _named_column(model, named)
             if col is not None:
                 subs = _subs_at(model['columns'], col, create=True)
                 if subs is not None:
@@ -8231,8 +8267,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # The tally leaves the column menu open: picking several values in a row
         # is the whole point of it.
-        case TallyItemToggle(index=idx, literal=literal):
-            col = _column_at(model, idx)
+        case TallyItemToggle(col=named, literal=literal):
+            col = _named_column(model, named)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 if literal in selected:
@@ -8248,8 +8284,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         # All and None reach only as far as the filter box has left on show, so
         # with an empty box they mean every value and none of them.
-        case TallySelectAll(index=idx):
-            col = _column_at(model, idx)
+        case TallySelectAll(col=named):
+            col = _named_column(model, named)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 rows = _column_tally_rows(col, model, value, eval_in_scope)
@@ -8260,8 +8296,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model, col, _in_tally_order(kept + shown, order), exclude)
                 _recompose_search(model, eval_in_scope)
 
-        case TallySelectNone(index=idx):
-            col = _column_at(model, idx)
+        case TallySelectNone(col=named):
+            col = _named_column(model, named)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 shown = set(_tally_shown(
@@ -8272,8 +8308,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     exclude)
                 _recompose_search(model, eval_in_scope)
 
-        case TallyExcludeToggle(index=idx):
-            col = _column_at(model, idx)
+        case TallyExcludeToggle(col=named):
+            col = _named_column(model, named)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
                 # Rewriting the same selection the other way round flips the
@@ -8281,28 +8317,28 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _write_tally_selection(model, col, selected, not exclude)
                 _recompose_search(model, eval_in_scope)
 
-        case TallyFilterInput(index=idx, value=val):
+        case TallyFilterInput(col=named, value=val):
             # Display only: it decides which rows the menu lists, and never
             # what the column search says.
-            if _column_at(model, idx) is not None:
+            if _named_column(model, named) is not None:
                 model['tally_filter'] = val
 
-        case TallySortSelect(index=idx, sort=sort):
+        case TallySortSelect(col=named, sort=sort):
             # Display only too, though the order does reach the search: a
             # selection is written in the order it was listed in, so it reads
             # the way the list the user clicked through read.
-            if _column_at(model, idx) is not None and sort in TALLY_SORTS:
+            if _named_column(model, named) is not None and sort in TALLY_SORTS:
                 model['tally_sort'] = sort
                 model['col_search_dropdown'] = None
 
-        case TallyCountFilterInput(index=idx, value=val):
+        case TallyCountFilterInput(col=named, value=val):
             # Display only, like the box beside it: which rows the menu lists,
             # never what the column search says.
-            if _column_at(model, idx) is not None:
+            if _named_column(model, named) is not None:
                 model['tally_count_filter'] = val
 
-        case TallyCountOpSelect(index=idx, op=op):
-            if _column_at(model, idx) is not None and op in TALLY_COUNT_OPS:
+        case TallyCountOpSelect(col=named, op=op):
+            if _named_column(model, named) is not None and op in TALLY_COUNT_OPS:
                 model['tally_count_op'] = op
                 model['col_search_dropdown'] = None
 
