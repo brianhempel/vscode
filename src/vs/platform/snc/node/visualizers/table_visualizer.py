@@ -76,7 +76,11 @@ from visualizer_utils import (
 CELL_KEY_SEP = '\x00'
 
 # Inside the row half of an aggregation answer's child key; see _agg_child_key.
-AGG_KEY_SEP = '\x01'
+# A character of its own rather than SUBCOL_SEP's: a key holds column
+# identities, a sub-column's identity is joined with SUBCOL_SEP, and the two
+# sharing a character would leave the key unparseable exactly when a table has
+# sub-columns.
+AGG_KEY_SEP = '\x02'
 
 # === Event types ===
 
@@ -833,9 +837,79 @@ def _header_cells(columns) -> list:
     return rows
 
 
-# The name a splatted element binds to in a derived whole-column expression.
-# Short, because it appears twice in every one of them.
-_SPLAT_ELEM = 'el'
+def _splat_elem_name(depth: int) -> str:
+    """What the element of the depth-*d* splat binds to in a derived
+    whole-column expression.
+
+    `item`, like the row, because that is what it is -- one item of the list the
+    splat spread. Numbered by NESTING LEVEL, with the root row as level one:
+    `for item in data for item2 in item['members'] for item3 in ...`. The row
+    already holds the bare name, and two levels binding the same one would leave
+    the inner loop reading its own list.
+    """
+    return f'item{depth + 2}'
+
+
+def _fresh_elem_name(depth: int, *avoid) -> str:
+    """The depth's element name, stepped down a level at a time until it is one
+    the expressions it will sit beside don't already bind.
+
+    A column expression can be a comprehension of its own -- a sub-column moved
+    out of a splat is exactly that -- and `for item2 in [f(item2) for item2 in
+    v]` is correct Python that reads like a bug. Stepping down rather than
+    inventing a name keeps every element called what its level calls it.
+    """
+    text = ' '.join(a for a in avoid if a)
+    n = depth
+    while re.search(rf'\b{_splat_elem_name(n)}\b', text):
+        n += 1
+    return _splat_elem_name(n)
+
+
+def _leaf_spread(leaf: LeafColumn, source_expr: str,
+                 binds: 'dict | None' = None) -> tuple:
+    """How a leaf's splats spread, as `(clauses, lists_expr, elem)`.
+
+    One `for` clause per splat in the CHAIN, not just the innermost: a leaf two
+    splats deep is two levels of spreading. *lists_expr* is the innermost
+    level's own list and *elem* the name its clause -- always the last one --
+    binds, so a caller wanting that level gathered rather than spread can take
+    `clauses[:-1]` and rebuild it.
+    """
+    clauses, elem, lists_expr = [], None, None
+    for depth, splat in enumerate(leaf.chain or (leaf.splat,)):
+        inner = _split_splat(splat)[1]
+        if elem is None:
+            # The outermost splat's own list, written in root-row scope -- `v`
+            # for a dict's value column, `item['members']` for a list of
+            # records -- under the header that binds the row it is read off.
+            lists_expr = _column_item_expr(inner, source_expr, binds=binds)
+            if lists_expr is None:
+                # `*$` over a list: the row itself is the list to spread.
+                lists_expr = _default_item_expr(binds)
+            clauses.append(f'for {_column_binding(inner, source_expr, binds)}')
+        else:
+            # A nested splat is read off the element of the splat it is inside,
+            # which is the same scope rule its sub-columns follow. _key_ rather
+            # than _item_, because a nested `*$` IS that element and the None a
+            # bare `$` answers with is a whole-column protocol, not this one.
+            lists_expr = _column_key_expr(inner, source_expr, item_expr=elem,
+                                          binds=binds)
+        elem = _fresh_elem_name(depth, lists_expr, leaf.sub)
+        clauses.append(f'for {elem} in {lists_expr}')
+    return clauses, lists_expr, elem
+
+
+def _leaf_elem_body(leaf: LeafColumn, source_expr: str, elem: str) -> str:
+    """What one element of a leaf's innermost splat reads as.
+
+    The sub-column is written against one element, so its bare `$` is that
+    element -- substituted rather than formatted, so a `$` inside a string
+    literal stays string content.
+    """
+    return (elem if leaf.sub in (None, '$')
+            else replace_dollars_in_py_exp(leaf.sub,
+                                           _column_dollars(source_expr, elem)))
 
 
 def _leaf_values_expr(leaf: LeafColumn, source_expr: str,
@@ -846,7 +920,14 @@ def _leaf_values_expr(leaf: LeafColumn, source_expr: str,
     read. A leaf under a splat is the flattened comprehension -- the splat's
     list spread into the outer loop, the sub-column read off each element:
 
-        [el['who'] for v in d.values() for el in v]
+        [item2['who'] for v in d.values() for item2 in v]
+
+    Flattening only the innermost of two levels doesn't merely write the wrong
+    code -- over lists of lists it evaluates, and answers the inner lists
+    instead of what the cells show.
+
+        [item3['n'] for item in data for item2 in item['members']
+                                     for item3 in item2['scores']]
 
     A leaf that isn't under a splat is the ordinary whole-column expression --
     of the composition when a plain parent carries it, since that is the column
@@ -854,24 +935,99 @@ def _leaf_values_expr(leaf: LeafColumn, source_expr: str,
     """
     if leaf.splat is None:
         return _column_values_expr(leaf.sub or leaf.expr, source_expr, binds)
-
-    inner = _split_splat(leaf.splat)[1]
-    # The splat's own list, written in root-row scope -- `v` for a dict's
-    # value column, `item['members']` for a list of records.
-    lists_expr = _column_item_expr(inner, source_expr, binds=binds)
-    if lists_expr is None:
-        # `*$` over a list: the row itself is the list to spread.
-        lists_expr = _default_item_expr(binds)
-    rows = _column_binding(inner, source_expr, binds)
-    # The sub-column is written against one element, so its bare `$` is the
-    # element -- substituted rather than formatted, so a `$` inside a string
-    # literal stays string content.
-    body = (_SPLAT_ELEM if leaf.sub in (None, '$')
-            else replace_dollars_in_py_exp(leaf.sub, [_SPLAT_ELEM]))
-    return f'[{body} for {rows} for {_SPLAT_ELEM} in {lists_expr}]'
+    clauses, _lists_expr, elem = _leaf_spread(leaf, source_expr, binds)
+    return f'[{_leaf_elem_body(leaf, source_expr, elem)} {" ".join(clauses)}]'
 
 
-def _column_whole_expr(model, col: str, source_expr: str) -> str:
+def _leaf_groups_agg_expr(leaf: LeafColumn, template: str, source_expr: str,
+                          binds: 'dict | None' = None) -> 'str | None':
+    """A per-group aggregation asked of EVERY group at once -- one answer per
+    group, in the order the groups are drawn.
+
+    The same spread _leaf_values_expr writes, with the innermost level gathered
+    back into a list instead of flattened into the outer loop, and the
+    aggregation wrapped around it. So the whole column reads as the list of
+    per-group answers the group rows show one at a time:
+
+        [sum([item2['n'] for item2 in item['pets']]) for item in data]
+
+    The group is the innermost one, which is the level `*` asks about, so a leaf
+    two splats deep keeps the outer level a `for` clause and gathers only its
+    own.
+    """
+    if leaf.splat is None:
+        return None
+    group, clauses = _leaf_group_parts(leaf, source_expr, binds)
+    return f'[{_agg_code(template, group)} {" ".join(clauses)}]'
+
+
+def _leaf_group_parts(leaf: LeafColumn, source_expr: str,
+                      binds: 'dict | None' = None) -> tuple:
+    """One group's values and the clauses that walk the groups, as
+    `(group_expr, clauses)` -- the spread with its innermost level gathered
+    back into a list instead of flattened into the outer loop."""
+    clauses, lists_expr, elem = _leaf_spread(leaf, source_expr, binds)
+    body = _leaf_elem_body(leaf, source_expr, elem)
+    return f'[{body} for {elem} in {lists_expr}]', clauses[:-1]
+
+
+def _leaf_groups_agg_dict_expr(leaf: LeafColumn, template: str,
+                               source_expr: str,
+                               binds: 'dict | None' = None) -> 'str | None':
+    """The same answers, keyed the way the dict they came out of is:
+
+        {k: sum([item2['n'] for item2 in v]) for k, v in d.items()}
+
+    The list of answers drops the keys, and for a dict of lists -- which is what
+    Group By makes -- the keys are half of what the rows say. None when there
+    are no keys to write: a list root has none at all, and two splats deep the
+    groups are inside one key rather than one per key, so several would collide.
+    """
+    if (leaf.splat is None or not _is_dict_binds(binds)
+            or len(leaf.chain or ()) != 1):
+        return None
+    group, _clauses = _leaf_group_parts(leaf, source_expr, binds)
+    binding = _column_binding(_split_splat(leaf.chain[0])[1], source_expr,
+                              binds, whole_row=True)
+    return f'{{k: {_agg_code(template, group)} for {binding}}}'
+
+
+def _split_splat_leaf(columns, target: str) -> 'LeafColumn | None':
+    """The leaf a SPLIT splat would be, or None when the target isn't one.
+
+    A splat carrying sub-columns is not a leaf -- its sub-columns are the drawn
+    columns -- but its header still spans them and still hands something over.
+    What it spans is the elements, which is exactly the leaf a splat with NO
+    sub-columns already is: one level of flattening, so the two shapes agree
+    about what the column's values are.
+    """
+    path = tuple(target.split(SUBCOL_SEP))
+    if not _split_splat(path[-1])[0] or _leaf_for(columns or {}, target):
+        return None
+    chain = tuple(p for p in path if _split_splat(p)[0])
+    return LeafColumn(expr=target, splat=path[-1], sub='$', header=path,
+                      chain=chain, depth=len(chain))
+
+
+def _leaf_lists_leaf(leaf: LeafColumn) -> LeafColumn:
+    """A splat's own lists as a leaf of their own: the splat's inner expression
+    read one level out, as a column of the scope its own parent names."""
+    outer = leaf.chain[:-1]
+    return replace(leaf, splat=outer[-1] if outer else None,
+                   sub=_split_splat(leaf.chain[-1])[1], chain=outer,
+                   depth=len(outer))
+
+
+def _leaf_lists_expr(leaf: LeafColumn, source_expr: str,
+                     binds: 'dict | None' = None) -> str:
+    """A splat's own lists, unflattened -- `[item['pets'] for item in data]`
+    beside the elements they spread into.
+    """
+    return _leaf_values_expr(_leaf_lists_leaf(leaf), source_expr, binds)
+
+
+def _column_whole_expr(columns, col: str, source_expr: str,
+                       binds: 'dict | None' = None) -> str:
     """Every value a column has, as one expression -- for any column.
 
     A leaf under a splat is keyed by a composed identity that means nothing on
@@ -879,14 +1035,102 @@ def _column_whole_expr(model, col: str, source_expr: str) -> str:
     is the ordinary whole-column expression. The one place that choice is made,
     so a header, a tally and an aggregation cannot disagree about what a
     column's values are.
+
+    Keyed on `columns` rather than on the model because the callers who most
+    need it -- an aggregation cell answering for a child key -- hold the
+    columns and no model at all.
     """
-    binds = _model_binds(model)
-    leaf = _leaf_for(model.get('columns') or {}, col)
+    leaf = _leaf_for(columns or {}, col) or _split_splat_leaf(columns, col)
     # A leaf under a plain parent is keyed by a composed identity too, and its
     # `sub` is the column it actually is -- so both kinds go through the leaf.
     if leaf is not None and (leaf.splat is not None or leaf.sub is not None):
         return _leaf_values_expr(leaf, source_expr, binds)
     return _column_values_expr(col, source_expr, binds)
+
+
+def _column_header_exps(columns, col: str, source_expr: str,
+                        binds: 'dict | None' = None) -> list:
+    """What a column header hands over.
+
+    A column of a LIST that nothing spread has the one reading and says nothing
+    about it -- a label on a lone expression is a distinction with nothing to
+    distinguish it from. Every other shape reads more than one way.
+
+    Over a DICT every column reads twice, because a dict's rows have keys and
+    the list reading is exactly the one that drops them. The keys are on the
+    screen beside the values, so the dict they make is no less what the column
+    is than the list is.
+
+    Anything a splat spread reads two ways again: FLAT, which is the column as
+    drawn -- one row per element, the levels above it collapsed into `for`
+    clauses -- and AS LISTS, which is the shape the column was made out of and
+    what each root row still holds. The flattened one leads, because that is
+    what the header spans. The splat's own header reads as the lists it spread;
+    a sub-column under it reads as one list of that sub-column per root row,
+    which is that same question asked of a column that is drawn rather than of
+    the splat itself. Over a dict both of those keep a keyed reading too -- a
+    dict of lists reads back as a dict of lists, which is also the shape Group
+    By made, for a column that got here that way.
+    """
+    flat = _column_whole_expr(columns, col, source_expr, binds)
+    leaf = _leaf_for(columns or {}, col) or _split_splat_leaf(columns, col)
+    is_dict = _is_dict_binds(binds)
+    if leaf is None or leaf.splat is None:
+        reads = _column_row_expr(columns, col) or col
+        # The keys alone are the one column with nothing to key by: `{k: k
+        # ...}` is the keys twice. Anything READ off the key still keys by it.
+        if not is_dict or reads.strip() == '$k':
+            return [PyExp(flat)]
+        return [PyExp(flat, label='List'),
+                PyExp(_column_dict_expr(reads, source_expr, binds),
+                      label='Dict')]
+    # The splat's header is about the lists themselves, so it reads through the
+    # leaf they are; a sub-column is about itself, read per root row.
+    is_splat = _split_splat(col.split(SUBCOL_SEP)[-1])[0]
+    row_leaf = _leaf_lists_leaf(leaf) if is_splat else leaf
+    lists = (_leaf_lists_expr(leaf, source_expr, binds) if is_splat
+             else _column_values_expr(_leaf_row_expr(leaf), source_expr, binds))
+    exps = [PyExp(flat, label='Flattened'), PyExp(lists, label='As lists')]
+    if is_dict:
+        # Per ROOT row rather than one level out, whatever the depth: the root
+        # keys are the only keys there are, so a deeper level stays a list
+        # inside the value it belongs to.
+        exps.append(PyExp(_column_dict_expr(_leaf_row_expr(row_leaf),
+                                            source_expr, binds),
+                          label='Dict of lists'))
+    return exps
+
+
+def _column_row_expr(columns, col: str) -> 'str | None':
+    """A column as one row reads it, or None when the target has 0..n values
+    per row rather than one.
+
+    A plain column is itself. A sub-column of a plain column is the composition
+    its leaf already carries, since that is the column it actually is. Anything
+    under -- or being -- a splat spreads into rows instead of having one value
+    per row, and answers None: what makes Sort and Group By go inert there
+    rather than write code that cannot run.
+
+    The row-scoped half of the pair whose other half is _column_whole_expr.
+    A leading star is not enough to recognise a splat by, either: a splat
+    nested under a plain column is keyed `$['a']\x01*$['b']` and hasn't got
+    one, so the question goes through the leaf.
+    """
+    if _split_splat(col)[0]:
+        return None
+    leaf = _leaf_for(columns or {}, col)
+    if leaf is None:
+        # Not a drawn column: a split splat's own menu target, or a plain
+        # column carrying sub-columns -- which is still read once per row.
+        return None if SUBCOL_SEP in col else col
+    return None if leaf.splat is not None else (leaf.sub or leaf.expr)
+
+
+def _is_leaf_identity(col: str) -> bool:
+    """Whether a column key is a leaf's identity rather than an expression --
+    a composed sub-column key, or a splat, neither of which means anything on
+    its own and both of which are read through the leaf."""
+    return SUBCOL_SEP in col or _split_splat(col)[0]
 
 
 def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
@@ -895,6 +1139,74 @@ def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
         if leaf.expr == expr:
             return leaf
     return None
+
+
+def _leaf_cell_value(leaf: LeafColumn, row: Row, lst, source_expr=None,
+                     eval_in_scope=None, read_through: bool = False):
+    """One cell's value, for the row in hand.
+
+    A leaf under a splat shows the ELEMENT this rendered row stands for --
+    already worked out when the group was built -- with the leaf's own
+    expression read off it when the splat carries sub-columns. Anything else is
+    the column read off the row, through the source when that can be
+    re-evaluated for free (see _is_pure_ref) and off the row itself otherwise.
+
+    One description of it rather than three: the render, the child models
+    init_model builds for those cells, and the lookup a child event comes back
+    through all have to agree, and a child model built for one value and then
+    asked about another goes wrong quietly.
+    """
+    if leaf.splat is not None:
+        element = row.splats.get(leaf.splat)
+        if leaf.sub in (None, '$') or element is None:
+            return element
+        return eval_dollar_expr(leaf.sub, element, eval_in_scope, outer=(lst,),
+                                bindings={'j': row.bindings.get('j', 0)})
+    reads = leaf.sub or leaf.expr
+    if read_through and eval_in_scope is not None and source_expr is not None:
+        return eval_in_scope(_column_cell_expr(reads, source_expr, row.index, lst))
+    return eval_dollar_expr(reads, row.item, eval_in_scope, outer=(lst,),
+                            bindings=row.bindings)
+
+
+def _leaf_cell_expr(leaf: LeafColumn, source_expr: str, row: Row,
+                    container=None) -> str:
+    """One cell of a leaf column, naming its row -- and, under a splat, its
+    element -- concretely.
+
+    What the cell hands to a drag, and what a child's own generated code is
+    rebound through on the way to the clipboard. A splat cell names the ELEMENT
+    it is showing rather than the starred column: the star is a display
+    instruction, and what the user drags into their file has to be the value
+    under the cursor.
+
+        data[0]['pets'][1]['kind']
+
+    The row key carries a position per splat level ("0.1.2"), so a leaf two
+    splats deep is subscripted twice -- each level written against the element
+    above it, which is the same scope rule the values follow.
+    """
+    if leaf.splat is None:
+        return _column_cell_expr(leaf.sub or leaf.expr, source_expr,
+                                 row.index, container)
+    binds, _item_expr = _cell_binds(source_expr, row.index, container)
+    positions = row.key.split('.')[1:]
+    out = None
+    for depth, splat in enumerate(leaf.chain):
+        inner = _split_splat(splat)[1]
+        if out is None:
+            lists_expr = _column_cell_expr(inner, source_expr, row.index,
+                                           container)
+        else:
+            lists_expr = replace_dollars_in_py_exp(
+                inner, _column_dollars(source_expr, out), bindings=binds)
+        j = positions[depth] if depth < len(positions) else 0
+        out = f'{_atomize(lists_expr)}[{j}]'
+    if leaf.sub in (None, '$'):
+        return out
+    return replace_dollars_in_py_exp(
+        leaf.sub, _column_dollars(source_expr, out),
+        bindings={**binds, 'j': str(row.bindings.get('j', 0))})
 
 
 def _leaf_values(leaf: LeafColumn, lst, model, eval_in_scope=None) -> list:
@@ -937,19 +1249,30 @@ def _leaf_values(leaf: LeafColumn, lst, model, eval_in_scope=None) -> list:
     return values
 
 
-def _leaf_group_values(leaf: LeafColumn, root_index: int, lst, model,
-                       eval_in_scope=None) -> list:
-    """One root row's worth of a leaf column's values.
+def _leaf_group_key(row: Row, depth: int) -> str:
+    """Which group a rendered row belongs to, for a leaf splatted to *depth*.
 
-    What a per-group aggregation is asked of. Read off the rows in hand rather
-    than through the source expression: the whole-column read has a name for
-    itself in the user's own code, and one group of it does not.
+    The row key carries a position per splat level ("3.1.2"), so cutting it to
+    the levels ABOVE the leaf names the group the leaf's own values vary within:
+    the root row for a leaf one splat deep, one of that row's elements for a
+    leaf two deep. Which is what `*` means on a leaf nested more than once --
+    the innermost group, not the whole root row.
+    """
+    return '.'.join(row.key.split('.')[:max(depth, 1)])
+
+
+def _leaf_group_values(leaf: LeafColumn, group_key: str, lst, model,
+                       eval_in_scope=None) -> list:
+    """One group's worth of a leaf column's values.
+
+    What a per-group aggregation is asked of, read off the rows in hand -- the
+    same rows the group is drawn from, so the answer is of what is on screen.
     """
     if leaf.splat is None:
         return []
     values = []
     for row in _rows(lst, model.get('columns') or {}):
-        if row.index != root_index:
+        if _leaf_group_key(row, leaf.depth) != group_key:
             continue
         element = row.splats.get(leaf.splat)
         if element is None:
@@ -961,6 +1284,50 @@ def _leaf_group_values(leaf: LeafColumn, root_index: int, lst, model,
         except Exception:
             pass
     return values
+
+
+def _leaf_group_values_expr(leaf: LeafColumn, group_key: str, source_expr: str,
+                            container=None) -> 'str | None':
+    """Every value a leaf column has in ONE group, as one expression.
+
+    A group does have a name in the user's own code: it is the list one row
+    holds, addressed the way a cell of that row is.
+
+        [item2['n'] for item2 in data[0]['pets']]
+
+    The group key carries a position per splat level above the leaf, so a leaf
+    two splats deep names the element of the outer one concretely and spreads
+    only the inner -- the innermost group, which is the one it answers about.
+    """
+    if leaf.splat is None or not leaf.chain:
+        return None
+    parts = group_key.split('.')
+    try:
+        row_index = int(parts[0])
+    except ValueError:
+        return None
+    positions = parts[1:]
+    binds, _item_expr = _cell_binds(source_expr, row_index, container)
+    out, lists_expr, spread_at = None, None, 0
+    for depth, splat in enumerate(leaf.chain):
+        inner = _split_splat(splat)[1]
+        if out is None:
+            lists_expr = _column_cell_expr(inner, source_expr, row_index,
+                                           container)
+        else:
+            lists_expr = replace_dollars_in_py_exp(
+                inner, _column_dollars(source_expr, out), bindings=binds)
+        spread_at = depth
+        if depth >= len(positions):
+            # The level the group spreads at: everything above it is one
+            # element, named, and this is the list of them.
+            break
+        out = f'{_atomize(lists_expr)}[{positions[depth]}]'
+    # Named for the level it belongs to, the same as the flattened form, even
+    # though the levels above it are concrete here rather than bound.
+    elem = _fresh_elem_name(spread_at, lists_expr, leaf.sub)
+    return (f'[{_leaf_elem_body(leaf, source_expr, elem)} '
+            f'for {elem} in {lists_expr}]')
 
 
 def _root_rows(value) -> list:
@@ -1438,6 +1805,27 @@ def _paren_if_loose(term: str) -> str:
     return term
 
 
+def _searchable_targets(columns) -> list:
+    """Every column a search can be written on, as (target, expression) pairs.
+
+    Keyed by the TARGET, because that is what the search is stored under and
+    what the box was typed into; lifted through the EXPRESSION, because that is
+    the column as one row reads it. The two are the same string until a column
+    carries sub-columns.
+
+    A target that spreads its value into rows is left out: a predicate on it
+    would match no rows and quietly empty the table. Everything else comes in
+    menu-target order, so every drawn column has its box.
+    """
+    columns = _as_columns(columns)
+    pairs = []
+    for target in _menu_targets(columns):
+        reads = _column_row_expr(columns, target)
+        if reads is not None:
+            pairs.append((target, reads))
+    return pairs
+
+
 def compose_column_searches(columns, column_searches, eval_in_scope=None,
                             leftovers=None) -> str | None:
     """Fold every active column search into one main-search string.
@@ -1454,7 +1842,7 @@ def compose_column_searches(columns, column_searches, eval_in_scope=None,
     """
     searches = column_searches or {}
     and_terms, or_terms = [], []
-    for col in columns:
+    for col, reads in _searchable_targets(columns):
         row = searches.get(col)
         if not row:
             continue
@@ -1462,7 +1850,7 @@ def compose_column_searches(columns, column_searches, eval_in_scope=None,
                                        eval_in_scope)
         if not pred:
             continue
-        term = lift_column_predicate(pred, col)
+        term = lift_column_predicate(pred, reads)
         # A row that never said how it composes composes the way every other
         # default does. Only `or` is a choice; `and` is what not choosing means,
         # so a row built without the key reads as one rather than crashing here.
@@ -1619,36 +2007,39 @@ def _search_row_from_predicate(pred: str, eval_in_scope=None) -> dict | None:
     return None
 
 
-def _claim_term(term: str, columns, first: int, used, eval_in_scope=None):
-    """The column a term belongs to, as (column index, column, row) -- or None
+def _claim_term(term: str, targets, first: int, used, eval_in_scope=None):
+    """The column a term belongs to, as (column index, target, row) -- or None
     when no column claims it.
 
     Only columns from *first* on are eligible: a group is composed in column
     order, so a term can't belong to a column an earlier term already went past.
     Among the columns that fit, the longest expression wins, which is the most
     specific reading -- `$['a'] == 1` is the a column's search, not the row's.
+
+    *targets* are (target, expression) pairs: the term is read against the
+    expression, and claimed under the target it is stored by.
     """
-    best = None
-    for index in range(first, len(columns)):
-        col = _col_at(columns, index)
+    best, best_len = None, -1
+    for index in range(first, len(targets)):
+        col, reads = targets[index]
         if col in used:
             continue
-        pred = unlift_term(term, col)
+        pred = unlift_term(term, reads)
         if pred is None:
             continue
         row = _search_row_from_predicate(pred, eval_in_scope)
-        if row is not None and (best is None or len(col) > len(best[1])):
-            best = (index, col, row)
+        if row is not None and len(reads) > best_len:
+            best, best_len = (index, col, row), len(reads)
     return best
 
 
-def _read_terms(and_terms, or_terms, columns, eval_in_scope=None):
+def _read_terms(and_terms, or_terms, targets, eval_in_scope=None):
     """Hand each term to a column, keeping the ones nothing claims."""
     searches, leftovers, used = {}, [], set()
     for compose, terms in (('and', and_terms), ('or', or_terms)):
         first = 0
         for index, term in enumerate(terms):
-            claim = _claim_term(term, columns, first, used, eval_in_scope)
+            claim = _claim_term(term, targets, first, used, eval_in_scope)
             if claim is None:
                 leftovers.append({'compose': compose, 'text': term,
                                   'index': index})
@@ -1671,9 +2062,10 @@ def decompose_search(search: str | None, columns,
         return ({}, [])
     node = _parse_search(search)
     readings = _search_readings(node, search) if node is not None else [([search], [])]
+    targets = _searchable_targets(columns)
     best = None
     for and_terms, or_terms in readings:
-        searches, leftovers = _read_terms(and_terms, or_terms, columns,
+        searches, leftovers = _read_terms(and_terms, or_terms, targets,
                                           eval_in_scope)
         if compose_column_searches(columns, searches, eval_in_scope,
                                    leftovers) != search:
@@ -1758,6 +2150,29 @@ def _subs_at(columns, target: str, create: bool = False) -> 'dict | None':
             subs = config['cols'] = {}
         node = subs
     return node
+
+
+def _add_derived_column(model, cell_col: str, expr: str) -> None:
+    """Code made in a cell, as a column of the table.
+
+    A cell's expression is one every row answers, so code derived from it is a
+    column. A cell under a splat shows one ELEMENT, though, so code derived
+    from that is a column of the ELEMENTS -- a sub-column of the splat rather
+    than a column of the table, which is the scope it was written in and the
+    only one it reads correctly in.
+    """
+    columns = model['columns']
+    leaf = _leaf_for(columns, cell_col)
+    if leaf is None or leaf.splat is None:
+        _col_add(columns, expr)
+        return
+    path = cell_col.split(SUBCOL_SEP)
+    # A splat drawing its own column is its new sub-column's parent; a
+    # sub-column's parent is whatever it is itself a sub-column of.
+    parent = (cell_col if path[-1] == leaf.splat
+              else SUBCOL_SEP.join(path[:-1]))
+    subs = _subs_at(columns, parent, create=True)
+    _col_add(columns if subs is None else subs, expr)
 
 
 def _subcol_candidates(col: str, lst, model, get_visualizer,
@@ -1858,18 +2273,42 @@ def _rename_target(columns, target: str, new_name: str) -> bool:
 _PROMOTE_ROOT = '_snc_root_'
 
 
-def _promote_expr(sub: str, splat_col: str) -> str:
+def _promote_expr(sub: str, splat_col: str, elem: str = None) -> str:
     """A sub-column's expression, read per ROOT ROW instead of per element.
 
     Out of the splat the column is read once per root row, and the root row has
     a LIST where the sub had one element -- so the sub is applied across it.
     Inside the splat `$` was the element and `$$` the root row; outside, the
     element has no name and the root row is `$`.
+
+    *elem* is the name to bind the element to, the outermost level's by default.
+    Only a caller coming out of more than one splat needs to say: the levels
+    nest, and two of them binding the same name would leave the inner one
+    reading its own list.
     """
     inner = _split_splat(splat_col)[1]
-    body = replace_dollars_in_py_exp(sub, [_SPLAT_ELEM, _PROMOTE_ROOT])
+    elem = elem if elem is not None else _fresh_elem_name(0, sub, inner)
+    body = replace_dollars_in_py_exp(sub, [elem, _PROMOTE_ROOT])
     body = body.replace(_PROMOTE_ROOT, '$')
-    return f'[{body} for {_SPLAT_ELEM} in {inner}]'
+    return f'[{body} for {elem} in {inner}]'
+
+
+def _leaf_row_expr(leaf: LeafColumn) -> str:
+    """A leaf column as one ROOT row reads it: the one value for a leaf nothing
+    spread into rows, and the LIST of them for one under a splat.
+
+    What a row aggregation's row shows in a splat column. That row is one row of
+    the list, and a splat column of one row is every value the splat spread out
+    of it -- so the cell shows the list rather than nothing, or one arbitrary
+    element of it.
+
+    Not the same question as _column_row_expr, which asks whether the column has
+    ONE value per row -- Sort and Group By need that and a list will not do.
+    """
+    expr = leaf.sub or leaf.expr if leaf.splat is None else (leaf.sub or '$')
+    for depth in range(len(leaf.chain) - 1, -1, -1):
+        expr = _promote_expr(expr, leaf.chain[depth], _splat_elem_name(depth))
+    return expr
 
 
 # The sub's own dollar goes in as a placeholder too, for the same reason the
@@ -1972,6 +2411,19 @@ def _move_target(columns, from_target: str, to_target: str) -> bool:
     keys = list(dst_map)
     _col_move(dst_map, len(keys) - 1, keys.index(_name(to_target)))
     return True
+
+
+def _named_row_column(model: dict, col: 'str | None') -> 'str | None':
+    """A named target as one row reads it -- _named_column and _column_row_expr
+    in one, which is what every row-scoped menu action needs.
+
+    None when the target is gone AND when it has no one value per row, so a
+    click arriving from a panel drawn before the columns changed answers the
+    same way the panel would have drawn.
+    """
+    target = _named_column(model, col)
+    return (None if target is None
+            else _column_row_expr(model.get('columns') or {}, target))
 
 
 def _named_column(model: dict, col: 'str | None') -> 'str | None':
@@ -2484,6 +2936,22 @@ def _column_values_expr(col: str, source_expr: str,
     return source_expr if clause is None else f'[{clause}]'
 
 
+def _column_dict_expr(col: str, source_expr: str,
+                      binds: 'dict | None' = None) -> str:
+    """A column of a DICT, keyed the way the dict is: `{k: <col> for k, v in
+    d.items()}`.
+
+    The list reading of a dict's column drops the keys, and for a dict of lists
+    they are half of what is on the screen. The pair through -- `whole_row` --
+    even where the column reads only the value, because the key is the point.
+    """
+    item_expr = _column_item_expr(col, source_expr, binds=binds)
+    if item_expr is None:
+        item_expr = _default_item_expr(binds)
+    binding = _column_binding(col, source_expr, binds, whole_row=True)
+    return f'{{k: {item_expr} for {binding}}}'
+
+
 def _column_values(col, lst, model, eval_in_scope=None) -> list:
     """Every row's value for one column, in row order.
 
@@ -2495,9 +2963,12 @@ def _column_values(col, lst, model, eval_in_scope=None) -> list:
     binds = _binds_for(lst)
     # A leaf under a splat is identified by its composed key, not by an
     # expression that means anything on its own -- so it is read through the
-    # leaf, flat, the same way the tally and the aggregations see it.
-    if SUBCOL_SEP in col or _split_splat(col)[0]:
-        leaf = _leaf_for(model.get('columns') or {}, col)
+    # leaf, flat, the same way the tally and the aggregations see it. A SPLIT
+    # splat is not a leaf and is read through the one it would be, so the
+    # values a menu summarises are the values its header hands over.
+    if _is_leaf_identity(col):
+        columns = model.get('columns') or {}
+        leaf = _leaf_for(columns, col) or _split_splat_leaf(columns, col)
         if leaf is not None:
             return _leaf_values(leaf, lst, model, eval_in_scope)
 
@@ -2844,18 +3315,24 @@ TALLY_IMPORTS = ('from collections import Counter',)
 
 
 def _tally_counter_expr(col: str, source_expr: str,
-                        binds: 'dict | None' = None) -> str:
+                        binds: 'dict | None' = None, columns=None) -> str:
     """The whole tally, before the menu has narrowed or reordered anything.
 
     Counter takes any iterable, so a computed column goes in as a generator --
-    there is no list to build on the way to counting it.
+    there is no list to build on the way to counting it. A leaf under a splat
+    or under a plain parent is keyed by a composed identity that is no
+    expression at all, so it goes through the same whole-column read every
+    other summary of that column uses.
     """
+    if _is_leaf_identity(col):
+        return f'Counter({_column_whole_expr(columns, col, source_expr, binds)})'
     clause = _column_values_clause(col, source_expr, binds)
     return f'Counter({clause if clause is not None else source_expr})'
 
 
 def _tally_row_count_expr(col: str, source_expr: str, literal: str,
-                          values, binds: 'dict | None' = None) -> str:
+                          values, binds: 'dict | None' = None,
+                          columns=None) -> str:
     """How many rows have one value -- the number that row is showing.
 
     A question about a single value, so it asks about that one rather than
@@ -2867,6 +3344,12 @@ def _tally_row_count_expr(col: str, source_expr: str, literal: str,
     different question with the same name. Anything else -- and every computed
     column, which has no list to ask -- counts the rows that match as it goes.
     """
+    if _is_leaf_identity(col):
+        # A splat column's rows ARE its elements, so the number beside the
+        # value counts those rather than the root rows they were spread from --
+        # and the code for it counts the same things the tally did.
+        flat = _column_whole_expr(columns, col, source_expr, binds)
+        return f'sum(1 for v in {flat} if v == {literal})'
     # A dict never takes the .count path: it has no .count at all, and its
     # item_expr is a real expression rather than the None that would ask for one.
     item_expr = _column_item_expr(col, source_expr, binds=binds)
@@ -2976,7 +3459,8 @@ def _tally_exprs(col, model: dict, tally, source_expr,
                for shown, count, _literal in rows):
         return None
 
-    counter_expr = _tally_counter_expr(col, source_expr)
+    counter_expr = _tally_counter_expr(col, source_expr, _model_binds(model),
+                                       model.get('columns') or {})
     sort = _tally_sort(model)
     conditions = _tally_filter_exprs(model, eval_in_scope)
     if sort == TALLY_SORT_DEFAULT and not conditions:
@@ -3571,6 +4055,11 @@ def _agg_row_index(lst, item, template: str = None, col: str = None,
                          None, lst,
                          eval_in_scope)
     try:
+        # A dict has no .index at all, and its rows are its items -- the same
+        # pair a row aggregation over one answers with, and the same lookup
+        # _agg_row_index_code writes down for it.
+        if isinstance(lst, dict):
+            return list(lst.items()).index(item)
         return lst.index(item)
     except Exception:
         return NO_ANSWER
@@ -3771,25 +4260,42 @@ def _agg_code(template: str, column_expr: str, source_expr: str = None) -> str:
 
 
 def _agg_column_expr(template: str, col: str, source_expr: str,
-                     binds: 'dict | None' = None) -> str:
+                     binds: 'dict | None' = None, columns=None) -> 'str | None':
     """What `$` stands for in an aggregation over *col*: every value the column
     has, or -- for a row aggregation, which asks row by row -- the column read
-    off the row its key is handed."""
-    return (_agg_row_key_expr(col, source_expr, binds) if _agg_is_row(template)
-            else _column_values_expr(col, source_expr, binds))
+    off the row its key is handed.
+
+    None when a row aggregation is asked of a column that spreads its value into
+    rows: the question is which ROW of the list is the extreme one, and a splat
+    column's rows are its own elements rather than the list's.
+    """
+    if not _agg_is_row(template):
+        return _column_whole_expr(columns, col, source_expr, binds)
+    reads = _agg_row_reads(col, columns)
+    return None if reads is None else _agg_row_key_expr(reads, source_expr, binds)
+
+
+def _agg_row_reads(col: str, columns=None) -> 'str | None':
+    """The expression a row aggregation reads a column by -- row-scoped,
+    because that is what its key is handed one of."""
+    return col if columns is None else _column_row_expr(columns, col)
 
 
 def _agg_col_code(template: str, col: str, source_expr: str,
-                  binds: 'dict | None' = None) -> str:
-    """An aggregation's expression for one column of one list.
+                  binds: 'dict | None' = None, columns=None) -> 'str | None':
+    """An aggregation's expression for one column of one list, or None when the
+    column cannot be asked that question.
 
     The one place a column and an aggregation are put together, so what a cell
     hands over, what a menu row hands over, and what an event coming back is
     rebound onto cannot say different things.
     """
-    return _agg_code(_agg_row_template(template, col, binds),
-                     _agg_column_expr(template, col, source_expr, binds),
-                     source_expr)
+    column_expr = _agg_column_expr(template, col, source_expr, binds, columns)
+    if column_expr is None:
+        return None
+    reads = _agg_row_reads(col, columns) if _agg_is_row(template) else col
+    return _agg_code(_agg_row_template(template, reads or col, binds),
+                     column_expr, source_expr)
 
 
 def _format_agg_value(value) -> str:
@@ -4941,8 +5447,21 @@ _PICK_COLLAPSE_RANGES = {
 
 
 def _pick_column_ids(columns) -> list:
-    """Every pickable column id, in display order (row index first)."""
-    return [PICK_IDX_COLUMN] + [f'col_{n}' for n in range(len(columns))]
+    """Every pickable column id, in display order (row index first).
+
+    Numbered by DRAWN column, which is what the overlays are laid over: a table
+    with sub-columns draws more columns than it has top-level ones, and ids
+    counted off those would name a different column than the one the region
+    sits on -- or none at all, past the second.
+
+    A splat column has no id: a band is a run of ROWS, and a splat column's
+    rows are its own elements rather than the list's, so there is no expression
+    for a run of them.
+    """
+    columns = _as_columns(columns)
+    return [PICK_IDX_COLUMN] + [
+        f'col_{n}' for n, leaf in enumerate(_leaf_columns(columns))
+        if _column_row_expr(columns, leaf.expr) is not None]
 
 
 def _pick_column_expr(col_id: str, columns) -> str | None:
@@ -4953,7 +5472,11 @@ def _pick_column_expr(col_id: str, columns) -> str | None:
         n = int(col_id[len('col_'):])
     except ValueError:
         return None
-    return _col_at(columns, n)
+    columns = _as_columns(columns)
+    leaves = _leaf_columns(columns)
+    if n >= len(leaves):
+        return None
+    return _column_row_expr(columns, leaves[n].expr)
 
 
 def _parse_pick_region_id(region_id: str) -> tuple | None:
@@ -5388,23 +5911,8 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
             if not is_splat and not row.span_start:
                 continue
             try:
-                if is_splat:
-                    element = row.splats.get(leaf.splat)
-                    if leaf.sub in (None, '$'):
-                        cell_value = element
-                    elif element is None:
-                        cell_value = None
-                    else:
-                        cell_value = eval_dollar_expr(
-                            leaf.sub, element, eval_in_scope, outer=(lst,),
-                            bindings={'j': row.bindings.get('j', 0)})
-                elif read_through and eval_in_scope is not None:
-                    cell_value = eval_in_scope(
-                        _column_cell_expr(col, source_expr, row.index, lst))
-                else:
-                    cell_value = eval_dollar_expr(col, row.item, eval_in_scope,
-                                                  outer=(lst,),
-                                                  bindings=row.bindings)
+                cell_value = _leaf_cell_value(leaf, row, lst, source_expr,
+                                              eval_in_scope, read_through)
             except Exception:
                 cell_value = None
             if cell_value is not None:
@@ -5599,7 +6107,8 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
     if not isinstance(tally, dict):
         # A tally too long to list is still a tally worth handing over; values
         # that can't be counted have no expression to give.
-        note_expr = (_tally_counter_expr(col, source_expr, _model_binds(model))
+        note_expr = (_tally_counter_expr(col, source_expr, _model_binds(model),
+                                         model.get('columns') or {})
                      if tally == TALLY_TOO_MANY and source_expr else None)
         return (f'<div class="col-tally"{dwell}>{title_html(note_expr)}'
                 f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
@@ -5620,34 +6129,40 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
 
     tally_rows = _tally_rows(tally, model)
     extreme = _tally_extreme(model, tally_rows)
+    # A column that spreads its value into rows has no row-scoped predicate to
+    # filter by: `*$['pets'] == 'cat'` matches no rows and would quietly empty
+    # the table. So the tally stays as a summary -- every count, and the code
+    # behind each of them -- and only the checking goes away.
+    filterable = _column_row_expr(model.get('columns') or {}, col) is not None
     rows = []
     for text, count, literal in tally_rows:
         if not _tally_lists(model, text, count, extreme, eval_in_scope):
             continue
         label = html.escape(truncate_str(text, 60))
-        if literal is None:
-            # Nothing to compare against, so the count is all this row has to
-            # offer, and a disabled box says so rather than looking clickable.
+        count_expr = (_tally_row_count_expr(col, source_expr, literal, lst,
+                                            _model_binds(model),
+                                            model.get('columns') or {})
+                      if source_expr and literal is not None else None)
+        count_html = (f'<span class="col-tally-count"'
+                      f'{py_exp_attrs(count_expr, align="right")}>{count}</span>')
+        if literal is None or not filterable:
+            # Nothing to compare against, or nowhere to compare it -- so the
+            # count is all this row has to offer, and a disabled box says so
+            # rather than looking clickable.
             rows.append(
                 f'<div class="col-tally-row unselectable">'
                 f'{_render_tally_check(False, disabled=True)}'
                 f'<span class="col-tally-item snc-code">{label}</span>'
-                f'<span class="col-tally-count">{count}</span>'
-                f'</div>')
+                f'{count_html}</div>')
             continue
         checked = literal in selected
         toggle_event = repr(TallyItemToggle(col=col, literal=literal))
-        count_expr = (_tally_row_count_expr(col, source_expr, literal, lst,
-                                            _model_binds(model))
-                      if source_expr else None)
         rows.append(
             f'<div class="col-tally-row{" checked" if checked else ""}" '
             f'snc-mouse-down="{html.escape(toggle_event)}">'
             f'{_render_tally_check(checked)}'
             f'<span class="col-tally-item snc-code">{label}</span>'
-            f'<span class="col-tally-count"'
-            f'{py_exp_attrs(count_expr, align="right")}>{count}</span>'
-            f'</div>')
+            f'{count_html}</div>')
 
     # A way of reaching a value in a long list, so it reads before them -- and
     # before All and None, which it decides the reach of.
@@ -5691,8 +6206,10 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
             lambda v: repr(TallySortSelect(col=col, sort=v)),
             model.get('col_search_dropdown'), 'col-tally-sort',
             'Order the values are listed in', _tally_sort_label)
-    controls_html = (
-        f'<div class="col-tally-controls">'
+    # All, None and Exclude say what the search filters on, so they go with the
+    # checkboxes on a column there is no filtering by. Sort and the two find
+    # boxes stay: they only say which values the menu puts in front of the user.
+    select_html = ('' if not filterable else
         f'<span class="col-search-chip" '
         f'data-tooltip="Select every value shown" '
         f'snc-mouse-down="{html.escape(repr(TallySelectAll(col=col)))}">'
@@ -5704,7 +6221,10 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
         f'data-tooltip="Filter to everything but the selected values" '
         f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(col=col)))}">'
-        f'{_render_tally_check(exclude)} Exclude</span>'
+        f'{_render_tally_check(exclude)} Exclude</span>')
+    controls_html = (
+        f'<div class="col-tally-controls">'
+        f'{select_html}'
         f'<div class="col-tally-sort-box">Sort:'
         f'{sort_html}'
         f'</div>{count_html}'
@@ -5774,8 +6294,15 @@ def _render_sort_panel(col, model) -> str:
     handed to one on its own doesn't know its number. Rather than hand over code
     that won't run, every row here goes inert -- the same answer as a line with
     nothing to rewrite, reached the same way.
+
+    A splat column reaches it too, and for the same kind of reason: sorting
+    orders ROWS, and a column that spreads its value into rows has no one value
+    per row to order by.
     """
-    if dollar_expr_names_index(col):
+    # The event still names the TARGET, which is a leaf's identity; the code is
+    # written against the expression that identity reads by.
+    reads = _column_row_expr(model.get('columns') or {}, col)
+    if reads is None or dollar_expr_names_index(reads):
         span, source_expr = None, None
     else:
         span = model.get('_source_span')
@@ -5784,7 +6311,7 @@ def _render_sort_panel(col, model) -> str:
 
     rows = []
     for direction in SORT_DIRECTIONS:
-        checked = _sort_checked(text, col, direction, _model_binds(model))
+        checked = _sort_checked(text, reads, direction, _model_binds(model))
         inert = text is None
         classes = ('col-compute-row col-sort-row'
                    + (' checked' if checked else '')
@@ -5798,7 +6325,7 @@ def _render_sort_panel(col, model) -> str:
         # these menus: a tooltip above one would cover the rows around it.
         rows.append(
             f'<div class="{classes}"'
-            f'{py_exp_attrs(None if inert else _sort_expr(text, col, direction, _model_binds(model)), align="right")}>'
+            f'{py_exp_attrs(None if inert else _sort_expr(text, reads, direction, _model_binds(model)), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{_sort_label(direction)}</span>'
@@ -5809,7 +6336,7 @@ def _render_sort_panel(col, model) -> str:
         # The row itself is the handle, like Unique and Tally. Without a source
         # there is no list to name and so no line to write or drag.
         code = (None if source_expr is None
-                else _sort_expr(source_expr, col, direction,
+                else _sort_expr(source_expr, reads, direction,
                                 _model_binds(model)))
         click_attr = '' if code is None else (
             f' snc-mouse-down="'
@@ -5837,12 +6364,17 @@ def _render_column_group_by(col, model) -> str:
     other row of the menu that opens none of its own.
 
     The row itself is the handle. Without a source there is no list to name, and
-    so no line to write or drag. A column naming `$i` needs no such care: the
-    comprehension enumerates, where a sort's key could not.
+    so no line to write or drag. A splat column has nothing to write either:
+    grouping cuts up ROWS by a value each of them has, and a column that spreads
+    its value into rows hasn't got one. A column naming `$i` needs no such care:
+    the comprehension enumerates, where a sort's key could not.
     """
     source_expr = model.get('_source_expr')
-    code = (None if source_expr is None
-            else _group_by_expr(col, source_expr, _model_binds(model)))
+    # The event still names the TARGET; the code is written against the
+    # expression that target reads by.
+    reads = _column_row_expr(model.get('columns') or {}, col)
+    code = (None if source_expr is None or reads is None
+            else _group_by_expr(reads, source_expr, _model_binds(model)))
     click_attr = '' if code is None else (
         f' snc-mouse-down="{html.escape(repr(GroupByClick(col=col)))}"')
     # Rightwards, like every handle in these menus: a tooltip above one would
@@ -5851,7 +6383,7 @@ def _render_column_group_by(col, model) -> str:
         f'<div class="snc-dropdown-option col-group-by'
         f'{"" if code else " unselectable"}"'
         f'{_column_dwell_attr(model)}{py_exp_attrs(code, align="right")}>'
-        f'<span class="snc-dropdown-option-label"{click_attr}>Group By</span>'
+        f'<span class="snc-dropdown-option-label"{click_attr}>Group By This Column</span>'
         f'</div>'
     )
 
@@ -6006,21 +6538,28 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
     aggregations, each a box holding the expression it is, with an empty one at
     the foot to write another in.
     """
+    columns = model.get('columns') or {}
     values = _column_values(col, lst, model, eval_in_scope)
     source_expr = model.get('_source_expr')
     values_expr = (None if source_expr is None
-                   else _column_values_expr(col, source_expr,
-                                            _model_binds(model)))
+                   else _column_whole_expr(columns, col, source_expr,
+                                           _model_binds(model)))
+    # A row aggregation reads the column off one row at a time, so it is asked
+    # of the expression the column reads by rather than of a leaf's identity.
+    reads = _column_row_expr(columns, col) or col
 
     # A column that splatted can be asked the same question two ways, so its
     # rows carry a second box: once per group, beside once for the column.
     # Nothing groups a column that did not splat, so it gets one box as before.
-    per_group = _split_splat(col)[0]
+    # Through the leaf, because a splat nested under a plain column is keyed
+    # `$['a']\x01*$['b']` and has no leading star to recognise it by.
+    leaf = _leaf_for(columns, col)
+    per_group = leaf is not None and leaf.splat is not None
     group_checked = set(_column_group_computes(model, col)) if per_group else set()
 
     rows = []
     for label, template, checked in _compute_rows(model, col):
-        answer = _agg_value(template, values, eval_in_scope, lst, col)
+        answer = _agg_value(template, values, eval_in_scope, lst, reads)
         # A question this column can't answer isn't worth checking -- but one
         # already checked stays clickable, or there'd be no way to uncheck it.
         unanswered = answer is NO_ANSWER
@@ -6042,7 +6581,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
         # column by when the list has no source.
         code = (None if unanswered or source_expr is None
                 else _agg_col_code(template, col, source_expr,
-                                   _model_binds(model)))
+                                   _model_binds(model), columns))
         # The per-group box asks the same question of one group at a time, so
         # it is offered even when the whole column can't answer it: a column of
         # mixed types may still be summable a group at a time.
@@ -6089,13 +6628,13 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
     # again by its place in the list of everything focusable would lose the
     # typing to it.
     for i, template in enumerate(_compute_free_rows(model, col)):
-        answer = _agg_value(template, values, eval_in_scope, lst, col)
+        answer = _agg_value(template, values, eval_in_scope, lst, reads)
         unanswered = answer is NO_ANSWER
         # Through _agg_column_expr like the catalog's rows, so a box holding
         # something written the way Min Item is hands over what it computed.
         code = (None if unanswered or source_expr is None
                 else _agg_col_code(template, col, source_expr,
-                                   _model_binds(model)))
+                                   _model_binds(model), columns))
         # A row of theirs is checked by being there at all, and unchecking is
         # how it is taken away: the expression is the only record of it, so
         # there would be nothing left to keep. The empty one is checking
@@ -6255,7 +6794,9 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
 
     source_expr = model.get('_source_expr')
     py_exp_attr = ('' if source_expr is None
-                   else py_exp_attrs(_column_whole_expr(model, col, source_expr)))
+                   else py_exp_attrs(_column_header_exps(
+                       model.get('columns') or {}, col, source_expr,
+                       _model_binds(model))))
 
     # The ▾ trigger is pinned to the cell's right edge by .col-header-inner's flex
     # layout (which lives on an inner span, never on the <th>: display:flex on a
@@ -6976,28 +7517,30 @@ def _agg_child_key(asking_col: str, template: str, shown_col: str) -> str:
             f'{CELL_KEY_SEP}{shown_col}')
 
 
-def _agg_group_child_key(asking_col: str, template: str, root_index: int) -> str:
+def _agg_group_child_key(asking_col: str, template: str, group_key: str) -> str:
     """The key one group's answer is a child under.
 
-    The group's number is in it because the answers of two groups are two
-    values: keyed alike they would share one child model, and expanding one
-    would expand every other.
+    The group is in it because the answers of two groups are two values: keyed
+    alike they would share one child model, and expanding one would expand
+    every other. The whole dotted path, not the root row alone -- a leaf two
+    splats deep answers once per INNER group, and two of those inside one root
+    row would otherwise collide.
     """
     return (f'agg{AGG_KEY_SEP}{asking_col}{AGG_KEY_SEP}{template}'
-            f'{AGG_KEY_SEP}{root_index}{CELL_KEY_SEP}{asking_col}')
+            f'{AGG_KEY_SEP}{group_key}{CELL_KEY_SEP}{asking_col}')
 
 
 def _parse_agg_child_key(key: str):
     """(asking column, aggregation, shown column, group or None), or None for a
-    cell's key. The group is the root row a per-group answer belongs to."""
+    cell's key. The group is the dotted row key a per-group answer is about."""
     head, _, shown_col = key.partition(CELL_KEY_SEP)
     parts = head.split(AGG_KEY_SEP)
     if parts[:1] != ['agg']:
         return None
     if len(parts) == 3:
         return parts[1], parts[2], shown_col, None
-    if len(parts) == 4 and parts[3].isdigit():
-        return parts[1], parts[2], shown_col, int(parts[3])
+    if len(parts) == 4:
+        return parts[1], parts[2], shown_col, parts[3]
     return None
 
 
@@ -7014,19 +7557,39 @@ def _agg_child_value(key: str, lst, model, eval_in_scope=None):
             return NO_ANSWER
         values = _leaf_group_values(leaf, group, lst, model, eval_in_scope)
         return _agg_display_value(_agg_value(template, values, eval_in_scope))
+    columns = model.get('columns') or {}
     if not _agg_is_row(template):
         values = _column_values(asking_col, lst, model, eval_in_scope)
         return _agg_display_value(_agg_value(template, values, eval_in_scope))
-    item = _agg_value(template, None, eval_in_scope, lst, asking_col)
+    item = _agg_value(template, None, eval_in_scope, lst,
+                      _agg_row_reads(asking_col, columns) or asking_col)
     if item is NO_ANSWER:
         return NO_ANSWER
-    idx = _agg_row_index(lst, item, template, asking_col, eval_in_scope)
+    idx = _agg_row_index(lst, item, template,
+                         _agg_row_reads(asking_col, columns), eval_in_scope)
+    shown = _leaf_for(columns, shown_col)
     return _agg_display_value(_column_cell_value(
-        shown_col, item, lst, eval_in_scope,
-        index=None if idx is NO_ANSWER else idx))
+        _leaf_row_expr(shown) if shown is not None else shown_col,
+        item, lst, eval_in_scope,
+        index=None if idx is NO_ANSWER else idx,
+        bindings=_row_agg_bindings(lst, item, idx)))
 
 
-def _agg_child_expr(key: str, source_expr, binds: 'dict | None' = None) -> str | None:
+def _group_values_code(columns, col: str, group_key: str,
+                       source_expr: 'str | None', container=None) -> 'str | None':
+    """One group of a column, as code -- or None when there is nothing to name
+    it by. The pair of _leaf_group_values, which is the same question asked of
+    the rows in hand."""
+    if source_expr is None:
+        return None
+    leaf = _leaf_for(columns or {}, col)
+    if leaf is None:
+        return None
+    return _leaf_group_values_expr(leaf, group_key, source_expr, container)
+
+
+def _agg_child_expr(key: str, source_expr, binds: 'dict | None' = None,
+                    columns=None, container=None) -> str | None:
     """The expression that names the value a key points at, or None when the
     list has no source to name it from.
 
@@ -7038,16 +7601,29 @@ def _agg_child_expr(key: str, source_expr, binds: 'dict | None' = None) -> str |
         return None
     asking_col, template, shown_col, group = _parse_agg_child_key(key)
     if group is not None:
-        # One group of a column has no name in the user's own code, so there is
-        # nothing honest to hand over -- see _render_group_agg_cell.
-        return None
+        values = _group_values_code(columns, asking_col, group, source_expr,
+                                    container)
+        return None if values is None else _agg_code(template, values)
     if not _agg_is_row(template):
-        return _agg_code(template, _column_values_expr(asking_col, source_expr))
-    item_code = _agg_col_code(template, asking_col, source_expr, binds)
+        return _agg_code(template,
+                         _column_whole_expr(columns, asking_col, source_expr,
+                                            binds))
+    item_code = _agg_col_code(template, asking_col, source_expr, binds, columns)
+    if item_code is None:
+        return None
+    shown = _leaf_for(columns or {}, shown_col)
+    reads = _leaf_row_expr(shown) if shown is not None else shown_col
+    # A dict's row is a PAIR, and every column of one is written as `$k` or
+    # `$v` -- so the halves are named off the row the aggregation picked, the
+    # same way a sort's key reaches them through its one parameter.
+    atom = _atomize(item_code)
     return replace_dollars_in_py_exp(
-        shown_col, _column_dollars(source_expr, item_code),
+        reads, _column_dollars(source_expr, item_code),
         index_exp=_agg_row_index_code(item_code, source_expr, template,
-                                      asking_col, binds))
+                                      _agg_row_reads(asking_col, columns),
+                                      binds),
+        bindings=({'k': f'{atom}[0]', 'v': f'{atom}[1]'}
+                  if _is_dict_binds(binds) else None))
 
 
 def _agg_display_value(answer):
@@ -7152,7 +7728,7 @@ def _agg_label_html(expr: str, col: str, level: int) -> str:
     return f'<div class="col-agg-label">{html.escape(name)}{holes}</div>'
 
 
-def _agg_remove_x_html(expr: str, col: str) -> str:
+def _agg_remove_x_html(expr: str, col: str, depth: int = 0) -> str:
     """The ✕ that takes a cell's aggregation away.
 
     The submenu's own checkbox event, because an aggregation is checked by being
@@ -7160,12 +7736,17 @@ def _agg_remove_x_html(expr: str, col: str) -> str:
     are one act, so the ✕ needs no event of its own -- and one the user wrote
     themselves is taken away the same way as any other.
 
+    *depth* is which of the column's boxes the cell came from -- 0 the whole
+    column, 1 once per group -- so a per-group answer's ✕ unchecks the per-group
+    box and leaves the whole-column answer where it is.
+
     Not a drag handle, though it sits inside one: what the cell hands over is
     the answer's expression, and a drag begun on the ✕ is a click the user
     slipped on rather than an ask for the code.
     """
+    event = ComputeToggle(col=col, expr=expr, depth=depth)
     return ('<span class="col-agg-x snc-hover-hidden" '
-            f'snc-mouse-down="{html.escape(repr(ComputeToggle(col=col, expr=expr)))}" '
+            f'snc-mouse-down="{html.escape(repr(event))}" '
             'draggable="false" data-tooltip="Remove aggregation">✕</span>')
 
 
@@ -7178,7 +7759,8 @@ def _render_agg_cell(expr, col, level, values, model, get_visualizer,
     # A column whose values have changed out from under an aggregation says
     # nothing rather than dropping the cell the user put there.
     code = (None if answer is NO_ANSWER
-            else _agg_child_expr(key, source_expr, _model_binds(model)))
+            else _agg_child_expr(key, source_expr, _model_binds(model),
+                                 model.get('columns') or {}))
     return (
         f'<td class="col-agg-cell snc-hover-hidden-parent">'
         f'<div class="col-agg"{py_exp_attrs(PyExp(code, _agg_imports(expr)))}>'
@@ -7190,46 +7772,88 @@ def _render_agg_cell(expr, col, level, values, model, get_visualizer,
         f'</div></td>')
 
 
-def _render_group_agg_cell(expr, leaf, root_index, lst, model, get_visualizer,
+def _render_group_agg_cell(expr, leaf, group_key, lst, model, get_visualizer,
                            eval_in_scope=None, max_width=None) -> str:
     """One group's answer, in a cell inside that group's span.
 
-    No drag expression: the whole-column read has a name for itself in the
-    user's own code, and one group of it does not -- so the cell shows the
-    answer and hands over nothing rather than handing over something that names
-    a different set of rows than the one on screen.
+    A group DOES have a name in the user's own code -- it is the list one row
+    holds -- so the cell hands over its answer written against that list. And
+    beside it the same question asked of every group at once, since the cell is
+    one of a column of them and the whole column is the more useful line to
+    write: `[sum(...) for item in data]` rather than the row 0 of it that
+    happens to have been dragged.
     """
-    values = _leaf_group_values(leaf, root_index, lst, model, eval_in_scope)
+    values = _leaf_group_values(leaf, group_key, lst, model, eval_in_scope)
     answer = _agg_value(expr, values, eval_in_scope)
+    source_expr = model.get('_source_expr')
+    columns = model.get('columns') or {}
+    values_code = _group_values_code(columns, leaf.expr, group_key,
+                                     source_expr, lst)
+    # A group whose values can't answer says nothing rather than handing over
+    # code that raises -- the same answer the whole-column cell gives.
+    code = (None if values_code is None or answer is NO_ANSWER
+            else _agg_code(expr, values_code))
+    others = [] if source_expr is None else [
+        (_leaf_groups_agg_expr(leaf, expr, source_expr, _model_binds(model)),
+         "All groups' values"),
+        (_leaf_groups_agg_dict_expr(leaf, expr, source_expr,
+                                    _model_binds(model)),
+         "Groups' values dict")]
+    handle = ('' if code is None else
+              py_exp_attrs([PyExp(code, _agg_imports(expr),
+                                  label='This one value')]
+                           + [PyExp(other, _agg_imports(expr), label=label)
+                              for other, label in others if other is not None]))
     # A LABEL rather than the submenu's boxes. The boxes name themselves by the
     # column they belong to and write back through it, so one per group would
     # be several inputs claiming the same name, all writing the whole column's
-    # ask. The place to edit a per-group aggregation is the menu that set it.
+    # ask. The place to EDIT a per-group aggregation is the menu that set it --
+    # but taking it away is the same act wherever it is done, so the ✕ is here,
+    # the way it is on a whole-column answer. Depth 1, so it unchecks the box
+    # beside the row rather than the row's own.
     name = _agg_name(expr)
     label = name if name is not None else expr
     holes = ''.join(f' {text}' for text in _agg_holes(expr))
-    key = _agg_group_child_key(leaf.expr, expr, root_index)
+    key = _agg_group_child_key(leaf.expr, expr, group_key)
     return (
-        f'<td class="col-agg-cell group-agg-cell">'
-        f'<div class="col-agg">'
+        f'<td class="col-agg-cell group-agg-cell snc-hover-hidden-parent">'
+        f'<div class="col-agg"{handle}>'
         f'<div class="col-agg-label">{html.escape(label)}{html.escape(holes)}</div>'
+        f'{_agg_remove_x_html(expr, leaf.expr, depth=1)}'
         f'<div class="col-agg-value">'
-        f'{_render_agg_answer(expr, answer, key, None, model, get_visualizer, eval_in_scope, max_width)}'
+        f'{_render_agg_answer(expr, answer, key, code, model, get_visualizer, eval_in_scope, max_width)}'
         f'</div>'
         f'</div></td>')
 
 
-def _column_cell_value(col: str, item, lst, eval_in_scope=None, index=None):
+def _column_cell_value(col: str, item, lst, eval_in_scope=None, index=None,
+                       bindings=None):
     """One row's value for a column, or NO_ANSWER when the column can't be read
     off that row.
 
     *lst* is what the column's `$$` names and *index* what its `$i` does -- the
-    row it is read off is not the whole of its scope."""
+    row it is read off is not the whole of its scope. *bindings* is the rest of
+    it: a dict's row is a PAIR, and every column of one is written as `$k` or
+    `$v`, so without them every cell of a dict's row reads as no value at all.
+    """
     try:
         return eval_dollar_expr(col, item, eval_in_scope, outer=(lst,),
-                                index=index)
+                                index=index, bindings=bindings)
     except Exception:
         return NO_ANSWER
+
+
+def _row_agg_bindings(lst, item, index=None) -> dict:
+    """What the suffixed dollars stand for in the row a row aggregation picked.
+
+    The same map _root_rows builds for a drawn row, for a row that is not drawn
+    from the container's own order: the pair a dict's row is, and the number the
+    aggregation found it at.
+    """
+    binds = {} if index is None or index is NO_ANSWER else {'i': index}
+    if isinstance(lst, dict) and isinstance(item, tuple) and len(item) == 2:
+        binds.update({'k': item[0], 'v': item[1]})
+    return binds
 
 
 def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
@@ -7252,33 +7876,38 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
     column of it and the index cell the number beside it, so without the name
     there is no handle on the row unless a `$` column happens to be drawn.
     """
-    asking = _col_at(columns, ci)
-    item = _agg_value(expr, None, eval_in_scope, lst, asking)
-    idx = _agg_row_index(lst, item, expr, asking, eval_in_scope)
+    leaves = _leaf_columns(columns)
+    asking = leaves[ci].expr
+    reads = _column_row_expr(columns, asking)
+    item = _agg_value(expr, None, eval_in_scope, lst, reads or asking)
+    idx = _agg_row_index(lst, item, expr, reads, eval_in_scope)
     # Nothing to hand over when the aggregation has no row to point at, and
     # nothing to name the list by when it has no source.
     binds = _binds_for(lst)
     item_code = (None if item is NO_ANSWER or source_expr is None
-                 else _agg_col_code(expr, asking, source_expr, binds))
+                 else _agg_col_code(expr, asking, source_expr, binds, columns))
     idx_code = (None if idx is NO_ANSWER or item_code is None
                 else _agg_row_index_code(item_code, source_expr, expr,
-                                         asking, binds))
+                                         reads, binds))
 
     cells = [f'<td class="row-index col-agg-cell">'
              f'<div class="col-agg"{py_exp_attrs(PyExp(idx_code, _agg_imports(expr)))}>'
              f'<div class="col-agg-label col-agg-item-label"'
              f'{py_exp_attrs(PyExp(item_code, _agg_imports(expr)))}>'
-             f'{_agg_name(expr)} by {asking}</div>'
+             f'{_agg_name(expr)} by {reads or asking}</div>'
              f'<div class="col-agg-label"></div>' # needed for spacing, the above is position: absolute to overflow
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
              f'</div></td>']
-    for cj, col in enumerate(columns):
+    for cj, leaf in enumerate(leaves):
+        col = leaf.expr
         value = (NO_ANSWER if item is NO_ANSWER
-                 else _column_cell_value(col, item, lst, eval_in_scope,
-                                         index=None if idx is NO_ANSWER else idx))
+                 else _column_cell_value(_leaf_row_expr(leaf), item, lst,
+                                         eval_in_scope,
+                                         index=None if idx is NO_ANSWER else idx,
+                                         bindings=_row_agg_bindings(lst, item, idx)))
         key = _agg_child_key(asking, expr, col)
         code = (None if value is NO_ANSWER or item_code is None
-                else _agg_child_expr(key, source_expr, binds))
+                else _agg_child_expr(key, source_expr, binds, columns))
         label = ('<div class="col-agg-label"></div>' if cj != ci else
                  f'{_agg_label_html(expr, asking, level)}'
                  f'{_agg_remove_x_html(expr, asking)}')
@@ -7296,8 +7925,14 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
 def _agg_layout(columns, model) -> List[tuple]:
     """The rows of answers under the table, top to bottom.
 
-    A row of cells is `('cells', [expr or None per column])`; a row aggregation
-    takes a row to itself and is `('item', column index, expr)`.
+    A row of cells is `('cells', [expr or None per LEAF])`; a row aggregation
+    takes a row to itself and is `('item', leaf index, expr)`.
+
+    Per leaf rather than per top-level column, because that is what the body
+    draws: a table with sub-columns has more cells in a row than it has columns,
+    and a row of answers as wide as the columns would leave every cell after the
+    first sitting under the wrong one -- and an answer asked of a sub-column
+    with nowhere to go at all.
 
     The cells come first and the rows of the list under them, because an answer
     about a column reads as part of that column while a row of the list reads
@@ -7310,7 +7945,8 @@ def _agg_layout(columns, model) -> List[tuple]:
     it -- so hanging from it is what keeps the cells reading as one block
     rather than as a ragged bottom edge.
     """
-    stacks = [_column_computes(model, col) for col in columns]
+    stacks = [_column_computes(model, leaf.expr)
+              for leaf in _leaf_columns(columns)]
     cell_stacks = [[expr for expr in stack if not _agg_is_row(expr)]
                    for stack in stacks]
     depth = max((len(stack) for stack in cell_stacks), default=0)
@@ -7344,14 +7980,15 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     if not levels:
         return ''
 
+    leaves = _leaf_columns(columns)
     # Once per column, however many answers are asked of it -- and not at all
     # for a column that only picks rows, since a key reads them one at a time.
     asked = [any(level[0] == 'cells' and level[1][ci] is not None
                  for level in levels)
-             for ci in range(len(columns))]
-    reads = [_column_values(col, lst, model, eval_in_scope) if asked[ci]
+             for ci in range(len(leaves))]
+    reads = [_column_values(leaf.expr, lst, model, eval_in_scope) if asked[ci]
              else None
-             for ci, col in enumerate(columns)]
+             for ci, leaf in enumerate(leaves)]
 
     rows = []
     for level, spec in enumerate(levels):
@@ -7367,13 +8004,37 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
             if expr is None:
                 cells.append('<td class="col-agg-blank"></td>')
             else:
-                cells.append(_render_agg_cell(expr, _col_at(columns, ci), level,
+                cells.append(_render_agg_cell(expr, leaves[ci].expr, level,
                                               reads[ci], model, get_visualizer,
                                               eval_in_scope, source_expr,
                                               max_width))
         rows.append(f'<tr class="col-agg-row">'
                     f'<td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
+
+
+def _group_agg_padding(rendered, rn, depth, n_group_aggs) -> int:
+    """How many rows of per-group answers sit inside the group a cell spans.
+
+    A group's answers are drawn inside the group they are about, so a column
+    reaching across that group has to reach across them too -- otherwise the
+    cell stops short and everything under it shifts left.
+
+    Its own answers are among them (they close the group this cell spans);
+    a deeper level's are counted once per group of that level inside it.
+    """
+    span = rendered[rn].span_at(depth)
+    rows = rendered[rn:rn + span]
+    return sum(n * len({_leaf_group_key(row, d) for row in rows})
+               for d, n in n_group_aggs.items() if d > depth)
+
+
+def _closes_group(rendered, rn, depth: int) -> bool:
+    """Whether this rendered row is the last of the group a depth-*d* leaf
+    answers about -- which is where those answers are hung."""
+    return (rn + 1 == len(rendered)
+            or _leaf_group_key(rendered[rn + 1], depth)
+            != _leaf_group_key(rendered[rn], depth))
 
 
 def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
@@ -7506,20 +8167,31 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             model, source_expr, eval_in_scope,
             _pick_region_ids(columns, first_match_row, len(lst)))
 
+    # Asked rather than assumed: a column the pick tool offers no expression
+    # for draws no overlay, instead of one that would be discarded as invalid
+    # the moment it was clicked.
+    pick_ids = set(_pick_column_ids(columns))
+
     def pick_overlay(row, col_id):
-        if not pick_here:
+        if not pick_here or col_id not in pick_ids:
             return ''
         return _render_pick_region(row, col_id, model, first_match_row,
                                    len(lst), pick_exprs)
 
     # Answers asked once per group, hung from the bottom of each group the way
-    # the whole-column ones hang from the floor of the table.
+    # the whole-column ones hang from the floor of the table. A leaf splatted
+    # more than once answers about its INNERMOST group, so the rows are counted
+    # per depth: a depth-d leaf's answers close each depth-(d-1) group.
     group_stacks = [_column_group_computes(model, leaf.expr)
                     if leaf.splat is not None else []
                     for leaf in leaves]
-    n_group_aggs = max((len(stack) for stack in group_stacks), default=0)
-    hung_group = [[None] * (n_group_aggs - len(stack)) + stack
-                  for stack in group_stacks]
+    n_group_aggs = {}
+    for ci, leaf in enumerate(leaves):
+        if group_stacks[ci]:
+            n_group_aggs[leaf.depth] = max(n_group_aggs.get(leaf.depth, 0),
+                                           len(group_stacks[ci]))
+    hung_group = [[None] * (n_group_aggs.get(leaf.depth, 0) - len(stack)) + stack
+                  for leaf, stack in zip(leaves, group_stacks)]
 
     rendered = _rows(lst, columns)
     for rn, row in enumerate(rendered):
@@ -7528,10 +8200,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         # spans that group. This is where the mockup's key cell comes from: `$k`
         # rowspans because it did not splat, not because it is a key -- and a
         # column splatted once but not twice spans its inner group the same way.
-        # The per-group answers are inside the root group, so they are inside
-        # its span too -- otherwise the key cell stops short and they shift left.
+        # The per-group answers are inside the group they are about, so they are
+        # inside every wider column's span too -- otherwise the key cell stops
+        # short and they shift left.
         def leaf_span(depth):
-            width = row.span_at(depth) + (n_group_aggs if depth == 0 else 0)
+            width = (row.span_at(depth)
+                     + _group_agg_padding(rendered, rn, depth, n_group_aggs))
             return f' rowspan="{width}"' if width > 1 else ''
 
         span_attr = leaf_span(0)
@@ -7564,11 +8238,6 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
-            is_splat = leaf.splat is not None
-            # What an unsplatted leaf reads by: the composition when a plain
-            # parent carries it, and its own identity otherwise -- the two are
-            # the same string until a column carries sub-columns.
-            reads = leaf.sub or col if not is_splat else None
             # A column belongs to the group at the depth it was splatted to, so
             # it is drawn once per group at THAT depth rather than once per
             # rendered row. The innermost depth is a group of one, which is how
@@ -7577,28 +8246,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 continue
             composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
             try:
-                if is_splat:
-                    # The element this rendered row stands for, already worked
-                    # out when the group was built -- then the leaf's own
-                    # expression read off it, when the splat carries
-                    # sub-columns.
-                    element = row.splats.get(leaf.splat)
-                    if leaf.sub in (None, '$'):
-                        cell_value = element
-                    elif element is None:
-                        cell_value = None
-                    else:
-                        cell_value = eval_dollar_expr(
-                            leaf.sub, element, eval_in_scope, outer=(lst,),
-                            bindings={'j': row.bindings.get('j', 0)})
-                elif read_through and eval_in_scope is not None:
-                    cell_value = eval_in_scope(
-                        _column_cell_expr(reads, source_expr, i, lst))
-                else:
-                    cell_value = eval_dollar_expr(reads, row.item,
-                                                  eval_in_scope,
-                                                  outer=(lst,),
-                                                  bindings=row.bindings)
+                cell_value = _leaf_cell_value(leaf, row, lst, source_expr,
+                                              eval_in_scope, read_through)
             except Exception:
                 cell_value = None
 
@@ -7612,18 +8261,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                                      eval_in_scope=eval_in_scope, **extra)
                 child_small = (composite_key != focused_child)
 
-                cell_expr = None
-                if source_expr is not None:
-                    # A splat cell names the ELEMENT it is showing, not the
-                    # starred column: the star is a display instruction, and
-                    # what the user drags into their file has to be the value
-                    # under the cursor.
-                    if is_splat:
-                        inner = _split_splat(col)[1]
-                        cell_expr = (f'{_atomize(_column_cell_expr(inner, source_expr, i, lst))}'
-                                     f'[{row.bindings["j"]}]')
-                    else:
-                        cell_expr = _column_cell_expr(reads, source_expr, i, lst)
+                cell_expr = (None if source_expr is None
+                             else _leaf_cell_expr(leaf, source_expr, row, lst))
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -7651,23 +8290,29 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         strs.append('</tr>')
 
         # The group's own answers, under its last row and inside its span. The
-        # unsplatted columns already reach down here, so these rows carry only
-        # the splatted ones -- a per-group answer about a column that did not
-        # splat would be that column's single value, which is the cell itself.
-        last_of_root = (rn + 1 == len(rendered)
-                        or rendered[rn + 1].index != row.index)
-        if n_group_aggs and last_of_root:
-            for level in range(n_group_aggs):
+        # columns that reach across the group already reach down here, so these
+        # rows carry only the ones splatted AT that depth -- a per-group answer
+        # about a column that did not splat would be that column's single value,
+        # which is the cell itself. Innermost first, so each block of answers
+        # sits directly under the group it is about.
+        for depth in sorted(n_group_aggs, reverse=True):
+            if not _closes_group(rendered, rn, depth):
+                continue
+            group_key = _leaf_group_key(row, depth)
+            for level in range(n_group_aggs[depth]):
                 cells = []
                 for ci, leaf in enumerate(leaves):
-                    expr = hung_group[ci][level]
-                    if leaf.splat is None:
+                    # Shallower columns span these rows; deeper ones have
+                    # already closed, and leave a cell's worth of space.
+                    if leaf.splat is None or leaf.depth < depth:
                         continue
+                    expr = (hung_group[ci][level]
+                            if leaf.depth == depth else None)
                     if expr is None:
                         cells.append('<td class="col-agg-blank"></td>')
                         continue
                     cells.append(_render_group_agg_cell(
-                        expr, leaf, i, lst, model, get_visualizer,
+                        expr, leaf, group_key, lst, model, get_visualizer,
                         eval_in_scope, max_column_width))
                 strs.append(f'<tr class="col-agg-row group-agg-row">'
                             f'{"".join(cells)}</tr>')
@@ -7741,10 +8386,14 @@ def _table_child_value_getter(key, lst, model, eval_in_scope=None):
     row_key, field_key = key.split(CELL_KEY_SEP, 1)
     columns = model.get('columns') or []
     row = _row_by_key(lst, columns, row_key)
-    if _split_splat(field_key)[0]:
-        # The element this rendered row stands for; the column expression alone
-        # names the whole splatted list, which is not what the cell is showing.
-        return row.splats.get(field_key)
+    # Through the leaf, because the key is a leaf's identity: a splat's is the
+    # whole splatted list rather than the element the cell is showing, and a
+    # sub-column's is a composition that means nothing as an expression.
+    leaf = _leaf_for(columns, field_key)
+    if leaf is not None:
+        return _leaf_cell_value(
+            leaf, row, lst, source_expr, eval_in_scope,
+            read_through=source_expr is not None and eval_in_scope is not None)
     if source_expr is not None and eval_in_scope is not None:
         return eval_in_scope(
             _column_cell_expr(field_key, source_expr, row.index, lst))
@@ -7799,22 +8448,37 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # An answer is one value the aggregation worked out, not a value
             # each row has, so there is no row-generic form of it: the same
             # expression names it wherever it is headed.
-            agg_expr = _agg_child_expr(msg.child_key, src,
-                                       _model_binds(model)) or cell_col
+            agg_expr = _agg_child_expr(msg.child_key, src, _model_binds(model),
+                                       model.get('columns') or {},
+                                       value) or cell_col
             commands = [nest_child_command(cmd, agg_expr, agg_expr)
                         for cmd in commands]
         else:
-            # A column stays row-generic (the cell_col dollar expression);
-            # anything bound for the clipboard names this row concretely, since
-            # the user pastes it into the editor as-is.
+            # A column stays generic (a dollar expression); anything bound for
+            # the clipboard names this row concretely, since the user pastes it
+            # into the editor as-is.
             # Under splat the row is looked up by its key, since "3.1" and
             # "3.0" share a column but not a value -- and int("3.1") raises.
-            _row = (_row_by_key(value, model.get('columns') or [], row_key)
+            columns = model.get('columns') or {}
+            _row = (_row_by_key(value, columns, row_key)
                     if value is not None else None)
-            concrete_cell = (_column_cell_expr(cell_col, src,
-                                               _row.index if _row else 0, value)
-                             if src else cell_col)
-            commands = [nest_child_command(cmd, cell_col, concrete_cell) for cmd in commands]
+            leaf = _leaf_for(columns, cell_col)
+            # The scope the child's code is written in. A cell under a splat
+            # shows one ELEMENT, so what is generic about it is generic over
+            # the elements -- `$['kind']`, not the composed identity the cell
+            # is keyed by, which is no expression at all.
+            generic_cell = (_column_row_expr(columns, cell_col)
+                            or (leaf.sub if leaf else None) or cell_col)
+            if src is None:
+                concrete_cell = generic_cell
+            elif leaf is not None and _row is not None:
+                concrete_cell = _leaf_cell_expr(leaf, src, _row, value)
+            else:
+                concrete_cell = _column_cell_expr(cell_col, src,
+                                                  _row.index if _row else 0,
+                                                  value)
+            commands = [nest_child_command(cmd, generic_cell, concrete_cell)
+                        for cmd in commands]
 
         filtered_commands: List[Any] = []
         type_key = config_key(value) if value else None
@@ -7823,7 +8487,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # expression is one every row answers. An answer's isn't, so its
             # code travels on up to whoever asked for it.
             if isinstance(cmd, tuple) and len(cmd) in (2, 3) and not is_agg:
-                _col_add(new_model['columns'], cmd[1])
+                _add_derived_column(new_model, cell_col, cmd[1])
                 if type_key:
                     _save_slots(new_model)
             else:
@@ -8086,11 +8750,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # Sort leaves the menu open for the same reason Compute does: it is a
         # checkbox, and flipping the direction is the common next act.
         case SortClick(col=named, direction=direction):
-            col = _named_column(model, named)
+            col = _named_row_column(model, named)
             span = model.get('_source_span')
-            # A column naming `$i` has no sort to write -- see _render_sort_panel,
-            # which draws no handle for one. Checked here too, since a click can
-            # arrive from a panel drawn before the column was edited.
+            # A column naming `$i` has no sort to write, and neither has one
+            # that splats -- see _render_sort_panel, which draws no handle for
+            # either. Checked here too, since a click can arrive from a panel
+            # drawn before the column was edited.
             if col is not None and dollar_expr_names_index(col):
                 col = None
             if col is not None and span is not None and direction in SORT_DIRECTIONS:
@@ -8107,7 +8772,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # One line written, unlike checking a box, which invites the next -- so
         # this closes the menu the way the Compute code rows do.
         case SortCodeClick(col=named, direction=direction):
-            col = _named_column(model, named)
+            col = _named_row_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and dollar_expr_names_index(col):
                 col = None
@@ -8125,7 +8790,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # The list, named -- the line the table is showing has no say in it,
         # the same way the Compute rows ask after the whole column.
         case GroupByClick(col=named):
-            col = _named_column(model, named)
+            # A splat has no one value per row to cut the rows up by, so it
+            # answers None here and the click writes nothing -- the same answer
+            # _render_column_group_by draws, reached the same way.
+            col = _named_row_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and source_expr is not None:
                 _close_column_menus(model)
@@ -8199,7 +8867,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             source_expr = model.get('_source_expr')
             if col is not None and source_expr is not None:
                 _close_column_menus(model)
-                code = _agg_code(expr, _column_values_expr(col, source_expr))
+                code = _agg_code(expr, _column_whole_expr(
+                    model.get('columns') or {}, col, source_expr,
+                    _model_binds(model)))
                 # What the line needs imported is the expression's own, declared
                 # where every other aggregation declares it rather than read back
                 # out of the text.

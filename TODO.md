@@ -40,11 +40,11 @@
 - [x] figure out what table widgets should be per column
 - [x] column tally
 - [x] aggregations
-- [ ] x button for group by aggregations
-- [ ] snc-py-exp for per-group aggregations
-- [ ] reify as...list of dict etc, to persist transient columns
+- [x] x button for group by aggregations
+- [x] snc-py-exp for per-group aggregations
+- [x] reify as...list of dict etc, to persist transient columns
 - [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*
-- [ ] drag to reorder subcolumns
+- [x] drag to reorder subcolumns
 - [ ] need to show list length somewhere
 - [ ] need to show string length somewhere
 - [ ] extract row by grabbing index cell

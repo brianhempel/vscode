@@ -1521,6 +1521,7 @@
 	background: var(--snc-table-header-bg);
 	padding: 0; /* wrapper re-adds padding */
 	vertical-align: top;
+	position: relative; /* for remove x */
 }
 
 /* Nested lists opt out, like the sticky header: their scrollport often doesn't
