@@ -51,6 +51,7 @@ from visualizer_utils import (
     ChildEvent, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
     strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
+    Dollar, DollarScope,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
     get_full_class_name, truncate_str, py_exp_attrs,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
@@ -213,6 +214,18 @@ def _get_autocomplete_suggestions(obj, current_fields: list, input_value: str) -
     if input_value:
         suggestions = [name for name in suggestions if name.startswith(input_value)]
     return suggestions
+
+
+def field_scope(obj_expr: str = None) -> DollarScope:
+    """The scope a field accessor is written in.
+
+    One level and no sigils, which is the whole of it: `_eval_field` hands
+    `eval_dollar_expr` no `outer` and no bindings, so a longer run or a sigil
+    would name nothing, and the box says exactly that by having nothing else to
+    say. There is no dict or splat variant the way there is in the table -- a
+    field is written against one value and that is all there ever is.
+    """
+    return DollarScope(Dollar('$', 'the object', obj_expr))
 
 
 def _eval_field(obj, accessor_code: str, eval_in_scope=None):
@@ -808,6 +821,7 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eva
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="$.field_name" '
+        f'data-tooltip="{html.escape(field_scope().legend)}" '
         f'spellcheck="false"'
         f'{extra_attrs} '
         f'class="obj-input" />'

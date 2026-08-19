@@ -7379,6 +7379,54 @@ def make_expand_toggle_event() -> dict:
     }
 
 
+def _tiny_len(html_str: str) -> str:
+    """The length readout on the expand bar, tag and all."""
+    match = re.search(r'<div class="tiny-len".*?</div>', html_str)
+    return match[0] if match else ''
+
+
+class TestTinyLen(unittest.TestCase):
+    """How long the string is, at the right end of the expand bar."""
+
+    def setUp(self):
+        self.tall_value = "l1\nl2\nl3\nl4\nl5"   # 5 lines -> bar offered
+        self.short_value = "l1\nl2\nl3\nl4"     # exactly 4 -> no bar
+        self.var_and_exp = ('x', 'x')
+
+    def render(self, value, small=False, var_and_exp=None):
+        return visualize(value, init_model(value), None, None, small=small,
+                         var_and_exp=var_and_exp)
+
+    def test_the_bar_says_how_long_the_string_is(self):
+        self.assertIn('14 chars', _tiny_len(self.render(self.tall_value)))
+
+    def test_a_string_that_fits_has_no_bar_to_count_on(self):
+        self.assertEqual('', _tiny_len(self.render(self.short_value)))
+
+    def test_the_count_hands_over_the_len_of_the_source(self):
+        out = self.render(self.tall_value, var_and_exp=self.var_and_exp)
+        self.assertIn(exp_attr('len(x)'), _tiny_len(out))
+        self.assertIn('draggable="true"', _tiny_len(out))
+
+    def test_the_count_offers_nothing_without_a_source_expression(self):
+        # Still shown -- the number is worth having even where there is no
+        # access path to hand the editor.
+        out = _tiny_len(self.render(self.tall_value))
+        self.assertIn('14 chars', out)
+        self.assertNotIn('snc-py-exps', out)
+
+    def test_the_count_shares_the_bar_with_the_toggle_it_follows(self):
+        out = self.render(self.tall_value)
+        self.assertIn('class="expand-and-len"', out)
+        self.assertLess(out.index('expand-toggle'), out.index('tiny-len'))
+
+    def test_the_preview_counts_too(self):
+        out = self.render(self.tall_value, small=True,
+                          var_and_exp=self.var_and_exp)
+        self.assertIn('14 chars', _tiny_len(out))
+        self.assertIn(exp_attr('len(x)'), _tiny_len(out))
+
+
 class TestExpandToggle(unittest.TestCase):
     """Test the expand/collapse toggle for tall (>4 line) strings."""
 
@@ -9283,6 +9331,18 @@ class TestTransformPreview(unittest.TestCase):
         self.model['replace_visible'] = True
         self.model['search'] = r"r'hello'"
 
+    def preview(self, html_output):
+        """The match-object preview alone.
+
+        Scoped rather than asked of the whole render: the Replace box's own
+        legend names `$[0]` too, that being the one thing a user writing against
+        a match object has to be told, so a search for it across the markup
+        would find the legend and answer about the wrong thing.
+        """
+        m = re.search(r'<div class="match-object-preview">.*?</div>',
+                      html_output, re.DOTALL)
+        return m.group(0) if m else ''
+
     def test_no_preview_when_replace_hidden(self):
         """No preview labels when replace_visible is False."""
         model = init_model(self.value)
@@ -9295,13 +9355,13 @@ class TestTransformPreview(unittest.TestCase):
         """No preview when there is no search pattern."""
         self.model['search'] = None
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertNotIn('$[0]', html_output)
+        self.assertNotIn('$[0]', self.preview(html_output))
 
     def test_no_preview_when_no_matches(self):
         """No preview when search matches nothing."""
         self.model['search'] = r"r'zzzzz'"
         html_output = visualize(self.value, self.model, None, None, max_width=400)
-        self.assertNotIn('$[0]', html_output)
+        self.assertNotIn('$[0]', self.preview(html_output))
 
     def test_row1_shows_match_labels(self):
         """Row 1 displays $[0], $.start(), $.end() labels."""
@@ -9867,54 +9927,29 @@ class TestIndexSliceCodeGen(unittest.TestCase):
         self.assertIn('x[10:]', expr)
 
 
-class TestLenIndicator(unittest.TestCase):
-    """Tests for the len() indicator displayed at the end of a string visualization.
+class TestSourceExpr(unittest.TestCase):
+    """The access path the render names the value by.
 
-    The source expression for the len indicator comes from the model's _source_expr
-    key, which is set by init_model() via the var_and_exp tuple — not from the
-    source_expr parameter passed by the AST rewriter (which contains internal
-    temp variable names like _snc_temp_1).
+    It comes from the model's _source_expr key, set from the var_and_exp tuple
+    -- not from the source_expr parameter the AST rewriter passes, which holds
+    internal temp names like _snc_temp_1. The length readout is built from it
+    (see TestTinyLen); nothing on a short string is.
     """
 
-    def test_len_indicator_from_assignment(self):
-        """init_model extracts var name from assignment and visualize uses it."""
+    def test_var_name_from_an_assignment(self):
         model = init_model("hello", var_and_exp=('str1', 'str1'))
-        html_output = visualize("hello", model, None, None)
-        self.assertIn(exp_attr('len(str1)'), html_output)
-        self.assertNotIn('_snc_temp', html_output)
-        self.assertIn('>5<', html_output)
+        self.assertEqual(model['_source_expr'], 'str1')
+        self.assertNotIn('_snc_temp', visualize("hello", model, None, None))
 
-    def test_len_indicator_absent_without_var_and_exp(self):
-        """Without var_and_exp, no len snc-py-exps should appear."""
-        model = init_model("hello")
-        html_output = visualize("hello", model, None, None)
-        self.assertNotIn('snc-py-exps', html_output)
-
-    def test_len_indicator_empty_string(self):
-        """Empty string should show len indicator with 0."""
-        model = init_model("", var_and_exp=('s', 's'))
-        html_output = visualize("", model, None, None)
-        self.assertIn(exp_attr('len(s)'), html_output)
-        self.assertIn('>0<', html_output)
-
-    def test_len_indicator_small_mode(self):
-        """Len indicator should be omitted in small mode."""
-        model = init_model("hi", var_and_exp=('s', 's'))
-        html_output = visualize("hi", model, None, None, small=True)
-        self.assertNotIn('len-indicator', html_output)
-        self.assertNotIn(exp_attr('len(s)'), html_output)
-
-    def test_len_indicator_draggable(self):
-        """The len indicator element should have draggable=true."""
-        model = init_model("abc", var_and_exp=('x', 'x'))
-        html_output = visualize("abc", model, None, None)
-        self.assertIn('draggable="true"', html_output)
-        self.assertIn(exp_attr('len(x)'), html_output)
-
-    def test_len_indicator_bare_expression(self):
+    def test_a_bare_expression_names_itself(self):
         """For a bare expression line, _source_expr is the whole expression."""
         model = init_model("hello", var_and_exp=(None, 'my_func()'))
         self.assertEqual(model['_source_expr'], 'my_func()')
+
+    def test_a_short_string_hands_over_nothing_of_its_own(self):
+        """No bar to carry the length, and the characters are not handles."""
+        model = init_model("hello", var_and_exp=('str1', 'str1'))
+        self.assertNotIn('snc-py-exps', visualize("hello", model, None, None))
 
 # =============================================================================
 # DSL Grammar Tests via Action Rule
@@ -13774,6 +13809,75 @@ class TestGeneratedCodeSaysWhatItNeeds(unittest.TestCase):
 
     def test_a_name_ending_in_re_is_not_the_module(self):
         self.assertEqual(code_imports("score.upper()"), ())
+
+
+# === What the Find and Replace boxes say their dollars mean ==================
+#
+# The two boxes speak different languages, and only one of them speaks dollars
+# at all. What `$` binds to in the Replace box turns on what was searched for:
+# a regex or a piece of text matches through `re.finditer`, so `$` is a match
+# object; an index or a slice reaches into the string directly, so `$` is the
+# text that came back.
+
+import html as _html
+from string_visualizer import FIND_TOOLTIP, replace_scope
+
+
+def _box_tooltip(html_str, needle):
+    """The data-tooltip on the box whose tag holds *needle*."""
+    for tag in re.findall(r'<input[^>]*>', html_str):
+        if needle in tag:
+            tip = re.search(r'data-tooltip="([^"]*)"', tag)
+            return _html.unescape(tip.group(1)) if tip else None
+    raise AssertionError(f'no box holding {needle!r}')
+
+
+class TestSearchBoxLegends(unittest.TestCase):
+    """The Find box takes no dollars -- what it takes is a pattern, an index or
+    a slice, and a `$` typed into one is the regex anchor rather than a scope."""
+
+    VALUE = 'hello world'
+
+    def render(self, search=None):
+        model = init_model(self.VALUE)
+        model['replace_visible'] = True
+        if search is not None:
+            model['search'] = search
+        return visualize(self.VALUE, model, None, lambda code: eval(code, {}),
+                         max_width=600)
+
+    def test_the_find_box_says_what_goes_in_it(self):
+        self.assertEqual(_box_tooltip(self.render(), 'placeholder="Find"'),
+                         FIND_TOOLTIP)
+
+    def test_the_find_box_legend_never_calls_a_dollar_a_scope(self):
+        # `$` there is the regex end anchor. Saying otherwise would teach the
+        # wrong thing about the one box where a bare `$` is legal syntax.
+        self.assertNotIn('$$', FIND_TOOLTIP)
+
+    def test_a_regex_search_makes_the_replace_box_a_match(self):
+        out = self.render("r'o'")
+        self.assertEqual(_box_tooltip(out, 'search-box-replace'), replace_scope(False).legend)
+
+    def test_the_match_legend_points_at_the_matched_text(self):
+        # `$` is an re.Match, so the text is a subscript away -- the one thing
+        # a user writing a replacement needs to be told.
+        self.assertIn('$[0]', replace_scope(False).legend)
+
+    def test_a_slice_search_makes_the_replace_box_the_text_itself(self):
+        out = self.render('2:5')
+        self.assertEqual(_box_tooltip(out, 'search-box-replace'),
+                         replace_scope(True).legend)
+
+    def test_an_index_search_does_the_same(self):
+        out = self.render('4')
+        self.assertEqual(_box_tooltip(out, 'search-box-replace'),
+                         replace_scope(True).legend)
+
+    def test_either_way_the_outer_run_is_the_whole_string(self):
+        for legend in (replace_scope(False).legend, replace_scope(True).legend):
+            with self.subTest(legend=legend):
+                self.assertIn('$$ the whole string', legend)
 
 
 if __name__ == '__main__':

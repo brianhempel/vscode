@@ -610,6 +610,123 @@ def dollar_expr_names_index(expr: str) -> bool:
     return 'i' in dollar_expr_sigils(expr)
 
 
+# --- Scopes: one declaration a box reads its legend off ----------------------
+#
+# A box the user writes Python into binds some set of dollar tokens, and the
+# tooltip on it is the only place that set is written down. Written down TWICE
+# -- once as the expressions the substitution threads, once as prose -- the two
+# drift, and the prose is the half nobody notices is wrong.
+#
+# So a scope is declared once, as what each token stands for AND how it reads,
+# and both halves are taken off that one declaration: `replace_exps` and
+# `bindings` go to replace_dollars_in_py_exp, `legend` goes to the box. A token
+# that isn't in the scope is in neither, which is the whole point.
+
+
+@dataclasses.dataclass(frozen=True)
+class Dollar:
+    """One dollar token, what it stands for, and how it reads.
+
+    *token* is the token as the user types it -- `$`, `$$`, `$i` -- and is the
+    only place the depth and the sigil are recorded; DOLLARS_RE reads them back
+    out, so a scope cannot say `$$` and mean depth 1.
+
+    *expr* is what the substitution puts in its place, and is None for a scope
+    built only to be read (a legend asked before there is a source expression to
+    name).
+    """
+    token: str
+    label: str
+    expr: 'str | None' = None
+
+    @property
+    def parts(self) -> tuple:
+        """(depth, sigil) -- what DOLLARS_RE makes of the token.
+
+        Depth 0 for a token that isn't a bare run: `$[0]` is a READING of `$`
+        rather than a scope of its own, and a legend is the right place to teach
+        one. Levels count from 1, so depth 0 drops out of `replace_exps` and
+        `bindings` without either having to know the difference.
+        """
+        m = DOLLARS_RE.fullmatch(self.token)
+        return (len(m[1]), m[2]) if m else (0, None)
+
+
+@dataclasses.dataclass(frozen=True)
+class DollarScope:
+    """Every dollar token a box binds, in the order it reads.
+
+    Order is the declaring site's, because reading order is a fact about the
+    prose rather than about the scope: a container's own tokens read between the
+    innermost value and the scopes outside it.
+    """
+    dollars: tuple
+
+    def __init__(self, *dollars):
+        object.__setattr__(self, 'dollars', tuple(d for d in dollars if d))
+
+    @property
+    def replace_exps(self) -> list:
+        """The depth-ordered expressions, as replace_dollars_in_py_exp wants
+        them. Truncated at the first depth the scope doesn't name: a run past
+        the end is left as written, which is what "not bound" has to look like.
+        """
+        by_depth = {d.parts[0]: d.expr for d in self.dollars
+                    if d.parts[1] is None and d.parts[0]}
+        out = []
+        for depth in range(1, max(by_depth, default=0) + 1):
+            if by_depth.get(depth) is None:
+                break
+            out.append(by_depth[depth])
+        return out
+
+    @property
+    def bindings(self) -> dict:
+        """The sigils, as replace_dollars_in_py_exp and eval_dollar_expr want
+        them."""
+        return {d.parts[1]: d.expr for d in self.dollars
+                if d.parts[1] is not None and d.expr is not None}
+
+    @property
+    def carries_exprs(self) -> bool:
+        """Whether this scope was built with the expressions as well as the
+        prose.
+
+        Some boxes have no substitution of their own to declare: a column search
+        is rewritten into the main box's scope by lift_column_predicate rather
+        than bound, and a sub-column's binding happens per cell, far from the
+        box. Those scopes are prose only, and everything in them reads.
+        """
+        return any(d.expr is not None for d in self.dollars)
+
+    def shows(self, dollar: Dollar) -> bool:
+        """Whether *dollar* belongs in the legend.
+
+        A scope that carries expressions is held to them: a token with nothing
+        to stand for is a token the substitution leaves as written, and a box
+        must not promise one. A reading like `$[0]` never carries an expression
+        -- it is how to use another token, not a token -- so it always reads.
+        """
+        return (dollar.expr is not None
+                or dollar.parts == (0, None)
+                or not self.carries_exprs)
+
+    @property
+    def legend(self) -> str:
+        """What the box says of itself.
+
+        The first token reads as a sentence and the rest lean on it, which is
+        how every one of these has always read.
+        """
+        return ', '.join(
+            f'{d.token} is {d.label}' if n == 0 else f'{d.token} {d.label}'
+            for n, d in enumerate(d for d in self.dollars if self.shows(d)))
+
+    @property
+    def tokens(self) -> tuple:
+        return tuple(d.token for d in self.dollars)
+
+
 def dollar_expr_parses(s: str, mode: str = 'eval') -> bool:
     """Whether *s* is valid Python once every dollar run is read as a value.
 

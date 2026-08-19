@@ -1303,5 +1303,75 @@ class TestRenderExpandToggle(unittest.TestCase):
         self.assertIn('draggable="false"', bar)
 
 
+# === A scope, read as expressions and as prose ===============================
+#
+# The point of declaring one is that both halves come off it: a token the scope
+# doesn't have can't be substituted and can't be described, so the two can't
+# drift apart.
+
+from visualizer_utils import Dollar, DollarScope
+
+
+class TestDollarScope(unittest.TestCase):
+
+    SCOPE = DollarScope(
+        Dollar('$', 'the item', 'item'),
+        Dollar('$i', 'the row number', 'i'),
+        Dollar('$$', 'the whole list', 'data'),
+    )
+
+    def test_the_levels_come_out_in_depth_order(self):
+        # What replace_dollars_in_py_exp wants, whatever order they were
+        # declared in -- the declaration order is the PROSE's.
+        self.assertEqual(self.SCOPE.replace_exps, ['item', 'data'])
+
+    def test_the_sigils_come_out_as_bindings(self):
+        self.assertEqual(self.SCOPE.bindings, {'i': 'i'})
+
+    def test_the_legend_leads_with_a_sentence(self):
+        self.assertEqual(self.SCOPE.legend,
+                         '$ is the item, $i the row number, $$ the whole list')
+
+    def test_the_two_halves_describe_the_same_tokens(self):
+        named = set(self.SCOPE.tokens)
+        bound = {'$'} | {f'${s}' for s in self.SCOPE.bindings}
+        bound |= {'$' * n for n in range(1, len(self.SCOPE.replace_exps) + 1)}
+        self.assertEqual(named, bound)
+
+    def test_a_level_with_nothing_to_stand_for_is_bound_by_neither(self):
+        # A source expression that can't be named drops $$ from the
+        # substitution and from the prose together, which is the whole point.
+        scope = DollarScope(Dollar('$', 'the item', 'item'),
+                            Dollar('$$', 'the whole list', None))
+        self.assertEqual(scope.replace_exps, ['item'])
+        self.assertNotIn('$$', scope.legend)
+
+    def test_a_run_past_the_end_is_not_invented(self):
+        # $$$ named but $$ not: the substitution stops at the gap rather than
+        # sliding the deeper expression into the shallower run.
+        scope = DollarScope(Dollar('$', 'a', 'A'), Dollar('$$$', 'c', 'C'))
+        self.assertEqual(scope.replace_exps, ['A'])
+
+    def test_a_reading_of_a_token_is_not_a_scope_of_its_own(self):
+        # `$[0]` teaches how to use `$`; it binds nothing and must not be
+        # mistaken for a level.
+        scope = DollarScope(Dollar('$', 'the match', 'mtch'),
+                            Dollar('$[0]', 'its text'),
+                            Dollar('$$', 'the whole string', 's'))
+        self.assertEqual(scope.replace_exps, ['mtch', 's'])
+        self.assertEqual(scope.bindings, {})
+        self.assertIn('$[0] its text', scope.legend)
+
+    def test_an_empty_slot_is_dropped_rather_than_punctuated(self):
+        # Scopes are built with conditional entries; a falsy one must not leave
+        # a stray comma behind.
+        scope = DollarScope(Dollar('$', 'the item', 'item'), None,
+                            Dollar('$$', 'the list', 'data'))
+        self.assertEqual(scope.legend, '$ is the item, $$ the list')
+
+    def test_a_scope_is_hashable_so_it_can_be_a_constant(self):
+        self.assertEqual(self.SCOPE, DollarScope(*self.SCOPE.dollars))
+
+
 if __name__ == '__main__':
     unittest.main()

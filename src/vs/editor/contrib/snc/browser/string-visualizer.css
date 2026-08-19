@@ -213,25 +213,6 @@ span.overlay-content {
 	vertical-align: text-top;
 }
 
-.len-anchor {
-	position: relative;
-	display: inline-block;
-	width: 0;
-	height: 0;
-	vertical-align: top;
-}
-
-.len-indicator {
-	position: absolute;
-	left: 3px;
-	top: 1px;
-	font-size: 7px;
-	line-height: 7px;
-	cursor: grab;
-	user-select: none;
-	white-space: nowrap;
-}
-
 .segment-label-anchor {
 	position: relative;
 	display: inline-block;

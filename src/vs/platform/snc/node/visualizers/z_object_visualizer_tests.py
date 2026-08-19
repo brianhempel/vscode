@@ -2088,5 +2088,43 @@ class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
         self.assertEqual(eval_in_scope(copies[0].text), [''])
 
 
+# === What the field box says its dollar means ================================
+
+import re as _re
+from z_object_visualizer import field_scope
+
+
+class TestFieldBoxLegend(unittest.TestCase):
+    """A field is written against the object and nothing else -- no enclosing
+    scope is threaded in, so `$` is the whole vocabulary and the box says so."""
+
+    class Point:
+        def __init__(self):
+            self.x, self.y = 1, 2
+
+    def field_box(self):
+        p = self.Point()
+        get_vis = lambda v: z_object_visualizer
+        model = init_model(p, get_vis, eval_in_scope=lambda c: eval(c, {'p': p}))
+        model['adding_field'] = True
+        out = visualize(p, model, get_vis, lambda c: eval(c, {'p': p}),
+                        max_width=600)
+        for tag in _re.findall(r'<input[^>]*>', out):
+            if 'obj-input' in tag:
+                return tag
+        raise AssertionError('no field box rendered')
+
+    def test_the_box_says_what_its_dollar_means(self):
+        tip = _re.search(r'data-tooltip="([^"]*)"', self.field_box())
+        self.assertIsNotNone(tip, 'the field box carries no legend')
+        self.assertEqual(html_module.unescape(tip.group(1)), field_scope().legend)
+
+    def test_it_promises_nothing_it_does_not_bind(self):
+        # eval_dollar_expr is called with no `outer` and no bindings, so a
+        # deeper run or a sigil would name nothing.
+        self.assertNotIn('$$', field_scope().legend)
+        self.assertNotIn('$i', field_scope().legend)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -129,6 +129,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
 from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
+                              Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
                               dollar_expr_parses, is_nested,
@@ -307,6 +308,39 @@ _SENTINEL_CHARS = [DC2, DC3]
 # expression that mentions $$ (see CHILD_SOURCE_DISPLAY) can be evaluated
 # against the real value rather than a name only the generated code has.
 _PREVIEW_SOURCE_BINDER = '_snc_v'
+
+
+# What the two boxes say of themselves. Only one of them speaks dollars at all.
+#
+# The Find box takes a pattern, a piece of text, or a place in the string, and
+# binds nothing -- so it has no scope, and what it says is what it accepts. It
+# deliberately says nothing about `$`: this is the one box where a bare `$` is
+# legal as written, being the regex end anchor, and a note saying the box has no
+# dollars would read as a note saying not to type one.
+FIND_TOOLTIP = "Text, r'regex', an index, or start:stop"
+
+
+def replace_scope(idx_slice: bool, match_expr: str = None,
+                  source_expr: str = None) -> DollarScope:
+    """The scope the Replace box is written in.
+
+    Exactly the two levels `_replace_expr_bound` binds, declared here so the box
+    and the substitution can't come to disagree: `$` is whatever the grammar
+    fills `mtch` with and `$$` is the string being searched, which stays true
+    when nested (see CHILD_SOURCE_DISPLAY).
+
+    What `mtch` holds turns on the search. A regex or a text search matches
+    through `re.finditer`, so it is a match object and the text is one subscript
+    away; an index or a slice reaches into the string directly, so it IS the
+    text. Nothing else about the scope changes, which is why one declaration
+    with one branch says it.
+    """
+    return DollarScope(
+        Dollar('$', 'the selected text' if idx_slice else 'the match',
+               match_expr),
+        *(() if idx_slice else (Dollar('$[0]', 'its text'),)),
+        Dollar('$$', 'the whole string', source_expr),
+    )
 
 
 def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_char: str | None = '') -> str:
@@ -3386,6 +3420,28 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
     )
 
 
+def _render_expand_bar(expanded: bool, value: str, model, *,
+                       small: bool = False) -> str:
+    """The bar under a clipped string: the expand toggle, and how long the
+    string is at its right end.
+
+    The count is a handle of its own -- the number on screen and len() of the
+    source are the same reading, so hovering it offers the code. It renders
+    bare where there is no access path, the number still being worth having.
+    The list visualizer draws the same bar (see _visualize_table); the two
+    share the CSS but not the wording, one counting items and one characters.
+    """
+    source_expr = model.get('_source_expr') if model else None
+    len_exp = f'len({source_expr})' if source_expr else None
+    len_n = len(value)
+    return (
+        f'<div class="expand-and-len">'
+        f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
+        f'<div class="tiny-len"{py_exp_attrs(len_exp)}>{len_n} char{"s" if len != 1 else ""}</div>'
+        f'</div>'
+    )
+
+
 def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> str:
     return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, var_and_exp))
 
@@ -3395,8 +3451,8 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
     # Where this value sits is a property of the render, not of the model: a
     # parent's columns can change under a child that was built once. Adopt the
-    # access path we were just handed so the draggable chips and the len()
-    # indicator name the value the way the editor could evaluate it.
+    # access path we were just handed so the draggable chips and the length
+    # readout name the value the way the editor could evaluate it.
     if model is not None and var_and_exp:
         var_name, expr = var_and_exp
         model['_source_expr'] = var_name if var_name else expr
@@ -3441,8 +3497,8 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         line_count = (raw.count('\n') + 1) if raw else 1
         expand_toggle_html = ''
         if line_count > 4:
-            expand_toggle_html = render_expand_toggle(
-                expanded, repr(ExpandToggle()), small=True)
+            expand_toggle_html = _render_expand_bar(
+                expanded, value, model, small=True)
 
         # One mousedown for the whole preview, standing in for the per-character
         # ones the focused render has. A nested preview is focused by clicking
@@ -3550,18 +3606,10 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     char_els.append(char_span('$', index, True, highlight_by_index.get(index), model, scroll_to=(index == first_match_index), is_regex_anchor=True))
     index += 1
 
-    # len() indicator at the top-left of the final character position
-    # (hidden when small - there's no room and it competes with the actual content)
-    resolved_source_expr = model.get('_source_expr') if model else None
-    if resolved_source_expr is not None and not small:
-        len_val = len(value)
-        len_expr = f'len({resolved_source_expr})'
-        char_els.append(
-            f'<span class="len-anchor">'
-            f'<span{py_exp_attrs(len_expr)} '
-            f'class="len-indicator"'
-            f'>{len_val}</span></span>'
-        )
+    # The string's length used to be printed here, floating at the top-left of
+    # the final character position. It lives on the expand bar now (see
+    # _render_expand_bar), out of the text's way -- but only for a string tall
+    # enough to have a bar.
 
     # chars_html = ''.join(char_els)
 
@@ -3629,12 +3677,14 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             replace_input_event = "lambda e: ReplaceBoxInput(value=e.get('value', ''))"
             preview_html = _render_transform_preview(model, value, eval_in_scope)
             match_preview_html = _render_match_object_preview(model, value, eval_in_scope)
+            replace_tooltip = replace_scope(idx_slice).legend
             replace_box_html = (
                 f'<div class="search-box-wrapper">'
                 f'<input type="text" tabindex="0"'
                 f' snc-input="{html.escape(replace_input_event)}"'
                 f' value="{html.escape(replace_text_value)}"'
                 f' placeholder="Replace/Map/Filter"'
+                f' data-tooltip="{html.escape(replace_tooltip)}"'
                 f' spellcheck="false"'
                 f' class="search-box search-box-replace"'
                 f" />"
@@ -3648,6 +3698,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f' snc-input="{html.escape(search_input_event)}"'
             f' value="{html.escape(search_box_value)}"'
             f' placeholder="Find"'
+            f' data-tooltip="{html.escape(FIND_TOOLTIP)}"'
             f' spellcheck="false"'
             f' class="search-box"'
             f" />"
@@ -3702,7 +3753,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     expanded_class = ' expanded' if expanded else ''
     expand_toggle_html = ''
     if line_count > 4:
-        expand_toggle_html = render_expand_toggle(expanded, repr(ExpandToggle()))
+        expand_toggle_html = _render_expand_bar(expanded, value, model)
 
     # Add tabindex to make div focusable for keyboard events, and snc-key-down handler
     # doing it like this to try to make less string garbage. Small mode returned

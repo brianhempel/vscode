@@ -58,7 +58,7 @@ from visualizer_utils import (
     with_pass_body,
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
-    DOLLARS_RE, SIGILS,
+    DOLLARS_RE, SIGILS, Dollar, DollarScope,
     eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs, PyExp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
@@ -1155,13 +1155,19 @@ def _leaf_cell_value(leaf: LeafColumn, row: Row, lst, source_expr=None,
     init_model builds for those cells, and the lookup a child event comes back
     through all have to agree, and a child model built for one value and then
     asked about another goes wrong quietly.
+
+    The row's whole binding map either way, rather than the splat's own `j`
+    alone: `_leaf_cell_expr` writes the row NUMBER into the code the same cell
+    hands to a drag, so a `$i` sub-column under a splat would otherwise show an
+    error beside an expression that evaluates. Everything a rendered row knows
+    about itself is in one place, and both sides read that place.
     """
     if leaf.splat is not None:
         element = row.splats.get(leaf.splat)
         if leaf.sub in (None, '$') or element is None:
             return element
         return eval_dollar_expr(leaf.sub, element, eval_in_scope, outer=(lst,),
-                                bindings={'j': row.bindings.get('j', 0)})
+                                bindings=row.bindings)
     reads = leaf.sub or leaf.expr
     if read_through and eval_in_scope is not None and source_expr is not None:
         return eval_in_scope(_column_cell_expr(reads, source_expr, row.index, lst))
@@ -1241,9 +1247,13 @@ def _leaf_values(leaf: LeafColumn, lst, model, eval_in_scope=None) -> list:
         if element is None:
             continue
         try:
+            # The row's own bindings, as _leaf_cell_value reads them: a column
+            # naming `$j` or `$i` has a value per row like any other, and one
+            # gathered without them would quietly come back short.
             values.append(element if leaf.sub in (None, '$')
                           else eval_dollar_expr(leaf.sub, element,
-                                                eval_in_scope, outer=(lst,)))
+                                                eval_in_scope, outer=(lst,),
+                                                bindings=row.bindings))
         except Exception:
             pass
     return values
@@ -1280,7 +1290,8 @@ def _leaf_group_values(leaf: LeafColumn, group_key: str, lst, model,
         try:
             values.append(element if leaf.sub in (None, '$')
                           else eval_dollar_expr(leaf.sub, element,
-                                                eval_in_scope, outer=(lst,)))
+                                                eval_in_scope, outer=(lst,),
+                                                bindings=row.bindings))
         except Exception:
             pass
     return values
@@ -2714,6 +2725,49 @@ def _cell_source_expr(model: dict, eval_in_scope) -> 'str | None':
 _LIST_BINDS = {'i': 'i'}
 _DICT_BINDS = {'i': 'i', 'k': 'k', 'v': 'v'}
 
+# How each sigil reads in a box's legend, per container. The binds dicts above
+# say WHICH sigils a scope has; this says what they mean, and the two are read
+# together by _sigil_dollars -- so a sigil added to a binds dict shows up in
+# every legend that scope reaches, and one added without a word for it raises
+# here rather than going quietly undocumented.
+#
+# One phrase per sigil rather than one per box: `$i` is the root row's number
+# wherever it is written, and the boxes used to say that three different ways
+# ("its index", "the index", "the row number") for no reason but that they were
+# written at different times. A dict counts entries, since a root row that
+# splats occupies several rendered rows and only the entry number is the one
+# `$i` means.
+_SIGIL_LABELS = {
+    'i': {False: 'the row number', True: 'the entry number'},
+    'j': {False: 'its position in the group',
+          True: 'its position in the group'},
+    'k': {True: 'the key'},
+    'v': {True: 'the value'},
+}
+
+# The order sigils read in, which is not the order a binds dict happens to be
+# written in: the halves of a pair read together, then the positions.
+_SIGIL_ORDER = ('k', 'v', 'j', 'i')
+
+
+def _sigil_dollars(binds: 'dict | None') -> list:
+    """A Dollar per sigil the scope actually binds, in reading order.
+
+    Driven by *binds* -- the same dict threaded to the substitution -- rather
+    than by the order table, so the legend and the code can't disagree about
+    which sigils exist. `_SIGIL_ORDER` only sorts what is already there, and a
+    sigil it has never heard of sorts last and then fails the lookup below.
+
+    A sigil with no phrase for this container raises: better a crash in a test
+    than a box quietly promising less than it binds.
+    """
+    is_dict = _is_dict_binds(binds)
+    binds = binds or {}
+    order = lambda sigil: (_SIGIL_ORDER.index(sigil) if sigil in _SIGIL_ORDER
+                           else len(_SIGIL_ORDER))
+    return [Dollar(f'${sigil}', _SIGIL_LABELS[sigil][is_dict], binds[sigil])
+            for sigil in sorted(binds, key=order)]
+
 
 def _binds_for(value) -> dict:
     """The comprehension-scope binds for a container's rows."""
@@ -2762,6 +2816,32 @@ def _names_bare_dollar(col: str) -> bool:
         col, holders, bindings={s: f'_snc_sig{s}_' for s in SIGILS})
 
 
+def _row_scope(binds: 'dict | None' = None,
+               source_expr: 'str | None' = None,
+               item_expr: 'str | None' = None) -> DollarScope:
+    """The scope a ROW expression is written in: the main search box, a column's
+    code box, and every column expression the two of them produce.
+
+    The one declaration of that scope. `_column_dollars` is its levels and the
+    two boxes' tooltips are its prose, so a column that can name something the
+    box never mentioned -- or a box that mentions something no column can name
+    -- is not expressible.
+
+    A source that can't be named drops `$$` from both halves at once: the run is
+    left as written, which won't compile, and the box stops promising it.
+    """
+    is_dict = _is_dict_binds(binds)
+    if item_expr is None:
+        item_expr = _default_item_expr(binds)
+    return DollarScope(
+        Dollar('$', 'the (key, value) pair' if is_dict else 'the item from the list',
+               item_expr),
+        *_sigil_dollars(binds),
+        Dollar('$$', 'the whole dict' if is_dict else 'the whole list',
+               None if source_expr is None else _atomize(source_expr)),
+    )
+
+
 def _column_dollars(source_expr: 'str | None', item_expr: str = 'item') -> list:
     """What the dollars in a column expression stand for: the row, and -- when
     there is an expression for it -- the list the row came from.
@@ -2772,9 +2852,11 @@ def _column_dollars(source_expr: 'str | None', item_expr: str = 'item') -> list:
     as tightly as the `$$` it replaces. A source that can't be named leaves the
     run as written, which won't compile -- the same as a column that names a
     variable the program doesn't have.
+
+    The levels of _row_scope, taken off the same declaration the boxes read
+    their tooltips off.
     """
-    return ([item_expr] if source_expr is None
-            else [item_expr, _atomize(source_expr)])
+    return _row_scope(source_expr=source_expr, item_expr=item_expr).replace_exps
 
 
 def _column_item_expr(col: str, source_expr: 'str | None' = None,
@@ -3866,21 +3948,6 @@ COMPUTE_CODES = (
     ('Tally',  'Counter($)', 'tally'),
 )
 
-# What a box the user writes a row expression in says of itself, wherever it is
-# drawn. The main search box and a column's code box are asked the same thing of
-# the same scope -- one row of the list, and which row it is -- so they say it
-# the same way.
-#
-# The other two boxes speak scopes of their own: a column search is written
-# inside a column's value, one level in from here, and an aggregation is asked of
-# the whole column at once.
-ITEM_EXPR_TOOLTIP = '$ is the item from the list, $i its index, $$ the whole list'
-
-# What a box the user writes an aggregation in says of itself, wherever it is
-# drawn. The same thing the column search box says of its own, less `$$$`: an
-# aggregation is asked of the whole column, so there is no one item to name.
-COMPUTE_EXPR_TOOLTIP = '$ is this whole column, $$ the whole original list'
-
 # The second box on a splatted column's Compute rows. The first asks the whole
 # column; this one asks each group of it, and the answers sit inside the groups
 # rather than under the table.
@@ -3890,6 +3957,23 @@ COMPUTE_PER_GROUP_TOOLTIP = 'Answer once per group'
 # off the name beside them -- the number in Percentile's box is the percentile
 # -- but "Histogram 10" doesn't say what the 10 counts.
 HISTOGRAM_BINS_TOOLTIP = 'Bin Count'
+
+
+def _compute_scope(binds: 'dict | None' = None,
+                   column_expr: 'str | None' = None,
+                   source_expr: 'str | None' = None) -> DollarScope:
+    """The scope an AGGREGATION is written in: the Compute box, and the box that
+    labels the cell one of them makes.
+
+    No sigils, and `$$$` nowhere: an aggregation is handed the column's values
+    and the container they came out of (see _agg_eval, which binds exactly those
+    two), and nothing about one row, there being no one row to ask about.
+    """
+    return DollarScope(
+        Dollar('$', 'this whole column', column_expr),
+        Dollar('$$', 'the whole original dict' if _is_dict_binds(binds)
+               else 'the whole original list', source_expr),
+    )
 
 # A question this column can't answer -- an empty column, a mean of strings, a
 # box holding something that isn't a number. Its own object rather than None,
@@ -4215,8 +4299,10 @@ def _agg_eval(body: str, column_expr: str, values, lst, eval_in_scope=None):
     user's own program by a menu they only opened to look at.
     """
     try:
+        levels = _compute_scope(column_expr=column_expr,
+                                source_expr='_lst').replace_exps
         code = (f'lambda np, math, _v, _lst: '
-                f'{replace_dollars_in_py_exp(body, [column_expr, "_lst"])}')
+                f'{replace_dollars_in_py_exp(body, levels)}')
         agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
@@ -4254,9 +4340,12 @@ def _agg_code(template: str, column_expr: str, source_expr: str = None) -> str:
     the column header hands to a drag -- or, for a row aggregation, the column
     read off one row. _agg_column_expr is where that choice is made.
     """
-    replacements = ([column_expr] if source_expr is None
-                    else [column_expr, source_expr])
-    return replace_dollars_in_py_exp(_agg_fill(template), replacements)
+    # _compute_scope's levels, taken off the same declaration the Compute box
+    # reads its tooltip off -- and it truncates at a source it can't name, which
+    # is what "$$ is not bound here" has to look like on both sides.
+    levels = _compute_scope(column_expr=column_expr,
+                            source_expr=source_expr).replace_exps
+    return replace_dollars_in_py_exp(_agg_fill(template), levels)
 
 
 def _agg_column_expr(template: str, col: str, source_expr: str,
@@ -5992,6 +6081,25 @@ def _render_column_search_chip(dropdown_id, current, options, make_event,
     )
 
 
+def _column_search_scope(binds: 'dict | None' = None) -> DollarScope:
+    """The scope a COLUMN SEARCH is written in: one level in from the row, so
+    every run is one longer than the main search box's.
+
+    No expressions, because nothing substitutes here: `lift_column_predicate`
+    rewrites the text into the main box's scope rather than binding it, carrying
+    every sigil across untouched -- none of them names a scope, so the column
+    value and the row it was read off share one row number, one key and one
+    position. So the sigils are `_row_scope`'s, read at this depth.
+    """
+    is_dict = _is_dict_binds(binds)
+    return DollarScope(
+        Dollar('$', "this column's value"),
+        *(Dollar(d.token, d.label) for d in _sigil_dollars(binds)),
+        Dollar('$$', 'the (key, value) pair' if is_dict else 'the row'),
+        Dollar('$$$', 'the whole dict' if is_dict else 'the whole list'),
+    )
+
+
 def _render_column_search_row(col, model) -> str:
     """Render one column's search: [and|or] [comparison] (text).
 
@@ -6035,7 +6143,7 @@ def _render_column_search_row(col, model) -> str:
         f'value="{html.escape(row["text"])}" '
         f'{focus_attrs}'
         f'placeholder="Column Search" '
-        f'data-tooltip="$ is the item from the column, $i the index, $$ the original list item, $$$ the whole list" '
+        f'data-tooltip="{html.escape(_column_search_scope(_model_binds(model)).legend)}" '
         f'spellcheck="false" '
         f'class="col-search-input search-box" />'
         f'<span class="col-search-chips">{op_html}</span>'
@@ -6389,10 +6497,77 @@ def _render_column_group_by(col, model) -> str:
 
 
 # What the box at the foot of the Subcolumns submenu says its dollars mean.
-# `$$$` is left out for the same reason Compute's tooltip leaves it out: a
-# sub-column is read one row at a time, so the whole list has nothing to say
-# here.
-SUBCOL_EXPR_TOOLTIP = "$ is this column's value, $$ the row"
+#
+# Assembled rather than written out, because a sub-column's scope is a fact
+# about where its box sits and the box sits in four places. Two questions settle
+# it: whether the column the sub is being added TO spreads its value into rows,
+# and whether anything above it does.
+#
+# `$` is what the sub is written against -- one element under a splat, the
+# column's own value otherwise. `$$` is the scope THAT was written in: the row
+# for a top-level column (`_compose_sub` maps the parent's `$$` back to `$`),
+# and the value it was read off for a nested one. Under a splat neither holds --
+# `_column_dollars` puts the source expression beside the element, so `$$` is
+# the whole list and the row has no name here at all.
+#
+# `$j`, the element's place in its group, exists wherever a splat does, which
+# includes a plain sub-column read off a splatted element. `$$$` is left out
+# everywhere because nothing binds it: two scopes are threaded in, and a longer
+# run is left as written.
+#
+# A sub-column sees the row's whole binding map (see _leaf_cell_value), so a
+# dict's halves reach it the way they reach the main box, and its `$i` counts
+# entries for the same reason it does there.
+
+
+def _subcol_binds(col: str, binds: 'dict | None' = None) -> dict:
+    """The sigils a sub-column of *col* binds.
+
+    `Row.bindings` with a `j` added by `_expand_row` for every splat level, and
+    that is what `_leaf_cell_value` threads -- so a sub-column sees the
+    container's own sigils wherever it sits, plus the element's place in its
+    group wherever a splat is above it.
+    """
+    out = dict(binds or {})
+    if any(_split_splat(part)[0] for part in col.split(SUBCOL_SEP)):
+        out['j'] = 'j'
+    return out
+
+
+def _subcol_scope(col: str, binds: 'dict | None' = None) -> DollarScope:
+    """The scope a SUB-COLUMN of *col* is written in.
+
+    Read off the key's segments rather than off the config, so a splat nested
+    under a plain column -- whose composed key leads with the plain parent and
+    so has no star at the front to recognise it by -- is read as the splat it
+    is.
+
+    Also the scope the Column code box speaks while a sub-column is being
+    EDITED: that box holds the sub-column's own expression, written in the scope
+    its parent hands out, so the box it is edited in and the box it was written
+    in promise the same thing by construction.
+
+    Three shapes for `$$`, because a sub-column sits in four places. It is the
+    scope `$` itself was written in: the row for a top-level column, the value
+    it was read off for a nested one. Under a splat neither holds --
+    `_column_dollars` puts the source expression beside the element, so the row
+    has no name here at all.
+    """
+    path = col.split(SUBCOL_SEP)
+    is_splat = _split_splat(path[-1])[0]
+    is_dict = _is_dict_binds(binds)
+    if is_splat:
+        outer = 'the whole dict' if is_dict else 'the whole list'
+    elif len(path) == 1:
+        outer = 'the (key, value) pair' if is_dict else 'the row'
+    else:
+        outer = 'the value it was read off'
+    return DollarScope(
+        Dollar('$', 'one item of the column' if is_splat else "this column's value"),
+        *(Dollar(d.token, d.label)
+          for d in _sigil_dollars(_subcol_binds(col, binds))),
+        Dollar('$$', outer),
+    )
 
 
 def _render_column_subcols(col, model, lst, get_visualizer=None,
@@ -6481,7 +6656,7 @@ def _render_subcol_panel(col, model, lst, get_visualizer=None,
             f'snc-input="{html.escape(_subcol_expr_event(col, expr))}" '
             f'snc-focus-key="subcol-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(SubcolExprKeyDown()))}" '
-            f'data-tooltip="{html.escape(SUBCOL_EXPR_TOOLTIP)}" '
+            f'data-tooltip="{html.escape(_subcol_scope(col, _model_binds(model)).legend)}" '
             f'value="{html.escape(expr)}" placeholder="Add subcolumn" '
             f'spellcheck="false" />'
             f'</div>')
@@ -6653,7 +6828,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
             f'snc-input="{html.escape(_compute_expr_event(col, template))}" '
             f'snc-focus-key="compute-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
-            f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
+            f'data-tooltip="{html.escape(_compute_scope(_model_binds(model)).legend)}" '
             f'value="{html.escape(template)}" placeholder="Add aggregation" '
             f'spellcheck="false" />'
             f'<span class="col-compute-preview"'
@@ -6850,6 +7025,27 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     )
 
 
+def _column_input_tooltip(model) -> str:
+    """What the Column code box says its dollars mean, for the column in it.
+
+    A new column, or an existing top-level one, is written in row scope. A
+    SUB-column is not: the box holds that sub-column's own expression (see
+    ColumnClick, which strips the composed identity down to it), and that
+    expression was written in the scope its parent hands out -- where `$` is the
+    parent's value or one splatted element, and `$j` names a position the row
+    scope has no word for.
+
+    So an edit says exactly what the Subcolumns box that wrote the text says,
+    asked of the PARENT: the two boxes hold the same expression and must not
+    read as two different scopes.
+    """
+    binds = _model_binds(model)
+    editing = model.get('editing_column')
+    if editing and SUBCOL_SEP in editing:
+        return _subcol_scope(editing.rsplit(SUBCOL_SEP, 1)[0], binds).legend
+    return _row_scope(binds, model.get('_source_expr')).legend
+
+
 def _column_input_html(lst, model, get_visualizer, is_editing):
     """The box a column is written in, with whatever it can suggest."""
     input_value = model.get('column_input_value', '')
@@ -6891,7 +7087,7 @@ def _column_input_html(lst, model, get_visualizer, is_editing):
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="Column code" '
-        f'data-tooltip="{html.escape(ITEM_EXPR_TOOLTIP)}" '
+        f'data-tooltip="{html.escape(_column_input_tooltip(model))}" '
         f'spellcheck="false"'
         f'{extra_attrs} '
         f'class="col-input" />'
@@ -7098,12 +7294,19 @@ def _render_search_box_input(model, eval_in_scope=None):
         f' snc-input="{html.escape(search_input_event)}"'
         f' value="{html.escape(search_value)}"'
         f' placeholder="Search"'
-        f' data-tooltip="{html.escape(ITEM_EXPR_TOOLTIP)}"'
+        f' data-tooltip="{html.escape(_row_scope(_model_binds(model), model.get("_source_expr")).legend)}"'
         f' spellcheck="false"'
         f' class="search-box" />'
         f'{toggles_html}'
         f'</div>'
     )
+
+
+# What the Join menu's own box says of itself. The one box in the action bar,
+# and it sits a few pixels from a search box that DOES speak dollars -- so it
+# says that it doesn't, which is the only place in the visualizer worth saying
+# that. Whatever is typed here goes into `sep.join(...)` as written.
+JOIN_SEP_TOOLTIP = 'The separator, as a Python expression (no $ here)'
 
 
 def _render_action_buttons(model, lst, eval_in_scope=None):
@@ -7303,6 +7506,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'<input type="text" snc-input="{html.escape(custom_input_event)}" '
         f'value="{html.escape(custom_sep)}" '
         f'placeholder="expr" '
+        f'data-tooltip="{html.escape(JOIN_SEP_TOOLTIP)}" '
         f'spellcheck="false" '
         f'class="snc-dropdown-input join-sep-input" />'
         f'</div>'
@@ -7692,7 +7896,8 @@ def _render_agg_answer(template, answer, key, code, model, get_visualizer,
     return f'{wrap_child_prefix(key)}{drawn}{wrap_child_suffix}'
 
 
-def _agg_label_html(expr: str, col: str, level: int) -> str:
+def _agg_label_html(expr: str, col: str, level: int,
+                    binds: 'dict | None' = None) -> str:
     """What names a cell: the catalog's word for the aggregation, or a box
     holding the expression when the aggregation is the user's own.
 
@@ -7705,6 +7910,9 @@ def _agg_label_html(expr: str, col: str, level: int) -> str:
     They name themselves by where they sit rather than by what they say, so that
     typing in one -- which rewrites what it says -- doesn't cost it the focus it
     is being typed into.
+
+    *binds* is what the submenu's box is asked for too: this box is that box
+    under another name, so the scope it says it speaks has to be the same one.
     """
     # The cell around them is a drag handle, and a drag beginning inside a box
     # would take the selection the user was making with it.
@@ -7714,7 +7922,7 @@ def _agg_label_html(expr: str, col: str, level: int) -> str:
                 f'snc-input="{html.escape(_compute_expr_event(col, expr))}" '
                 f'snc-focus-key="agg-expr-{col}-{level}" '
                 f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
-                f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}" '
+                f'data-tooltip="{html.escape(_compute_scope(binds).legend)}" '
                 f'value="{html.escape(expr)}" size="{max(len(expr), 4)}" '
                 f'draggable="false" spellcheck="false" />')
     holes = ''.join(
@@ -7764,7 +7972,7 @@ def _render_agg_cell(expr, col, level, values, model, get_visualizer,
     return (
         f'<td class="col-agg-cell snc-hover-hidden-parent">'
         f'<div class="col-agg"{py_exp_attrs(PyExp(code, _agg_imports(expr)))}>'
-        f'{_agg_label_html(expr, col, level)}'
+        f'{_agg_label_html(expr, col, level, _model_binds(model))}'
         f'{_agg_remove_x_html(expr, col)}'
         f'<div class="col-agg-value">'
         f'{_render_agg_answer(expr, answer, key, code, model, get_visualizer, eval_in_scope, max_width)}'
@@ -7909,7 +8117,7 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
         code = (None if value is NO_ANSWER or item_code is None
                 else _agg_child_expr(key, source_expr, binds, columns))
         label = ('<div class="col-agg-label"></div>' if cj != ci else
-                 f'{_agg_label_html(expr, asking, level)}'
+                 f'{_agg_label_html(expr, asking, level, binds)}'
                  f'{_agg_remove_x_html(expr, asking)}')
         side_value_class = ' not-agg-col' if cj != ci else ''
         cells.append(
@@ -8327,7 +8535,20 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # puts its own. Nothing marks the container: the pane's ceiling is written
     # inline above, and a class here would reach the cells' panes too.
     if can_expand:
+        # The count is a handle of its own: the number on screen and len() of
+        # the source are the same reading, so hovering it offers the code. It
+        # renders bare where there is no access path -- the number still says
+        # how much is being clipped.
+        len_exp = f'len({source_expr})' if source_expr else None
+        len_n = len(lst)
+        strs.append(f'<div class="expand-and-len">')
         strs.append(render_expand_toggle(expanded, repr(ExpandToggle()), small=small))
+        strs.append(f'<div class="tiny-len"{py_exp_attrs(len_exp)}>{len_n} ')
+        if model['_is_dict']:
+            strs.append('entries' if len != 1 else 'entry')
+        else:
+            strs.append('items' if len != 1 else 'item')
+        strs.append(f'</div></div>')
 
     if not small:
         strs.append(_render_search_box(model, lst, eval_in_scope, small=False))

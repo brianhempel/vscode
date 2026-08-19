@@ -225,26 +225,42 @@
    container that also holds children -- a table's cells -- doesn't hand their
    panes a state that isn't theirs. */
 
-.expand-toggle {
+.expand-and-len {
 	display: flex;
-	align-items: center;
-	justify-content: center;
-	height: 8px;
-	cursor: pointer;
-	user-select: none;
-	color: var(--snc-text-color);
+	height: 10px;
+	line-height: 10px;
 	border-top: 1px solid var(--snc-border-color);
-	line-height: 8px;
 	/* avoid a thin sliver of scrolling table content showing up at certain zoom levels. because we have negative margin on the table scroller to hide the bottom table borders */
 	background-color: var(--snc-bg);
 	z-index: 1;
+	user-select: none;
+	color: var(--snc-text-dimmed);
 	&:last-child {
 		/* make bg not cut off the corners of the visualizer */
 		border-radius: 0 0 4px 4px;
 	}
 }
 
-.expand-toggle:hover {
+.expand-toggle {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 10px;
+	cursor: pointer;
+	line-height: 10px;
+	flex-grow: 1;
+}
+
+.tiny-len {
+	font-size: 8px;
+	padding: 0 10px;
+	border-left: 1px solid var(--snc-border-color);
+	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
+}
+
+.expand-toggle:hover,
+.tiny-len:hover {
 	background: var(--snc-hover-bg);
 	color: black;
 }
@@ -1484,6 +1500,7 @@
 
 .list-visualizer .empty-list {
 	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
 	font-size: var(--snc-menu-font-size);
 	text-align: center;
 	border: none;
@@ -1569,6 +1586,7 @@
 	color: var(--snc-text-muted);
 	white-space: nowrap;
 	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
 	font-size: 8px;
 	line-height: 1;
 	padding: 2px 0 0;

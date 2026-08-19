@@ -6,6 +6,7 @@ Run:
 """
 
 import ast
+import copy
 import json
 import math
 import unittest
@@ -12902,9 +12903,9 @@ class TestComputeItemRowRendering(unittest.TestCase):
 
 
 from table_visualizer import (
-    COMPUTE_CODES, COMPUTE_EXPR_TOOLTIP, TALLY_IMPORTS,
+    COMPUTE_CODES, TALLY_IMPORTS,
     ComputeCodeClick, ComputeExprInput, ComputeExprKeyDown,
-    _agg_is_free, _compute_free_rows,
+    _agg_is_free, _compute_free_rows, _compute_scope,
 )
 
 
@@ -13188,7 +13189,7 @@ class TestFreeAggregationRendering(ComputePanelCase):
     def test_the_box_says_what_the_dollars_mean(self):
         # The same thing the column search box says of its own.
         lst, model = tally_model(COMPUTE_LIST)
-        self.assertIn(f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}"',
+        self.assertIn(f'data-tooltip="{html.escape(_compute_scope().legend)}"',
                       self.panel(model, lst))
 
     def free_rows(self, panel):
@@ -13274,7 +13275,7 @@ class TestFreeAggregationCell(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)[2]'])
         cell = self.cells(self.rows(model, lst)[0])[0]
-        self.assertIn(f'data-tooltip="{html.escape(COMPUTE_EXPR_TOOLTIP)}"',
+        self.assertIn(f'data-tooltip="{html.escape(_compute_scope().legend)}"',
                       cell)
 
 
@@ -15370,6 +15371,61 @@ class TestExpandToggle(unittest.TestCase):
         self.assertIn('expand-toggle', self.table(lst, model))
 
 
+def _tiny_len(output: str) -> str:
+    """The length readout on the expand bar, tag and all."""
+    match = re.search(r'<div class="tiny-len".*?</div>', output)
+    return match[0] if match else ''
+
+
+class TestTinyLen(unittest.TestCase):
+    """How many items the list has, at the right end of the expand bar."""
+
+    TALL = list(range(30))
+    SHORT = [1, 2, 3]
+
+    def table(self, lst, model=None, **kwargs):
+        if model is None:
+            model = init_model(lst, mock_get_visualizer)
+        return visualize(lst, model, mock_get_visualizer, None, **kwargs)
+
+    def test_the_bar_says_how_many_items_there_are(self):
+        self.assertIn('30 items', _tiny_len(self.table(self.TALL)))
+
+    def test_a_table_that_fits_has_no_bar_to_count_on(self):
+        self.assertEqual('', _tiny_len(self.table(self.SHORT)))
+
+    def test_the_count_hands_over_the_len_of_the_source(self):
+        output = self.table(self.TALL, var_and_exp=('xs', 'xs'))
+        self.assertEqual(exps_in(_tiny_len(output)), [['len(xs)']])
+
+    def test_the_count_is_draggable_like_any_other_handle(self):
+        output = self.table(self.TALL, var_and_exp=('xs', 'xs'))
+        self.assertIn('draggable="true"', _tiny_len(output))
+
+    def test_the_count_offers_nothing_without_a_source_expression(self):
+        # Still shown -- the number is worth having even where there is no
+        # access path to hand the editor.
+        output = self.table(self.TALL)
+        self.assertIn('30 items', _tiny_len(output))
+        self.assertNotIn('snc-py-exps', _tiny_len(output))
+
+    def test_a_dict_counts_its_pairs_off_the_dict(self):
+        d = {str(i): i for i in range(30)}
+        output = self.table(d, var_and_exp=('d', 'd'))
+        self.assertIn('30 items', _tiny_len(output))
+        self.assertEqual(exps_in(_tiny_len(output)), [['len(d)']])
+
+    def test_the_count_sits_after_the_toggle_it_shares_the_bar_with(self):
+        output = self.table(self.TALL)
+        self.assertIn('class="expand-and-len"', output)
+        self.assertLess(output.index('expand-toggle'), output.index('tiny-len'))
+
+    def test_the_preview_counts_too(self):
+        output = self.table(self.TALL, var_and_exp=('xs', 'xs'), small=True)
+        self.assertIn('30 items', _tiny_len(output))
+        self.assertEqual(exps_in(_tiny_len(output)), [['len(xs)']])
+
+
 # === snc-py-exps under dicts, sub-columns, splats and grouping ================
 
 from table_visualizer import (
@@ -16859,6 +16915,533 @@ class TestEveryExpressionTheTableHandsOver(unittest.TestCase):
             with self.subTest(shape=label):
                 self.assertNotIn(SUBCOL_SEP, out)
                 self.assertNotIn(AGG_KEY_SEP, out)
+
+
+# === What each box says its dollars mean =====================================
+#
+# Every box the user writes Python into binds the dollars to a scope of its own,
+# and the legend on it is the only place that scope is written down. So the
+# legend is asked of the same thing the box is: what a dict binds is not what a
+# list binds, and what a sub-column of a splat binds is not what a sub-column of
+# a plain column binds.
+
+from table_visualizer import (
+    JOIN_SEP_TOOLTIP, _leaf_cell_expr, _leaf_cell_value, _leaf_values,
+    _column_search_scope, _row_scope, _sigil_dollars, _subcol_binds,
+    _subcol_scope, _SIGIL_LABELS, _DICT_BINDS, _LIST_BINDS,
+    _binds_for, _column_dollars, _is_dict_binds, _agg_code,
+)
+
+
+def box_tooltip(html_str, needle):
+    """The data-tooltip on the box whose tag holds *needle*."""
+    for tag in re.findall(r'<input[^>]*>', html_str):
+        if needle in tag:
+            tip = re.search(r'data-tooltip="([^"]*)"', tag)
+            return html.unescape(tip.group(1)) if tip else None
+    raise AssertionError(f'no box holding {needle!r}')
+
+
+class DollarLegendCase(unittest.TestCase):
+    """A table over a list and the same table over a dict, rendered far enough
+    for the boxes to be on screen."""
+
+    LIST = [{'n': 1}, {'n': 2}]
+    DICT = {'a': 1, 'b': 2}
+
+    def render(self, value, *, menu=False, submenu=None, adding=False):
+        name = 'd' if isinstance(value, dict) else 'data'
+        model = init_model(value, mock_get_visualizer, var_and_exp=(name, name))
+        model['_source_expr'] = name
+        if menu or submenu:
+            model['openDropdown'] = {'id': menu_id(model)}
+        if submenu:
+            model['col_search_dropdown'] = menu_id(model, submenu)
+        if adding:
+            model['adding_column'] = True
+        return visualize(value, model, mock_get_visualizer,
+                         lambda c: eval(c, {name: value}),
+                         var_and_exp=(name, name))
+
+
+class TestRowScopeLegend(DollarLegendCase):
+    """The main search box and the Column code box are asked the same thing of
+    the same scope -- one row, and which row it is -- so they say it the same
+    way. A dict's row is the pair its .items() gives, and the halves have names
+    of their own."""
+
+    def test_a_list_says_what_it_always_said(self):
+        self.assertEqual(box_tooltip(self.render(self.LIST), 'placeholder="Search"'),
+                         _row_scope(_LIST_BINDS, 'data').legend)
+
+    def test_a_dict_says_the_row_is_a_pair(self):
+        self.assertEqual(box_tooltip(self.render(self.DICT), 'placeholder="Search"'),
+                         _row_scope(_DICT_BINDS, 'd').legend)
+
+    def test_a_dict_names_the_key_and_the_value(self):
+        # The two tokens a user reaching into a dict actually wants, and the two
+        # the list wording has no room for.
+        legend = box_tooltip(self.render(self.DICT), 'placeholder="Search"')
+        self.assertIn('$k', legend)
+        self.assertIn('$v', legend)
+
+    def test_the_column_code_box_speaks_the_same_scope(self):
+        for value, expected in ((self.LIST, _row_scope(_LIST_BINDS, 'data').legend),
+                                (self.DICT, _row_scope(_DICT_BINDS, 'd').legend)):
+            with self.subTest(dict=isinstance(value, dict)):
+                out = self.render(value, adding=True)
+                self.assertEqual(box_tooltip(out, 'placeholder="Column code"'),
+                                 expected)
+
+    def test_a_dict_counts_entries_rather_than_rows(self):
+        # One entry occupies as many rendered rows as its splat spreads it
+        # into, so "row number" would name something `$i` isn't.
+        for legend in (_row_scope(_DICT_BINDS).legend, _column_search_scope(_DICT_BINDS).legend):
+            with self.subTest(legend=legend):
+                self.assertIn('$i the entry number', legend)
+                self.assertNotIn('row number', legend)
+
+
+class TestEditingAColumnLegend(unittest.TestCase):
+    """Double-clicking a header opens the Column code box on that column. A
+    top-level column is written in row scope; a SUB-column is written in the
+    scope its parent hands out, which is what its own Subcolumns box promises.
+    """
+
+    DATA = [{'pets': [{'kind': 'cat'}, {'kind': 'dog'}]}]
+    COLS = {'*$["pets"]': {'cols': {'$["kind"]': {}}}}
+    SPLAT = '*$["pets"]'
+    SUB = '*$["pets"]' + SUBCOL_SEP + '$["kind"]'
+
+    def editing(self, target, value=None, columns=None):
+        value = self.DATA if value is None else value
+        name = 'd' if isinstance(value, dict) else 'data'
+        ev = lambda c: eval(c, {name: value})
+        model = init_model(value, mock_get_visualizer, var_and_exp=(name, name))
+        model['columns'] = self.COLS if columns is None else columns
+        model['_source_expr'] = name
+        model['editing_column'] = target
+        model['column_input_value'] = (
+            target.split(SUBCOL_SEP, 1)[1] if SUBCOL_SEP in target else target)
+        out = visualize(value, model, mock_get_visualizer, ev,
+                        var_and_exp=(name, name))
+        return box_tooltip(out, 'col-input')
+
+    def test_a_top_level_column_keeps_the_row_legend(self):
+        self.assertEqual(self.editing(self.SPLAT),
+                         _row_scope(_LIST_BINDS, 'data').legend)
+
+    def test_a_sub_column_speaks_its_parents_scope(self):
+        # `$["kind"]` is written against one element of the splat, which is
+        # exactly what the splat's own Subcolumns box promises.
+        self.assertEqual(self.editing(self.SUB),
+                         _subcol_scope(self.SPLAT, _LIST_BINDS).legend)
+
+    def test_editing_a_sub_column_names_the_group_position(self):
+        # The box the sub-column was WRITTEN in lists `$j`; the box it is EDITED
+        # in has to list it too, or the same text reads as two different scopes.
+        self.assertIn('$j', self.editing(self.SUB))
+
+    def test_a_nested_plain_sub_column_speaks_its_parents_scope_too(self):
+        columns = {'$["a"]': {'cols': {'$[0]': {}}}}
+        legend = self.editing('$["a"]' + SUBCOL_SEP + '$[0]',
+                              value=[{'a': 'xy'}], columns=columns)
+        self.assertEqual(legend, _subcol_scope('$["a"]', _LIST_BINDS).legend)
+        self.assertNotIn('$j', legend)
+
+
+class TestColumnSearchLegend(DollarLegendCase):
+    """A column search is written one level in from the row: $ is the column's
+    value, so every other run is one deeper than the main box's."""
+
+    def test_a_list_says_what_it_always_said(self):
+        out = self.render(self.LIST, menu=True)
+        self.assertEqual(box_tooltip(out, 'col-search-input'),
+                         _column_search_scope(_LIST_BINDS).legend)
+
+    def test_a_dict_names_the_key_and_the_value_here_too(self):
+        out = self.render(self.DICT, menu=True)
+        self.assertEqual(box_tooltip(out, 'col-search-input'),
+                         _column_search_scope(_DICT_BINDS).legend)
+        self.assertIn('$k', _column_search_scope(_DICT_BINDS).legend)
+        self.assertIn('$v', _column_search_scope(_DICT_BINDS).legend)
+
+    def test_the_dict_legend_does_not_call_the_row_a_list_item(self):
+        # $$ is the pair for a dict, not "the original list item".
+        self.assertNotIn('list item', _column_search_scope(_DICT_BINDS).legend)
+
+
+class TestAggregationLegend(DollarLegendCase):
+    """An aggregation is asked of the whole column at once, so there is no one
+    item to name -- only what the column came out of."""
+
+    def test_a_list_says_what_it_always_said(self):
+        out = self.render(self.LIST, submenu='compute')
+        self.assertEqual(box_tooltip(out, 'placeholder="Add aggregation"'),
+                         _compute_scope(_LIST_BINDS).legend)
+
+    def test_a_dict_names_a_dict(self):
+        out = self.render(self.DICT, submenu='compute')
+        self.assertEqual(box_tooltip(out, 'placeholder="Add aggregation"'),
+                         _compute_scope(_DICT_BINDS).legend)
+
+    def test_the_cell_label_says_the_same_thing_the_menu_did(self):
+        # The box that labels a free-form aggregation's cell is the same box
+        # under another name, so it cannot say a different scope.
+        name = 'd'
+        model = init_model(self.DICT, mock_get_visualizer, var_and_exp=(name, name))
+        model['_source_expr'] = name
+        _set_column_computes(model, col_at(model), ['sorted($)[0]'])
+        out = visualize(self.DICT, model, mock_get_visualizer,
+                        lambda c: eval(c, {name: self.DICT}),
+                        var_and_exp=(name, name))
+        self.assertEqual(box_tooltip(out, 'col-agg-expr'),
+                         _compute_scope(_DICT_BINDS).legend)
+
+
+class TestSubcolLegend(SubcolPanelCase):
+    """A sub-column's scope is a fact about where its box sits, and the box sits
+    in four places. Each is checked against what the leaf under it actually
+    resolves to -- see TestSubcolLegendMatchesTheCells below."""
+
+    ORGS = [{'name': 'acme', 'pets': [{'kind': 'cat'}, {'kind': 'dog'}]},
+            {'name': 'globex', 'pets': [{'kind': 'fish'}]}]
+    SPLAT = '*$["pets"]'
+    UNDER_SPLAT = '*$["pets"]' + SUBCOL_SEP + '$["kind"]'
+
+    def test_the_box_carries_the_legend_for_where_it_sits(self):
+        panel = self.panel(self.model())
+        self.assertEqual(box_tooltip(panel, 'placeholder="Add subcolumn"'),
+                         _subcol_scope(self.SPLIT, _LIST_BINDS).legend)
+
+    def test_a_top_level_plain_column_calls_the_outer_run_the_row(self):
+        legend = _subcol_scope(self.SPLIT, _LIST_BINDS).legend
+        self.assertEqual(legend,
+                         "$ is this column's value, $i the row number, "
+                         '$$ the row')
+
+    def test_a_splat_calls_the_outer_run_the_whole_list(self):
+        # It resolves to the source expression, not to the row -- the defect
+        # this legend had.
+        legend = _subcol_scope(self.SPLAT, _LIST_BINDS).legend
+        self.assertEqual(legend,
+                         '$ is item of the column, $j its position in the group, '
+                         '$i the row number, $$ the whole list')
+        self.assertNotIn('$$ the row', legend)
+
+    def test_a_sub_of_a_sub_names_what_it_was_read_off(self):
+        # Neither the row nor the whole list: `_compose_sub` binds the outer run
+        # to whatever the parent column reads.
+        legend = _subcol_scope("$['a']" + SUBCOL_SEP + '$[0]', _LIST_BINDS).legend
+        self.assertEqual(legend,
+                         "$ is this column's value, $i the row number, "
+                         '$$ the value it was read off')
+
+    def test_a_plain_sub_under_a_splat_still_names_the_group_position(self):
+        # $j is bound wherever a splat is above, not only where the box sits on
+        # the splat itself.
+        legend = _subcol_scope(self.UNDER_SPLAT, _LIST_BINDS).legend
+        self.assertEqual(legend,
+                         "$ is this column's value, $j its position in the "
+                         'group, $i the row number, $$ the value it was read '
+                         'off')
+
+    def test_nothing_without_a_splat_above_it_names_a_group_position(self):
+        for col in (self.SPLIT, "$['a']" + SUBCOL_SEP + '$[0]'):
+            with self.subTest(col=col):
+                self.assertNotIn('$j', _subcol_scope(col, _LIST_BINDS).legend)
+
+    def test_a_splat_nested_under_a_plain_column_reads_as_a_splat(self):
+        # Its composed key leads with the plain parent, so there is no star at
+        # the front to recognise it by.
+        legend = _subcol_scope("$['pets']" + SUBCOL_SEP + '*$', _LIST_BINDS).legend
+        self.assertIn('$ is one item of the column', legend)
+        self.assertIn('$$ the whole list', legend)
+
+    def test_nothing_promises_the_run_no_box_here_binds(self):
+        for col in (self.SPLIT, self.SPLAT, self.UNDER_SPLAT,
+                    "$['a']" + SUBCOL_SEP + '$[0]'):
+            with self.subTest(col=col):
+                self.assertNotIn('$$$', _subcol_scope(col, _LIST_BINDS).legend)
+
+    def test_a_dicts_sub_column_names_the_key_and_the_value(self):
+        # A row's bindings reach a sub-column, so a dict's halves are as
+        # available here as they are in the main box.
+        legend = _subcol_scope('*$v', _DICT_BINDS).legend
+        self.assertIn('$k the key', legend)
+        self.assertIn('$v the value', legend)
+
+    def test_a_dicts_sub_column_counts_entries_rather_than_rows(self):
+        legend = _subcol_scope('*$v', _DICT_BINDS).legend
+        self.assertIn('$i the entry number', legend)
+        self.assertNotIn('row number', legend)
+
+    def test_a_dicts_outer_run_is_named_as_a_dict(self):
+        self.assertIn('$$ the whole dict', _subcol_scope('*$v', _DICT_BINDS).legend)
+        self.assertIn('$$ the (key, value) pair',
+                      _subcol_scope('$v', _DICT_BINDS).legend)
+
+    def test_a_list_says_none_of_that(self):
+        for col in (self.SPLAT, self.SPLIT):
+            with self.subTest(col=col):
+                legend = _subcol_scope(col, _LIST_BINDS).legend
+                self.assertNotIn('$k', legend)
+                self.assertNotIn('$v', legend)
+                self.assertIn('$i the row number', legend)
+
+
+class TestSubcolLegendMatchesTheCells(unittest.TestCase):
+    """The legend against the leaves themselves: what a box promises has to be
+    what a sub-column written into it resolves to."""
+
+    DATA = [{'name': 'ab', 'pets': [{'kind': 'cat'}, {'kind': 'dog'}]},
+            {'name': 'c', 'pets': [{'kind': 'fish'}]}]
+
+    def scope(self, code):
+        return eval(code, {'data': self.DATA})
+
+    def outer_run(self, columns, target):
+        """What `$$` written into the box under *target* comes back as."""
+        cols = copy.deepcopy(columns)
+        _subs_at(cols, target, create=True)['$$'] = {}
+        leaf = [l for l in _leaf_columns(cols) if l.expr.endswith('$$')][0]
+        row = _rows(self.DATA, cols)[-1]
+        return _leaf_cell_value(leaf, row, self.DATA, 'data', self.scope)
+
+    def test_the_row_it_promises_is_the_row(self):
+        target = '$["name"]'
+        self.assertIn('$$ the row', _subcol_scope(target, _LIST_BINDS).legend)
+        self.assertEqual(self.outer_run({target: {}}, target), self.DATA[-1])
+
+    def test_the_whole_list_it_promises_is_the_whole_list(self):
+        target = '*$["pets"]'
+        self.assertIn('$$ the whole list', _subcol_scope(target, _LIST_BINDS).legend)
+        self.assertEqual(self.outer_run({target: {}}, target), self.DATA)
+
+    def test_what_it_was_read_off_is_what_it_was_read_off(self):
+        columns = {'*$["pets"]': {'cols': {'$["kind"]': {}}}}
+        target = '*$["pets"]' + SUBCOL_SEP + '$["kind"]'
+        self.assertIn('$$ the value it was read off',
+                      _subcol_scope(target, _LIST_BINDS).legend)
+        # The last rendered row is globex's only pet.
+        self.assertEqual(self.outer_run(columns, target), {'kind': 'fish'})
+
+
+class TestDictSubcolLegendMatchesTheCells(unittest.TestCase):
+    """The same, for the shape Group By produces: a dict of lists, splatted.
+    Every token the legend names has to come back with a value."""
+
+    GROUPS = {'eng': [{'who': 'ann'}, {'who': 'bo'}], 'mkt': [{'who': 'cy'}]}
+    COLS = {'$k': {}, '*$v': {'cols': {'$["who"]': {}}}}
+
+    def cell(self, sub):
+        cols = copy.deepcopy(self.COLS)
+        _subs_at(cols, '*$v', create=True)[sub] = {}
+        leaf = [l for l in _leaf_columns(cols) if l.expr.endswith(sub)][0]
+        row = _rows(self.GROUPS, cols)[-1]
+        return _leaf_cell_value(leaf, row, self.GROUPS, 'd',
+                                lambda c: eval(c, {'d': self.GROUPS}))
+
+    def test_every_token_the_legend_names_binds(self):
+        legend = _subcol_scope('*$v', _DICT_BINDS).legend
+        # The last rendered row is 'mkt', entry 1, position 0 in its group.
+        for token, expected in (('$k', 'mkt'), ('$v', [{'who': 'cy'}]),
+                                ('$i', 1), ('$j', 0),
+                                ('$$', self.GROUPS)):
+            with self.subTest(token=token):
+                self.assertIn(token, legend)
+                self.assertEqual(self.cell(token), expected)
+
+    def test_the_entry_number_is_not_the_rendered_row_number(self):
+        # 'eng' spreads into two rendered rows and both report entry 0, which
+        # is why the dict legend says entry rather than row.
+        rows = _rows(self.GROUPS, self.COLS)
+        self.assertEqual([r.key for r in rows], ['0.0', '0.1', '1.0'])
+        self.assertEqual([r.bindings['i'] for r in rows], [0, 0, 1])
+
+
+class TestJoinSeparatorLegend(DollarLegendCase):
+    """The one box in the action bar, sitting beside a search box that does take
+    dollars -- so it says that it doesn't."""
+
+    def test_the_box_says_it_is_an_ordinary_expression(self):
+        self.assertEqual(box_tooltip(self.render(self.LIST), 'join-sep-input'),
+                         JOIN_SEP_TOOLTIP)
+
+
+class TestSplatSubcolBindings(unittest.TestCase):
+    """What a splat's sub-column binds, asked of the cell and of the code the
+    same cell hands over. They have to agree: a legend that advertises $i is
+    advertising both."""
+
+    ORGS = [{'name': 'acme', 'pets': [{'kind': 'cat'}, {'kind': 'dog'}]},
+            {'name': 'globex', 'pets': [{'kind': 'fish'}]}]
+
+    def leaf_and_rows(self, sub):
+        cols = {'*$["pets"]': {'cols': {sub: {}}}}
+        return _leaf_columns(cols)[0], _rows(self.ORGS, cols), cols
+
+    def scope(self, code):
+        return eval(code, {'data': self.ORGS})
+
+    def test_the_row_number_reaches_the_cell(self):
+        leaf, rows, _ = self.leaf_and_rows('$i')
+        got = [_leaf_cell_value(leaf, row, self.ORGS, 'data', self.scope)
+               for row in rows]
+        self.assertEqual(got, [0, 0, 1])
+
+    def test_the_cell_and_the_code_it_drags_agree_about_the_row_number(self):
+        leaf, rows, _ = self.leaf_and_rows('$i')
+        for row in rows:
+            with self.subTest(row=row.key):
+                self.assertEqual(
+                    _leaf_cell_value(leaf, row, self.ORGS, 'data', self.scope),
+                    self.scope(_leaf_cell_expr(leaf, 'data', row, self.ORGS)))
+
+    def test_the_position_in_the_group_reaches_the_cell(self):
+        leaf, rows, _ = self.leaf_and_rows('$j')
+        got = [_leaf_cell_value(leaf, row, self.ORGS, 'data', self.scope)
+               for row in rows]
+        self.assertEqual(got, [0, 1, 0])
+
+    def test_a_whole_column_of_positions_keeps_every_row(self):
+        # _leaf_values is what an aggregation over the column is asked of, so a
+        # binding it drops is a column that silently loses rows.
+        leaf, _rws, cols = self.leaf_and_rows('$j')
+        model = init_model(self.ORGS, mock_get_visualizer,
+                           var_and_exp=('data', 'data'))
+        model['columns'] = cols
+        self.assertEqual(_leaf_values(leaf, self.ORGS, model, self.scope),
+                         [0, 1, 0])
+
+
+class TestLegendsFollowTheBinds(unittest.TestCase):
+    """The sync itself. A box's legend is generated from the binds dict its
+    scope was handed, so the two cannot describe different sets of tokens --
+    these are the tests that would fail if someone went back to writing the
+    prose out by hand."""
+
+    def test_the_sigils_named_are_exactly_the_sigils_bound(self):
+        for binds in (_LIST_BINDS, _DICT_BINDS):
+            with self.subTest(dict=_is_dict_binds(binds)):
+                self.assertEqual({d.token for d in _sigil_dollars(binds)},
+                                 {f'${s}' for s in binds})
+
+    def test_a_sigil_added_to_a_container_reaches_every_legend(self):
+        # The property that matters: declaring a sigil in the binds seam is all
+        # it takes for the boxes to start teaching it.
+        binds = {**_LIST_BINDS, 'j': 'j'}
+        for scope in (_row_scope(binds), _column_search_scope(binds),
+                      _subcol_scope('$', binds), _subcol_scope('*$', binds)):
+            with self.subTest(scope=scope.legend):
+                self.assertIn('$j', scope.legend)
+
+    def test_a_sigil_with_no_words_for_it_refuses_to_go_undocumented(self):
+        # Better a crash here than a box quietly promising less than it binds.
+        with self.assertRaises(KeyError):
+            _sigil_dollars({**_LIST_BINDS, 'q': 'q'})
+
+    def test_a_sigil_taken_away_leaves_every_legend(self):
+        for scope in (_row_scope({}), _column_search_scope({}),
+                      _subcol_scope('$', {})):
+            with self.subTest(scope=scope.legend):
+                self.assertNotIn('$i', scope.legend)
+
+    def test_the_levels_a_column_substitutes_are_the_levels_the_box_names(self):
+        # _column_dollars IS _row_scope's levels, so the expression a column
+        # compiles to and the tooltip over the box it was typed into come off
+        # one declaration.
+        scope = _row_scope(_LIST_BINDS, source_expr='data')
+        self.assertEqual(scope.replace_exps, _column_dollars('data'))
+        self.assertEqual(scope.tokens, ('$', '$i', '$$'))
+
+    def test_the_levels_an_aggregation_substitutes_are_the_ones_it_names(self):
+        # _agg_code and _agg_eval both take their levels off _compute_scope, so
+        # the Compute box's tooltip and the code its rows write agree by
+        # construction.
+        scope = _compute_scope(_LIST_BINDS, 'COLVALS', 'data')
+        self.assertEqual(scope.replace_exps, ['COLVALS', 'data'])
+        self.assertEqual(_agg_code('sum($) / len($$)', 'COLVALS', 'data'),
+                         'sum(COLVALS) / len(data)')
+
+    def test_an_aggregation_with_no_source_promises_no_outer_run(self):
+        scope = _compute_scope(_LIST_BINDS, 'COLVALS', None)
+        self.assertEqual(scope.replace_exps, ['COLVALS'])
+        self.assertNotIn('$$', scope.legend)
+        # And the substitution leaves it as written, which is what the box
+        # declining to mention it means.
+        self.assertEqual(_agg_code('len($$)', 'COLVALS', None), 'len($$)')
+
+    def test_a_list_with_no_source_promises_no_outer_run(self):
+        # `$$` is left as written when there is nothing to name the list by, so
+        # the box stops offering it -- both halves at once.
+        scope = _row_scope(_LIST_BINDS, source_expr=None)
+        self.assertEqual(scope.replace_exps, _column_dollars(None))
+        self.assertNotIn('$$', scope.legend)
+
+    def test_a_sub_column_binds_the_group_position_exactly_where_a_splat_is(self):
+        # _subcol_binds is what _leaf_cell_value threads, and the legend is
+        # built from it -- one answer, not two.
+        for col, wants_j in (('$', False), ('*$', True),
+                             ('*$v' + SUBCOL_SEP + '$.x', True),
+                             ('$a' + SUBCOL_SEP + '$.x', False)):
+            with self.subTest(col=col):
+                self.assertEqual('j' in _subcol_binds(col, _LIST_BINDS), wants_j)
+                self.assertEqual('$j' in _subcol_scope(col, _LIST_BINDS).legend,
+                                 wants_j)
+
+    def test_every_sigil_has_a_word_for_every_container_that_binds_it(self):
+        for binds in (_LIST_BINDS, _DICT_BINDS, {**_DICT_BINDS, 'j': 'j'},
+                      {**_LIST_BINDS, 'j': 'j'}):
+            for sigil in binds:
+                with self.subTest(sigil=sigil, dict=_is_dict_binds(binds)):
+                    self.assertIn(_is_dict_binds(binds), _SIGIL_LABELS[sigil])
+
+
+class TestEveryLegendTokenActuallyBinds(unittest.TestCase):
+    """The other direction, asked of the running code rather than of the
+    declaration: evaluate each token the box names and check something comes
+    back. A legend that names a token the substitution leaves as written
+    produces a SyntaxError here."""
+
+    LIST = [{'n': 1, 'pets': [{'kind': 'cat'}, {'kind': 'dog'}]},
+            {'n': 2, 'pets': [{'kind': 'koi'}]}]
+    DICT = {'eng': [{'who': 'ann'}, {'who': 'bo'}], 'mkt': [{'who': 'cy'}]}
+
+    def cells(self, value, columns, name):
+        """Every drawn column's value for the last rendered row."""
+        row = _rows(value, columns)[-1]
+        scope = lambda c: eval(c, {name: value})
+        out = {}
+        for leaf in _leaf_columns(columns):
+            token = leaf.expr.split(SUBCOL_SEP)[-1]
+            out[token] = _leaf_cell_value(leaf, row, value, name, scope)
+        return out
+
+    def check(self, value, name, parent, columns_for):
+        binds = _binds_for(value)
+        legend = _subcol_scope(parent, binds).legend
+        tokens = [d.token for d in _subcol_scope(parent, binds).dollars]
+        got = self.cells(value, columns_for(tokens), name)
+        for token in tokens:
+            with self.subTest(parent=parent, token=token, legend=legend):
+                # NO_ANSWER never appears here: an unbound run raises inside
+                # eval_dollar_expr, which is what this is looking for.
+                self.assertIn(token, got)
+
+    def test_a_lists_sub_column_binds_everything_its_box_names(self):
+        for parent, columns_for in (
+                ('$["n"]', lambda ts: {'$["n"]': {'cols': {t: {} for t in ts}}}),
+                ('*$["pets"]',
+                 lambda ts: {'*$["pets"]': {'cols': {t: {} for t in ts}}})):
+            self.check(self.LIST, 'data', parent, columns_for)
+
+    def test_a_dicts_sub_column_binds_everything_its_box_names(self):
+        for parent, columns_for in (
+                ('$v', lambda ts: {'$v': {'cols': {t: {} for t in ts}}}),
+                ('*$v', lambda ts: {'*$v': {'cols': {t: {} for t in ts}}})):
+            self.check(self.DICT, 'd', parent, columns_for)
+
 
 
 if __name__ == '__main__':
