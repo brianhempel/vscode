@@ -1929,7 +1929,7 @@
    cell or a field) holds a block child, so it has to be a box of its own --
    an inline one lets the block break out and paints the border as a stray
    strip beside it. Same reason the widget-root rule below is inline-block. */
-.py-exp-grab:has(> .visualizer-container) {
+.visualizer-container .py-exp-grab:has(> .visualizer-container) {
 	display: inline-block;
 	margin: -1px; /* Cancel out our border so strings don't take up more space in the table. */
 }
@@ -1940,7 +1940,7 @@
    inline-block so the handle contains a block child (a static visualizer's
    markup) rather than painting a stray inline strip beside it. */
 .monaco-editor .snc-visualization-widget > .py-exp-grab {
-	display: inline-block;
+	display: block;
 	border: none;
 	border-radius: inherit;
 
