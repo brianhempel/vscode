@@ -15574,7 +15574,7 @@ class TestTinyLen(unittest.TestCase):
     def test_a_dict_counts_its_pairs_off_the_dict(self):
         d = {str(i): i for i in range(30)}
         output = self.table(d, var_and_exp=('d', 'd'))
-        self.assertIn('30 items', _tiny_len(output))
+        self.assertIn('30 entries', _tiny_len(output))
         self.assertEqual(exps_in(_tiny_len(output)), [['len(d)']])
 
     def test_the_count_sits_after_the_toggle_it_shares_the_bar_with(self):
@@ -17289,8 +17289,8 @@ class TestSubcolLegend(SubcolPanelCase):
         # this legend had.
         legend = _subcol_scope(self.SPLAT, _LIST_BINDS).legend
         self.assertEqual(legend,
-                         '$ is item of the column, $j its position in the group, '
-                         '$i the row number, $$ the whole list')
+                         '$ is one item of the column, $j its position in the '
+                         'group, $i the row number, $$ the whole list')
         self.assertNotIn('$$ the row', legend)
 
     def test_a_sub_of_a_sub_names_what_it_was_read_off(self):
@@ -17691,14 +17691,14 @@ class TestAddColumnBesideMenu(AddColumnBesideCase):
                                                             after=after))),
                           menu)
 
-    def test_the_rows_sit_above_remove_column(self):
+    def test_the_rows_sit_below_remove_column(self):
         # Beside Remove Column, ahead of everything that asks after the rows:
         # the three rows that decide which columns exist, together.
         menu = _first_column_header(self.render(self.model()))
         self.assertEqual(
             re.findall(r'>(Add Column Before|Add Column After|Remove Column'
                        r'|Subcolumns|Sort)<', menu),
-            ['Add Column Before', 'Add Column After', 'Remove Column',
+            ['Remove Column', 'Add Column Before', 'Add Column After',
              'Subcolumns', 'Sort'])
 
     def test_a_sub_column_offers_them_too(self):

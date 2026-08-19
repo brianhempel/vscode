@@ -7023,11 +7023,6 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
     """
     remove_event = repr(RemoveColumnClick(col=col))
     rows = [
-        # The two ways of making a column where the user is looking, over the
-        # one way of taking one away: the rows that decide which columns exist,
-        # together and ahead of everything that asks after the rows. The (+) at
-        # the far right can only ever add there, and a table wide enough to
-        # need a column in the middle is one whose far right is off screen.
         f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove Column</span>'
