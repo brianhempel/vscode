@@ -7163,6 +7163,29 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     )
 
 
+def _render_row_index_header(model, n_header: int) -> str:
+    """The cell over the row numbers.
+
+    It says `$i`: the token a column expression writes to name the number
+    underneath it, so the column of numbers is labelled with the way to ask
+    about them rather than left blank. Dimmed, like the numbers themselves --
+    it heads a column the user didn't add and can't remove.
+
+    The tooltip is that sigil's phrase from `_SIGIL_LABELS`, the same one the
+    code boxes' legends read, so hovering here and hovering there can't come
+    back with two different accounts of what `$i` counts.
+
+    It reaches down past the sub-column rows for the reason the columns beside
+    it do: there is nothing under it to head, and stopping short would slide
+    the first sub-column underneath it.
+    """
+    binds = _model_binds(model)
+    tooltip = f'$i is {_SIGIL_LABELS["i"][_is_dict_binds(binds)]}'
+    span_attrs = f' rowspan="{n_header}"' if n_header > 1 else ''
+    return (f'<th class="row-index-header"{span_attrs} '
+            f'data-tooltip="{html.escape(tooltip)}">$i</th>')
+
+
 def _column_input_tooltip(model) -> str:
     """What the Column code box says its dollars mean, for the column in it.
 
@@ -8479,7 +8502,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # <tfoot>: a row group sticks as a block, so a sub-column row pins under
     # the row above it without anything having to measure that row's height.
     strs.append('<table><thead class="col-header-rows"><tr>')
-    strs.append(f'<th{f" rowspan=\"{n_header}\"" if n_header > 1 else ""}></th>')
+    strs.append(_render_row_index_header(model, n_header))
 
     # Where Add Column Before / After put the box: beside the column it was
     # asked for, in that column's own header row, so the new column is written

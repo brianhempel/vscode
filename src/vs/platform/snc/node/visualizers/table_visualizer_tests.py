@@ -1127,6 +1127,69 @@ class TestHeaderRowGroup(unittest.TestCase):
         self.assertIn('col-add', self.head_of(out))
 
 
+class TestRowIndexHeader(unittest.TestCase):
+    """The row-index column heads itself with the sigil that names it: a column
+    expression asking about the same number writes `$i`, so the column of
+    numbers says `$i` rather than nothing at all."""
+
+    @staticmethod
+    def render(value, columns=None, subcols=(), small=False):
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(value, gv, var_and_exp=('d', 'd'))
+        if columns is not None:
+            model['columns'] = {c: ({'cols': {s: {} for s in subcols}}
+                                    if c == '*$v' and subcols else {})
+                                for c in columns}
+        return visualize(value, model, gv, None, small=small)
+
+    @staticmethod
+    def index_header(html_out):
+        head = html_out[html_out.index('<thead'):html_out.index('</thead>')]
+        # The first cell of the first header row is the one over the indices.
+        return head[head.index('<th'):head.index('</th>') + len('</th>')]
+
+    def test_the_index_column_is_headed_by_the_sigil(self):
+        self.assertIn('$i', self.index_header(self.render([1, 2, 3])))
+
+    def test_the_header_is_marked_as_the_index_column(self):
+        # Dimming is CSS's half of this; the class is what it hangs on. Its own
+        # class rather than the cells' `row-index`, since a header cell is
+        # weighted and aligned as a header, not as one of the numbers.
+        self.assertIn('row-index-header',
+                      self.index_header(self.render([1, 2, 3])))
+
+    def test_a_dict_is_headed_the_same_way(self):
+        # `$i` is bound over a dict's entries too, so the column that shows it
+        # says so there as well.
+        self.assertIn('$i', self.index_header(self.render({'a': 1})))
+
+    def test_an_empty_container_still_says_it(self):
+        # The header is about the scope, not about the rows, and a table with
+        # no rows is exactly where a reader needs telling what a column means.
+        self.assertIn('$i', self.index_header(self.render([])))
+
+    def test_a_small_table_says_it_too(self):
+        self.assertIn('$i', self.index_header(self.render([1, 2, 3],
+                                                          small=True)))
+
+    def test_it_still_reaches_down_past_the_sub_column_row(self):
+        # The cell spans every header row, so the sub-column row doesn't slide
+        # a column to the left underneath it.
+        out = self.render({'t1': [{'who': 'ann', 'age': 30}]},
+                          ['$k', '*$v'], ["$['who']", "$['age']"])
+        self.assertIn('rowspan="2"', self.index_header(out))
+
+    def test_it_says_what_the_number_is(self):
+        # The same phrase the code boxes' legends use for `$i`, off the same
+        # declaration -- a reader who hovers here and hovers there is told one
+        # thing, not two.
+        self.assertIn('the row number', self.index_header(self.render([1, 2])))
+
+    def test_a_dict_counts_entries(self):
+        self.assertIn('the entry number',
+                      self.index_header(self.render({'a': 1})))
+
+
 class TestEditingAHeaderKeepsItsSpans(unittest.TestCase):
     """Double-clicking a header swaps the cell for an input box -- but the cell
     still covers exactly what it covered, or every column to its right shifts."""
@@ -16463,8 +16526,10 @@ class TestLeafSpaceLayout(unittest.TestCase):
     def test_the_answer_row_is_as_wide_as_a_body_row(self):
         out = self.render(self.model(computes={self.leaf(1): ['sum($)']}))
         foot = agg_foot(out)
-        body_row = re.search(r'<tr>(?:(?!</tr>).)*row-index(?:(?!</tr>).)*</tr>',
-                             out, re.DOTALL).group(0)
+        # The index CELL, not the `$i` header over it -- a header row has no
+        # <td> in it to count.
+        body_row = re.search(r'<tr>(?:(?!</tr>).)*<td class="row-index"'
+                             r'(?:(?!</tr>).)*</tr>', out, re.DOTALL).group(0)
         self.assertEqual(len(re.findall(r'<td', foot)),
                          len(re.findall(r'<td', body_row)))
 

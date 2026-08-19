@@ -48,13 +48,13 @@
 - [x] need to show list length somewhere
 - [x] need to show string length somewhere
 - [ ] extract row by grabbing index cell
+- [x] add dimmed `$i` header to index column
 - [x] add column left/right in col menu
 - [ ] add custom subcol menu item styling
 - [ ] checkbox styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
 - [ ] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
-- [ ] hiding the $ sometimes is a bit funky
 - [ ] $item instead of $, maybe?
 - [ ] col action: convert to int, float
 - [ ] dictionary visualizer

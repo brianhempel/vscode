@@ -1799,6 +1799,15 @@
 	text-align: right;
 }
 
+/* The `$i` over the row numbers. Dimmed and unbolded: it heads a column the
+   user never added, so it reads with the numbers under it rather than with the
+   columns beside it. */
+.list-visualizer th.row-index-header {
+	color: var(--snc-text-muted);
+	font-weight: normal;
+	text-align: right;
+}
+
 .list-visualizer tr.row-match {
 	border-left: 2px solid var(--snc-string-color);
 }
