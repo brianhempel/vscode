@@ -253,10 +253,14 @@
 
 .tiny-len {
 	font-size: 8px;
-	padding: 0 10px;
+	padding: 0 5px;
 	border-left: 1px solid var(--snc-border-color);
 	font-family: var(--snc-ui-widget-font-family);
 	letter-spacing: -0.025em;
+	/* a string's bar carries two of these (lines, then chars): let the toggle
+	   give up the room rather than wrapping a count onto a second line */
+	white-space: nowrap;
+	flex-shrink: 0;
 }
 
 .expand-toggle:hover,
@@ -929,6 +933,7 @@
   border-bottom-width: 0;
 }
 /* Last column. Avoid double-borders */
+.small > .list-table-scroll > table > thead > tr > th:last-child,
 .small > .list-table-scroll > table > tbody > tr > th:last-child,
 .small > .list-table-scroll > table > tbody > tr > td:last-child,
 .small > .list-table-scroll > table > tfoot > tr > td:last-child {
@@ -955,32 +960,68 @@
 	margin-bottom: -1px; /* overlap/hide bottom table border so it doesn't double-up with the search area border */
 }
 
-/* Keep column headers visible while scrolling the table body. box-shadow draws
-   the bottom edge because border-collapse: collapse doesn't stick cell borders.
+/* Keep column headers visible while scrolling the table body.
+
+   The <thead> is what sticks, not the cells -- the same reason the aggregations
+   stick as a <tfoot>: a row group sticks as one block, so a sub-column row pins
+   underneath the row it belongs to without anything having to know how tall
+   that row is. Sticking the rows one at a time can't do that: every one of them
+   would pin at top: 0 and pile up on the first.
+
    Nested lists opt out: their overflow:auto often doesn't overflow, so sticky
    would stick to the parent's scrollport and float over it. */
-.list-visualizer > .list-table-scroll > table tr:first-child > th {
+.list-visualizer > .list-table-scroll > table > thead.col-header-rows {
 	position: sticky;
 	top: 0;
 	z-index: 1;
+}
+
+/* box-shadow draws each header cell's bottom edge because border-collapse:
+   collapse hands the real borders to the table, which doesn't stick with the
+   group. Every cell draws its own, so a splat's header still shows the line
+   between it and the sub-columns it spans.
+
+   The edge is named so anything else that wants a shadow here can keep it:
+   box-shadow doesn't accumulate across rules, so a second one would otherwise
+   have to restate this and the two would drift apart. Nested lists blank the
+   variable rather than the shadow, for the same reason. */
+.list-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th {
+	--snc-col-header-edge: inset 0 -1px 0 var(--snc-table-cell-border-color);
 	background: var(--snc-table-header-bg);
 	border-bottom-width: 0;
-	box-shadow: inset 0 -1px 0 var(--snc-table-cell-border-color);
-
-	&:first-child {
-		border-radius: 4px 0 0 0; /* don't overlap the rounded upper-left border corner of .snc-visualization-widget */
-	}
+	box-shadow: var(--snc-col-header-edge);
 
 	/* a column actively filtering rows */
 	&.col-filtered {
 		background-color: var(--snc-hl-selected);
 	}
+
+	/* Where a dragged column would land. An inset shadow rather than a border
+	   or an overlay: a collapsed border belongs to the table, which no longer
+	   travels with the sticky <thead>, and an absolutely positioned line needs
+	   the cell to be its containing block -- which a table cell is not reliably
+	   willing to be, so the line ends up measured from the <thead> instead. A
+	   shadow is painted on the cell itself and can't land anywhere else. */
+	&.col-drag-before {
+		box-shadow: inset 2px 0 0 var(--snc-string-color), var(--snc-col-header-edge);
+	}
+
+	&.col-drag-after {
+		box-shadow: inset -2px 0 0 var(--snc-string-color), var(--snc-col-header-edge);
+	}
 }
 
-.list-visualizer .list-visualizer > .list-table-scroll > table tr:first-child > th {
+.list-visualizer > .list-table-scroll > table > thead.col-header-rows > tr:first-child > th:first-child {
+	border-radius: 4px 0 0 0; /* don't overlap the rounded upper-left border corner of .snc-visualization-widget */
+}
+
+.list-visualizer .list-visualizer > .list-table-scroll > table > thead.col-header-rows {
 	position: static;
 	z-index: auto;
-	box-shadow: none;
+}
+
+.list-visualizer .list-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th {
+	--snc-col-header-edge: 0 0 0 transparent; /* the real border is back, below */
 	border-bottom-width: 1px;
 }
 
@@ -1703,6 +1744,10 @@
 	opacity: 0.3;
 }
 
+/* The drop line for a header in a PINNED table is a shadow instead, drawn with
+   the rest of the header's edges -- see .col-header-rows above for why. These
+   still serve the small/unpinned tables, where the table paints its own
+   borders where they were written. */
 .list-visualizer th.col-drag-before {
 	border-left: 2px solid var(--snc-string-color);
 }
@@ -1794,7 +1839,7 @@
 	border-color: transparent;
 }
 
-.list-visualizer.pick-tool-selected > .list-table-scroll > table tr:first-child > th {
+.list-visualizer.pick-tool-selected > .list-table-scroll > table > thead.col-header-rows > tr > th {
 	box-shadow: none;
 }
 

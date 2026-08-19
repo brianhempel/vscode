@@ -1542,8 +1542,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Pinned table headers (position: sticky) visually cover the top of
 		// the scroll container, so a row aligned to containerRect.top can
-		// still end up hidden underneath the header.
-		const headerEl = container.querySelector('th') as HTMLElement | null;
+		// still end up hidden underneath the header. The whole <thead> is what
+		// pins -- sub-column rows included -- so it is the group's height that
+		// has to be cleared, not the first row's.
+		const headerEl = container.querySelector('thead') as HTMLElement | null;
 		const headerHeight = headerEl && dom.getWindow(headerEl).getComputedStyle(headerEl).position === 'sticky'
 			? headerEl.getBoundingClientRect().height
 			: 0;

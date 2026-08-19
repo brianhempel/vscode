@@ -90,6 +90,17 @@ class AddColumnClick:
     pass
 
 @dataclass(frozen=True, slots=True)
+class AddColumnAtClick:
+    """User picked Add Column Before / After in a column's ▾ menu.
+
+    The same box the (+) opens, drawn beside the column it was asked for
+    instead of at the far right -- and, over a sub-column, adding a sub-column
+    of that column's parent rather than a column of the table.
+    """
+    col: str
+    after: bool
+
+@dataclass(frozen=True, slots=True)
 class ColumnInput:
     """User typed in the column name input (add or edit mode)."""
     value: str
@@ -583,6 +594,26 @@ def _col_add(columns, col: str, config=None) -> bool:
     if col in columns:
         return False
     columns[col] = dict(config or {})
+    return True
+
+
+def _col_insert(columns, col: str, index: int, config=None) -> bool:
+    """Add a column at a position rather than at the end.
+
+    What Add Column Before / After needs, and the one place a position is the
+    point rather than a way of naming a column: the box was drawn in a gap
+    between two headers, and that gap is where what it writes belongs. Past the
+    end is the end, so an index that ran ahead of a column removed under the
+    open box still adds the column somewhere rather than losing it.
+    """
+    if col in columns:
+        return False
+    keys = list(columns)
+    keys.insert(max(0, min(index, len(keys))), col)
+    columns[col] = dict(config or {})
+    rebuilt = {k: columns[k] for k in keys}
+    columns.clear()
+    columns.update(rebuilt)
     return True
 
 
@@ -2449,6 +2480,96 @@ def _named_column(model: dict, col: 'str | None') -> 'str | None':
     if not isinstance(col, str):
         return None
     return col if col in _menu_targets(model.get('columns') or {}) else None
+
+
+# Which side of which column the open box sits on, as one string, since
+# `adding_column` is where that box is and a second key could come to disagree
+# with it. True is the box the (+) opens, which goes at the far right and needs
+# no column to say so. A character of its own rather than SUBCOL_SEP's: the
+# column named is an identity, and a nested one already holds that separator.
+ADD_ANCHOR_SEP = '\x03'
+
+
+def _add_anchor(model: dict) -> 'tuple | None':
+    """The column the open box was asked for and which side of it it sits on,
+    or None when it is the far-right box the (+) opens.
+
+    Says nothing about whether that column is still there -- see
+    _add_beside_target, which asks.
+    """
+    at = model.get('adding_column')
+    if not isinstance(at, str) or ADD_ANCHOR_SEP not in at:
+        return None
+    side, _, col = at.partition(ADD_ANCHOR_SEP)
+    return (col, side == 'after')
+
+
+def _add_anchor_value(col: str, after: bool) -> str:
+    return f'{"after" if after else "before"}{ADD_ANCHOR_SEP}{col}'
+
+
+def _add_beside_target(model: dict) -> 'tuple | None':
+    """The anchor, once the table has been asked whether it still has it.
+
+    An anchor names its column like every other column event, so one from a
+    render the table has moved on from means nothing -- and the box falls back
+    to the far right rather than throwing away what the user has typed.
+    """
+    anchor = _add_anchor(model)
+    if anchor is None:
+        return None
+    target = _named_column(model, anchor[0])
+    return None if target is None else (target, anchor[1])
+
+
+def _add_beside(model: dict, expr: str) -> bool:
+    """Put a new column in where the open box was drawn.
+
+    Among the anchor's own SIBLINGS, which is what makes the row over a
+    sub-column add a sub-column: the box sits in that column's header row, and
+    a column of the table would be drawn somewhere the box never was.
+    """
+    columns = model['columns']
+    beside = _add_beside_target(model)
+    if beside is None:
+        return _col_add(columns, expr)
+    target, after = beside
+    path = target.split(SUBCOL_SEP)
+    siblings = (columns if len(path) == 1
+                else _subs_at(columns, SUBCOL_SEP.join(path[:-1])))
+    if siblings is None:
+        return _col_add(columns, expr)
+    return _col_insert(siblings, expr,
+                       list(siblings).index(path[-1]) + (1 if after else 0))
+
+
+def _add_box_leaf(model: dict, columns) -> 'tuple | None':
+    """Where the open box sits among the DRAWN columns: which leaf it is drawn
+    in front of, and how deep it hangs.
+
+    The header cell is one thing and the space under it another -- the cells
+    below have to leave the box a column's worth of room, or every column right
+    of it slides off the values it names. None when there is nothing to leave
+    room for: no box, the far-right one, or one past the last column, which has
+    nothing to its right to push.
+    """
+    beside = _add_beside_target(model)
+    if beside is None:
+        return None
+    target, after = beside
+    leaves = _leaf_columns(columns)
+    covered = [i for i, leaf in enumerate(leaves)
+               if leaf.expr == target or leaf.expr.startswith(target + SUBCOL_SEP)]
+    if not covered:
+        return None
+    at = covered[-1] + 1 if after else covered[0]
+    if at >= len(leaves):
+        return None
+    # A new column has no splat of its own, so it is drawn at the depth its
+    # ancestors put it at -- one grouping level per splat above it.
+    path = target.split(SUBCOL_SEP)
+    depth = sum(1 for name in path[:-1] if _split_splat(name)[0])
+    return (at, depth)
 
 
 def _column_search_row(model: dict, col: str) -> dict:
@@ -5870,6 +5991,11 @@ _COLUMN_MGMT_DEFAULTS = {
     # The column whose header is a box right now, by name -- see _menu_id:
     # what is being edited does not change when the columns move.
     'editing_column': None,
+    # Where the box that writes a new column is, rather than whether there is
+    # one: True for the far-right box the (+) opens, and which side of which
+    # column for one the ▾ menu asked for (see _add_anchor). One slot, because
+    # the box and where it sits are the same fact -- a second key could come to
+    # say the box is open somewhere it isn't drawn.
     'adding_column': False,
     'column_input_value': '',
     'selected_suggestion_index': None,
@@ -6897,10 +7023,22 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
     """
     remove_event = repr(RemoveColumnClick(col=col))
     rows = [
+        # The two ways of making a column where the user is looking, over the
+        # one way of taking one away: the rows that decide which columns exist,
+        # together and ahead of everything that asks after the rows. The (+) at
+        # the far right can only ever add there, and a table wide enough to
+        # need a column in the middle is one whose far right is off screen.
         f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove Column</span>'
         f'</div>',
+        *(f'<div class="snc-dropdown-option col-add-beside"'
+          f'{_column_dwell_attr(model)}>'
+          f'<span snc-mouse-down="'
+          f'{html.escape(repr(AddColumnAtClick(col=col, after=after)))}" '
+          f'class="snc-dropdown-option-label">Add Column {side}</span>'
+          f'</div>'
+          for side, after in (('Before', False), ('After', True))),
         # Beside Remove Column: the two rows that decide which columns exist,
         # ahead of the three that ask questions about the rows.
         _render_column_subcols(col, model, lst, get_visualizer,
@@ -7038,11 +7176,17 @@ def _column_input_tooltip(model) -> str:
     So an edit says exactly what the Subcolumns box that wrote the text says,
     asked of the PARENT: the two boxes hold the same expression and must not
     read as two different scopes.
+
+    A box opened BESIDE a sub-column is writing another one, so it says the
+    same thing: what it writes goes in beside its neighbour, in the scope that
+    neighbour is read in.
     """
     binds = _model_binds(model)
-    editing = model.get('editing_column')
-    if editing and SUBCOL_SEP in editing:
-        return _subcol_scope(editing.rsplit(SUBCOL_SEP, 1)[0], binds).legend
+    beside = _add_beside_target(model)
+    written = (model.get('editing_column')
+               or (beside[0] if beside is not None else None))
+    if written and SUBCOL_SEP in written:
+        return _subcol_scope(written.rsplit(SUBCOL_SEP, 1)[0], binds).legend
     return _row_scope(binds, model.get('_source_expr')).legend
 
 
@@ -7096,9 +7240,17 @@ def _column_input_html(lst, model, get_visualizer, is_editing):
     )
 
 
-def _render_column_input(lst, model, get_visualizer, is_editing):
-    """A header cell holding the box, for a column being added or edited."""
-    return f'<th>{_column_input_html(lst, model, get_visualizer, is_editing)}</th>'
+def _render_column_input(lst, model, get_visualizer, is_editing, span_attrs=''):
+    """A header cell holding the box, for a column being added or edited.
+
+    An edited cell keeps the spans the header cell it replaced had: the box is
+    a different thing to look at, not a differently-shaped hole in the header.
+    Without them a splat being renamed stops covering its sub-columns, and a
+    column beside sub-columns stops reaching down past their row -- either way
+    everything to the right of it shifts while the user is typing.
+    """
+    return (f'<th{span_attrs}>'
+            f'{_column_input_html(lst, model, get_visualizer, is_editing)}</th>')
 
 
 def _resolve_first_and_index(model, eval_in_scope):
@@ -8106,8 +8258,13 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
              f'<div class="col-agg-label"></div>' # needed for spacing, the above is position: absolute to overflow
              f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
              f'</div></td>']
+    add_box = _add_box_leaf(model, columns)
     for cj, leaf in enumerate(leaves):
         col = leaf.expr
+        # The column being written has no value for this row either, and the
+        # row still has to line up with the columns above it.
+        if add_box is not None and add_box[0] == cj:
+            cells.append('<td class="col-add-blank"></td>')
         value = (NO_ANSWER if item is NO_ANSWER
                  else _column_cell_value(_leaf_row_expr(leaf), item, lst,
                                          eval_in_scope,
@@ -8197,6 +8354,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     reads = [_column_values(leaf.expr, lst, model, eval_in_scope) if asked[ci]
              else None
              for ci, leaf in enumerate(leaves)]
+    add_box = _add_box_leaf(model, columns)
 
     rows = []
     for level, spec in enumerate(levels):
@@ -8209,6 +8367,11 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
             continue
         cells = []
         for ci, expr in enumerate(spec[1]):
+            # The column being written is asked nothing, but it is drawn: these
+            # rows have to leave it the space its header takes, like every
+            # other row of the table.
+            if add_box is not None and add_box[0] == ci:
+                cells.append('<td class="col-add-blank"></td>')
             if expr is None:
                 cells.append('<td class="col-agg-blank"></td>')
             else:
@@ -8312,49 +8475,91 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # sub-columns anywhere this is one <tr> of width-1 cells, exactly the
     # markup it has always been.
     n_header = len(header_rows)
-    strs.append('<table><tr>')
+    # One <thead> around every header row, the way the aggregations share one
+    # <tfoot>: a row group sticks as a block, so a sub-column row pins under
+    # the row above it without anything having to measure that row's height.
+    strs.append('<table><thead class="col-header-rows"><tr>')
     strs.append(f'<th{f" rowspan=\"{n_header}\"" if n_header > 1 else ""}></th>')
 
+    # Where Add Column Before / After put the box: beside the column it was
+    # asked for, in that column's own header row, so the new column is written
+    # where it is going to be drawn.
+    beside = _add_beside_target(model)
     for level, cells in enumerate(header_rows):
         if level:
             strs.append('<tr>')
         for cell in cells:
-            if model.get('editing_column') == cell.expr:
-                strs.append(_render_column_input(
-                    lst, model, get_visualizer, is_editing=True))
-                continue
             span_attrs = ''
-            if cell.colspan > 1:
-                span_attrs = f' colspan="{cell.colspan}"'
+            # A cell the box is drawn under has to span it too, or it stops
+            # short and its sub-columns shift out from under it.
+            over_box = (beside is not None
+                        and beside[0].startswith(cell.expr + SUBCOL_SEP))
+            colspan = cell.colspan + (1 if over_box else 0)
+            if colspan > 1:
+                span_attrs = f' colspan="{colspan}"'
             if cell.rowspan > 1:
                 span_attrs += f' rowspan="{cell.rowspan}"'
-            # A sub-column is a column: it gets the same header, so the same
-            # menu -- search, tally, sort and Compute all key on the column
-            # expression, and a leaf's is one _column_values understands.
-            strs.append(_render_column_header(
-                cell.expr, model, lst, eval_in_scope,
-                span_attrs=span_attrs,
-                extra_classes='col-subheader' if level else None,
-                label=cell.label if level else None,
-                get_visualizer=get_visualizer))
+            # The box is a column of the table like any other: it reaches down
+            # past the sub-column rows the way its new neighbours do.
+            box = ('' if beside is None or beside[0] != cell.expr else
+                   _render_column_input(
+                       lst, model, get_visualizer, is_editing=False,
+                       span_attrs=(f' rowspan="{n_header - level}"'
+                                   if n_header - level > 1 else '')))
+            if box and not beside[1]:
+                strs.append(box)
+            if model.get('editing_column') == cell.expr:
+                strs.append(_render_column_input(
+                    lst, model, get_visualizer, is_editing=True,
+                    span_attrs=span_attrs))
+            else:
+                # A sub-column is a column: it gets the same header, so the
+                # same menu -- search, tally, sort and Compute all key on the
+                # column expression, and a leaf's is one _column_values
+                # understands.
+                strs.append(_render_column_header(
+                    cell.expr, model, lst, eval_in_scope,
+                    span_attrs=span_attrs,
+                    extra_classes='col-subheader' if level else None,
+                    label=cell.label if level else None,
+                    get_visualizer=get_visualizer))
+            if box and beside[1]:
+                strs.append(box)
 
         if level == 0:
-            if model.get('adding_column'):
+            # Both sit at the right end of the top row, where there is nothing
+            # below them to head -- so they reach to the bottom of the header
+            # like the columns beside them, rather than leaving a hole under
+            # themselves for every sub-column row.
+            full_span = f' rowspan="{n_header}"' if n_header > 1 else ''
+            # Unless it is already drawn beside the column it was asked for --
+            # an anchor the table no longer has falls back to here, so the box
+            # is drawn exactly once wherever it ends up.
+            if model.get('adding_column') and beside is None:
                 strs.append(_render_column_input(lst, model, get_visualizer,
-                                                 is_editing=False))
+                                                 is_editing=False,
+                                                 span_attrs=full_span))
             if not small:
                 add_event = repr(AddColumnClick())
                 strs.append(
-                    f'<th class="col-add" '
+                    f'<th class="col-add"{full_span} '
                     f'snc-mouse-down="{html.escape(add_event)}" '
                     f'data-tooltip="Add column">'
                     f'<span class="col-add-icon full-opacity-on-hover">+</span>'
                     f'</th>'
                 )
         strs.append('</tr>')
+    strs.append('</thead>')
+
+    # Which drawn column the open box takes the place of, and how deep it hangs
+    # -- the cells below have to leave it a column's worth of room, or every
+    # column to its right slides off the values it names.
+    add_box = _add_box_leaf(model, columns)
 
     if len(lst) == 0:
-        strs.append(f'<tr><td class="empty-list" colspan="{len(leaves) + 1}">Empty.</td></tr>')
+        strs.append(f'<tr><td class="empty-list" '
+                    f'colspan="{len(leaves) + 1 + (add_box is not None)}">'
+                    f'Empty.</td></tr>')
 
     source_expr = model.get('_source_expr')
     # Whether a cell may be read by evaluating `<source>[i]` again, or has to be
@@ -8446,6 +8651,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
+            # The column being written has no values yet, so it leaves the
+            # space it will take -- and spans its group the way a column at
+            # that depth does, since that is the shape of the space.
+            if add_box is not None and add_box[0] == ci and row.starts_at(add_box[1]):
+                strs.append(f'<td class="col-add-blank"'
+                            f'{leaf_span(add_box[1])}></td>')
             # A column belongs to the group at the depth it was splatted to, so
             # it is drawn once per group at THAT depth rather than once per
             # rendered row. The innermost depth is a group of one, which is how
@@ -8510,6 +8721,14 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             for level in range(n_group_aggs[depth]):
                 cells = []
                 for ci, leaf in enumerate(leaves):
+                    # The column being written answers nothing, but it is a
+                    # column of this group -- it leaves its space here for the
+                    # reason it leaves it in the rows above. A box at depth 0
+                    # is a column of the table rather than of the group, and
+                    # spans these rows the way the columns beside it do.
+                    if (add_box is not None and add_box[0] == ci
+                            and 0 < add_box[1] and depth <= add_box[1]):
+                        cells.append('<td class="col-add-blank"></td>')
                     # Shallower columns span these rows; deeper ones have
                     # already closed, and leave a cell's worth of space.
                     if leaf.splat is None or leaf.depth < depth:
@@ -8730,6 +8949,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['column_input_value'] = ''
             model['editing_column'] = None
 
+        case AddColumnAtClick(col=named, after=after):
+            _close_column_menus(model)
+            target = _named_column(model, named)
+            model['adding_column'] = (True if target is None
+                                      else _add_anchor_value(target, after))
+            model['column_input_value'] = ''
+            model['editing_column'] = None
+
         case ColumnInput(value=val):
             model['column_input_value'] = val
             if val and get_visualizer is not None:
@@ -8740,7 +8967,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ColumnSelect(name=name):
             if model.get('adding_column'):
-                _col_add(model['columns'], name)
+                _add_beside(model, name)
                 model['adding_column'] = False
                 model['column_input_value'] = ''
                 if type_key:
@@ -8863,7 +9090,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
                 if model.get('adding_column'):
                     if commit_val:
-                        _col_add(model['columns'], commit_val)
+                        _add_beside(model, commit_val)
                         if type_key:
                             _save_slots(model)
                     model['adding_column'] = False

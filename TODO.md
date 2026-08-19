@@ -45,25 +45,14 @@
 - [x] reify as...list of dict etc, to persist transient columns
 - [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*
 - [x] drag to reorder subcolumns
-- [ ] when there's subcolumns, double-click to edit is causing a diff column to appear
-- [ ] need to show list length somewhere
-- [ ] need to show string length somewhere
+- [x] need to show list length somewhere
+- [x] need to show string length somewhere
 - [ ] extract row by grabbing index cell
-- [ ] add column left/right in col menu
+- [x] add column left/right in col menu
+- [ ] add custom subcol menu item styling
+- [ ] checkbox styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
 - [ ] need to able to select/delete rows (e.g. delete header row)
-- [ ] column search box on a splat (or anything under one) is dead UI: it accepts
-      text and stores it, but `_column_row_expr` is None for those targets so
-      `_searchable_targets` leaves them out and `compose_column_searches` never
-      sees them — nothing filters, yet the header goes `col-filtered` and the ▾
-      goes `active`, so the UI claims a filter is on. The tally in the same menu
-      already gates on `filterable`; the search row never got the same treatment.
-      Either hide the row when `_column_row_expr` is None or dim it, and gate
-      `_column_search_active` the same way so stale stored text stops lighting
-      the header. Note `$j` could not work there even if the search were wired
-      up: the lift carries sigils into main-search scope, which binds only
-      `{'i': ...}` (or the dict trio), and the main search filters ROOT rows
-      while `$j` names a position inside one root row's splatted group
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
 - [ ] hiding the $ sometimes is a bit funky
 - [ ] $item instead of $, maybe?
@@ -72,11 +61,13 @@
 - [ ] tuple visualizer
 - [ ] list of tuples
 - [ ] tuple of lists
+- [ ] transposed dict of lists (dict keys are column headers)
 - [x] group by (i.e. dictionaries of lists)
 - [ ] generic object visualizer
 - [ ] visualize sets
 - [ ] make it clearer what is temp state versus reified in code. *jacob: the fact that there is temp state is a little funky too*
 - [ ] make the above work nicely for large, nested JSON blobs (Ultorg lol)
+- [ ] needs a touch more color to look nice
 - [ ] use VS Code debug config to know how to launch python and app
 
 ## Details

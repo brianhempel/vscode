@@ -3422,22 +3422,28 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
 
 def _render_expand_bar(expanded: bool, value: str, model, *,
                        small: bool = False) -> str:
-    """The bar under a clipped string: the expand toggle, and how long the
-    string is at its right end.
+    """The bar under a clipped string: the expand toggle, and at its right end
+    how tall the string is and how long, coarse measure before fine.
 
-    The count is a handle of its own -- the number on screen and len() of the
-    source are the same reading, so hovering it offers the code. It renders
-    bare where there is no access path, the number still being worth having.
+    Each count is a handle of its own -- the number on screen and the code that
+    reads it are the same reading, so hovering one offers the other. The lines
+    are counted the way they are drawn (a trailing newline draws an empty last
+    line), so the expression offered counts them that way too rather than
+    reaching for splitlines(), which would disagree with the screen. They render
+    bare where there is no access path, the numbers still being worth having.
     The list visualizer draws the same bar (see _visualize_table); the two
     share the CSS but not the wording, one counting items and one characters.
     """
     source_expr = model.get('_source_expr') if model else None
     len_exp = f'len({source_expr})' if source_expr else None
+    lines_exp = f"{source_expr}.count('\\n') + 1" if source_expr else None
     len_n = len(value)
+    lines_n = value.count('\n') + 1
     return (
         f'<div class="expand-and-len">'
         f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
-        f'<div class="tiny-len"{py_exp_attrs(len_exp)}>{len_n} char{"s" if len != 1 else ""}</div>'
+        f'<div class="tiny-len"{py_exp_attrs(lines_exp)}>{lines_n} line{"s" if lines_n != 1 else ""}</div>'
+        f'<div class="tiny-len"{py_exp_attrs(len_exp)}>{len_n} char{"s" if len_n != 1 else ""}</div>'
         f'</div>'
     )
 

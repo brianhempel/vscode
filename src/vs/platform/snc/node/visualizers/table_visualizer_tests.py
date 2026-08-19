@@ -83,7 +83,7 @@ from table_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
-    ColumnKeyDown, ExpandToggle, COLUMN_DOTFILE_NAME, CELL_KEY_SEP,
+    ColumnKeyDown, ExpandToggle, COLUMN_DOTFILE_NAME, CELL_KEY_SEP, SUBCOL_SEP,
     CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_column_suggestions, _get_all_possible_columns,
@@ -1084,6 +1084,105 @@ class TestSplatSubColumnRendering(unittest.TestCase):
         model = init_model(d, gv, var_and_exp=('d', 'd'))
         html_out = visualize(d, model, gv, None)
         self.assertNotIn('colspan', html_out)
+
+
+class TestHeaderRowGroup(unittest.TestCase):
+    """Every header row lives in one <thead>, the way the aggregations live in
+    one <tfoot>: a row group can stick as a block, so a sub-column header pins
+    under the header above it without anything having to measure its height."""
+
+    @staticmethod
+    def render(value, columns=None, subcols=()):
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(value, gv, var_and_exp=('d', 'd'))
+        if columns is not None:
+            model['columns'] = {c: ({'cols': {s: {} for s in subcols}}
+                                    if c == '*$v' and subcols else {})
+                                for c in columns}
+        return visualize(value, model, gv, None)
+
+    @staticmethod
+    def head_of(html_out):
+        return html_out[html_out.index('<thead'):html_out.index('</thead>')]
+
+    def test_the_header_rows_are_a_row_group(self):
+        out = self.render({'a': 1})
+        self.assertIn('<thead', out)
+        self.assertIn('</thead>', out)
+
+    def test_the_body_rows_are_outside_the_head(self):
+        out = self.render({'a': 1})
+        self.assertLess(out.index('</thead>'), out.index('<td'))
+
+    def test_a_sub_column_header_is_in_the_same_group(self):
+        # The whole point: the second header row has to stick along with the
+        # first, so it has to be in the group that sticks.
+        out = self.render({'t1': [{'who': 'ann', 'age': 30}]},
+                          ['$k', '*$v'], ["$['who']", "$['age']"])
+        self.assertIn('col-subheader', self.head_of(out))
+
+    def test_the_add_column_button_is_in_the_head(self):
+        # It sits in the top header row, so it pins with it.
+        out = self.render({'a': 1})
+        self.assertIn('col-add', self.head_of(out))
+
+
+class TestEditingAHeaderKeepsItsSpans(unittest.TestCase):
+    """Double-clicking a header swaps the cell for an input box -- but the cell
+    still covers exactly what it covered, or every column to its right shifts."""
+
+    @staticmethod
+    def render(value, columns, subcols, editing):
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(value, gv, var_and_exp=('d', 'd'))
+        model['columns'] = {c: ({'cols': {s: {} for s in subcols}}
+                                if c == '*$v' else {})
+                            for c in columns}
+        model['editing_column'] = editing
+        return visualize(value, model, gv, None)
+
+    @staticmethod
+    def input_cell(html_out):
+        """The <th> open tag holding the box, spans and all."""
+        at = html_out.index('col-input')
+        start = html_out.rindex('<th', 0, at)
+        return html_out[start:html_out.index('>', start) + 1]
+
+    def value(self):
+        return {'t1': [{'who': 'ann', 'age': 30},
+                       {'who': 'bo', 'age': 25}]}
+
+    def test_editing_a_column_beside_sub_columns_keeps_its_rowspan(self):
+        # `$k` spans down past the sub-column row; an unspanned box would let
+        # the first sub-column header slide underneath it.
+        out = self.render(self.value(), ['$k', '*$v'],
+                          ["$['who']", "$['age']"], '$k')
+        self.assertIn('rowspan="2"', self.input_cell(out))
+
+    def test_editing_a_splat_keeps_its_colspan(self):
+        # The splat's header covers its sub-columns; narrowed to one cell, the
+        # + button and everything right of it walk left.
+        out = self.render(self.value(), ['$k', '*$v'],
+                          ["$['who']", "$['age']"], '*$v')
+        self.assertIn('colspan="2"', self.input_cell(out))
+
+    def test_editing_a_sub_column_needs_no_span(self):
+        sub = f'*$v{SUBCOL_SEP}' + "$['who']"
+        out = self.render(self.value(), ['$k', '*$v'],
+                          ["$['who']", "$['age']"], sub)
+        cell = self.input_cell(out)
+        self.assertNotIn('rowspan', cell)
+        self.assertNotIn('colspan', cell)
+
+    def test_editing_a_column_in_a_flat_table_needs_no_span(self):
+        d = {'a': 1, 'b': 2}
+        gv = mock_get_visualizer_dict_tables
+        model = init_model(d, gv, var_and_exp=('d', 'd'))
+        model['editing_column'] = col_at(model)
+        out = visualize(d, model, gv, None)
+        cell = self.input_cell(out)
+        self.assertNotIn('rowspan', cell)
+        self.assertNotIn('colspan', cell)
 
 
 class TestSplatCellLookup(unittest.TestCase):
@@ -17442,6 +17541,411 @@ class TestEveryLegendTokenActuallyBinds(unittest.TestCase):
                 ('*$v', lambda ts: {'*$v': {'cols': {t: {} for t in ts}}})):
             self.check(self.DICT, 'd', parent, columns_for)
 
+
+from html.parser import HTMLParser
+
+from table_visualizer import (AddColumnAtClick, _add_anchor, _col_insert,
+                              _subcol_scope, _model_binds)
+
+
+def _header_html(output):
+    """The table's header rows: everything before its first body cell."""
+    return output[:output.index('<td')]
+
+
+def _header_row(output, level=0):
+    """One header row's cells, in the order they are drawn."""
+    row = _header_html(output).split('<tr>')[level + 1]
+    return re.findall(r'<th.*?</th>', row, re.DOTALL)
+
+
+def _cell_names(cells):
+    """What each header cell shows: its column, or what kind of cell it is
+    where it shows no column -- the row-index corner, the box, the (+)."""
+    names = []
+    for cell in cells:
+        if 'col-input' in cell:
+            names.append('BOX')
+        elif 'col-add' in cell:
+            names.append('+')
+        else:
+            m = re.search(r'class="col-name">([^<]*)<', cell)
+            names.append(html.unescape(m.group(1)) if m else '')
+    return names
+
+
+def _body_row(output, n=0):
+    """One body row's cells, in the order they are drawn."""
+    rows = re.findall(r'<tr[^>]*>(?:(?!<tr).)*?<td.*?</tr>', output, re.DOTALL)
+    return re.findall(r'<td.*?</td>', rows[n], re.DOTALL)
+
+
+class AddColumnBesideCase(unittest.TestCase):
+    """A table of three columns, with one column's ▾ menu open."""
+
+    LST = [{'a': 1, 'b': 2, 'c': 3}]
+
+    def model(self, lst=None, columns=None, index=0):
+        model = init_model(self.LST if lst is None else lst,
+                           mock_get_visualizer)
+        if columns is not None:
+            model['columns'] = columns
+        model['openDropdown'] = {'id': menu_id(model, index=index)}
+        return model
+
+    def click(self, model, event, lst=None):
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            out, _ = update(make_column_mouse_event(repr(event)), None, model,
+                            self.LST if lst is None else lst,
+                            mock_get_visualizer)
+        return out
+
+    def commit(self, model, text, lst=None):
+        """Type an expression into the open box and press Enter."""
+        model['column_input_value'] = text
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            out, _ = update(make_column_key_event('Enter'), None, model,
+                            self.LST if lst is None else lst,
+                            mock_get_visualizer)
+        return out
+
+    def render(self, model, lst=None):
+        return visualize(self.LST if lst is None else lst, model,
+                         mock_get_visualizer, None)
+
+
+class TestAddColumnBesideMenu(AddColumnBesideCase):
+    """The two rows that make a column where the user is looking, rather than
+    at the far right the table's own (+) adds to."""
+
+    def test_the_menu_offers_both_sides(self):
+        col = col_at(self.model(), 1)
+        menu = self.render(self.model(index=1))
+        for after in (False, True):
+            self.assertIn(html.escape(repr(AddColumnAtClick(col=col,
+                                                            after=after))),
+                          menu)
+
+    def test_the_rows_sit_above_remove_column(self):
+        # Beside Remove Column, ahead of everything that asks after the rows:
+        # the three rows that decide which columns exist, together.
+        menu = _first_column_header(self.render(self.model()))
+        self.assertEqual(
+            re.findall(r'>(Add Column Before|Add Column After|Remove Column'
+                       r'|Subcolumns|Sort)<', menu),
+            ['Add Column Before', 'Add Column After', 'Remove Column',
+             'Subcolumns', 'Sort'])
+
+    def test_a_sub_column_offers_them_too(self):
+        split = "$.split(',')"
+        lines = ['id,name', '1,Alice']
+        model = self.model(lst=lines,
+                           columns={split: {'cols': {'$[0]': {}, '$[1]': {}}}},
+                           index=0)
+        sub = col_at(model, 0)
+        self.assertIn(SUBCOL_SEP, sub)
+        menu = self.render(model, lst=lines)
+        self.assertIn(html.escape(repr(AddColumnAtClick(col=sub, after=True))),
+                      menu)
+
+    def test_opening_the_box_closes_the_menu(self):
+        model = self.click(self.model(), AddColumnAtClick(col=col_at(self.model()),
+                                                          after=False))
+        self.assertIsNone(model['openDropdown'])
+        self.assertEqual(model['column_input_value'], '')
+        self.assertIsNone(model['editing_column'])
+
+
+class TestAddColumnBesideBox(AddColumnBesideCase):
+    """Where the box is drawn: beside the column the menu was opened on, so
+    the new column is written where it will end up."""
+
+    def open_at(self, index, after, model=None):
+        model = model or self.model(index=index)
+        return self.click(model, AddColumnAtClick(col=col_at(model, index),
+                                                  after=after))
+
+    def test_before_draws_the_box_to_the_left_of_that_column(self):
+        model = self.open_at(1, after=False)
+        names = _cell_names(_header_row(self.render(model)))
+        self.assertEqual(names, ['', "$['a']", 'BOX', "$['b']", "$['c']", '+'])
+
+    def test_after_draws_it_to_the_right(self):
+        model = self.open_at(1, after=True)
+        names = _cell_names(_header_row(self.render(model)))
+        self.assertEqual(names, ['', "$['a']", "$['b']", 'BOX', "$['c']", '+'])
+
+    def test_the_plus_still_draws_its_box_at_the_far_right(self):
+        model = self.click(self.model(), AddColumnClick())
+        names = _cell_names(_header_row(self.render(model)))
+        self.assertEqual(names, ['', "$['a']", "$['b']", "$['c']", 'BOX', '+'])
+
+    def test_the_body_keeps_its_columns_lined_up(self):
+        # A header cell with no cell under it would slide every column right of
+        # it off the values it names, so the column being written gets an empty
+        # cell in each row until it exists.
+        model = self.open_at(1, after=False)
+        cells = _body_row(self.render(model))
+        self.assertEqual(len(cells), 5)
+        self.assertIn('col-add-blank', cells[2])
+
+    def test_the_empty_table_still_spans_the_whole_width(self):
+        model = self.model(lst=[], columns={'$': {}}, index=0)
+        model = self.open_at(0, after=False, model=model)
+        html_out = self.render(model, lst=[])
+        self.assertIn('colspan="3"', html_out)
+
+    def test_the_box_says_what_a_sub_columns_dollars_mean(self):
+        # The box holds a sub-column's own expression, written in the scope its
+        # parent hands out -- the same thing the Subcolumns box would say.
+        split = "$.split(',')"
+        lines = ['id,name', '1,Alice']
+        model = self.model(lst=lines, columns={split: {'cols': {'$[0]': {}}}})
+        model = self.open_at(0, after=True, model=model)
+        legend = _subcol_scope(split, _model_binds(model)).legend
+        self.assertIn(f'data-tooltip="{html.escape(legend)}"',
+                      self.render(model, lst=lines))
+
+
+class TestAddColumnBesideSubcolumns(AddColumnBesideCase):
+    """A sub-column's menu adds a sub-column: the box sits in its own header
+    row, and what it writes goes in beside it rather than at the top level."""
+
+    SPLIT = "$.split(',')"
+    LINES = ['id,name', '1,Alice']
+
+    def subcol_model(self, index=0):
+        return self.model(lst=self.LINES,
+                          columns={self.SPLIT: {'cols': {'$[0]': {}, '$[1]': {}}}},
+                          index=index)
+
+    def open_at(self, index, after):
+        model = self.subcol_model(index)
+        return self.click(model, AddColumnAtClick(col=col_at(model, index),
+                                                  after=after), lst=self.LINES)
+
+    def test_the_box_sits_in_the_sub_columns_own_row(self):
+        model = self.open_at(1, after=True)
+        out = self.render(model, lst=self.LINES)
+        self.assertEqual(_cell_names(_header_row(out, 1)),
+                         ['$[0]', '$[1]', 'BOX'])
+
+    def test_the_parent_spans_the_box_too(self):
+        # Otherwise the header cell stops short and the columns under it shift.
+        model = self.open_at(0, after=False)
+        out = self.render(model, lst=self.LINES)
+        self.assertIn('colspan="3"', _header_row(out)[1])
+
+    def test_what_it_writes_is_a_sub_column(self):
+        model = self.commit(self.open_at(0, after=False), 'len($)',
+                            lst=self.LINES)
+        self.assertEqual(list(_subs_at(model['columns'], self.SPLIT)),
+                         ['len($)', '$[0]', '$[1]'])
+        self.assertEqual(list(model['columns']), [self.SPLIT])
+
+    def test_after_puts_it_on_the_other_side(self):
+        model = self.commit(self.open_at(0, after=True), 'len($)',
+                            lst=self.LINES)
+        self.assertEqual(list(_subs_at(model['columns'], self.SPLIT)),
+                         ['$[0]', 'len($)', '$[1]'])
+
+
+class TestAddColumnBesideCommit(AddColumnBesideCase):
+    """What the box writes goes in where the box was drawn."""
+
+    def open_at(self, index, after):
+        model = self.model(index=index)
+        return self.click(model, AddColumnAtClick(col=col_at(model, index),
+                                                  after=after))
+
+    def test_before_inserts_at_that_position(self):
+        model = self.commit(self.open_at(1, after=False), 'len($)')
+        self.assertEqual(list(model['columns']),
+                         ["$['a']", 'len($)', "$['b']", "$['c']"])
+        self.assertFalse(model['adding_column'])
+        self.assertEqual(model['column_input_value'], '')
+
+    def test_after_inserts_at_the_next_position(self):
+        model = self.commit(self.open_at(1, after=True), 'len($)')
+        self.assertEqual(list(model['columns']),
+                         ["$['a']", "$['b']", 'len($)', "$['c']"])
+
+    def test_a_suggestion_goes_in_the_same_place(self):
+        model = self.open_at(0, after=True)
+        model = self.click(model, ColumnSelect(name="$['z']"))
+        self.assertEqual(list(model['columns']),
+                         ["$['a']", "$['z']", "$['b']", "$['c']"])
+
+    def test_the_plus_still_adds_at_the_far_right(self):
+        model = self.click(self.model(), AddColumnClick())
+        self.assertIs(model['adding_column'], True)
+        self.assertIsNone(_add_anchor(model))
+        model = self.commit(model, 'len($)')
+        self.assertEqual(list(model['columns'])[-1], 'len($)')
+
+    def test_a_column_that_went_away_falls_back_to_the_far_right(self):
+        # The anchor names its column, like every other column event; one that
+        # no longer exists says nothing about where the new column goes, and a
+        # column the user wrote is not worth throwing away over it.
+        model = self.open_at(1, after=False)
+        del model['columns'][col_at(model, 1)]
+        model = self.commit(model, 'len($)')
+        self.assertEqual(list(model['columns'])[-1], 'len($)')
+
+    def test_escape_takes_the_box_away(self):
+        model = self.open_at(1, after=False)
+        model, _ = update(make_column_key_event('Escape'), None, model,
+                          self.LST, mock_get_visualizer)
+        self.assertFalse(model['adding_column'])
+        self.assertIsNone(_add_anchor(model))
+
+    def test_a_column_already_drawn_is_not_added_twice(self):
+        model = self.commit(self.open_at(1, after=False), "$['c']")
+        self.assertEqual(list(model['columns']), ["$['a']", "$['b']", "$['c']"])
+
+
+class _TableGrid(HTMLParser):
+    """The outermost table as a grid of occupied slots, spans and all.
+
+    Only the outer table: a cell's own visualizer may draw one of its own, and
+    that one's shape is its business.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.widths = []      # one per row: how many columns it fills
+        self._carried = {}    # row offset -> columns a rowspan above holds
+        self._row = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'table':
+            self.depth += 1
+        elif tag == 'tr' and self.depth == 1:
+            self._start_row()
+        elif tag in ('td', 'th') and self.depth == 1:
+            colspan = int(attrs.get('colspan', 1))
+            rowspan = int(attrs.get('rowspan', 1))
+            self._row += colspan
+            for r in range(1, rowspan):
+                self._carried[r] = self._carried.get(r, 0) + colspan
+
+    def handle_endtag(self, tag):
+        if tag == 'table':
+            self.depth -= 1
+        elif tag == 'tr' and self.depth == 1:
+            self._end_row()
+
+    def _start_row(self):
+        if self._row is not None:
+            self._end_row()
+        self._row = self._carried.pop(0, 0)
+
+    def _end_row(self):
+        self.widths.append(self._row)
+        self._carried = {r - 1: n for r, n in self._carried.items()}
+        self._row = None
+
+    def close(self):
+        super().close()
+        if self._row is not None:
+            self._end_row()
+
+
+def _row_widths(output):
+    """How many columns each row of the table fills."""
+    grid = _TableGrid()
+    grid.feed(output)
+    grid.close()
+    return grid.widths
+
+
+class TestAddColumnBesideKeepsTheTableRectangular(AddColumnBesideCase):
+    """The box takes a column of the table everywhere, not just in the header:
+    every row grows by exactly the one column it is taking, so nothing to the
+    right of it comes away from its own values.
+
+    Past the last column there is nothing to hold in place, and the box sits
+    where the (+)'s does -- over the space beside the table rather than over a
+    column of it, which is where the (+)'s box has always sat."""
+
+    SPLAT = {'$k': {}, '*$v': {'cols': {'$[0]': {}, '$[1]': {}}}}
+    GROUPS = {'eng': [['1', 'Alice'], ['2', 'Bo']], 'mkt': [['3', 'Cy']]}
+
+    def check(self, model_for, lst):
+        """The table with the box open beside every column, on either side."""
+        base = _row_widths(visualize(lst, model_for(), mock_get_visualizer,
+                                     None))
+        columns = model_for()['columns']
+        n_header = _header_depth(columns)
+        leaves = [leaf.expr for leaf in _leaf_columns(columns)]
+        for index, target in enumerate(_menu_targets(columns)):
+            covered = [i for i, expr in enumerate(leaves)
+                       if expr == target or expr.startswith(target + SUBCOL_SEP)]
+            for after in (False, True):
+                with self.subTest(column=target, after=after):
+                    model = self.click(
+                        model_for(),
+                        AddColumnAtClick(col=target, after=after), lst=lst)
+                    widths = _row_widths(
+                        visualize(lst, model, mock_get_visualizer, None))
+                    past_end = after and covered[-1] == len(leaves) - 1
+                    self.assertEqual(
+                        widths,
+                        [w + 1 for w in base[:n_header]]
+                        + [w + (0 if past_end else 1) for w in base[n_header:]])
+
+    def test_a_plain_table(self):
+        self.check(lambda: self.model(), self.LST)
+
+    def test_a_table_with_sub_columns(self):
+        lines = ['id,name', '1,Alice']
+        columns = {"$.split(',')": {'cols': {'$[0]': {}, '$[1]': {}}},
+                   'len($)': {}}
+        self.check(lambda: self.model(lst=lines, columns=copy.deepcopy(columns)),
+                   lines)
+
+    def test_a_splat_and_its_per_group_answers(self):
+        def model_for():
+            model = self.model(lst=self.GROUPS, columns=copy.deepcopy(self.SPLAT))
+            model['column_computes'] = {f'*$v{SUBCOL_SEP}$[0]': ['len($)']}
+            return model
+        self.check(model_for, self.GROUPS)
+
+    def test_a_table_with_answers_under_it(self):
+        def model_for():
+            model = self.model()
+            model['column_computes'] = {
+                "$['b']": ['min($)', 'min($$, key=lambda item: $)']}
+            return model
+        self.check(model_for, self.LST)
+
+
+class TestColInsert(unittest.TestCase):
+    """The map keeps its order, so a column can go in anywhere in it."""
+
+    def test_it_inserts_at_the_index(self):
+        cols = {}
+        for name in ('a', 'b', 'c'):
+            _col_add(cols, name)
+        self.assertTrue(_col_insert(cols, 'x', 1))
+        self.assertEqual(list(cols), ['a', 'x', 'b', 'c'])
+
+    def test_it_keeps_every_columns_config(self):
+        cols = {'a': {'cols': {'$[0]': {}}}, 'b': {}}
+        _col_insert(cols, 'x', 0)
+        self.assertEqual(cols['a'], {'cols': {'$[0]': {}}})
+
+    def test_a_duplicate_is_refused(self):
+        cols = {'a': {}, 'b': {}}
+        self.assertFalse(_col_insert(cols, 'b', 0))
+        self.assertEqual(list(cols), ['a', 'b'])
+
+    def test_past_the_end_is_the_end(self):
+        cols = {'a': {}}
+        _col_insert(cols, 'x', 99)
+        self.assertEqual(list(cols), ['a', 'x'])
 
 
 if __name__ == '__main__':

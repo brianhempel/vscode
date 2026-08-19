@@ -7379,10 +7379,15 @@ def make_expand_toggle_event() -> dict:
     }
 
 
+def _tiny_lens(html_str: str) -> list:
+    """The readouts on the expand bar, tags and all, left to right."""
+    return re.findall(r'<div class="tiny-len".*?</div>', html_str)
+
+
 def _tiny_len(html_str: str) -> str:
-    """The length readout on the expand bar, tag and all."""
-    match = re.search(r'<div class="tiny-len".*?</div>', html_str)
-    return match[0] if match else ''
+    """Every readout on the expand bar as one string, for asking what the bar
+    says without caring which chip says it."""
+    return ''.join(_tiny_lens(html_str))
 
 
 class TestTinyLen(unittest.TestCase):
@@ -7425,6 +7430,37 @@ class TestTinyLen(unittest.TestCase):
                           var_and_exp=self.var_and_exp)
         self.assertIn('14 chars', _tiny_len(out))
         self.assertIn(exp_attr('len(x)'), _tiny_len(out))
+
+    def test_the_bar_says_how_many_lines_the_string_has(self):
+        self.assertIn('5 lines', _tiny_len(self.render(self.tall_value)))
+
+    def test_the_lines_are_counted_the_way_they_are_drawn(self):
+        # A trailing newline draws an empty last line, and is counted as one.
+        out = self.render("l1\nl2\nl3\nl4\nl5\n")
+        self.assertIn('6 lines', _tiny_len(out))
+
+    def test_the_line_count_hands_over_the_code_that_reads_it(self):
+        out = _tiny_lens(self.render(self.tall_value,
+                                     var_and_exp=self.var_and_exp))[0]
+        self.assertIn('5 lines', out)
+        self.assertIn(exp_attr("x.count('\\n') + 1"), out)
+        self.assertIn('draggable="true"', out)
+
+    def test_the_line_count_offers_nothing_without_a_source_expression(self):
+        out = _tiny_lens(self.render(self.tall_value))[0]
+        self.assertIn('5 lines', out)
+        self.assertNotIn('snc-py-exps', out)
+
+    def test_the_lines_come_before_the_chars_they_are_made_of(self):
+        lines, chars = _tiny_lens(self.render(self.tall_value))
+        self.assertIn('5 lines', lines)
+        self.assertIn('14 chars', chars)
+
+    def test_the_preview_counts_lines_too(self):
+        out = self.render(self.tall_value, small=True,
+                          var_and_exp=self.var_and_exp)
+        self.assertIn('5 lines', _tiny_len(out))
+        self.assertIn(exp_attr("x.count('\\n') + 1"), _tiny_len(out))
 
 
 class TestExpandToggle(unittest.TestCase):
