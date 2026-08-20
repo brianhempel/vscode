@@ -56,7 +56,7 @@
 - [ ] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
 - [ ] $item instead of $, maybe?
-- [ ] col action: convert to int, float
+- [x] col action: convert to int, float
 - [ ] dictionary visualizer
 - [ ] tuple visualizer
 - [ ] list of tuples

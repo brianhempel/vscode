@@ -1365,11 +1365,13 @@
    hoisted a second time, out of the panel the row lives in, so its styles hang
    off nothing (see the note above .col-menu-panel).
 
-   Sort's submenu is the same list of rows -- a checkbox, a name, and under a
-   separator the rows that write a line -- so it carries these same classes and
-   is styled once here. It adds .col-sort, .col-sort-trigger, .col-sort-panel,
-   .col-sort-row and .col-sort-code alongside them, which style nothing today
-   and are there to hang a difference off if one ever turns up. */
+   Sort's and Convert Type's submenus are the same list of rows -- a checkbox, a
+   name, and under a separator the rows that write something new -- so they carry
+   these same classes and are styled once here. They add .col-sort,
+   .col-sort-trigger, .col-sort-panel, .col-sort-row and .col-sort-code (and
+   .col-convert, .col-convert-trigger, .col-convert-panel, .col-convert-row and
+   .col-convert-code) alongside them, which style nothing today and are there to
+   hang a difference off if one ever turns up. */
 
 .col-menu-panel .col-compute {
 	/* .snc-dropdown-trigger is inline-flex, which would leave the row as wide

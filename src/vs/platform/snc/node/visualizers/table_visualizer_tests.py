@@ -14991,6 +14991,379 @@ class TestGroupBySeedsTheGroupedTable(unittest.TestCase):
         self.seed(['$[0]'], index=0, source=None).assert_not_called()
 
 
+# === Convert Type ===
+
+from table_visualizer import (ConvertTypeToggle, ConvertTypeColumnClick,
+                              CONVERT_TYPES, _convert_expr, _converted_type,
+                              _column_computes)
+
+
+class TestConvertExpr(unittest.TestCase):
+    """What the menu writes into the column's own expression."""
+
+    def test_it_wraps_the_column(self):
+        self.assertEqual(_convert_expr("$['n']", 'int'), "int($['n'])")
+
+    def test_it_offers_the_four_types_the_menu_lists(self):
+        self.assertEqual([_convert_expr('$', to) for to in CONVERT_TYPES],
+                         ['int($)', 'float($)', 'str($)', 'bool($)'])
+
+    def test_another_type_replaces_rather_than_nests(self):
+        self.assertEqual(_convert_expr("int($['n'])", 'float'), "float($['n'])")
+
+    def test_no_type_takes_the_conversion_off(self):
+        self.assertEqual(_convert_expr("int($['n'])", None), "$['n']")
+
+    def test_an_expression_that_converts_nothing_is_left_as_written(self):
+        self.assertEqual(_convert_expr("len($['n'])", None), "len($['n'])")
+
+    def test_a_splat_converts_the_elements_it_spread(self):
+        self.assertEqual(_convert_expr("*$['ns']", 'int'),
+                         "*[int(item2) for item2 in $['ns']]")
+
+    def test_and_takes_that_back_off_again(self):
+        self.assertEqual(
+            _convert_expr("*[int(item2) for item2 in $['ns']]", None),
+            "*$['ns']")
+
+    def test_a_splats_type_is_replaced_rather_than_nested_too(self):
+        self.assertEqual(
+            _convert_expr("*[int(item2) for item2 in $['ns']]", 'str'),
+            "*[str(item2) for item2 in $['ns']]")
+
+    def test_a_splat_of_a_comprehension_does_not_shadow_its_own_element(self):
+        # _promote_expr's rule: `for item2 in [f(item2) for item2 in v]` is
+        # correct Python that reads like a bug.
+        self.assertEqual(
+            _convert_expr('*[item2 for item2 in $]', 'int'),
+            '*[int(item3) for item3 in [item2 for item2 in $]]')
+
+
+class TestConvertedType(unittest.TestCase):
+    """Which box is ticked is the column expression's answer, not the model's --
+    so a conversion the user typed by hand ticks the box that describes it."""
+
+    def test_a_wrapped_column_reads_as_its_type(self):
+        self.assertEqual(_converted_type("int($['n'])"), 'int')
+        self.assertEqual(_converted_type("bool($['n'])"), 'bool')
+
+    def test_a_plain_column_converts_nothing(self):
+        self.assertIsNone(_converted_type("$['n']"))
+
+    def test_a_call_that_is_not_a_conversion_is_not_one(self):
+        self.assertIsNone(_converted_type("len($['n'])"))
+
+    def test_a_two_argument_int_is_not_the_conversion_this_menu_writes(self):
+        # The second argument is a base, and taking the wrapper off would
+        # change what the column says rather than what type it reads as.
+        self.assertIsNone(_converted_type("int($['n'], 16)"))
+
+    def test_one_written_by_hand_ticks_its_box(self):
+        self.assertEqual(_converted_type("float( $['n'] )"), 'float')
+
+    def test_something_that_does_not_parse_converts_nothing(self):
+        self.assertIsNone(_converted_type("int($['n']"))
+
+    def test_a_splat_reads_through_the_elements_it_spread(self):
+        self.assertEqual(_converted_type("*[int(x) for x in $['ns']]"), 'int')
+
+    def test_a_comprehension_that_converts_something_else_is_not_one(self):
+        self.assertIsNone(_converted_type("*[int(x['a']) for x in $['ns']]"))
+
+    def test_a_filtered_comprehension_is_not_a_plain_conversion(self):
+        self.assertIsNone(_converted_type("*[int(x) for x in $['ns'] if x]"))
+
+    def test_a_conversion_is_not_read_through_a_star_that_is_not_there(self):
+        # `[int(x) for x in ns]` as a plain column is a list per row, not a
+        # column that converts -- taking the comprehension off would change
+        # what the column is.
+        self.assertIsNone(_converted_type('[int(x) for x in $]'))
+
+
+CONVERT_LIST = [{'n': '3'}, {'n': '1'}, {'n': '2'}]
+
+
+def convert_model(lst=None, columns=None, source='data', index=0):
+    """A table model with a column menu and its Convert Type submenu open."""
+    lst = CONVERT_LIST if lst is None else lst
+    model = init_model(lst, mock_get_visualizer)
+    model['columns'] = ["$['n']"] if columns is None else columns
+    model['_source_expr'] = source
+    model['openDropdown'] = {'id': menu_id(model, index=index)}
+    model['col_search_dropdown'] = menu_id(model, 'convert', index)
+    return lst, model
+
+
+class ConvertPanelCase(unittest.TestCase):
+    """The Convert Type submenu, opened over a one-column table."""
+
+    def panel(self, model, lst):
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertIn('col-convert-panel', th)
+        panel = th[th.index('col-convert-panel'):]
+        # Convert Type's own trigger comes before its panel, so the next one
+        # along is Compute's -- i.e. where this panel has finished.
+        return panel[:panel.index('col-compute-trigger')]
+
+    def rows(self, panel):
+        return re.findall(r'<div class="col-compute-row[^"]*".*?'
+                          r'(?=<div class="col-compute-row|$)', panel,
+                          re.DOTALL)
+
+    def names(self, panel):
+        return re.findall(r'col-compute-name">([^<]*)<', panel)
+
+
+class TestConvertPanelRendering(ConvertPanelCase):
+    """Eight rows: four that rewrite the column, four that write another one
+    beside it."""
+
+    def test_it_lists_the_eight_rows_in_order(self):
+        lst, model = convert_model()
+        self.assertEqual(self.names(self.panel(model, lst)),
+                         ['int', 'float', 'str', 'bool',
+                          'int (new column)', 'float (new column)',
+                          'str (new column)', 'bool (new column)'])
+
+    def test_only_the_rewriting_rows_have_a_checkbox(self):
+        lst, model = convert_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertEqual([('col-tally-check' in row) for row in rows],
+                         [True] * 4 + [False] * 4)
+
+    def test_an_unconverted_column_checks_nothing(self):
+        lst, model = convert_model()
+        for row in self.rows(self.panel(model, lst))[:4]:
+            self.assertNotIn('checked', row)
+
+    def test_the_type_the_column_already_reads_as_is_the_checked_row(self):
+        lst, model = convert_model(columns=["int($['n'])"])
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('checked', rows[0])
+        for row in rows[1:4]:
+            self.assertNotIn('checked', row)
+
+    def test_every_row_hands_over_the_converted_column(self):
+        lst, model = convert_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[0])
+        self.assertIn(exp_attr("[str(item['n']) for item in data]"), rows[2])
+
+    def test_the_new_column_rows_hand_over_the_same_expression(self):
+        lst, model = convert_model()
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[4])
+
+    def test_a_checked_row_still_names_the_column_it_describes(self):
+        # The row names a type, not the click; dragging int off a column that
+        # already reads as one hands over the column as it stands.
+        lst, model = convert_model(columns=["int($['n'])"])
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[0])
+
+    def test_a_splat_hands_over_the_elements_it_spread(self):
+        # The converted column read the ordinary way -- the star's own list
+        # converted, then flattened -- rather than a comprehension fused by
+        # hand: what the drag hands over is what the column would BE.
+        lst, model = convert_model(lst=[{'ns': ['1', '2']}],
+                                   columns=["*$['ns']"])
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn(
+            exp_attr('[item3 for item in data '
+                     "for item3 in [int(item2) for item2 in item['ns']]]"),
+            rows[0])
+
+    def test_every_row_hands_its_expression_out_to_the_right(self):
+        # A tooltip over a menu row would otherwise cover the rows around it.
+        lst, model = convert_model()
+        for row in self.rows(self.panel(model, lst)):
+            self.assertIn('snc-py-exp-align="right"', row)
+
+    def test_a_list_with_no_source_has_no_expression_to_hand_over(self):
+        lst, model = convert_model(source=None)
+        for row in self.rows(self.panel(model, lst)):
+            self.assertNotIn('snc-py-exps', row)
+
+    def test_but_it_can_still_be_converted(self):
+        # Unlike Sort, this rewrites the COLUMN rather than the line, so a list
+        # with no name of its own has nothing to stop it.
+        lst, model = convert_model(source=None)
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('ConvertTypeToggle', rows[0])
+        self.assertNotIn('unselectable', rows[0])
+
+    def test_a_column_that_is_already_there_is_not_offered_again(self):
+        # Two columns would share one identity, and the second would be a cell
+        # nothing could tell from the first.
+        lst, model = convert_model(columns=["$['n']", "int($['n'])"])
+        rows = self.rows(self.panel(model, lst))
+        self.assertIn('unselectable', rows[0])
+        self.assertNotIn('ConvertTypeToggle', rows[0])
+        self.assertIn('unselectable', rows[4])
+        self.assertNotIn('ConvertTypeColumnClick', rows[4])
+        self.assertNotIn('unselectable', rows[1])
+
+    def test_the_trigger_reads_as_a_flyout_like_sort(self):
+        lst, model = convert_model()
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertIn('>Convert Type<', th)
+        self.assertIn('col-convert-trigger', th)
+
+    def test_it_sits_between_group_by_and_compute(self):
+        lst, model = convert_model()
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertLess(th.index('col-group-by'), th.index('col-convert'))
+        self.assertLess(th.index('col-convert'), th.index('>Compute<'))
+
+    def test_only_the_open_submenu_draws_its_panel(self):
+        lst, model = convert_model()
+        model['col_search_dropdown'] = menu_id(model, 'compute')
+        th = _first_column_header(
+            visualize(lst, model, mock_get_visualizer,
+                      lambda code: eval(code, {}, {'data': lst})))
+        self.assertNotIn('col-convert-panel', th)
+
+
+class ConvertEventCase(unittest.TestCase):
+    def click(self, event, lst=None, **kwargs):
+        lst, model = convert_model(lst, **kwargs)
+        return update(make_column_mouse_event(repr(event)),
+                      ('data', 'data'), model, lst, mock_get_visualizer,
+                      eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+
+
+class TestConvertTypeToggle(ConvertEventCase):
+    """Clicking a type rewrites the column's own expression, so the cells, the
+    search and everything computed off the column all read the new type."""
+
+    def test_it_wraps_the_columns_expression(self):
+        model, _ = self.click(ConvertTypeToggle(col="$['n']", to='int'))
+        self.assertEqual(list(model['columns']), ["int($['n'])"])
+
+    def test_it_writes_no_code(self):
+        # A conversion is about how a column reads, not about the line.
+        _, commands = self.click(ConvertTypeToggle(col="$['n']", to='int'))
+        self.assertEqual(commands, [])
+
+    def test_it_keeps_the_columns_place(self):
+        model, _ = self.click(ConvertTypeToggle(col="$['b']", to='float'),
+                              lst=[{'a': 1, 'b': '2', 'c': 3}],
+                              columns=["$['a']", "$['b']", "$['c']"], index=1)
+        self.assertEqual(list(model['columns']),
+                         ["$['a']", "float($['b'])", "$['c']"])
+
+    def test_clicking_the_checked_type_takes_the_conversion_off(self):
+        model, _ = self.click(ConvertTypeToggle(col="int($['n'])", to='int'),
+                              columns=["int($['n'])"])
+        self.assertEqual(list(model['columns']), ["$['n']"])
+
+    def test_another_type_replaces_rather_than_nests(self):
+        model, _ = self.click(ConvertTypeToggle(col="int($['n'])", to='str'),
+                              columns=["int($['n'])"])
+        self.assertEqual(list(model['columns']), ["str($['n'])"])
+
+    def test_the_menu_stays_open_on_the_column_it_renamed(self):
+        # A checkbox, and picking another type is the common next act -- but the
+        # column it is open on is called something else now.
+        model, _ = self.click(ConvertTypeToggle(col="$['n']", to='int'))
+        self.assertEqual(model['openDropdown'],
+                         {'id': "col-menu-int($['n'])"})
+        self.assertEqual(model['col_search_dropdown'], "convert-int($['n'])")
+
+    def test_what_the_column_computes_follows_it_over(self):
+        # The aggregations describe the column rather than filtering it.
+        lst, model = convert_model()
+        model['column_computes'] = {"$['n']": ['len($)']}
+        model, _ = update(
+            make_column_mouse_event(repr(ConvertTypeToggle(col="$['n']",
+                                                           to='int'))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+        self.assertEqual(_column_computes(model, "int($['n'])"), ['len($)'])
+
+    def test_a_sub_column_converts_its_own_expression(self):
+        model, _ = self.click(ConvertTypeToggle(col=f"$['p']\x01$['n']",
+                                                to='int'),
+                              lst=[{'p': {'n': '1'}}],
+                              columns={"$['p']": {'cols': {"$['n']": {}}}})
+        self.assertEqual(list(model['columns']["$['p']"]['cols']),
+                         ["int($['n'])"])
+
+    def test_a_splat_converts_the_elements_it_spread(self):
+        model, _ = self.click(ConvertTypeToggle(col="*$['ns']", to='int'),
+                              lst=[{'ns': ['1', '2']}], columns=["*$['ns']"])
+        self.assertEqual(list(model['columns']),
+                         ["*[int(item2) for item2 in $['ns']]"])
+
+    def test_a_name_a_sibling_already_has_is_refused(self):
+        model, _ = self.click(ConvertTypeToggle(col="$['n']", to='int'),
+                              columns=["$['n']", "int($['n'])"])
+        self.assertEqual(list(model['columns']), ["$['n']", "int($['n'])"])
+
+    def test_a_type_it_does_not_offer_is_a_noop(self):
+        model, _ = self.click(ConvertTypeToggle(col="$['n']", to='eval'))
+        self.assertEqual(list(model['columns']), ["$['n']"])
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        model, _ = self.click(ConvertTypeToggle(col='$.gone', to='int'))
+        self.assertEqual(list(model['columns']), ["$['n']"])
+
+
+class TestConvertTypeColumnClick(ConvertEventCase):
+    """The other four rows add the converted column beside the original, which
+    is the one thing the checkbox can't do: keep both readings on screen."""
+
+    def test_it_adds_the_converted_column_to_the_right(self):
+        model, _ = self.click(ConvertTypeColumnClick(col="$['n']", to='int'))
+        self.assertEqual(list(model['columns']), ["$['n']", "int($['n'])"])
+
+    def test_it_lands_beside_the_column_rather_than_at_the_far_right(self):
+        model, _ = self.click(ConvertTypeColumnClick(col="$['a']", to='str'),
+                              lst=[{'a': 1, 'b': 2}],
+                              columns=["$['a']", "$['b']"], index=0)
+        self.assertEqual(list(model['columns']),
+                         ["$['a']", "str($['a'])", "$['b']"])
+
+    def test_a_converted_column_converts_from_the_same_place(self):
+        # Replacing rather than nesting, the way the checkboxes do.
+        model, _ = self.click(ConvertTypeColumnClick(col="int($['n'])",
+                                                    to='str'),
+                              columns=["int($['n'])"])
+        self.assertEqual(list(model['columns']),
+                         ["int($['n'])", "str($['n'])"])
+
+    def test_a_sub_columns_new_column_is_a_sub_column_beside_it(self):
+        # It is written in the scope its parent hands out, so a column of the
+        # table would read it against something else entirely.
+        model, _ = self.click(ConvertTypeColumnClick(col=f"$['p']\x01$['n']",
+                                                     to='int'),
+                              lst=[{'p': {'n': '1'}}],
+                              columns={"$['p']": {'cols': {"$['n']": {}}}})
+        self.assertEqual(list(model['columns']["$['p']"]['cols']),
+                         ["$['n']", "int($['n'])"])
+
+    def test_the_menu_closes_behind_it(self):
+        # One column written, unlike checking a box, which invites the next.
+        model, _ = self.click(ConvertTypeColumnClick(col="$['n']", to='int'))
+        self.assertIsNone(model['openDropdown'])
+        self.assertIsNone(model['col_search_dropdown'])
+
+    def test_a_column_that_is_already_there_is_not_added_twice(self):
+        model, _ = self.click(ConvertTypeColumnClick(col="$['n']", to='int'),
+                              columns=["$['n']", "int($['n'])"])
+        self.assertEqual(list(model['columns']), ["$['n']", "int($['n'])"])
+
+    def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
+        model, _ = self.click(ConvertTypeColumnClick(col='$.gone', to='int'))
+        self.assertEqual(list(model['columns']), ["$['n']"])
+
+
 class TestSourceSpanAndExprRefresh(unittest.TestCase):
     """The line can be rewritten under a model that outlives the rewrite, so
     what the model knows about it is refreshed rather than remembered."""

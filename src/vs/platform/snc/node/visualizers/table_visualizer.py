@@ -40,6 +40,7 @@ Columns shown in the table are configurable and persisted:
 """
 
 import ast
+import copy
 import functools
 import html
 import itertools
@@ -269,6 +270,26 @@ class GroupByClick:
     over it.
     """
     col: str
+
+@dataclass(frozen=True, slots=True)
+class ConvertTypeToggle:
+    """User checked or unchecked one of a column's Convert Type rows, which
+    rewrites the COLUMN's own expression rather than the line the table is
+    showing -- a conversion is about how one column reads, where a sort is about
+    the order the rows arrive in.
+
+    Clicking the type the column already reads as takes the conversion off, so
+    one row is both the way in and the way out -- the shape SortClick has.
+    """
+    col: str
+    to: str
+
+@dataclass(frozen=True, slots=True)
+class ConvertTypeColumnClick:
+    """User clicked one of the Convert Type submenu's `(new column)` rows, which
+    puts the converted column beside the original instead of over it."""
+    col: str
+    to: str
 
 @dataclass(frozen=True, slots=True)
 class ComputeToggle:
@@ -2522,6 +2543,19 @@ def _add_beside_target(model: dict) -> 'tuple | None':
     return None if target is None else (target, anchor[1])
 
 
+def _siblings_of(columns, target: str) -> 'dict | None':
+    """The map a column lives in: the table's own columns for a top-level one,
+    its parent's `cols` for a sub-column, and None when there is no such column.
+
+    Off the LAST separator rather than the first, so a sub-column of a
+    sub-column is looked for where it actually sits.
+    """
+    path = target.split(SUBCOL_SEP)
+    if len(path) == 1:
+        return columns
+    return _subs_at(columns, SUBCOL_SEP.join(path[:-1]))
+
+
 def _add_beside(model: dict, expr: str) -> bool:
     """Put a new column in where the open box was drawn.
 
@@ -2534,13 +2568,12 @@ def _add_beside(model: dict, expr: str) -> bool:
     if beside is None:
         return _col_add(columns, expr)
     target, after = beside
-    path = target.split(SUBCOL_SEP)
-    siblings = (columns if len(path) == 1
-                else _subs_at(columns, SUBCOL_SEP.join(path[:-1])))
+    siblings = _siblings_of(columns, target)
     if siblings is None:
         return _col_add(columns, expr)
     return _col_insert(siblings, expr,
-                       list(siblings).index(path[-1]) + (1 if after else 0))
+                       list(siblings).index(target.split(SUBCOL_SEP)[-1])
+                       + (1 if after else 0))
 
 
 def _add_box_leaf(model: dict, columns) -> 'tuple | None':
@@ -3976,6 +4009,235 @@ def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
         return
     save_columns_to_dotfile(type_key, [],
                             _grouped_slots(col, model.get('columns')))
+
+
+# =============================================================================
+# Convert type
+# =============================================================================
+#
+# The Convert Type submenu of a column's ▾ menu wraps the column's own
+# expression -- `$['n']` becomes `int($['n'])` -- so the cells, the search, the
+# tally and every aggregation read the converted values without one of them
+# being told about it. Nothing here touches the line the table is showing: a
+# conversion says how one COLUMN reads, where a sort says what order the rows
+# arrive in and so has to be written where the rows come from.
+#
+# So, as in Sort, the checkboxes are not model state. Which one is ticked is read
+# back out of the column expression, and there is nowhere for the two to
+# disagree; a conversion the user typed by hand ticks the box that describes it.
+#
+# The rows under the separator write the converted column BESIDE the original,
+# which is the one thing the checkbox cannot do: keep both readings on screen at
+# once, and keep the original's searches and aggregations while doing it.
+
+# The types the submenu offers, in the order it offers them. Python's own
+# one-argument constructors, so the code a row writes is the code anyone would
+# type -- and the row's name is the function's.
+CONVERT_TYPES = ('int', 'float', 'str', 'bool')
+
+
+def _dollar_probe(expr: str) -> tuple:
+    """*expr* with every dollar run replaced by a name Python can parse, and the
+    map back.
+
+    A column expression is not Python -- `$['n']` is a SyntaxError -- so it is
+    read through placeholders, and any source segment taken off the parse is
+    handed back through the same map. Distinct names rather than one shared
+    probe, so `$$` and `$` come back as themselves.
+
+    A dollar that is string content is replaced too, and comes back verbatim for
+    the same reason: only the STRUCTURE is read off the parse, and the text is
+    always the user's own.
+    """
+    names = {}
+
+    def probe(m):
+        name = f'_snc_dlr{len(names)}_'
+        names[name] = m[0]
+        return name
+
+    return DOLLARS_RE.sub(probe, expr), names
+
+
+def _unprobe(text: 'str | None', names: dict) -> 'str | None':
+    for name, token in names.items():
+        text = text.replace(name, token) if text is not None else None
+    return text
+
+
+def _is_convert_call(node) -> bool:
+    """Whether a parsed node is one of the conversions this menu speaks about.
+
+    One argument and no keywords: `int(x, 16)` reads a base, so taking that
+    wrapper off would change what the column SAYS rather than what type it reads
+    as -- and this menu only ever offers to change the latter.
+    """
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in CONVERT_TYPES and len(node.args) == 1
+            and not node.keywords)
+
+
+def _parse_convert(expr: str, is_splat: bool = False) -> 'tuple | None':
+    """A conversion read apart as (what it converts, which type), or None when
+    the expression isn't one.
+
+    Two shapes, because a splat spread a LIST into rows: `int($['n'])` for the
+    one value an ordinary column has per row, and `[int(item2) for item2 in
+    $['ns']]` for the elements a splat spreads. Whatever the element is called,
+    since _promote_expr names it away from whatever it wraps -- what is checked
+    is that the comprehension converts its own element and nothing else, which
+    is the only shape the star can be taken back off again.
+    """
+    probed, names = _dollar_probe(expr)
+    try:
+        node = ast.parse(probed, mode='eval').body
+    except (SyntaxError, ValueError):
+        return None
+    if is_splat:
+        if not (isinstance(node, ast.ListComp) and len(node.generators) == 1):
+            return None
+        gen = node.generators[0]
+        if gen.ifs or gen.is_async or not isinstance(gen.target, ast.Name):
+            return None
+        if not (_is_convert_call(node.elt)
+                and isinstance(node.elt.args[0], ast.Name)
+                and node.elt.args[0].id == gen.target.id):
+            return None
+        inner = _unprobe(ast.get_source_segment(probed, gen.iter), names)
+        return None if inner is None else (inner, node.elt.func.id)
+    if not _is_convert_call(node):
+        return None
+    inner = _unprobe(ast.get_source_segment(probed, node.args[0]), names)
+    return None if inner is None else (inner, node.func.id)
+
+
+def _convert_expr(col_expr: str, to: 'str | None') -> str:
+    """*col_expr* -- one column's own expression -- reading as *to*, or, with no
+    type, with whatever conversion it has taken off.
+
+    Always unwraps first, so picking another type replaces the conversion rather
+    than nesting inside it -- the same answer _sort_expr gives a second sort.
+
+    A splat spread a list into rows, so what converts is every ELEMENT of it:
+    the star stays where it is and the conversion goes inside, which is the same
+    line _promote_expr writes when a sub-column comes out of a splat.
+    """
+    is_splat, inner = _split_splat(col_expr)
+    star = SPLAT if is_splat else ''
+    parsed = _parse_convert(inner, is_splat)
+    if parsed is not None:
+        inner = parsed[0]
+    if to is None:
+        return f'{star}{inner}'
+    if is_splat:
+        return f'{star}{_promote_expr(f"{to}($)", f"{SPLAT}{inner}")}'
+    return f'{to}({inner})'
+
+
+def _converted_type(col_expr: str) -> 'str | None':
+    """Which type a column already reads as, or None -- the checkbox, read off
+    the expression rather than out of the model."""
+    is_splat, inner = _split_splat(col_expr)
+    parsed = _parse_convert(inner, is_splat)
+    return parsed[1] if parsed else None
+
+
+def _convert_target(col: str, to: 'str | None') -> tuple:
+    """(the column's own expression converted, the identity it would then have).
+
+    A column is written in the scope its parent hands out, so what converts is
+    the LAST segment of the key: the whole expression for a column of the table,
+    the sub-column's own expression for one drawn under another.
+    """
+    path = col.split(SUBCOL_SEP)
+    seg = _convert_expr(path[-1], to)
+    return seg, SUBCOL_SEP.join(path[:-1] + [seg])
+
+
+def _convert_writable(columns, col: str, seg: str) -> bool:
+    """Whether *col* can be written as *seg* where it lives.
+
+    False when a sibling already reads that way: two columns would share one
+    identity, and the second would be a cell nothing could tell from the first.
+    What dims a row rather than letting the click land on nothing.
+    """
+    siblings = _siblings_of(columns, col)
+    return (siblings is not None and col.split(SUBCOL_SEP)[-1] in siblings
+            and seg not in siblings)
+
+
+def _convert_values_expr(columns, col: str, to: str, source_expr: 'str | None',
+                         binds: 'dict | None' = None) -> 'str | None':
+    """Every value the column would have once converted, as one expression --
+    what a Convert Type row hands to a drag.
+
+    Asked of the columns as they WOULD read rather than assembled here: a column
+    under a splat is keyed by an identity that means nothing on its own, and the
+    ordinary whole-column question already knows how to flatten one. So the
+    conversion is written into a copy of the config and the same question asked
+    of that.
+    """
+    if source_expr is None:
+        return None
+    path = col.split(SUBCOL_SEP)
+    seg, converted = _convert_target(col, to)
+    # A column that already reads that way is its own answer -- and renaming it
+    # to the name it has would be refused as a duplicate.
+    if seg == path[-1]:
+        return _column_whole_expr(columns, col, source_expr, binds)
+    cols = copy.deepcopy(columns)
+    siblings = _siblings_of(cols, col)
+    if siblings is None or path[-1] not in siblings:
+        return None
+    if not _col_rename_at(siblings, list(siblings).index(path[-1]), seg):
+        return None
+    return _column_whole_expr(cols, converted, source_expr, binds)
+
+
+def _convert_column(model, col: str, to: 'str | None', eval_in_scope=None) -> bool:
+    """Rewrite a column's own expression, keeping its place and what it carries.
+
+    The clean-up a rename anywhere needs: the cells are keyed by the column, and
+    so are the search and the aggregations. The search was written against the
+    old expression and goes with it; the aggregations describe the column rather
+    than filtering it, so they follow it over.
+    """
+    columns = model['columns']
+    seg, converted = _convert_target(col, to)
+    if not _convert_writable(columns, col, seg):
+        return False
+    # Both questions _col_rename_at can refuse on -- is the column there, is the
+    # new name taken -- are the two _convert_writable just asked.
+    siblings = _siblings_of(columns, col)
+    _col_rename_at(siblings, list(siblings).index(col.split(SUBCOL_SEP)[-1]), seg)
+    # The composed identity rather than the bare segment: a sub-column's cells,
+    # search and aggregations are all keyed by the identity it is DRAWN under.
+    _rename_column_children(model, col, converted)
+    _remove_column_search(model, col)
+    _rename_column_compute(model, col, converted)
+    _recompose_search(model, eval_in_scope)
+    return True
+
+
+def _repoint_column_menus(model, old: str, new: str) -> None:
+    """Keep the open menu on a column whose identity has just changed.
+
+    A menu id names its column (see _menu_id), so a conversion would otherwise
+    leave the menu open on a column no longer there -- and the checkbox that
+    made it invites the next click straight after.
+
+    The KIND is whatever the id said it was, so the column menu and whichever
+    submenu is open both survive without either being named here.
+    """
+    def repointed(at):
+        return (at[:-len(old)] + new
+                if isinstance(at, str) and at.endswith(f'-{old}') else at)
+
+    model['col_search_dropdown'] = repointed(model.get('col_search_dropdown'))
+    open_dropdown = model.get('openDropdown')
+    if isinstance(open_dropdown, dict):
+        model['openDropdown'] = {**open_dropdown,
+                                 'id': repointed(open_dropdown.get('id'))}
 
 
 # =============================================================================
@@ -6799,6 +7061,103 @@ def _subcol_expr_event(col: str, expr: str) -> str:
             f"value=e.get('value', ''))")
 
 
+def _render_column_convert(col, model) -> str:
+    """Render the Convert Type row of a column's ▾ menu, and its submenu when
+    open.
+
+    A flyout out of the already-hoisted column menu, like Sort, and sharing its
+    one open slot -- so opening this puts Sort away, and Escape and every way of
+    leaving the column menu already close it.
+
+    It carries Compute's classes as well as its own, for Sort's reason: the
+    three submenus are the same list of rows and are styled once.
+    """
+    dropdown_id = _menu_id('convert', col)
+    is_open = model.get('col_search_dropdown') == dropdown_id
+    toggle_event = repr(ColumnSearchDropdownToggle(dropdown_id=dropdown_id))
+    panel_html = _render_convert_panel(col, model) if is_open else ''
+    return (
+        f'<div class="snc-dropdown-trigger col-compute col-convert"'
+        f'{_column_dwell_attr(model, opens=dropdown_id)}>'
+        f'<div class="snc-dropdown-option col-compute-trigger'
+        f' col-convert-trigger{" open" if is_open else ""}" '
+        f'data-tooltip="Read this column\'s values as another type" '
+        f'snc-mouse-down="{html.escape(toggle_event)}">'
+        f'<span class="snc-dropdown-option-label col-compute-title">'
+        f'Convert Type</span>'
+        f'<span class="submenu-right-arrow">▸</span>'
+        f'</div>{panel_html}</div>'
+    )
+
+
+def _render_convert_panel(col, model) -> str:
+    """One row per type that rewrites the column, and one per type that writes
+    another column beside it.
+
+    The first four are checkboxes because a column either reads as a type or it
+    doesn't, and the box is read off the column expression rather than off the
+    model. Neither half needs the line the table is showing -- a conversion is
+    about the column -- so, unlike Sort, a list with nothing to rewrite is no
+    reason for a row to go inert. What does dim one is a sibling that already
+    reads that way: two columns would share one identity.
+    """
+    columns = model.get('columns') or {}
+    source_expr = model.get('_source_expr')
+    binds = _model_binds(model)
+    current = _converted_type(col.split(SUBCOL_SEP)[-1])
+
+    rows = []
+    for to in CONVERT_TYPES:
+        checked = current == to
+        # Clicking the type the column already reads as takes the conversion
+        # off, so one row is both the way in and the way out.
+        seg, _ident = _convert_target(col, None if checked else to)
+        inert = not _convert_writable(columns, col, seg)
+        toggle_attr = '' if inert else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(ConvertTypeToggle(col=col, to=to)))}"')
+        # The row names a TYPE, not the click, so a row already checked hands
+        # over the column as it stands rather than the unconversion a click
+        # there would write. Rightwards, like every handle in these menus: a
+        # tooltip above one would cover the rows around it.
+        code = (None if inert else
+                _convert_values_expr(columns, col, to, source_expr, binds))
+        rows.append(
+            f'<div class="col-compute-row col-convert-row'
+            f'{" checked" if checked else ""}'
+            f'{" unselectable" if inert else ""}"'
+            f'{py_exp_attrs(code, align="right")}>'
+            f'<span class="col-compute-toggle"{toggle_attr}>'
+            f'{_render_tally_check(checked, disabled=inert)}'
+            f'<span class="col-compute-name">{to}</span>'
+            f'</span></div>')
+
+    rows.append('<div class="col-compute-sep"></div>')
+    for to in CONVERT_TYPES:
+        # The row itself is the handle, like Sort's `(new code)` rows. What it
+        # writes replaces any conversion the column already has rather than
+        # nesting inside it, the way the checkboxes do.
+        seg, _ident = _convert_target(col, to)
+        inert = not _convert_writable(columns, col, seg)
+        click_attr = '' if inert else (
+            f' snc-mouse-down="'
+            f'{html.escape(repr(ConvertTypeColumnClick(col=col, to=to)))}"')
+        code = (None if inert else
+                _convert_values_expr(columns, col, to, source_expr, binds))
+        rows.append(
+            f'<div class="col-compute-row col-compute-code col-convert-code'
+            f'{" unselectable" if inert else ""}"'
+            f'{py_exp_attrs(code, align="right")}>'
+            f'<span class="col-compute-toggle"{click_attr}>'
+            f'<span class="col-compute-nocheck"></span>'
+            f'<span class="col-compute-name">{to} (new column)</span>'
+            f'</span></div>')
+
+    return (f'<div class="snc-dropdown-panel flyout col-compute-panel '
+            f'col-convert-panel" snc-dropdown-align="flyout">'
+            f'{"".join(rows)}</div>')
+
+
 def _render_column_compute(col, model, lst, eval_in_scope=None) -> str:
     """Render the Compute row of a column's ▾ menu, and its submenu when open.
 
@@ -7040,6 +7399,10 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
                                eval_in_scope),
         _render_column_sort(col, model),
         _render_column_group_by(col, model),
+        # Above Compute: it says how the column READS, which is a question
+        # every row below it -- what the column adds up to, what it is
+        # searched and tallied on -- then asks of the converted values.
+        _render_column_convert(col, model),
         _render_column_compute(col, model, lst, eval_in_scope),
         _render_column_search_row(col, model),
         _render_column_tally(col, model, lst, eval_in_scope),
@@ -9272,6 +9635,40 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # The dict the line makes has no columns of its own yet, and
                 # the ones to want are the ones in hand.
                 _seed_grouped_columns(col, value, model, eval_in_scope)
+
+        # Convert Type leaves the menu open for the same reason Sort does: it is
+        # a checkbox, and picking another type is the common next act. The
+        # column is called something else now, though, so the menu is pointed at
+        # what it has become.
+        case ConvertTypeToggle(col=named, to=to):
+            col = _named_column(model, named)
+            if col is not None and to in CONVERT_TYPES:
+                # Clicking the type the column already reads as takes the
+                # conversion off, so one row is both the way in and the way out.
+                wanted = (None if _converted_type(col.split(SUBCOL_SEP)[-1]) == to
+                          else to)
+                _seg, converted = _convert_target(col, wanted)
+                if _convert_column(model, col, wanted, eval_in_scope):
+                    _repoint_column_menus(model, col, converted)
+                    if type_key:
+                        _save_slots(model)
+
+        # One column written, unlike checking a box, which invites the next --
+        # so this closes the menu the way the Sort code rows do.
+        case ConvertTypeColumnClick(col=named, to=to):
+            col = _named_column(model, named)
+            if col is not None and to in CONVERT_TYPES:
+                seg, _converted = _convert_target(col, to)
+                if _convert_writable(model['columns'], col, seg):
+                    _close_column_menus(model)
+                    # Beside the column rather than at the far right, which is
+                    # where the answer belongs and, for a sub-column, the only
+                    # scope the new expression reads correctly in.
+                    siblings = _siblings_of(model['columns'], col)
+                    _col_insert(siblings, seg,
+                                list(siblings).index(col.split(SUBCOL_SEP)[-1]) + 1)
+                    if type_key:
+                        _save_slots(model)
 
         # Compute leaves the menu open for the same reason the tally does:
         # checking several aggregations in a row is the whole point.
