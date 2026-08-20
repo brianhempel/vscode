@@ -252,6 +252,7 @@
 }
 
 .tiny-len {
+	cursor: grab;
 	font-size: 8px;
 	padding: 0 5px;
 	border-left: 1px solid var(--snc-border-color);
@@ -471,7 +472,11 @@
 	box-shadow: var(--snc-panel-shadow);
 
   width: fit-content;
-  margin-top: 5px;
+  /* Off its trigger by what a tooltip is off the thing it belongs to: one
+     distance for everything the widget hangs beside a control. The hoisted
+     copies (positioned by TypeScript against the trigger's edge) get their
+     gap from here too. */
+  margin-top: 4px;
   max-height: 350px;
   overflow: auto;
 	scrollbar-width: var(--snc-scrollbar-width);
@@ -582,7 +587,7 @@
 }
 
 /* Highlight the draggable border/padding zone of snc-py-exp wrappers */
-.snc-py-exp-drag-hover {
+.snc-py-exp-drag-hover:not(.row-handle) {
 	border-color: rgba(127, 127, 127, 0.5) !important;
 }
 
@@ -627,6 +632,19 @@
 	gap: 6px;
 	white-space: nowrap;
 	box-shadow: var(--snc-panel-shadow);
+}
+
+/* The gap between a tooltip you can reach into and the thing it belongs to,
+   covered so the reach crosses nothing. Sits under the tooltip and over the
+   visualizer: a mousemove landing in the gap would otherwise report a hover
+   on whatever is under it (a string visualizer character, say), re-render the
+   widget, and take the tooltip away mid-reach. Invisible -- all it does is
+   take the pointer, and it is only up while its tooltip is. */
+.snc-tooltip-bridge {
+	position: fixed;
+	z-index: 10000;
+	background: transparent;
+	pointer-events: auto;
 }
 
 /* Simple data-tooltip text labels (e.g. "Toggle replace/map/filter",
@@ -1386,8 +1404,14 @@
 /* Group By is an ordinary menu row, so it needs no styling of its own -- except
    for having nothing to write, which the two submenus each spell out for their
    own rows and a plain .snc-dropdown-option doesn't. A list with no name has no
-   line to write or drag, so the row reads as one to read past. */
-.col-menu-panel .snc-dropdown-option.unselectable {
+   line to write or drag, so the row reads as one to read past.
+
+   The row menu's rows are ordinary in the same way, and go inert for the same
+   kind of reason -- a row that won't zip is no row of headers -- so they read
+   past the same way too. Both panels are hoisted out of the widget, which is
+   why these hang off the panel rather than off .list-visualizer. */
+.col-menu-panel .snc-dropdown-option.unselectable,
+.row-menu-panel .snc-dropdown-option.unselectable {
 	cursor: default;
 	color: var(--snc-text-muted);
 
@@ -1799,6 +1823,115 @@
 .list-visualizer td.row-index {
 	color: var(--snc-text-muted);
 	text-align: right;
+	/* Anchors the pick overlay, which covers the whole cell. */
+	position: relative;
+}
+
+/* The number and the two controls that hang off it. Flex lives on this wrapper
+   and never on the <td>: display:flex on a table cell drops it out of table
+   layout -- the same reason .col-header-inner exists.
+
+   It is as tall as the number rather than as tall as the cell, so the controls
+   line up with the digits rather than with whatever tall value happens to be
+   drawn beside them in the same row. That makes it, not the cell, what a
+   hoisted control is measured against, which is why it carries the host mark. */
+.list-visualizer td.row-index > .row-index-inner {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	position: relative;
+}
+
+/* --- The row's drag handle and ▾ menu ---
+
+   What the column headers carry, for rows. The row numbers are a character or
+   two wide and there is nothing to take from them, so neither widget is in the
+   cell's flow: the handle is drawn just outside the table's left edge and the
+   ▾ over the column to the cell's right. The column stays as wide as its
+   numbers, and nothing the user came to read is covered up until they reach
+   for it.
+
+   Both appear only while the NUMBER is hovered rather than the row: the ▾ sits
+   over the first column's cell, and one that appeared whenever the pointer was
+   anywhere in the row would be lying in wait over the value beneath it.
+
+   The ▾ uses its own visibility rule rather than .snc-hover-hidden, whose
+   parent class the <td> would have to carry: a table nested inside some other
+   visualizer's hover-hidden row would then have every row's ▾ answering to
+   THAT row's hover instead of to its own cell's.
+
+   Out of the flow and centred on the wrapper rather than laid out by it: an
+   absolutely positioned child is not a flex item, so align-items has nothing
+   to say about it -- and a ▾ that WAS a flex item would take room in a cell
+   that has none to give. */
+.list-visualizer .row-index-inner > .row-menu-trigger,
+.row-handle {
+	user-select: none;
+	color: var(--snc-text-muted);
+	line-height: 16px;
+	background-color: var(--snc-bg);
+	border: solid 1px var(--snc-table-cell-border-color);
+}
+
+.list-visualizer .row-index-inner > .row-menu-trigger {
+	padding: 0 1px;
+	visibility: hidden;
+	position: absolute;
+	left: 100%;
+	margin-left: 2px;
+	/* top: 50%; */
+	/* transform: translateY(-50%); */
+	cursor: pointer;
+	font-size: 18px;
+	border-radius: 0 3px 3px 0;
+	border-left-color: var(--snc-bg);
+	z-index: 1;
+}
+
+/* The second of these is the open menu: its panel is hoisted out of the cell,
+   so the number stops being hovered the moment the pointer reaches the panel,
+   and the trigger has to stay put behind it. */
+.list-visualizer td.row-index:hover .row-menu-trigger,
+.list-visualizer .row-index-inner > .row-menu-trigger.open {
+	visibility: visible;
+}
+
+.list-visualizer .row-index-inner > .row-menu-trigger.open {
+	color: var(--snc-text-color);
+	/* can't use snc-hover-bg because we need something 100% opacity */
+	background-color: var(--snc-table-header-bg) !important;
+}
+
+.list-visualizer .row-index-inner > .row-menu-trigger:hover,
+.row-handle:hover {
+	color: var(--snc-text-color);
+	background-color: var(--snc-table-header-bg) !important;
+}
+
+/* The drag handle belongs outside the table's left edge, which is outside the
+   scrollport that clips it -- so the one in the cell is never shown, and the
+   front end lifts a copy out to the editor container for as long as the number
+   is hovered (see showHoistedHover). These styles hang off the class alone,
+   NOT off .list-visualizer, because the copy that is actually drawn is no
+   longer inside one -- the same reason .col-menu-panel's do. */
+.row-handle {
+	position: absolute;
+	right: 100%;
+	margin-right: 2px;
+	cursor: grab;
+	/* Named rather than inherited, since the copy that is drawn hangs off the
+	   editor container rather than the table */
+	font-family: var(--snc-code-font-family);
+	font-size: 10px;
+	padding: 0 2px;
+	border-radius: 3px 0 0 3px;
+	margin-right: 2px;
+	border-color: var(--vscode-focusBorder);
+	border-right-color: var(--snc-bg);
+}
+
+.list-visualizer .row-index-inner > .row-handle {
+	visibility: hidden;
 }
 
 /* The `$i` over the row numbers. Dimmed and unbolded: it heads a column the

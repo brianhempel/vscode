@@ -223,13 +223,29 @@ class TallyCountOpSelect:
 
 @dataclass(frozen=True, slots=True)
 class ColumnMenuDismiss:
-    """A click landed outside the column ▾ menu, so the menu is finished.
+    """A click landed outside an open ▾ menu, so the menu is finished.
 
     What a menu anywhere else does. The ▾ still toggles, and Escape still walks
     out a level at a time; this is the third way out, and the one that needs no
     aiming.
+
+    A row's menu is dismissed by the same event as a column's: both are held
+    open by the one `openDropdown` slot, and "a click landed outside" says
+    nothing about which of them it landed outside of.
     """
     pass
+
+@dataclass(frozen=True, slots=True)
+class RowActionClick:
+    """User clicked a row of the ▾ menu on a row's number.
+
+    One event for the three of them rather than one each, because they are one
+    question asked three ways -- what line does this row write? -- and the
+    catalog that answers it is what the menu draws itself from. So a row and
+    its click cannot come to disagree about what the row writes.
+    """
+    row: int
+    action: str
 
 @dataclass(frozen=True, slots=True)
 class ColumnSubmenuDwell:
@@ -1228,7 +1244,7 @@ def _leaf_cell_value(leaf: LeafColumn, row: Row, lst, source_expr=None,
 
 
 def _leaf_cell_expr(leaf: LeafColumn, source_expr: str, row: Row,
-                    container=None) -> str:
+                    container=None, from_end: bool = False) -> str:
     """One cell of a leaf column, naming its row -- and, under a splat, its
     element -- concretely.
 
@@ -1246,15 +1262,15 @@ def _leaf_cell_expr(leaf: LeafColumn, source_expr: str, row: Row,
     """
     if leaf.splat is None:
         return _column_cell_expr(leaf.sub or leaf.expr, source_expr,
-                                 row.index, container)
-    binds, _item_expr = _cell_binds(source_expr, row.index, container)
+                                 row.index, container, from_end)
+    binds, _item_expr = _cell_binds(source_expr, row.index, container, from_end)
     positions = row.key.split('.')[1:]
     out = None
     for depth, splat in enumerate(leaf.chain):
         inner = _split_splat(splat)[1]
         if out is None:
             lists_expr = _column_cell_expr(inner, source_expr, row.index,
-                                           container)
+                                           container, from_end)
         else:
             lists_expr = replace_dollars_in_py_exp(
                 inner, _column_dollars(source_expr, out), bindings=binds)
@@ -3060,7 +3076,8 @@ def _has_source_form(k) -> bool:
         return False
 
 
-def _cell_binds(source_expr: str, i: int, container=None) -> tuple:
+def _cell_binds(source_expr: str, i: int, container=None,
+                from_end: bool = False) -> tuple:
     """(binds, item_expr) naming row *i*'s parts concretely.
 
     A cell stands on its own wherever it is dropped, so every part of it is a
@@ -3068,9 +3085,15 @@ def _cell_binds(source_expr: str, i: int, container=None) -> tuple:
     means addressing by key -- what a user would write, and what is pleasant to
     drag into the editor -- with a fallback to positional addressing for a key
     that has no source form, which always works.
+
+    *from_end* names the row `[-1]` instead of by its number, for the last row
+    of a list (see _names_from_end). `$i` is left counting from the front: it
+    is where the row SITS, and the last row of three sits at 2 however it was
+    reached. It is a list-only question -- a dict's rows are addressed by key,
+    which is already a name that survives the dict growing.
     """
     if not isinstance(container, dict):
-        return {'i': str(i)}, f'{source_expr}[{i}]'
+        return {'i': str(i)}, f'{source_expr}[{-1 if from_end else i}]'
     key = _row_at(container, i).item[0]
     if _has_source_form(key):
         key_expr = repr(key)
@@ -3083,7 +3106,8 @@ def _cell_binds(source_expr: str, i: int, container=None) -> tuple:
             f'list({src}.items())[{i}]')
 
 
-def _column_cell_expr(col: str, source_expr: str, i: int, container=None) -> str:
+def _column_cell_expr(col: str, source_expr: str, i: int, container=None,
+                      from_end: bool = False) -> str:
     """One cell of a column, naming its row through the source rather than
     row-generically -- what a cell is read through and what it hands over.
 
@@ -3091,7 +3115,7 @@ def _column_cell_expr(col: str, source_expr: str, i: int, container=None) -> str
     concretely, so `$i` in it is a number rather than a variable, and the
     expression stands on its own wherever it is dropped.
     """
-    binds, item_expr = _cell_binds(source_expr, i, container)
+    binds, item_expr = _cell_binds(source_expr, i, container, from_end)
     return replace_dollars_in_py_exp(
         col, _column_dollars(source_expr, item_expr), bindings=binds)
 
@@ -4009,6 +4033,339 @@ def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
         return
     save_columns_to_dotfile(type_key, [],
                             _grouped_slots(col, model.get('columns')))
+
+
+# =============================================================================
+# Row actions
+# =============================================================================
+#
+# The columns have a drag handle and a ▾ menu on their headers; the rows have
+# the same two on their numbers. What a column's menu asks is a question about
+# a column of values -- sort by it, tally it, add it up -- and what a row's asks
+# is the handful of things one row of a list is good for: dropping it, taking
+# it out, or reading it as the names of the rows under it.
+#
+# Every one of them writes a line rather than changing the table, so there is no
+# row state to keep: which menu is open is the same `openDropdown` slot the
+# column menus use, keyed by the row number instead of a column expression.
+#
+# They are one catalog, `_row_actions`, which the menu draws itself from and the
+# click reads back -- so a row cannot offer one line and write another, and the
+# handle on the number is built out of the same answers.
+#
+# A row is two things at once and the menu says both: the ITEM, whatever `$` is
+# for this container, and the ROW OF CELLS, the columns that happen to be on
+# screen. They coincide often enough (a one-column table showing `$`) that the
+# menu drops the second when they read the same, and differ often enough that
+# offering only one of them would be picking for the user.
+#
+# The last row of a list can be named a third way -- `[-1]`, which is what a
+# person writes for "the last one" and the only naming here that survives the
+# list growing. So it gets its own rows, at the top, and the cells of that row
+# are handed the same naming (see _names_from_end).
+
+ROW_ACTIONS = ('last_delete', 'last_item', 'last_cells',
+               'delete', 'item', 'cells', 'headers')
+
+# The ones that name the row from the end. First in the menu, because a row
+# that HAS an end-relative name is one the user reached for as "the last one".
+LAST_ROW_ACTIONS = ('last_delete', 'last_item', 'last_cells')
+
+# What each one calls the line it writes. `{word}` is item or entry (see
+# _item_word), which is what the `$i` heading this very column already calls it.
+_ROW_ACTION_NAMES = {
+    'last_delete': '{base}_without_last',
+    'last_item': '{base}_last_{word}',
+    'last_cells': '{base}_last_row',
+    'delete': '{base}_without_{word}_{i}',
+    'item': '{base}_{word}_{i}',
+    'cells': '{base}_row_{i}',
+    # Not `{i}`: what it makes is the same list of dicts whichever row named
+    # the keys, and row 0 -- the only one anyone reaches for twice -- would read
+    # as a row number in the name of a list that no longer has one.
+    'headers': '{base}_dicts',
+}
+
+
+def _item_word(model: dict) -> str:
+    """What this container calls one of its rows' values.
+
+    The `$i` header over the row numbers says "the entry number" for a dict, so
+    a menu hanging off that very column cannot go on calling the same thing an
+    item. The row of CELLS is a row either way -- that is a fact about the
+    table, which draws rows whatever it is drawing them from.
+    """
+    return 'entry' if _is_dict_binds(_model_binds(model)) else 'item'
+
+
+def _names_from_end(model: dict, lst, i: int) -> bool:
+    """Whether row *i* is worth naming `[-1]` as well as by its number.
+
+    The last row of a list of more than one. A list of one has a last row that
+    is also its first, and `data[-1]` would be `data[0]` said twice. A dict is
+    left out entirely: its rows are addressed by key, which is already a name
+    that doesn't move when the dict grows, so an end-relative one buys nothing
+    and `list(d.items())[-1]` is not what anyone would have written.
+    """
+    if _is_dict_binds(_model_binds(model)):
+        return False
+    try:
+        n = len(lst)
+    except Exception:
+        return False
+    return n > 1 and i == n - 1
+
+
+def _row_item_expr(model: dict, lst, i: int,
+                   from_end: bool = False) -> 'str | None':
+    """Row *i* itself, named through the source: `data[2]`, `data[-1]`, or a
+    dict's own `('b', d['b'])`.
+
+    Whatever bare `$` is for this container, which for a dict is the pair its
+    `.items()` gives -- the same naming every cell of that row is written
+    through (see _cell_binds), so the row and its cells cannot disagree about
+    which row is meant.
+    """
+    source_expr = model.get('_source_expr')
+    if source_expr is None:
+        return None
+    return _cell_binds(source_expr, i, lst, from_end)[1]
+
+
+def _row_column_exprs(model: dict, lst, i: int,
+                      from_end: bool = False) -> 'list | None':
+    """Every drawn column of row *i*, named through the source -- in the order
+    the table draws them.
+
+    The columns as DRAWN, so a column the user took away is not among them and
+    one they computed is. The index column is not either: it heads nothing the
+    user added, and the row number is already written into every one of these.
+
+    A splat column reads as the whole list it spread rather than the one element
+    a rendered row shows: this is asked of the ROOT row, which is one row
+    however many rendered rows it takes across. That is `_leaf_row_expr`, the
+    same reading a row aggregation's row shows in a splat column -- and, for a
+    leaf nothing splatted, the very expression that leaf's cell is dragged out
+    by, which is why the body reads its cells' code back out of this list rather
+    than substituting the same column twice per row.
+    """
+    source_expr = model.get('_source_expr')
+    leaves = _leaf_columns(model.get('columns') or {})
+    if source_expr is None or not leaves:
+        return None
+    return [_column_cell_expr(_leaf_row_expr(leaf), source_expr, i, lst,
+                              from_end)
+            for leaf in leaves]
+
+
+def _row_tuple_expr(model: dict, lst, i: int, parts=None,
+                    from_end: bool = False) -> 'str | None':
+    """Row *i* as the columns on screen read it -- one of the two things the
+    drag handle on the number hands over, and what Extract Row Cells writes.
+
+    One column is handed over bare rather than as `(x,)`. A one-tuple is what
+    the label says and not what anyone dragging one column out of one row
+    means.
+
+    *parts* is `_row_column_exprs` already in hand, for the render, which has
+    them for the cells anyway. It is the caller's job that they were asked for
+    with the same *from_end*.
+    """
+    if parts is None:
+        parts = _row_column_exprs(model, lst, i, from_end)
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else f'({", ".join(parts)})'
+
+
+def _row_without_expr(model: dict, lst, i: int,
+                      from_end: bool = False) -> 'str | None':
+    """The container with row *i* left out.
+
+    Slices for a list, and the two ends written out only where there are two:
+    the first row is `data[1:]` and the last `data[:2]`, which is what anyone
+    would write and shorter than the general form that would also be correct.
+    Reached as the LAST row it is `data[:-1]` instead -- the same rows, said
+    the way the row was asked for, and the only one of the two that goes on
+    meaning "all but the last" once the list grows.
+
+    A dict is not sliceable and has a name for its rows, so it drops the entry
+    by key -- `{k: v for k, v in d.items() if k != 'b'}` -- through the same key
+    expression its cells are addressed by, with the positional fallback for a
+    key that has no source form.
+    """
+    source_expr = model.get('_source_expr')
+    if source_expr is None:
+        return None
+    if _is_dict_binds(_model_binds(model)):
+        key = _cell_binds(source_expr, i, lst)[0]['k']
+        return (f'{{k: v for k, v in {_atomize(source_expr)}.items() '
+                f'if k != {key}}}')
+    src = _atomize(source_expr)
+    if from_end:
+        return f'{src}[:-1]'
+    if i == 0:
+        return f'{src}[1:]'
+    if i == len(lst) - 1:
+        return f'{src}[:{i}]'
+    return f'{src}[:{i}] + {src}[{i + 1}:]'
+
+
+def _row_headers_expr(model: dict, lst, i: int) -> 'str | None':
+    """The rows under row *i*, keyed by row *i*'s own values: what a list of
+    lists straight out of a CSV reader wants to be.
+
+    The rows it names are every OTHER row, which is the list Delete Row already
+    knows how to write -- so the two cannot come to disagree about what is left
+    once a row is spoken for.
+
+    `dict(zip(...))` rather than a comprehension over the pairs: it is the
+    spelling anyone would reach for, and it is shorter. Inert where the row
+    would not zip -- a dict has no row of headers to find, and zipping a number
+    or a string is a line that cannot run or one that runs character by
+    character.
+    """
+    if _is_dict_binds(_model_binds(model)):
+        return None
+    header = _row_item_expr(model, lst, i)
+    rest = _row_without_expr(model, lst, i)
+    if header is None or rest is None:
+        return None
+    try:
+        if not isinstance(lst[i], (list, tuple)):
+            return None
+    except Exception:
+        return None
+    return f'[dict(zip({header}, item)) for item in {rest}]'
+
+
+def _row_action_label(action: str, model: dict, i: int) -> str:
+    """What a row of the menu reads as, naming the row it is about.
+
+    Every row says which row, rather than the menu saying it once: the panel is
+    hoisted out of the table and can end up anywhere on screen, so a row read on
+    its own has to say what it means.
+
+    An item is an item (or a dict's entry); a row of cells is a row, which is a
+    fact about the table rather than about what it is drawing.
+    """
+    word = _item_word(model).capitalize()
+    # One column is handed over bare (see _row_tuple_expr), so the label
+    # doesn't promise a tuple that isn't written.
+    as_tuple = (' as Tuple'
+                if len(_leaf_columns(model.get('columns') or {})) > 1 else '')
+    return {
+        'last_delete': f'Delete Last {word}',
+        'last_item': f'Extract Last {word}',
+        'last_cells': f'Extract Last Row Cells{as_tuple}',
+        'delete': f'Delete {word} {i}',
+        'item': f'Extract {word} {i}',
+        'cells': f'Extract Row {i} Cells{as_tuple}',
+        'headers': f'Use {word} {i} as Headers',
+    }.get(action, '')
+
+
+def _row_action_code(action: str, model: dict, lst, i: int,
+                     parts=None) -> 'str | None':
+    """The line one row of the menu writes, or None where there is none.
+
+    The end-relative rows answer None off the last row, which is the same
+    answer the menu draws when it leaves them out -- so a click that arrives
+    for one anyway (a stale panel, a list that has since grown) writes nothing
+    rather than a line about a row it was never offered for.
+
+    *parts* is a `_row_column_exprs` cache for the NUMBERED cells row only; the
+    end-relative one names its cells differently and asks for its own.
+    """
+    from_end = action in LAST_ROW_ACTIONS
+    if from_end and not _names_from_end(model, lst, i):
+        return None
+    if action in ('delete', 'last_delete'):
+        return _row_without_expr(model, lst, i, from_end)
+    if action in ('item', 'last_item'):
+        return _row_item_expr(model, lst, i, from_end)
+    if action == 'cells':
+        return _row_tuple_expr(model, lst, i, parts)
+    if action == 'last_cells':
+        return _row_tuple_expr(model, lst, i, from_end=True)
+    if action == 'headers':
+        return _row_headers_expr(model, lst, i)
+    return None
+
+
+def _drop_repeats(rows: list) -> list:
+    """Whatever of *rows* says something the rows before it haven't.
+
+    A row's item and its cells are the same expression whenever the table draws
+    one column and that column is `$` -- and for a dict, whenever it draws `$k`
+    and `$v` side by side, which IS the entry. Offering the same code twice
+    under two names is offering the user a choice that isn't one.
+
+    Rows carrying no code are left where they are: they say what CAN'T be
+    written here, which two of them can do without repeating each other.
+    """
+    seen, out = set(), []
+    for row in rows:
+        code = row[-1]
+        if code is not None:
+            if code in seen:
+                continue
+            seen.add(code)
+        out.append(row)
+    return out
+
+
+def _row_actions(model: dict, lst, i: int,
+                 parts=None) -> List[Tuple[str, str, Optional[str]]]:
+    """`(action, label, code)` per row of the row ▾ menu, in menu order.
+
+    The one description of what a row can be written into: the menu draws
+    itself from this, the handle on the number is built out of the same
+    answers, and the click reads it back rather than working the line out a
+    second time.
+
+    The end-relative rows are left out entirely rather than drawn inert where
+    they don't apply: an ordinary row is not a last row with nothing to say, it
+    is a row that was never asked the question.
+    """
+    return _drop_repeats([
+        (action, _row_action_label(action, model, i),
+         _row_action_code(action, model, lst, i, parts))
+        for action in ROW_ACTIONS
+        if action not in LAST_ROW_ACTIONS or _names_from_end(model, lst, i)])
+
+
+def _row_handle_exprs(model: dict, lst, i: int, parts=None) -> List[PyExp]:
+    """What the drag handle on a row's number offers, in the order the tooltip
+    stacks them. The first is what a drag hands over.
+
+    Two readings of the row -- the cells on screen, and the item behind them --
+    because a table showing three of a record's ten fields can be asked for
+    either and the handle has no way of knowing which was meant. The cells come
+    first: the handle sits on a row of the table, and the table is the columns.
+
+    For the last row of a list, the two end-relative readings come ahead of
+    both, so the drag hands over `[-1]` there. That is the naming the cells of
+    that row are handed as well, and the only one that goes on meaning the same
+    row once the list grows.
+    """
+    word = _item_word(model)
+    rows = []
+    if _names_from_end(model, lst, i):
+        rows += [("Last row's cells",
+                  _row_tuple_expr(model, lst, i, from_end=True)),
+                 (f'Last {word}', _row_item_expr(model, lst, i, from_end=True))]
+    rows += [("Row's cells", _row_tuple_expr(model, lst, i, parts)),
+             (word.capitalize(), _row_item_expr(model, lst, i))]
+    return [PyExp(code, label=label)
+            for label, code in _drop_repeats(rows) if code is not None]
+
+
+def _row_action_name(action: str, model: dict, source_expr: str, i: int) -> str:
+    """What to call the line a row of the menu writes."""
+    _has_var, base = _name_context_for_source(source_expr)
+    return _ROW_ACTION_NAMES[action].format(base=base, word=_item_word(model),
+                                            i=i)
 
 
 # =============================================================================
@@ -7544,6 +7901,125 @@ def _render_row_index_header(model, n_header: int) -> str:
             f'data-tooltip="{html.escape(tooltip)}">$i</th>')
 
 
+def _render_row_menu(model, lst, i: int, parts=None) -> str:
+    """The rows of the ▾ menu on a row's number.
+
+    A state-driven panel like the column menu's, so the front end hoists it out
+    of the table's overflow container, and flyout-aligned so it reads as
+    belonging to the ▾ rather than to the row it is drawn over. It opens no
+    submenus of its own, so no row of it takes a dwell.
+
+    Each row is a handle on the line it writes, like Group By: the code a click
+    inserts is the code a drag hands over, from the one catalog both read.
+    """
+    rows = []
+    for action, label, code in _row_actions(model, lst, i, parts):
+        click_attr = '' if code is None else (
+            f' snc-mouse-down='
+            f'"{html.escape(repr(RowActionClick(row=i, action=action)))}"')
+        rows.append(
+            f'<div class="snc-dropdown-option row-action'
+            f'{"" if code else " unselectable"}"'
+            f'{py_exp_attrs(code, align="right")}>'
+            f'<span class="snc-dropdown-option-label"{click_attr}>'
+            f'{html.escape(label)}</span>'
+            f'</div>')
+    dismiss = repr(ColumnMenuDismiss())
+    return (f'<div class="snc-dropdown-panel flyout row-menu-panel" '
+            f'snc-dropdown-align="flyout" snc-dismiss="{html.escape(dismiss)}">'
+            + ''.join(rows)
+            + '</div>')
+
+
+def _render_row_widgets(model, lst, i: int, parts=None) -> tuple:
+    """The drag handle and the ▾ that hang off a row's number, as `(left,
+    right)` -- the two sides of the number they sit on.
+
+    The row numbers are the only cells a row has that aren't already showing
+    something, and they are a character or two wide -- so neither widget is in
+    the cell's flow. Both are positioned out of it, the handle over the table's
+    left edge and the ▾ over the column beside it, and both are drawn only
+    while the number is hovered. So the column stays as wide as its numbers
+    and nothing the user came to read is covered up until they reach for it.
+
+    Outside the table's left edge is outside the scrollport that clips it, so
+    the handle is `snc-hover-hoist`: the front end lifts a copy of it out to
+    the editor container while the number is hovered, the way it lifts a hover
+    menu out, and lays that copy over the box the stylesheet gave the original.
+    So the original is placed here like anything else and merely made invisible
+    -- it is still what says where its copy belongs. The ▾ needs none of this:
+    the column it hangs over is inside the table.
+
+    Nothing at all where no row of the menu could write a line -- without a
+    source expression there is no list to name, so there is nothing to drag and
+    nothing to write, the same answer Group By gives. That is the whole test:
+    with a source, Delete always has a line, so a menu with a source in hand
+    always has something live in it.
+
+    The menu's own rows are worked out only while it is open. This runs once
+    per row of the table and the table draws every row it has, so a closed
+    menu's expressions would be several per row of the list, built and thrown
+    away on every keystroke. The handle's are not optional -- they are what it
+    hands over -- so they are paid for on every row.
+
+    *parts* is `_row_column_exprs` for this row, by its NUMBER, which the body
+    has in hand -- the same reason it is threaded rather than asked for again.
+    An end-relative reading names its cells differently and asks for its own.
+    """
+    if model.get('_source_expr') is None:
+        return ('', '')
+    handle_exprs = _row_handle_exprs(model, lst, i, parts)
+    handle = ('' if not handle_exprs else
+              f'<span class="row-handle" snc-hover-hoist '
+              f'data-tooltip="Drag out this row" '
+              f'data-tooltip-align="bottom"'
+              f'{py_exp_attrs(handle_exprs)}>⣿</span>')
+
+    menu_id = _menu_id('row-menu', str(i))
+    menu_open = (model.get('openDropdown') or {}).get('id') == menu_id
+    # The open panel is hoisted out of the cell, so the number stops being
+    # hovered as soon as the pointer reaches it; pin the trigger visible.
+    open_class = ' open' if menu_open else ''
+    toggle_event = repr(DropdownToggle(dropdown_id=menu_id))
+    menu = (
+        f'<span class="snc-dropdown-trigger row-menu-trigger{open_class}">'
+        f'<span snc-mouse-down="{html.escape(toggle_event)}" '
+        f'data-tooltip="Row actions" class="row-menu{open_class}">▾</span>'
+        f'{_render_row_menu(model, lst, i, parts) if menu_open else ""}'
+        f'</span>'
+    )
+    return (handle, menu)
+
+
+def _render_row_index_cell(model, lst, i: int, span_attrs: str = '',
+                           overlay: str = '', parts=None,
+                           widgets: bool = True) -> str:
+    """One row's number, and the two controls that hang off it.
+
+    The number and the controls sit in a wrapper INSIDE the cell rather than in
+    the cell itself. That wrapper is what can be laid out -- the controls line
+    up against the number rather than against a cell as tall as whatever is
+    drawn beside it -- and `display: flex` on a <td> drops the cell out of
+    table layout, which is the reason `.col-header-inner` exists too.
+
+    So the wrapper is where the handle is placed even though the copy that gets
+    drawn is lifted out of the table: the front end lays that copy over the box
+    the wrapper gave the original, so the stylesheet here settles where it goes
+    and nothing on the other side has to. Which is why `snc-hoist-host` is on
+    the wrapper -- it marks what does the laying out.
+
+    The pick overlay stays a child of the CELL: it covers the whole cell and is
+    positioned against it, and it is only ever drawn when the controls are not.
+    """
+    handle, menu = (_render_row_widgets(model, lst, i, parts) if widgets
+                    else ('', ''))
+    host_attr = ' snc-hoist-host' if handle or menu else ''
+    return (f'<td class="row-index"{span_attrs}>'
+            f'<div class="row-index-inner"{host_attr}>'
+            f'{handle}{i}{menu}'
+            f'</div>{overlay}</td>')
+
+
 def _column_input_tooltip(model) -> str:
     """What the Column code box says its dollars mean, for the column in it.
 
@@ -8938,9 +9414,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     add_box = _add_box_leaf(model, columns)
 
     if len(lst) == 0:
+
         strs.append(f'<tr><td class="empty-list" '
                     f'colspan="{len(leaves) + 1 + (add_box is not None)}">'
-                    f'Empty.</td></tr>')
+                    f'Empty {lst.__class__.__name__}.</td></tr>')
 
     source_expr = model.get('_source_expr')
     # Whether a cell may be read by evaluating `<source>[i]` again, or has to be
@@ -8988,8 +9465,20 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                   for leaf, stack in zip(leaves, group_stacks)]
 
     rendered = _rows(lst, columns)
+    # Set on every root row below, and read only by the leaves whose cells are
+    # drawn on one -- but declared here so they can never be read before a root
+    # row has said what they are.
+    row_exprs = None
+    cell_exprs = None
     for rn, row in enumerate(rendered):
         i = row.index
+        # The last row of a list is handed `[-1]` rather than its number, all
+        # the way down: the cells of that row, the code a child of one of them
+        # makes, and the two readings the row's own handle leads with. It is
+        # the one naming here that goes on meaning the same row once the list
+        # grows, which is what a cell dragged into the file is for.
+        from_end = (not small and not pick_here
+                    and _names_from_end(model, lst, i))
         # A column draws once per group at the depth it was splatted to, and
         # spans that group. This is where the mockup's key cell comes from: `$k`
         # rowspans because it did not splat, not because it is a key -- and a
@@ -9025,10 +9514,27 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         # The row index is a root-row value like any other, so it rowspans for
         # the same reason the unsplatted columns do.
         if row.span_start:
-            strs.append(f'<td class="row-index"{span_attr}>')
-            strs.append(str(i))
-            strs.append(pick_overlay(i, PICK_IDX_COLUMN))
-            strs.append('</td>')
+            # Every drawn column of this root row, worked out once. It is what
+            # the row's own handle hands over as a tuple, and -- for a leaf
+            # nothing splatted, whose cell is drawn on this very row -- the
+            # expression that cell is dragged out by, so the two are one
+            # substitution rather than two per column per row.
+            row_exprs = (None if small or pick_here
+                         else _row_column_exprs(model, lst, i))
+            # And the same again from the end, where the row has an end to be
+            # named from: those are the cells' own, and the handle's
+            # end-relative readings are built from them in turn.
+            cell_exprs = (_row_column_exprs(model, lst, i, from_end=True)
+                          if from_end else row_exprs)
+            # The row's own handle and menu, once per ROOT row -- one row is
+            # one row however many rendered rows a splat takes it across.
+            # Neither in a small table, where there is no room and no line to
+            # write, nor under the pick tool, whose region overlay sits on top
+            # of this cell and takes every click that lands on it.
+            strs.append(_render_row_index_cell(
+                model, lst, i, span_attrs=span_attr,
+                overlay=pick_overlay(i, PICK_IDX_COLUMN), parts=row_exprs,
+                widgets=not small and not pick_here))
 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
@@ -9061,8 +9567,17 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                                      eval_in_scope=eval_in_scope, **extra)
                 child_small = (composite_key != focused_child)
 
-                cell_expr = (None if source_expr is None
-                             else _leaf_cell_expr(leaf, source_expr, row, lst))
+                # A leaf nothing splatted reads the same expression per cell as
+                # per root row, and its cell is only ever drawn on the row that
+                # worked that list out -- so it is read back rather than
+                # substituted a second time. A splat's cell names the ELEMENT
+                # it is showing, which is a different question, and asks it.
+                cell_expr = (
+                    None if source_expr is None
+                    else (cell_exprs[ci]
+                          if cell_exprs is not None and leaf.splat is None
+                          else _leaf_cell_expr(leaf, source_expr, row, lst,
+                                               from_end)))
 
                 # The parent doesn't wrap children for drag: each is handed its
                 # access-path expression and decides for itself, so a child with
@@ -9143,7 +9658,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         len_n = len(lst)
         strs.append(f'<div class="expand-and-len">')
         strs.append(render_expand_toggle(expanded, repr(ExpandToggle()), small=small))
-        strs.append(f'<div class="tiny-len"{py_exp_attrs(len_exp)}>{len_n} ')
+        strs.append(f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} ')
         if model['_is_dict']:
             strs.append('entries' if len != 1 else 'entry')
         else:
@@ -9292,12 +9807,19 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             or (leaf.sub if leaf else None) or cell_col)
             if src is None:
                 concrete_cell = generic_cell
-            elif leaf is not None and _row is not None:
-                concrete_cell = _leaf_cell_expr(leaf, src, _row, value)
             else:
-                concrete_cell = _column_cell_expr(cell_col, src,
-                                                  _row.index if _row else 0,
-                                                  value)
+                # The last row's cells were handed `[-1]` on the way down (see
+                # _names_from_end), so code made in one comes back bound to the
+                # same expression -- otherwise the value on screen and the text
+                # on the clipboard would name different rows.
+                idx = _row.index if _row else 0
+                from_end = _names_from_end(model, value, idx)
+                if leaf is not None and _row is not None:
+                    concrete_cell = _leaf_cell_expr(leaf, src, _row, value,
+                                                    from_end)
+                else:
+                    concrete_cell = _column_cell_expr(cell_col, src, idx,
+                                                      value, from_end)
             commands = [nest_child_command(cmd, generic_cell, concrete_cell)
                         for cmd in commands]
 
@@ -9635,6 +10157,20 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # The dict the line makes has no columns of its own yet, and
                 # the ones to want are the ones in hand.
                 _seed_grouped_columns(col, value, model, eval_in_scope)
+
+        # One line written, like Group By, so the menu closes behind it. The
+        # code comes back out of the catalog the menu drew itself from rather
+        # than being worked out a second time here, so the row that was clicked
+        # and the line that lands cannot describe different rows.
+        case RowActionClick(row=i, action=action):
+            source_expr = model.get('_source_expr')
+            in_range = isinstance(i, int) and 0 <= i < len(value)
+            code = (_row_action_code(action, model, value, i)
+                    if in_range and action in ROW_ACTIONS else None)
+            if code is not None and source_expr is not None:
+                _close_column_menus(model)
+                commands.append(new_code_command(
+                    (_row_action_name(action, model, source_expr, i), code)))
 
         # Convert Type leaves the menu open for the same reason Sort does: it is
         # a checkbox, and picking another type is the common next act. The

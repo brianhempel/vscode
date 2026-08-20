@@ -47,9 +47,10 @@
 - [x] drag to reorder subcolumns
 - [x] need to show list length somewhere
 - [x] need to show string length somewhere
-- [ ] extract row by grabbing index cell
+- [x] extract row by grabbing index cell
 - [x] add dimmed `$i` header to index column
 - [x] add column left/right in col menu
+- [ ] grouped aggregations as new column instead of extra rows
 - [ ] add custom subcol menu item styling
 - [ ] checkbox styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first

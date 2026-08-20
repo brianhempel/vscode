@@ -149,12 +149,19 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private useBlockLayout = false;
 	private readonly clipboardService: IClipboardService;
 	private pyExpTooltip: HTMLElement | null = null;
+	private pyExpTooltipBridge: HTMLElement | null = null;
 	private pyExpTooltipTimer: any = null;
 	private pyExpTooltipHideTimer: any = null;
 	private pyExpCurrentTarget: Element | null = null;
 	private pyExpTooltipDragInProgress = false;
 	private lastMouseDownTarget: Node | null = null;
+	// A press on a draggable handle in a non-focused visualizer, held rather
+	// than acted on: acting pins focus, and the re-render that follows would
+	// take the handle out from under the drag that was about to start. Read on
+	// mouseup, where a press that never became a drag is the click it was.
+	private unfocusedDragPress: MouseEvent | null = null;
 	private actionTooltip: HTMLElement | null = null;
+	private actionTooltipBridge: HTMLElement | null = null;
 	private actionTooltipTimer: any = null;
 	private actionTooltipHideTimer: any = null;
 	private actionTooltipTarget: Element | null = null;
@@ -166,6 +173,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoverMenuTrigger: Element | null = null;
 	private hoverMenuHideTimer: any = null;
 	private hoverMenuListeners: IDisposable[] = [];
+	private hoistedHover: HTMLElement | null = null;
+	private hoistedHoverHost: Element | null = null;
+	private hoistedHoverHideTimer: any = null;
+	private hoistedHoverListeners: IDisposable[] = [];
+	private hoistedHoverDragging = false;
 
 	// How long the pointer must rest on an [snc-dwell] element before its event
 	// is sent. Long enough that crossing a menu on the way somewhere else opens
@@ -179,6 +191,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// How long the mouse must rest on an action button or a data-tooltip element
 	// before its tooltip appears.
 	private static readonly TOOLTIP_SHOW_DELAY_MS = 300;
+
+	// How far a dropdown panel hangs off its trigger - the same distance a
+	// tooltip sits off the thing it belongs to. The gap itself is the panel's
+	// margin-top in CSS; this copy is for the flip above a trigger, which has
+	// to undo that margin before it can put the gap on the other side.
+	private static readonly MENU_GAP = 4;
 
 	private dwellTimer: any = null;
 	private dwellTarget: Element | null = null;
@@ -250,6 +268,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		this._register(dom.addDisposableListener(this.domNode, 'mousedown', (ev: MouseEvent) => {
 			this.lastMouseDownTarget = ev.target as Node;
+			// A new press, so any held one is spent -- its own mouseup landed
+			// somewhere the widget never saw.
+			this.unfocusedDragPress = null;
 			// Small-mode click-to-expand: intercept the first mousedown so the
 			// click pins focus to this line instead of dispatching a Python
 			// event. We swallow the event because the small DOM is structurally
@@ -263,6 +284,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				const targetNode = ev.target as Node | null;
 				const targetEl = targetNode instanceof Element ? targetNode : (targetNode?.parentElement ?? null);
 				if (targetEl && targetEl.closest('[snc-unfocused-clickable]')) {
+					// A handle that is dragged as well as clicked (the tiny-len
+					// counts on the expand bar) needs the press left alone:
+					// preventDefault cancels the browser's drag before it can
+					// begin, and dispatching now would pin focus and re-render
+					// the handle away mid-press. Its event waits for the mouseup
+					// that says no drag happened. A click-only control (the
+					// expand toggle, draggable="false") still acts on the press
+					// and swallows it.
+					if (this.startsDrag(targetEl)) {
+						this.unfocusedDragPress = ev;
+						return;
+					}
 					ev.preventDefault();
 					ev.stopPropagation();
 					this.dispatch_mouse_python_event('snc-mouse-down', ev, true);
@@ -282,6 +315,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_mouse_python_event('snc-mouse-move', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mouseup', (ev: MouseEvent) => {
+			// The press came up where a drag would have taken it away instead
+			// (see mousedown), so it was a click after all: send what the press
+			// would have sent, from where the press was.
+			const press = this.unfocusedDragPress;
+			this.unfocusedDragPress = null;
+			if (press) {
+				this.dispatch_mouse_python_event('snc-mouse-down', press, true);
+				return;
+			}
 			this.dispatch_mouse_python_event('snc-mouse-up', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
@@ -357,7 +399,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
 			const relatedTarget = ev.relatedTarget as Node | null;
-			if (this.actionTooltip && relatedTarget && this.actionTooltip.contains(relatedTarget)) {
+			if (relatedTarget && (this.actionTooltip?.contains(relatedTarget)
+				|| this.actionTooltipBridge?.contains(relatedTarget))) {
 				return;
 			}
 			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'data-action-expr')) {
@@ -398,6 +441,30 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.scheduleHoverMenuHide();
 		}));
 
+		// Controls that live just outside their own cell (a table row's drag
+		// handle, over the left edge of the table) and so are clipped away by
+		// the scrollport they sit in. One is lifted out at a time, for as long
+		// as its host is hovered - see showHoistedHover.
+		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
+			const host = this.findAncestorWithAttr(ev.target as Node, 'snc-hoist-host');
+			if (!host) { return; }
+			clearTimeout(this.hoistedHoverHideTimer);
+			if (host !== this.hoistedHoverHost) {
+				this.hideHoistedHover();
+				this.hoistedHoverHost = host;
+				this.showHoistedHover(host as HTMLElement);
+			}
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
+			if (!this.hoistedHoverHost) { return; }
+			const relatedTarget = ev.relatedTarget as Node | null;
+			// The lifted control is outside the host, so moving onto it leaves
+			// the host: that is the one departure that must not put it away.
+			if (relatedTarget && this.hoistedHover?.contains(relatedTarget)) { return; }
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-hoist-host') === this.hoistedHoverHost) { return; }
+			this.scheduleHoistedHoverHide();
+		}));
+
 		// Add the widget to the editor
 		this.editor.addOverlayWidget(this);
 	}
@@ -417,6 +484,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private pyExpListeners(root: HTMLElement, stopAt: Element): IDisposable[] {
 		return [
 			dom.addDisposableListener(root, 'dragstart', (ev: DragEvent) => {
+				// The press did become a drag, so it is not a click waiting on
+				// a mouseup -- which won't come, dragend coming instead.
+				this.unfocusedDragPress = null;
 				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps', stopAt);
 				if (pyExpEl && ev.dataTransfer) {
 					if (this.lastMouseDownTarget) {
@@ -474,8 +544,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}),
 			dom.addDisposableListener(root, 'mouseout', (ev: MouseEvent) => {
 				const relatedTarget = ev.relatedTarget as Node | null;
-				// Don't hide if moving into the tooltip itself
-				if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
+				// Don't hide if moving into the tooltip itself, or onto the
+				// underlay covering the gap on the way to it.
+				if (relatedTarget && (this.pyExpTooltip?.contains(relatedTarget)
+					|| this.pyExpTooltipBridge?.contains(relatedTarget))) {
 					return;
 				}
 				// Don't clean up if moving within the same snc-py-exps (mouseover will handle it)
@@ -716,6 +788,55 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
+	 * Lay a transparent underlay over the gap between a tooltip and the element
+	 * it belongs to, so that reaching for the tooltip reaches nothing else.
+	 *
+	 * Those few px are over the visualizer, and a mousemove sampled there lands
+	 * on whatever is underneath -- a string visualizer character, say, which
+	 * reports the hover to Python, re-renders the widget, and takes the tooltip
+	 * away mid-reach. Nothing under the gap has anything to offer while the
+	 * tooltip is up, so the underlay takes the pointer instead, and counts as
+	 * being on the tooltip for the purpose of keeping it up.
+	 *
+	 * Returns null when the two overlap, there being no gap to cover.
+	 */
+	private tooltipBridge(tooltip: HTMLElement, target: DOMRect,
+		keepAlive: () => void, letGo: () => void): HTMLElement | null {
+		const tip = tooltip.getBoundingClientRect();
+		// A px into each of the pair it spans, so rounding leaves no seam.
+		const OVERLAP = 1;
+		// The pointer's path between the two is rarely the straight line
+		// between their nearest edges, so the underlay is a little wider than
+		// the pair it spans.
+		const SLACK = 3;
+		const [xMin, xMax] = [Math.min(tip.left, target.left) - SLACK, Math.max(tip.right, target.right) + SLACK];
+		const [yMin, yMax] = [Math.min(tip.top, target.top) - SLACK, Math.max(tip.bottom, target.bottom) + SLACK];
+		let box: { left: number; top: number; width: number; height: number };
+		if (tip.bottom <= target.top) {
+			box = { left: xMin, top: tip.bottom - OVERLAP, width: xMax - xMin, height: target.top - tip.bottom + 2 * OVERLAP };
+		} else if (tip.top >= target.bottom) {
+			box = { left: xMin, top: target.bottom - OVERLAP, width: xMax - xMin, height: tip.top - target.bottom + 2 * OVERLAP };
+		} else if (tip.right <= target.left) {
+			box = { left: tip.right - OVERLAP, top: yMin, width: target.left - tip.right + 2 * OVERLAP, height: yMax - yMin };
+		} else if (tip.left >= target.right) {
+			box = { left: target.right - OVERLAP, top: yMin, width: tip.left - target.right + 2 * OVERLAP, height: yMax - yMin };
+		} else {
+			return null;
+		}
+
+		const bridge = document.createElement('div');
+		bridge.className = 'snc-tooltip-bridge';
+		bridge.style.left = `${box.left}px`;
+		bridge.style.top = `${box.top}px`;
+		bridge.style.width = `${box.width}px`;
+		bridge.style.height = `${box.height}px`;
+		bridge.addEventListener('mouseenter', keepAlive);
+		bridge.addEventListener('mouseleave', letGo);
+		this.editor.getContainerDomNode().appendChild(bridge);
+		return bridge;
+	}
+
+	/**
 	 * Show a tooltip with the handle's Python expressions, a row each, near the
 	 * given element.
 	 */
@@ -724,6 +845,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		if (this.pyExpTooltip) {
 			this.pyExpTooltip.remove();
 			this.pyExpTooltip = null;
+		}
+		if (this.pyExpTooltipBridge) {
+			this.pyExpTooltipBridge.remove();
+			this.pyExpTooltipBridge = null;
 		}
 
 		const exps = pyExpsOf(target, 'snc-py-exps');
@@ -738,6 +863,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				() => {
 					this.pyExpTooltipDragInProgress = true;
 					clearTimeout(this.pyExpTooltipHideTimer);
+					// A drag hit-tests whatever is under the pointer for a drop
+					// target, and the underlay is not one: leaving it up would
+					// refuse a drop landing in the strip it covers.
+					if (this.pyExpTooltipBridge) {
+						this.pyExpTooltipBridge.remove();
+						this.pyExpTooltipBridge = null;
+					}
 				},
 				() => {
 					this.pyExpTooltipDragInProgress = false;
@@ -745,17 +877,20 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}));
 		}
 
-		// Keep tooltip alive while hovering it; also keep hover menu alive
-		tooltip.addEventListener('mouseenter', () => {
+		// Keep tooltip alive while hovering it (or the underlay bridging the
+		// gap to it); also keep hover menu alive
+		const keepAlive = () => {
 			clearTimeout(this.pyExpTooltipHideTimer);
 			clearTimeout(this.hoverMenuHideTimer);
-		});
-		tooltip.addEventListener('mouseleave', () => {
+		};
+		const letGo = () => {
 			this.schedulePyExpTooltipHide();
 			if (this.hoverMenu) {
 				this.scheduleHoverMenuHide();
 			}
-		});
+		};
+		tooltip.addEventListener('mouseenter', keepAlive);
+		tooltip.addEventListener('mouseleave', letGo);
 
 		// A handle wrapping the whole visualizer has no free space above it: the
 		// widget's top edge is against the line of code it belongs to, so a
@@ -789,6 +924,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		tooltip.style.visibility = '';
 
 		this.pyExpTooltip = tooltip;
+		this.pyExpTooltipBridge = this.tooltipBridge(tooltip, rect, keepAlive, letGo);
 	}
 
 	/**
@@ -820,6 +956,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.pyExpTooltip.remove();
 			this.pyExpTooltip = null;
 		}
+		if (this.pyExpTooltipBridge) {
+			this.pyExpTooltipBridge.remove();
+			this.pyExpTooltipBridge = null;
+		}
 	}
 
 	private showActionTooltip(target: Element): void {
@@ -836,12 +976,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			tooltip.appendChild(this.pyExpRow(exp, () => this.hideActionTooltip()));
 		}
 
-		tooltip.addEventListener('mouseenter', () => {
+		const keepAlive = () => {
 			clearTimeout(this.actionTooltipHideTimer);
-		});
-		tooltip.addEventListener('mouseleave', () => {
+		};
+		const letGo = () => {
 			this.scheduleActionTooltipHide();
-		});
+		};
+		tooltip.addEventListener('mouseenter', keepAlive);
+		tooltip.addEventListener('mouseleave', letGo);
 
 		tooltip.style.visibility = 'hidden';
 		this.editor.getContainerDomNode().appendChild(tooltip);
@@ -852,6 +994,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		tooltip.style.visibility = '';
 
 		this.actionTooltip = tooltip;
+		this.actionTooltipBridge = this.tooltipBridge(tooltip, rect, keepAlive, letGo);
 	}
 
 	private scheduleActionTooltipHide(): void {
@@ -870,6 +1013,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.actionTooltip.remove();
 			this.actionTooltip = null;
 		}
+		if (this.actionTooltipBridge) {
+			this.actionTooltipBridge.remove();
+			this.actionTooltipBridge = null;
+		}
 	}
 
 	private showSimpleTooltip(target: Element): void {
@@ -884,13 +1031,16 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		tooltip.textContent = text;
 
 		// Same placement convention as snc-py-exps tooltips:
-		//   data-tooltip-align="right" -> render to the right of the target,
-		//                                 vertically centered (with a fallback
-		//                                 to the left if it would overflow)
-		//   default                    -> render above the target (with a
-		//                                 fallback to below if it overflows).
+		//   data-tooltip-align="right"  -> render to the right of the target,
+		//                                  vertically centered (with a fallback
+		//                                  to the left if it would overflow)
+		//   data-tooltip-align="bottom" -> render below the target (with a
+		//                                  fallback to above if it overflows).
+		//   default                     -> render above the target (with a
+		//                                  fallback to below if it overflows).
 		const align = target.getAttribute('data-tooltip-align');
-		const viewportWidth = dom.getWindow(this.editor.getContainerDomNode()).innerWidth;
+		const win = dom.getWindow(this.editor.getContainerDomNode());
+		const viewportWidth = win.innerWidth;
 
 		if (align === 'right') {
 			tooltip.style.visibility = 'hidden';
@@ -903,17 +1053,30 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			tooltip.style.left = `${left}px`;
 			tooltip.style.top = `${rect.top + (rect.height - tooltipRect.height) / 2}px`;
 			tooltip.style.visibility = '';
-		} else {
+		} else if (align === 'bottom') {
 			tooltip.style.left = `${rect.left}px`;
-			tooltip.style.top = `${rect.top - 28}px`;
+			tooltip.style.top = `${rect.bottom + 4}px`;
 			this.editor.getContainerDomNode().appendChild(tooltip);
 			const tooltipRect = tooltip.getBoundingClientRect();
-			if (tooltipRect.top < 0) {
-				tooltip.style.top = `${rect.bottom + 4}px`;
+			if (tooltipRect.bottom > win.innerHeight) {
+				tooltip.style.top = `${Math.max(0, rect.top - tooltipRect.height - 4)}px`;
 			}
 			if (tooltipRect.right > viewportWidth) {
 				tooltip.style.left = `${Math.max(0, rect.right - tooltipRect.width)}px`;
 			}
+		} else {
+			// Measured, not guessed at a line tall, so this sits the same 4px
+			// off its target as the py-exp and action tooltips do.
+			tooltip.style.visibility = 'hidden';
+			this.editor.getContainerDomNode().appendChild(tooltip);
+			const tooltipRect = tooltip.getBoundingClientRect();
+			const above = rect.top - tooltipRect.height - 4;
+			tooltip.style.left = `${rect.left}px`;
+			tooltip.style.top = `${above < 0 ? rect.bottom + 4 : above}px`;
+			if (rect.left + tooltipRect.width > viewportWidth) {
+				tooltip.style.left = `${Math.max(0, rect.right - tooltipRect.width)}px`;
+			}
+			tooltip.style.visibility = '';
 		}
 
 		this.simpleTooltip = tooltip;
@@ -967,7 +1130,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		} else {
 			clone.style.left = `${triggerRect.left}px`;
 		}
-		clone.style.top = `${triggerRect.bottom + 2}px`;
+		// Flush with the trigger's bottom edge; the panel's own margin-top is the
+		// gap, so a hover menu hangs off its trigger by the same 4px a hoisted
+		// click menu does.
+		clone.style.top = `${triggerRect.bottom}px`;
 
 		// Wire up event listeners on the hoisted panel. Walk only within the
 		// clone, then re-apply the stashed ChildEvent envelope so nested
@@ -1023,7 +1189,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		});
 		clone.addEventListener('mouseout', (ev: MouseEvent) => {
 			const relatedTarget = ev.relatedTarget as Node | null;
-			if (this.pyExpTooltip && relatedTarget && this.pyExpTooltip.contains(relatedTarget)) {
+			if (relatedTarget && (this.pyExpTooltip?.contains(relatedTarget)
+				|| this.pyExpTooltipBridge?.contains(relatedTarget))) {
 				return;
 			}
 			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'snc-py-exps')) {
@@ -1037,6 +1204,128 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		this.editor.getContainerDomNode().appendChild(clone);
 		this.hoverMenu = clone;
+	}
+
+	/**
+	 * Lift the control marked `snc-hover-hoist` inside *host* out of the
+	 * scrollport that clips it, for as long as the pointer is on the host.
+	 *
+	 * A table row's drag handle sits just outside the left edge of its
+	 * row-number cell -- which is the left edge of the table, inside
+	 * `.list-table-scroll`, whose overflow cuts it away entirely. Hoisting it
+	 * on hover is the trade the hover menus make: one element at a time, only
+	 * while it is wanted, rather than every row's handle hoisted at render and
+	 * repositioned on every scroll.
+	 *
+	 * A clone rather than the element itself, like showHoverMenu: the next
+	 * render replaces the widget's markup wholesale, and a control that had
+	 * been moved out would be left in the editor container with nothing behind
+	 * it to answer for.
+	 *
+	 * The copy is laid over the box the original occupies, so where it lands is
+	 * decided by the stylesheet that placed the original and by nothing here.
+	 * That is why the original is only made invisible rather than taken out of
+	 * the flow: it stays the authority on where its copy belongs, and moving it
+	 * in CSS moves the copy with it.
+	 */
+	private showHoistedHover(host: HTMLElement): void {
+		const source = host.querySelector(':scope > [snc-hover-hoist]') as HTMLElement | null;
+		if (!source) { return; }
+		// Nowhere to lay a copy over. A control taken out of the flow entirely
+		// has no box to read, and one placed at the origin would be a copy in
+		// the corner of the editor rather than beside the row it came from.
+		const sourceRect = source.getBoundingClientRect();
+		if (sourceRect.width === 0 && sourceRect.height === 0) { return; }
+
+		// A host scrolled out of one of its own scrollports is clipped away in
+		// the widget, so nothing should be lifted out on its behalf.
+		const hostRect = host.getBoundingClientRect();
+		const container = this.editor.getContainerDomNode();
+		const scrollers: HTMLElement[] = [];
+		let ancestor: HTMLElement | null = host.parentElement;
+		while (ancestor && ancestor !== this.domNode.parentElement && ancestor !== container) {
+			if (VisualizationWidget.isScrollableElement(ancestor)) { scrollers.push(ancestor); }
+			ancestor = ancestor.parentElement;
+		}
+		for (const scroller of scrollers) {
+			const port = scroller.getBoundingClientRect();
+			if (port.width === 0 || port.height === 0) { continue; }
+			if (hostRect.right <= port.left || hostRect.left >= port.right
+				|| hostRect.bottom <= port.top || hostRect.top >= port.bottom) {
+				return;
+			}
+		}
+
+		const clone = source.cloneNode(true) as HTMLElement;
+		clone.removeAttribute('snc-hover-hoist');
+		clone.classList.add('snc-hoisted-hover');
+		// Over the box the original occupies, exactly. The rect is where the
+		// stylesheet put the original's border box, margins and offsets and
+		// all -- so the copy takes none of those with it, or it would be
+		// offset a second time by the same rules that produced this rect.
+		clone.style.position = 'fixed';
+		clone.style.zIndex = '10000';
+		clone.style.margin = '0';
+		clone.style.left = `${sourceRect.left}px`;
+		clone.style.top = `${sourceRect.top}px`;
+		clone.style.right = 'auto';
+		clone.style.bottom = 'auto';
+		// Sized from the rect too, rather than left to shrink to fit again out
+		// here: the box is what was measured, so it is the box that is copied.
+		clone.style.boxSizing = 'border-box';
+		clone.style.width = `${sourceRect.width}px`;
+		clone.style.height = `${sourceRect.height}px`;
+		clone.style.visibility = 'visible';
+		container.appendChild(clone);
+
+		this.hoistedHoverListeners.push(
+			// The root's own mousedown never sees the clone, and dragstart
+			// reads this to tell a drag from a click that slipped.
+			dom.addDisposableListener(clone, 'mousedown', (ev: MouseEvent) => {
+				this.lastMouseDownTarget = ev.target as Node;
+			}),
+			dom.addDisposableListener(clone, 'mouseleave', () => this.scheduleHoistedHoverHide()),
+			dom.addDisposableListener(clone, 'mouseenter', () => clearTimeout(this.hoistedHoverHideTimer)),
+			// A drag leaves the control the moment it starts, which is the one
+			// departure that must not take the control away underneath it.
+			dom.addDisposableListener(clone, 'dragstart', () => { this.hoistedHoverDragging = true; }),
+			dom.addDisposableListener(clone, 'dragend', () => {
+				this.hoistedHoverDragging = false;
+				this.hideHoistedHover();
+			}),
+			...this.pyExpListeners(clone, container),
+			...this.simpleTooltipListeners(clone, container),
+		);
+		// Scrolling moves the host out from under it, and there is no reason to
+		// chase a control the pointer is about to leave anyway.
+		for (const scroller of scrollers) {
+			this.hoistedHoverListeners.push(
+				dom.addDisposableListener(scroller, 'scroll', () => this.hideHoistedHover()));
+		}
+
+		this.hoistedHover = clone;
+	}
+
+	private scheduleHoistedHoverHide(): void {
+		clearTimeout(this.hoistedHoverHideTimer);
+		if (this.hoistedHoverDragging) { return; }
+		this.hoistedHoverHideTimer = setTimeout(() => {
+			this.hideHoistedHover();
+		}, 100);
+	}
+
+	private hideHoistedHover(): void {
+		clearTimeout(this.hoistedHoverHideTimer);
+		this.hoistedHoverDragging = false;
+		this.hoistedHoverHost = null;
+		for (const d of this.hoistedHoverListeners) {
+			d.dispose();
+		}
+		this.hoistedHoverListeners = [];
+		if (this.hoistedHover) {
+			this.hoistedHover.remove();
+			this.hoistedHover = null;
+		}
 	}
 
 	private scheduleHoverMenuHide(): void {
@@ -1058,6 +1347,26 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.hoverMenu = null;
 		}
 		this.hidePyExpTooltip();
+	}
+
+	/**
+	 * Whether a press on *target* would begin a native drag: the nearest
+	 * element between it and the widget root that says either way says yes.
+	 *
+	 * The browser's own rule, asked before the press is swallowed -- a handle
+	 * marked draggable="true" (py_exp_attrs writes it) drags, and anything
+	 * inside it marked draggable="false" doesn't, which is how a control that
+	 * only wants clicks opts out.
+	 */
+	private startsDrag(target: Element): boolean {
+		let el: Element | null = target;
+		while (el && el !== this.domNode) {
+			const draggable = el.getAttribute('draggable');
+			if (draggable === 'true') { return true; }
+			if (draggable === 'false') { return false; }
+			el = el.parentElement;
+		}
+		return false;
 	}
 
 	/**
@@ -1345,6 +1654,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hideActionTooltip();
 		this.hideSimpleTooltip();
 		this.hideHoverMenu();
+		this.hideHoistedHover();
 
 		// Any pending focus restoration from an older render should be ignored.
 		const currentFocusRestoreVersion = ++this.focusRestoreVersion;
@@ -1904,7 +2214,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// A flyout slides up to fit - flipping it across the trigger would
 			// leave it pointing at nothing. A drop-down flips above its trigger,
 			// unless there's even less room up there.
-			const flippedTop = triggerRect.top - panelRect.height;
+			//
+			// Flipping crosses the trigger, so the panel's margin-top - the gap,
+			// pushing it down and away when it hangs below - now pushes it up and
+			// INTO the trigger: back that out, then leave the same gap above.
+			const flippedTop = triggerRect.top - panelRect.height
+				- 2 * VisualizationWidget.MENU_GAP;
 			const slidTop = Math.max(0, viewportHeight - panelRect.height);
 			panel.style.top = `${!isFlyout && flippedTop >= 0 ? flippedTop : slidTop}px`;
 		}
@@ -2142,6 +2457,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hideActionTooltip();
 		this.hideSimpleTooltip();
 		this.hideHoverMenu();
+		this.hideHoistedHover();
 		this.cleanupHoistedDropdowns();
 		this.cleanupHoistedSegmentLabels();
 		this.editor.removeOverlayWidget(this);

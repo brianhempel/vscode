@@ -2626,12 +2626,15 @@ class TestCellDraggablePyExp(unittest.TestCase):
         """Generic cells (int, model=None) get NO parent-emitted wrapper; the
         child receives var_and_exp and self-wraps. The mock generic visualizer
         echoes the expression it was given so we can verify propagation."""
-        lst = [{'age': 25}, {'age': 30}]
+        lst = [{'age': 25}, {'age': 30}, {'age': 35}]
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        # The child was handed the per-cell expression via var_and_exp.
+        # The child was handed the per-cell expression via var_and_exp. The
+        # last row is handed `[-1]` instead (see _names_from_end), so the rows
+        # asked about here are ones with a row after them.
         self.assertIn("child-expr=people[0]['age']", html_output)
         self.assertIn("child-expr=people[1]['age']", html_output)
+        self.assertIn("child-expr=people[-1]['age']", html_output)
         # Parent does not also wrap generic cells in py-exp-cell.
         self.assertNotIn('class="py-exp-cell"', html_output)
 
@@ -2655,8 +2658,11 @@ class TestCellDraggablePyExp(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer, var_and_exp=('people', 'people'))
         model['focused_child'] = f"0{CELL_KEY_SEP}$['name']"
         html_output = visualize(lst, model, mock_get_visualizer, None)
-        # No drag wrapper around the focused cell.
-        self.assertNotIn(exp_attr("people[0]['name']"), html_output)
+        # No drag wrapper around the focused cell. Asked of the cell rather
+        # than the whole table: the row's own handle names this row by its one
+        # visible column, which is the same expression from somewhere else.
+        cell = re.search(r'<td>.*?</td>', html_output, re.DOTALL).group(0)
+        self.assertNotIn(exp_attr("people[0]['name']"), cell)
         self.assertNotIn('class="py-exp-grab"', html_output)
         self.assertNotIn('class="py-exp-cell"', html_output)
 
@@ -17401,6 +17407,17 @@ class TestEveryExpressionTheTableHandsOver(unittest.TestCase):
                     out, _m = self.render(value, columns, name, **fields)
                     self.check(out, {name: value}, f'{label} / {target!r} / {kind}')
 
+    def test_with_the_row_menu_open_on_every_row(self):
+        # The row handles are drawn whatever else is; the menu's own rows are
+        # only there while it is open, so every row gets opened in turn.
+        for label, value, columns in self.SHAPES:
+            name = 'd' if isinstance(value, dict) else 'data'
+            for i in range(len(value)):
+                out, _m = self.render(
+                    value, columns, name,
+                    openDropdown={'id': _menu_id('row-menu', str(i))})
+                self.check(out, {name: value}, f'{label} / row {i}')
+
     def test_with_an_aggregation_on_every_column(self):
         for label, value, columns in self.SHAPES:
             name = 'd' if isinstance(value, dict) else 'data'
@@ -18384,6 +18401,729 @@ class TestColInsert(unittest.TestCase):
         cols = {'a': {}}
         _col_insert(cols, 'x', 99)
         self.assertEqual(list(cols), ['a', 'x'])
+
+
+# === The row's drag handle and ▾ menu ========================================
+#
+# What a column header carries, for a row: a handle that hands over the row's
+# values and a menu of the lines a row can be written into. The index column is
+# the only cell a row has that isn't already showing something, and it has no
+# room to spare -- so both sit outside the number and only appear on hover.
+
+from table_visualizer import (
+    RowActionClick, ROW_ACTIONS, LAST_ROW_ACTIONS,
+    _row_actions, _row_tuple_expr, _row_without_expr, _row_headers_expr,
+    _row_item_expr, _row_column_exprs, _row_handle_exprs, _names_from_end,
+    _render_row_index_cell,
+)
+
+
+ROW_LIST = [{'b': 3, 'c': 'x'}, {'b': 1, 'c': 'y'}, {'b': 2, 'c': 'z'}]
+
+
+def row_model(lst=None, columns=None, source='data', open_row=None):
+    """A table with a source to write code from, and optionally a row menu
+    open on one of its rows."""
+    lst = ROW_LIST if lst is None else lst
+    model = init_model(lst, mock_get_visualizer)
+    if columns is not None:
+        model['columns'] = _as_columns(columns)
+    model['_source_expr'] = source
+    if open_row is not None:
+        model['openDropdown'] = {'id': _menu_id('row-menu', str(open_row))}
+    return lst, model
+
+
+def row_codes(model, lst, i):
+    """The row menu's rows as {action: code}."""
+    return {action: code for action, _label, code in _row_actions(model, lst, i)}
+
+
+def row_labels(model, lst, i):
+    return [label for _action, label, _code in _row_actions(model, lst, i)]
+
+
+class TestRowTupleExpr(unittest.TestCase):
+    """What the drag handle hands over: the row, as the columns on screen read
+    it. The index column is not one of them -- it heads no column the user
+    added, and the number is already the row's name in every other expression
+    the row offers."""
+
+    def test_it_is_the_visible_columns_of_that_row(self):
+        lst, model = row_model()
+        self.assertEqual(_row_tuple_expr(model, lst, 1),
+                         "(data[1]['b'], data[1]['c'])")
+
+    def test_a_column_the_user_took_away_is_not_in_it(self):
+        lst, model = row_model(columns=["$['c']"])
+        self.assertEqual(_row_tuple_expr(model, lst, 2), "data[2]['c']")
+
+    def test_one_column_is_not_written_as_a_one_tuple(self):
+        # `(data[0]['b'],)` is the tuple the label promises and not the thing
+        # anyone dragging one column out of one row wants.
+        lst, model = row_model(columns=["$['b']"])
+        self.assertEqual(_row_tuple_expr(model, lst, 0), "data[0]['b']")
+
+    def test_a_computed_column_reads_as_it_is_written(self):
+        lst, model = row_model(columns=["$['b']", "$['b'] * 2"])
+        self.assertEqual(_row_tuple_expr(model, lst, 0),
+                         "(data[0]['b'], data[0]['b'] * 2)")
+
+    def test_the_row_number_column_is_the_number(self):
+        # A cell names one row concretely, so `$i` in it is that number.
+        lst, model = row_model(columns=['$i', "$['b']"])
+        self.assertEqual(_row_tuple_expr(model, lst, 2), "(2, data[2]['b'])")
+
+    def test_a_splat_column_is_the_whole_list_the_row_spread(self):
+        # The row is one row however many rendered rows it takes, so a column
+        # that spread it hands over every value it spread.
+        lst = [{'pets': ['cat', 'dog']}, {'pets': ['rat']}]
+        lst, model = row_model(lst, {"*$['pets']": {}})
+        self.assertEqual(_row_tuple_expr(model, lst, 0),
+                         "[item2 for item2 in data[0]['pets']]")
+
+    def test_a_dict_row_is_addressed_by_its_key(self):
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(_row_tuple_expr(model, d, 1), "('b', d['b'])")
+
+    def test_no_source_means_nothing_to_hand_over(self):
+        lst, model = row_model(source=None)
+        self.assertIsNone(_row_tuple_expr(model, lst, 0))
+
+
+class TestRowWithoutExpr(unittest.TestCase):
+    """The list with one row left out -- what Delete Row writes."""
+
+    def test_the_first_row_is_a_slice_past_it(self):
+        lst, model = row_model()
+        self.assertEqual(_row_without_expr(model, lst, 0), 'data[1:]')
+
+    def test_the_last_row_is_a_slice_up_to_it(self):
+        lst, model = row_model()
+        self.assertEqual(_row_without_expr(model, lst, 2), 'data[:2]')
+
+    def test_a_row_in_the_middle_is_the_two_halves(self):
+        lst, model = row_model()
+        self.assertEqual(_row_without_expr(model, lst, 1),
+                         'data[:1] + data[2:]')
+
+    def test_the_only_row_leaves_an_empty_list(self):
+        lst, model = row_model([{'b': 1}])
+        self.assertEqual(_row_without_expr(model, lst, 0), 'data[1:]')
+
+    def test_a_loose_source_is_parenthesized_before_it_is_sliced(self):
+        lst, model = row_model(source='xs + ys')
+        self.assertEqual(_row_without_expr(model, lst, 1),
+                         '(xs + ys)[:1] + (xs + ys)[2:]')
+
+    def test_a_dict_drops_the_entry_by_key(self):
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(_row_without_expr(model, d, 1),
+                         "{k: v for k, v in d.items() if k != 'b'}")
+
+    def test_a_key_with_no_source_form_is_addressed_by_position(self):
+        d = {(1, 2): 'a', float('nan'): 'b'}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(_row_without_expr(model, d, 1),
+                         '{k: v for k, v in d.items() if k != list(d)[1]}')
+
+    def test_no_source_means_no_line(self):
+        lst, model = row_model(source=None)
+        self.assertIsNone(_row_without_expr(model, lst, 0))
+
+
+class TestRowHeadersExpr(unittest.TestCase):
+    """A row of headers over the rows under it: the list of lists a CSV reader
+    hands back, read as the list of dicts it wants to be."""
+
+    ROWS = [['name', 'dept'], ['Alice', 'eng'], ['Bob', 'mkt']]
+
+    def test_the_first_row_names_the_rest(self):
+        lst, model = row_model(self.ROWS, ['$[0]', '$[1]'])
+        self.assertEqual(_row_headers_expr(model, lst, 0),
+                         '[dict(zip(data[0], item)) for item in data[1:]]')
+
+    def test_any_row_can_be_the_headers(self):
+        # The rows it names are every OTHER row, which is the same list Delete
+        # Row writes -- so the two can't come to disagree about what is left.
+        lst, model = row_model(self.ROWS, ['$[0]', '$[1]'])
+        self.assertEqual(
+            _row_headers_expr(model, lst, 1),
+            '[dict(zip(data[1], item)) for item in data[:1] + data[2:]]')
+
+    def test_a_row_that_is_not_a_sequence_has_no_headers_in_it(self):
+        # zip of a number is a line that cannot run, so the row goes inert
+        # rather than writing one.
+        lst, model = row_model([1, 2, 3], ['$'])
+        self.assertIsNone(_row_headers_expr(model, lst, 0))
+
+    def test_a_string_row_is_not_a_row_of_headers(self):
+        lst, model = row_model(['ab', 'cd'], ['$'])
+        self.assertIsNone(_row_headers_expr(model, lst, 0))
+
+    def test_a_dict_has_no_row_to_read_as_headers(self):
+        d = {'a': [1], 'b': [2]}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertIsNone(_row_headers_expr(model, d, 0))
+
+
+class TestNamedFromTheEnd(unittest.TestCase):
+    """Which rows are worth naming from the end of the list as well as by
+    their number."""
+
+    def test_the_last_row_of_a_list_of_several(self):
+        lst, model = row_model()
+        self.assertTrue(_names_from_end(model, lst, 2))
+
+    def test_not_a_row_in_the_middle(self):
+        lst, model = row_model()
+        self.assertFalse(_names_from_end(model, lst, 1))
+
+    def test_not_the_only_row(self):
+        # Its last row is its first, and `data[-1]` is `data[0]` said twice.
+        lst, model = row_model([{'b': 1}])
+        self.assertFalse(_names_from_end(model, lst, 0))
+
+    def test_not_a_dicts_last_entry(self):
+        # A dict's rows are addressed by key, which is a name that doesn't
+        # move when the dict grows -- there is nothing left to buy.
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertFalse(_names_from_end(model, d, 1))
+
+
+class TestNamingTheLastRowFromTheEnd(unittest.TestCase):
+    """The same questions asked of the last row, answered `[-1]`."""
+
+    def test_the_item_is_the_last_one(self):
+        lst, model = row_model()
+        self.assertEqual(_row_item_expr(model, lst, 2, from_end=True),
+                         'data[-1]')
+
+    def test_the_list_without_it_is_everything_but_the_last(self):
+        lst, model = row_model()
+        self.assertEqual(_row_without_expr(model, lst, 2, from_end=True),
+                         'data[:-1]')
+
+    def test_its_cells_are_read_off_the_last_item(self):
+        lst, model = row_model()
+        self.assertEqual(_row_column_exprs(model, lst, 2, from_end=True),
+                         ["data[-1]['b']", "data[-1]['c']"])
+
+    def test_its_row_is_the_tuple_of_those(self):
+        lst, model = row_model()
+        self.assertEqual(_row_tuple_expr(model, lst, 2, from_end=True),
+                         "(data[-1]['b'], data[-1]['c'])")
+
+    def test_the_row_number_column_still_counts_from_the_front(self):
+        # `$i` is where the row sits, and the last row of three sits at 2
+        # however it is reached.
+        lst, model = row_model(columns=['$i'])
+        self.assertEqual(_row_column_exprs(model, lst, 2, from_end=True), ['2'])
+
+
+class TestRowActions(unittest.TestCase):
+    """The rows of the menu, in the order it offers them."""
+
+    def test_a_middle_row_offers_the_four_numbered_ones(self):
+        lst, model = row_model()
+        self.assertEqual([a for a, _l, _c in _row_actions(model, lst, 1)],
+                         ['delete', 'item', 'cells', 'headers'])
+
+    def test_the_last_row_offers_the_end_relative_ones_first(self):
+        lst, model = row_model()
+        self.assertEqual([a for a, _l, _c in _row_actions(model, lst, 2)],
+                         list(ROW_ACTIONS))
+        self.assertEqual(list(ROW_ACTIONS)[:3], list(LAST_ROW_ACTIONS))
+
+    def test_each_row_says_which_row_it_is_about(self):
+        lst, model = row_model()
+        self.assertEqual(row_labels(model, lst, 1),
+                         ['Delete Item 1', 'Extract Item 1',
+                          'Extract Row 1 Cells as Tuple',
+                          'Use Item 1 as Headers'])
+
+    def test_the_last_rows_own_three_read_from_the_end(self):
+        lst, model = row_model()
+        self.assertEqual(row_labels(model, lst, 2)[:3],
+                         ['Delete Last Item', 'Extract Last Item',
+                          'Extract Last Row Cells as Tuple'])
+
+    def test_the_item_and_the_cells_are_different_questions(self):
+        # One is whatever `$` is, the other the columns on screen.
+        lst, model = row_model()
+        codes = row_codes(model, lst, 1)
+        self.assertEqual(codes['item'], 'data[1]')
+        self.assertEqual(codes['cells'], "(data[1]['b'], data[1]['c'])")
+
+    def test_one_column_is_extracted_without_the_word_tuple(self):
+        lst, model = row_model(columns=["$['b']"])
+        self.assertIn('Extract Row 0 Cells', row_labels(model, lst, 0))
+        self.assertNotIn('Extract Row 0 Cells as Tuple',
+                         row_labels(model, lst, 0))
+
+    def test_a_column_that_is_the_item_is_not_offered_twice(self):
+        # The cells of a one-column table showing `$` ARE the item, and a menu
+        # that says so twice has a row to spare.
+        lst, model = row_model(columns=['$'])
+        self.assertEqual(row_labels(model, lst, 1),
+                         ['Delete Item 1', 'Extract Item 1',
+                          'Use Item 1 as Headers'])
+
+    def test_a_dicts_rows_are_called_entries(self):
+        # The `$i` over this very column says "the entry number" for a dict, so
+        # the menu hanging off it can't call the same thing an item.
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(row_labels(model, d, 0)[:2],
+                         ['Delete Entry 0', 'Extract Entry 0'])
+
+    def test_a_row_with_nothing_to_write_carries_no_code(self):
+        lst, model = row_model([1, 2, 3], ['$'])
+        self.assertIsNone(row_codes(model, lst, 0)['headers'])
+
+    def test_without_a_source_no_row_carries_code(self):
+        lst, model = row_model(source=None)
+        self.assertEqual(set(row_codes(model, lst, 0).values()), {None})
+
+
+class TestRowHandleExprs(unittest.TestCase):
+    """What the drag handle on a row's number offers, in the order the tooltip
+    stacks them. The first is what a drag hands over."""
+
+    def labelled(self, model, lst, i):
+        return [(e.label, e.expr) for e in _row_handle_exprs(model, lst, i)]
+
+    def test_a_row_reads_two_ways(self):
+        lst, model = row_model()
+        self.assertEqual(self.labelled(model, lst, 1),
+                         [("Row's cells", "(data[1]['b'], data[1]['c'])"),
+                          ('Item', 'data[1]')])
+
+    def test_the_last_row_offers_its_end_relative_readings_first(self):
+        lst, model = row_model()
+        self.assertEqual(self.labelled(model, lst, 2),
+                         [("Last row's cells", "(data[-1]['b'], data[-1]['c'])"),
+                          ('Last item', 'data[-1]'),
+                          ("Row's cells", "(data[2]['b'], data[2]['c'])"),
+                          ('Item', 'data[2]')])
+
+    def test_a_column_that_is_the_item_is_not_offered_twice(self):
+        lst, model = row_model(columns=['$'])
+        self.assertEqual(self.labelled(model, lst, 1),
+                         [("Row's cells", 'data[1]')])
+
+    def test_a_dicts_entry_is_labelled_an_entry(self):
+        # `$v` alone is not the whole entry, so the two readings differ and
+        # both are offered -- the second by the name a dict's rows go by.
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$v'], source='d')
+        self.assertEqual(self.labelled(model, d, 1),
+                         [("Row's cells", "d['b']"),
+                          ('Entry', "('b', d['b'])")])
+
+    def test_a_dict_drawing_both_halves_says_the_entry_once(self):
+        # `$k` and `$v` side by side ARE the entry, spelled the way the entry
+        # itself is spelled.
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(self.labelled(model, d, 1),
+                         [("Row's cells", "('b', d['b'])")])
+
+
+class TestRowWidgetRendering(unittest.TestCase):
+    """Both widgets hang off the row's number and neither takes any of its
+    room: they are drawn outside the cell, and only while it is hovered."""
+
+    def render(self, lst=None, columns=None, source='data', open_row=None,
+               small=False, **fields):
+        lst, model = row_model(lst, columns, source, open_row)
+        model.update(fields)
+        # visualize re-reads the source off var_and_exp each run (see
+        # _adopt_source), so a table meant to have none must be handed none.
+        var_and_exp = None if source is None else ('data', source)
+        return lst, model, visualize(lst, model, mock_get_visualizer,
+                                     lambda c: eval(c, {'data': lst}),
+                                     small=small, var_and_exp=var_and_exp)
+
+    def index_cell(self, out, n=0):
+        cells = re.findall(r'<td class="row-index[^"]*".*?</td>', out, re.DOTALL)
+        return cells[n]
+
+    def index_inner(self, out, n=0):
+        """The wrapper inside the cell -- the number and the two controls."""
+        cell = self.index_cell(out, n)
+        m = re.search(r'<div class="row-index-inner".*(?=</div>)', cell,
+                      re.DOTALL)
+        assert m is not None, 'no row-index-inner'
+        return m.group(0)
+
+    def test_the_index_cell_carries_a_drag_handle(self):
+        _lst, _model, out = self.render()
+        self.assertIn('row-handle', self.index_cell(out, 1))
+
+    def test_the_handle_hands_over_the_rows_visible_columns(self):
+        _lst, _model, out = self.render()
+        offered = [e for h in handles_in(self.index_cell(out, 1)) for e in h]
+        self.assertEqual(offered[0],
+                         {'expr': "(data[1]['b'], data[1]['c'])",
+                          'label': "Row's cells"})
+
+    def test_the_handle_offers_the_item_beside_the_cells(self):
+        _lst, _model, out = self.render()
+        offered = [e for h in handles_in(self.index_cell(out, 1)) for e in h]
+        self.assertEqual(offered[1], {'expr': 'data[1]', 'label': 'Item'})
+
+    def test_the_last_rows_handle_leads_with_the_end_relative_readings(self):
+        _lst, _model, out = self.render()
+        offered = [e['label']
+                   for h in handles_in(self.index_cell(out, 2)) for e in h]
+        self.assertEqual(offered, ["Last row's cells", 'Last item',
+                                   "Row's cells", 'Item'])
+
+    def test_the_handle_asks_to_be_lifted_out_of_the_scrollport(self):
+        # It belongs outside the table's left edge, which is outside the
+        # overflow that clips it, so the front end draws a copy of it there
+        # for as long as the number is hovered.
+        _lst, _model, out = self.render()
+        self.assertIn('snc-hover-hoist', self.index_cell(out, 0))
+
+    def test_the_number_and_the_controls_share_a_wrapper(self):
+        # Flex on the <td> would drop the cell out of table layout, so what
+        # lays the three of them out is a wrapper inside it.
+        _lst, _model, out = self.render()
+        inner = self.index_inner(out, 2)
+        self.assertIn('row-handle', inner)
+        self.assertIn('row-menu-trigger', inner)
+        self.assertRegex(inner, r'</span>2<span')
+
+    def test_the_wrapper_is_what_a_hoisted_control_is_placed_against(self):
+        # Not the cell: the cell is as tall as whatever is drawn beside it in
+        # the row, and the controls belong beside the number.
+        _lst, _model, out = self.render()
+        self.assertIn('snc-hoist-host', self.index_inner(out, 0))
+
+    def test_a_cell_with_no_controls_hosts_nothing(self):
+        _lst, _model, out = self.render(small=True)
+        self.assertIn('row-index-inner', self.index_cell(out, 0))
+        self.assertNotIn('snc-hoist-host', out)
+
+    def test_the_pick_overlay_stays_a_child_of_the_cell(self):
+        # It covers the whole cell and is positioned against it, so it is not
+        # one of the things the wrapper lays out.
+        _lst, _model, out = self.render(search="$['b'] == 1", tool='pick',
+                                        first_match=True)
+        self.assertIn('pick-region', self.index_cell(out, 0))
+        self.assertNotIn('pick-region', self.index_inner(out, 0))
+
+    def test_the_handle_is_draggable(self):
+        _lst, _model, out = self.render()
+        self.assertIn('draggable="true"', self.index_cell(out, 0))
+
+    def test_the_number_is_still_the_cells_only_content(self):
+        # Both widgets are position:absolute, so the column stays as wide as
+        # the numbers in it.
+        _lst, _model, out = self.render()
+        self.assertRegex(self.index_cell(out, 2), r'>\s*2\s*<')
+
+    def test_the_index_cell_carries_a_menu_trigger(self):
+        _lst, _model, out = self.render()
+        self.assertIn('row-menu-trigger', self.index_cell(out, 0))
+
+    def test_the_menu_is_closed_until_the_trigger_is_clicked(self):
+        _lst, _model, out = self.render()
+        self.assertNotIn('row-menu-panel', out)
+
+    def test_an_open_menu_draws_its_panel_under_its_own_row(self):
+        _lst, _model, out = self.render(open_row=1)
+        self.assertNotIn('row-menu-panel', self.index_cell(out, 0))
+        self.assertIn('row-menu-panel', self.index_cell(out, 1))
+
+    def test_the_open_panel_is_one_the_front_end_hoists(self):
+        _lst, _model, out = self.render(open_row=0)
+        panel = out[out.index('row-menu-panel'):]
+        self.assertIn('snc-dropdown-panel', self.index_cell(out, 0))
+        self.assertIn('snc-dropdown-align="flyout"', self.index_cell(out, 0))
+        self.assertIn('snc-dismiss', panel[:200])
+
+    def test_the_open_trigger_stays_visible_behind_the_hoisted_panel(self):
+        _lst, _model, out = self.render(open_row=0)
+        self.assertIn('row-menu-trigger open', self.index_cell(out, 0))
+
+    def test_every_menu_row_is_a_handle_on_the_code_it_writes(self):
+        _lst, lst_model, out = self.render(open_row=1)
+        panel = self.index_cell(out, 1)
+        offered = {e['expr'] for h in handles_in(panel) for e in h}
+        self.assertIn('data[:1] + data[2:]', offered)
+        self.assertIn("(data[1]['b'], data[1]['c'])", offered)
+
+    def test_a_row_with_nothing_to_write_is_drawn_unselectable(self):
+        # A list of numbers: `$` is the whole column, so the cells reading is
+        # the item and drops out, and nothing zips into headers.
+        _lst, _model, out = self.render([1, 2, 3], ['$'], open_row=0)
+        rows = re.findall(r'<div class="snc-dropdown-option row-action[^"]*"',
+                          self.index_cell(out, 0))
+        self.assertEqual(len(rows), 3)
+        self.assertIn('unselectable', rows[2])
+
+    def test_the_last_rows_menu_leads_with_its_end_relative_rows(self):
+        _lst, _model, out = self.render(open_row=2)
+        panel = self.index_cell(out, 2)
+        self.assertIn('Delete Last Item', panel)
+        self.assertLess(panel.index('Delete Last Item'),
+                        panel.index('Delete Item 2'))
+
+    def test_an_ordinary_row_is_offered_none_of_them(self):
+        _lst, _model, out = self.render(open_row=1)
+        self.assertNotIn('Last Item', self.index_cell(out, 1))
+
+    def test_a_small_table_draws_neither(self):
+        # No room, and an unfocused preview is not where a line gets written.
+        _lst, _model, out = self.render(small=True)
+        self.assertNotIn('row-handle', out)
+        self.assertNotIn('row-menu-trigger', out)
+
+    def test_a_table_with_no_source_draws_neither(self):
+        _lst, _model, out = self.render(source=None)
+        self.assertNotIn('row-handle', out)
+        self.assertNotIn('row-menu-trigger', out)
+
+    def test_the_pick_tool_keeps_the_index_cell_to_itself(self):
+        # The pick region overlay sits on top of the cell and takes the click;
+        # a handle under it is one the user could never reach.
+        _lst, _model, out = self.render(search="$['b'] == 1", tool='pick',
+                                        first_match=True)
+        self.assertIn('pick-region', out)
+        self.assertNotIn('row-handle', out)
+
+    def test_a_splat_draws_the_widgets_once_per_root_row(self):
+        lst = [{'pets': ['cat', 'dog']}, {'pets': ['rat']}]
+        _lst, _model, out = self.render(lst, {"*$['pets']": {}})
+        self.assertEqual(out.count('row-handle'), 2)
+
+
+class TestRowActionClick(unittest.TestCase):
+    """Clicking one writes its line and closes the menu behind it."""
+
+    def click(self, action, row=1, lst=None, columns=None, source='data',
+              **fields):
+        lst, model = row_model(lst, columns, source, open_row=row)
+        model.update(fields)
+        return update(make_column_mouse_event(
+            repr(RowActionClick(row=row, action=action))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+
+    def test_delete_writes_the_list_without_that_row(self):
+        _model, commands = self.click('delete')
+        self.assertEqual(commands[0][:2],
+                         ('data_without_item_1', 'data[:1] + data[2:]'))
+
+    def test_item_writes_the_item_itself(self):
+        _model, commands = self.click('item')
+        self.assertEqual(commands[0][:2], ('data_item_1', 'data[1]'))
+
+    def test_cells_writes_the_rows_columns_as_a_tuple(self):
+        _model, commands = self.click('cells')
+        self.assertEqual(commands[0][:2],
+                         ('data_row_1', "(data[1]['b'], data[1]['c'])"))
+
+    def test_the_last_rows_three_are_written_from_the_end(self):
+        self.assertEqual(self.click('last_delete', row=2)[1][0][:2],
+                         ('data_without_last', 'data[:-1]'))
+        self.assertEqual(self.click('last_item', row=2)[1][0][:2],
+                         ('data_last_item', 'data[-1]'))
+        self.assertEqual(self.click('last_cells', row=2)[1][0][:2],
+                         ('data_last_row', "(data[-1]['b'], data[-1]['c'])"))
+
+    def test_an_end_relative_click_on_a_row_that_is_not_last_writes_nothing(self):
+        # The menu never offered it there, so a stale click can't take it up.
+        _model, commands = self.click('last_delete', row=1)
+        self.assertEqual(commands, [])
+
+    def test_headers_writes_the_list_of_dicts(self):
+        rows = [['name'], ['Alice'], ['Bob']]
+        _model, commands = self.click('headers', row=0, lst=rows,
+                                      columns=['$[0]'])
+        self.assertEqual(
+            commands[0][:2],
+            ('data_dicts', '[dict(zip(data[0], item)) for item in data[1:]]'))
+
+    def test_the_lines_need_nothing_imported(self):
+        _model, commands = self.click('delete')
+        self.assertEqual(len(commands[0]), 2)
+
+    def test_the_menu_closes_behind_it(self):
+        model, _commands = self.click('cells')
+        self.assertIsNone(model['openDropdown'])
+
+    def test_the_name_falls_back_when_the_list_has_no_name(self):
+        _model, commands = self.click('delete', source='data[0]')
+        self.assertEqual(commands[0][0], 'result_without_item_1')
+
+    def test_a_dicts_entry_is_named_an_entry(self):
+        d = {'a': 1, 'b': 2}
+        _model, commands = self.click('delete', lst=d, columns=['$k', '$v'],
+                                      source='d')
+        self.assertEqual(commands[0][0], 'd_without_entry_1')
+
+    def test_a_row_that_is_gone_writes_nothing(self):
+        _model, commands = self.click('delete', row=9)
+        self.assertEqual(commands, [])
+
+    def test_an_action_with_no_code_writes_nothing(self):
+        _model, commands = self.click('headers', row=0, lst=[1, 2, 3],
+                                      columns=['$'])
+        self.assertEqual(commands, [])
+
+    def test_a_dict_is_offered_none_of_the_end_relative_rows(self):
+        d = {'a': 1, 'b': 2}
+        _model, commands = self.click('last_item', row=1, lst=d,
+                                      columns=['$k', '$v'], source='d')
+        self.assertEqual(commands, [])
+
+    def test_an_action_nobody_offers_writes_nothing(self):
+        _model, commands = self.click('sort')
+        self.assertEqual(commands, [])
+
+    def test_without_a_source_it_writes_nothing(self):
+        _model, commands = self.click('delete', source=None)
+        self.assertEqual(commands, [])
+
+
+class TestTheLastRowsCellsNameItFromTheEnd(unittest.TestCase):
+    """The row handle is not the only thing on the last row that can say
+    `[-1]`: the cells are handed that expression too, so a child's own handles
+    are built out of it and the code a cell makes comes back bound to it.
+
+    One expression per cell rather than two: `var_and_exp` is the one slot a
+    child is given, so which naming the last row hands down is a choice, and
+    the one that survives the list growing is the one worth having.
+    """
+
+    LST = [{'b': 3, 'c': 'x'}, {'b': 1, 'c': 'y'}, {'b': 2, 'c': 'z'}]
+
+    def render(self, lst=None, columns=None):
+        lst = self.LST if lst is None else lst
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        if columns is not None:
+            model['columns'] = _as_columns(columns)
+        return lst, model, visualize(lst, model, mock_get_visualizer,
+                                     lambda c: eval(c, {'data': lst}),
+                                     var_and_exp=('data', 'data'))
+
+    def body_row(self, out, n):
+        rows = [r for r in re.findall(r'<tr[^>]*>.*?</tr>', out, re.DOTALL)
+                if 'col-header' not in r]
+        return rows[n]
+
+    def cell_exprs(self, out, n):
+        """The expression each cell of body row *n* was handed, index cell
+        (which has its own labelled readings) aside.
+
+        Read off what the child did with it rather than off the table: the int
+        mock echoes the expression it was given, and the string mock wraps
+        itself in a handle built out of it. Between them that is every way a
+        cell's expression reaches the editor.
+        """
+        row = self.body_row(out, n)
+        row = row[row.index('</td>'):]
+        echoed = re.findall(r'child-expr=([^>]*)>', html.unescape(row))
+        return echoed + [e['expr'] for h in handles_in(row) for e in h]
+
+    def test_the_last_rows_cells_are_read_off_the_last_item(self):
+        _lst, _model, out = self.render()
+        self.assertCountEqual(self.cell_exprs(out, 2),
+                              ["data[-1]['b']", "data[-1]['c']"])
+
+    def test_every_other_row_is_still_read_by_its_number(self):
+        _lst, _model, out = self.render()
+        self.assertCountEqual(self.cell_exprs(out, 1),
+                              ["data[1]['b']", "data[1]['c']"])
+
+    def test_the_only_row_of_a_list_is_read_by_its_number(self):
+        _lst, _model, out = self.render([{'b': 3, 'c': 'x'}])
+        self.assertCountEqual(self.cell_exprs(out, 0),
+                              ["data[0]['b']", "data[0]['c']"])
+
+    def test_a_splat_cell_in_the_last_row_too(self):
+        # Asked of the whole table: a splat's later rendered rows have no
+        # index cell of their own for cell_exprs to read past.
+        lst = [{'pets': ['cat']}, {'pets': ['rat', 'bat']}]
+        _lst, _model, out = self.render(lst, {"*$['pets']": {}})
+        offered = {e['expr'] for h in handles_in(out) for e in h}
+        self.assertIn("data[-1]['pets'][0]", offered)
+        self.assertIn("data[-1]['pets'][1]", offered)
+        self.assertIn("data[0]['pets'][0]", offered)
+
+    def test_a_dicts_last_entry_is_still_read_by_its_key(self):
+        d = {'a': 1, 'b': 2}
+        model = init_model(d, mock_get_visualizer, var_and_exp=('d', 'd'))
+        model['columns'] = _as_columns(['$v'])
+        out = visualize(d, model, mock_get_visualizer,
+                        lambda c: eval(c, {'d': d}), var_and_exp=('d', 'd'))
+        self.assertCountEqual(self.cell_exprs(out, 1), ["d['b']"])
+
+
+class TestCodeOutOfTheLastRowsCell(unittest.TestCase):
+    """The way back up agrees with the way down: a cell handed `data[-1][...]`
+    has whatever it makes rebound through the same expression, or the value on
+    screen and the text on the clipboard would name different rows."""
+
+    DATA = [{'name': 'ann'}, {'name': 'bo'}, {'name': 'cy'}]
+
+    def fire(self, row_key):
+        cols = _as_columns({"$['name']": {}})
+        model = init_model(self.DATA, get_visualizer_cell_code,
+                           var_and_exp=('data', 'data'))
+        model['columns'] = cols
+        key = f'{row_key}{CELL_KEY_SEP}{_leaf_columns(cols)[0].expr}'
+        ev = make_child_mouse_event(key, 'lambda ev: None')
+        # The first mousedown on an unfocused cell only pins focus to it.
+        model, _ = update(ev, ('data', 'data'), model, self.DATA,
+                          get_visualizer_cell_code)
+        return update(ev, ('data', 'data'), model, self.DATA,
+                      get_visualizer_cell_code)
+
+    def test_the_clipboard_form_names_the_last_item(self):
+        _model, commands = self.fire('2')
+        texts = [c.text for c in commands if isinstance(c, CopyToClipboard)]
+        self.assertEqual(texts, ["(data[-1]['name']).upper()"])
+        self.assertEqual(eval(texts[0], {'data': self.DATA}), 'CY')
+
+    def test_another_row_still_names_its_number(self):
+        _model, commands = self.fire('1')
+        texts = [c.text for c in commands if isinstance(c, CopyToClipboard)]
+        self.assertEqual(texts, ["(data[1]['name']).upper()"])
+
+    def test_the_column_it_writes_is_row_generic_either_way(self):
+        # What the code is generic over is the rows, which the row it was made
+        # in has no say in.
+        model, _commands = self.fire('2')
+        self.assertIn("($['name']).upper()", model['columns'])
+
+
+class TestRowMenuToggle(unittest.TestCase):
+    """The trigger is the same state-driven dropdown the column ▾ is, so it
+    goes through the one slot that holds a menu open."""
+
+    def test_clicking_the_trigger_opens_that_rows_menu(self):
+        lst, model = row_model()
+        model, _commands = update(
+            make_dropdown_toggle_event(_menu_id('row-menu', '2')),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+        self.assertEqual(model['openDropdown'], {'id': 'row-menu-2'})
+
+    def test_a_click_away_closes_it(self):
+        lst, model = row_model(open_row=1)
+        model, _commands = update(
+            make_column_mouse_event(repr(table_visualizer.ColumnMenuDismiss())),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+        self.assertIsNone(model['openDropdown'])
 
 
 if __name__ == '__main__':

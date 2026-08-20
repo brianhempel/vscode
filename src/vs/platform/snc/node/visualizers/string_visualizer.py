@@ -3435,15 +3435,22 @@ def _render_expand_bar(expanded: bool, value: str, model, *,
     share the CSS but not the wording, one counting items and one characters.
     """
     source_expr = model.get('_source_expr') if model else None
-    len_exp = f'len({source_expr})' if source_expr else None
-    lines_exp = f"{source_expr}.count('\\n') + 1" if source_expr else None
+    if source_expr:
+        len_exp = f'len({source_expr})'
+        lines_exps = [
+            PyExp(f"{source_expr}.count('\\n') + 1", label="Count"),
+            PyExp(f"{source_expr}.splitlines()", label="As list"),
+        ]
+    else:
+        len_exp = None
+        lines_exps = None
     len_n = len(value)
     lines_n = value.count('\n') + 1
     return (
         f'<div class="expand-and-len">'
         f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
-        f'<div class="tiny-len"{py_exp_attrs(lines_exp)}>{lines_n} line{"s" if lines_n != 1 else ""}</div>'
-        f'<div class="tiny-len"{py_exp_attrs(len_exp)}>{len_n} char{"s" if len_n != 1 else ""}</div>'
+        f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(lines_exps)}>{lines_n} line{"s" if lines_n != 1 else ""}</div>'
+        f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} char{"s" if len_n != 1 else ""}</div>'
         f'</div>'
     )
 
