@@ -249,6 +249,9 @@
 	cursor: pointer;
 	line-height: 10px;
 	flex-grow: 1;
+	/* this stuff makes us not get extra scrollable area from the chevron's translateY */
+	position: relative;
+	overflow: clip;
 }
 
 .tiny-len {
