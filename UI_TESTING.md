@@ -40,4 +40,4 @@ The tools are in `ui_testing_tools/*.js`:
 
 Visualizers appear below the relevant line of code, so you sometimes have to scroll down to see their buttons. Any buttons above are from a prior line of code.
 
-When finished, quit the app with `pkill -f "snc_test.*--remote-debugging-port=9222"`.
+When finished, quit the app with `pkill -f "snc_test.*--remote-debugging-port=9222"`. Do not use simply `pkill -f "remote-debugging-port=9222"` because that will not kill the full app and you will be subsequently confused.
