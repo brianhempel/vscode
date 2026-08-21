@@ -1,7 +1,7 @@
 // Usage: node cursor.js <line-number>
 // Moves the editor cursor to the given line using Ctrl+G (Go to Line).
 
-import { connect, send } from './cdp.js';
+import { connect, send, waitForPython } from './cdp.js';
 
 const line = process.argv[2];
 if (!line || isNaN(Number(line))) {
@@ -47,7 +47,15 @@ async function main() {
 	// Press Enter to go
 	await dispatchKey(ws, 'Enter', 'Enter', 13, {});
 
+	// Long enough for Go to Line to close and move the cursor, which is what
+	// arms the re-run below. Without it the first status read can land before
+	// anything has been set off and find nothing to wait for.
 	await new Promise(r => setTimeout(r, 100));
+
+	// Landing on a new line changes which visualizer is focused, which re-runs
+	// the program 150ms later so the new one draws full-size and the old one
+	// small. That is the render worth waiting for, not the cursor move.
+	await waitForPython(ws);
 
 	console.log(`Cursor moved to line ${line}`);
 	process.exit(0);

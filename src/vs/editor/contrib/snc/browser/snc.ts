@@ -215,9 +215,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onLinkChainClick = onLinkChainClick;
 		this.clipboardService = clipboardService;
 
-		// Create the widget DOM node
+		// Create the widget DOM node. The line number rides along as a class so a
+		// visualizer can be picked out by the line it belongs to (`.snc-line-7`),
+		// which is the only handle a UI test has on which visualizer is which -
+		// nothing in the HTML the visualizer renders says where it came from. A
+		// widget is only ever reused for the line it was made for (a line whose
+		// item count changes is rebuilt), so this stays true without maintenance.
 		this.domNode = document.createElement('div');
-		this.domNode.className = 'snc-visualization-widget';
+		this.domNode.className = `snc-visualization-widget snc-line-${lineNumber}`;
 
 		// Add custom mouse wheel event handling to actually scroll
 		this._register(dom.addDisposableListener(this.domNode, 'wheel', (e: WheelEvent) => {
@@ -2701,6 +2706,19 @@ export function suggestVarNameForExpression(expr: string): string {
 	return 'new_var';
 }
 
+/**
+ * Every live controller in this window, and how many runs have reached a
+ * conclusion. Both exist for `_sncPythonStatus` (see the end of the
+ * constructor), which is what `ui_testing_tools/wait_for_python.js` polls.
+ *
+ * Window-wide rather than per-editor because the backend is one worker pool
+ * shared by every editor, and a test asking "is Python done?" has no way to
+ * know which editor's controller to ask. An idle controller contributes
+ * nothing, so the union across all of them is the honest answer.
+ */
+const sncControllers = new Set<SNCController>();
+let sncRunsSettled = 0;
+
 export class SNCController extends Disposable implements IEditorContribution {
 	public static readonly ID = 'editor.contrib.snc';
 
@@ -2725,6 +2743,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	// Streaming state
 	private currentRunId: string | null = null;
+	// True from the moment runProgram commits to a run until that run has an id.
+	// It awaits the cancellation of the previous run in between, and a status
+	// poll landing in that gap would otherwise see no run in flight and no run
+	// scheduled, and call the backend idle just as it is starting work.
+	private runStarting = false;
 
 	// Sticky notification shown when the python executable can't be launched
 	// (e.g. neither the Python extension's selection nor the 'python3'
@@ -2732,7 +2755,26 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// output, indicating Python is working again.
 	private pythonSpawnFailureNotification: INotificationHandle | null = null;
 	private eventsBeingHandledCurrentRun: { line: number; visIndex: number; events: UiEvent[] }[] = [];
-	private visualizationItems: IVisualizationItem[] = [];
+	private _visualizationItems: IVisualizationItem[] = [];
+	/**
+	 * How far the DOM is behind the items. Bumped by every assignment to
+	 * `visualizationItems` and caught up by `updateVisualizationWidgets`, so
+	 * `itemsVersion !== renderedVersion` means Python has handed over HTML that
+	 * is not on screen yet. A property pair rather than a flag set at each of
+	 * the assignment sites: there are five of them, spread across the stream
+	 * handler, the content-change adjuster and the error paths, and one missed
+	 * would make the status quietly wrong in the direction that matters (saying
+	 * it is rendered when it is not).
+	 */
+	private itemsVersion = 0;
+	private renderedVersion = 0;
+	private get visualizationItems(): IVisualizationItem[] {
+		return this._visualizationItems;
+	}
+	private set visualizationItems(items: IVisualizationItem[]) {
+		this._visualizationItems = items;
+		this.itemsVersion++;
+	}
 	private syntaxErrorActive = false;
 	private streamSubscription: { dispose(): void } | null = null;
 	private streamUpdateTimer: any = null;
@@ -2893,6 +2935,46 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Monaco only renders visible lines in the DOM, so CDP can't read the
 		// full text buffer or control scroll position without model access.
 		(globalThis as any)._sncEditor = editor;
+
+		// Exposed for ui_testing_tools/wait_for_python.js. Nothing in the DOM
+		// says whether Python is still working -- a visualizer mid-run looks
+		// exactly like a finished one -- so a test that clicked something has no
+		// way to know when to start reading. See `pythonStatus`.
+		sncControllers.add(this);
+		this._register({ dispose: () => { sncControllers.delete(this); } });
+		(globalThis as any)._sncPythonStatus = () => SNCController.pythonStatus();
+	}
+
+	/**
+	 * Whether the window still has Python work outstanding, and why.
+	 *
+	 * `runsSettled` matters as much as `busy` does: a window that has not
+	 * started its first run yet is idle in exactly the same way as one that has
+	 * finished, so a waiter has to see a run conclude before it believes an idle
+	 * reading. `reasons` is for the timeout message -- "still busy" is not worth
+	 * printing, "still running" versus "still scheduled" is.
+	 */
+	private static pythonStatus(): { python: boolean | null; busy: boolean; reasons: string[]; runsSettled: number } {
+		const reasons = new Set<string>();
+		// null until some editor has a model to have an opinion about. A
+		// controller exists from the moment its editor is constructed, which
+		// during startup is before the file it will show has loaded -- and
+		// answering `false` there reads as "no run is coming", which is how a
+		// waiter concludes it has nothing to wait for and starts reading a
+		// window that has not drawn yet.
+		let python: boolean | null = null;
+		for (const controller of sncControllers) {
+			if (controller.editor.getModel()) {
+				python = python || controller.isPythonModel();
+			}
+			if (controller.runStarting) { reasons.add('starting'); }
+			if (controller.currentRunId) { reasons.add('running'); }
+			if (controller.debounceTimer) { reasons.add('scheduled'); }
+			if (controller.focusRerunTimer) { reasons.add('focus-rerun'); }
+			if (controller.cursorUpdateTimer) { reasons.add('re-rendering'); }
+			if (controller.itemsVersion !== controller.renderedVersion) { reasons.add('un-rendered'); }
+		}
+		return { python, busy: reasons.size > 0, reasons: [...reasons], runsSettled: sncRunsSettled };
 	}
 
 	/**
@@ -2997,6 +3079,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		this.debounceTimer = setTimeout(() => {
+			this.debounceTimer = null;
 			this.runProgram(this.getProgram());
 		}, this.debounceDelay);
 	}
@@ -3122,6 +3205,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			clearTimeout(this.cursorUpdateTimer);
 		}
 		this.cursorUpdateTimer = setTimeout(() => {
+			this.cursorUpdateTimer = null;
 			this.updateVisualizationWidgets(data);
 		}, 50);
 
@@ -3649,6 +3733,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 
 			this.debounceTimer = setTimeout(() => {
+				this.debounceTimer = null;
 				this.runProgram(this.getProgram());
 			}, this.debounceDelay);
 		}
@@ -3670,6 +3755,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		this.debounceTimer = setTimeout(() => {
+			this.debounceTimer = null;
 			this.runProgram(content);
 		}, 1);
 	}
@@ -3699,6 +3785,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.viewZones.clear();
 		this.viewZoneHeights.clear();
 		this.topSpacerHeight = 0;
+
+		// Tearing the widgets down is a render too. Its callers drop the items
+		// first, so the empty DOM is the truth; the one that does not (a run
+		// that failed to launch) is an error path where the next run redraws
+		// everything anyway, and leaving the version behind there would hang
+		// every waiting tool rather than let it read a screen that is not going
+		// to change.
+		this.renderedVersion = this.itemsVersion;
 	}
 
 	private setSyntaxErrorState(active: boolean): void {
@@ -4043,6 +4137,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 		this.applySyntaxErrorClassToWidgets();
 		this.updateLinkChrome();
+
+		// The DOM now shows these items -- but only claim so when they are still
+		// the current ones. The cursor-move re-render captures the array it was
+		// given and draws it 50ms later, by which time a run may have replaced
+		// it, and that render caught up with nothing.
+		if (visualizationData === this._visualizationItems) {
+			this.renderedVersion = this.itemsVersion;
+		}
 	}
 
 	/**
@@ -4820,6 +4922,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 
+		// Committed to a run from here on; see the field's comment.
+		this.runStarting = true;
+
 		// Get the working directory from the first workspace folder
 		const workingDirectory = this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath || '';
 		const modelUri = this.editor.getModel()?.uri;
@@ -4983,6 +5088,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 					this.currentRunId = null;
 					this.eventsBeingHandledCurrentRun = [];
+					// Counted after the widgets are updated above, so a waiter
+					// that sees this can already read the new DOM.
+					sncRunsSettled++;
 				} else if (msg.type === 'warning') {
 					console.warn('SNC warning:', msg.warning);
 				} else if (msg.type === 'error') {
@@ -5008,6 +5116,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 					this.eventsBeingHandledCurrentRun = [];
 					this.visualizationItems = [];
 					this.clearVisualizationWidgets();
+					sncRunsSettled++;
 				}
 			});
 			this._register({ dispose: () => { this.streamSubscription?.dispose(); this.streamSubscription = null; } });
@@ -5026,6 +5135,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Start a new streaming run
 		const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.currentRunId = runId;
+		// The run has an id now, so `currentRunId` speaks for it from here.
+		this.runStarting = false;
 		const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
 		// Track trigger time for timing measurement
 		this.runTriggerMsById.set(runId, nowMs);
@@ -5054,6 +5165,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.currentRunId = null;
 			this.eventsBeingHandledCurrentRun = [];
 			this.clearVisualizationWidgets();
+			// A run that never started is as over as one that ran, and a waiter
+			// that only counted successes would wait out its whole timeout here.
+			sncRunsSettled++;
 		}
 	}
 

@@ -1,6 +1,10 @@
 // Usage: node wait_for.js '.my-selector' [timeout_ms]
+//
+// Waits for Python to finish, then for the element to be in the DOM. Not the
+// same as waiting for it to be showing -- see `measure` in cdp.js -- which is
+// what ready.js and reload.js do.
 
-import { connect, evaluate } from './cdp.js';
+import { connect, waitFor, waitForPython } from './cdp.js';
 
 const selector = process.argv[2];
 const timeout = Number(process.argv[3]) || 10000;
@@ -12,20 +16,12 @@ if (!selector) {
 
 async function main() {
 	const ws = await connect();
-	const poll = 200;
-	const deadline = Date.now() + timeout;
-
-	while (Date.now() < deadline) {
-		const found = await evaluate(ws, `!!document.querySelector(${JSON.stringify(selector)})`);
-		if (found) {
-			console.log(`Found: ${selector}`);
-			process.exit(0);
-		}
-		await new Promise(r => setTimeout(r, poll));
-	}
-
-	console.error(`Timed out after ${timeout}ms waiting for: ${selector}`);
-	process.exit(1);
+	// Its own budget, not a share of one: a slow run should not leave the
+	// element less time to appear in.
+	await waitForPython(ws, timeout);
+	await waitFor(ws, selector, { timeout });
+	console.log(`Found: ${selector}`);
+	process.exit(0);
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });
