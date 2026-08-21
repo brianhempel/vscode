@@ -77,7 +77,7 @@ from string_visualizer import (
     _action_btn,
     _dropdown_row,
 )
-from visualizer_utils import py_exp_attrs
+from visualizer_utils import py_exp_attrs, PyExp
 
 
 # The list-comprehension form a multi-match regex hands over, `{}` being how
@@ -7393,6 +7393,11 @@ def _tiny_len(html_str: str) -> str:
 class TestTinyLen(unittest.TestCase):
     """How long the string is, at the right end of the expand bar."""
 
+    # The line count is one number with two readings, so its handle offers
+    # both and labels them apart: how many, and the lines themselves.
+    LINE_EXPS = (PyExp("x.count('\\n') + 1", label='Count'),
+                 PyExp('x.splitlines()', label='As list'))
+
     def setUp(self):
         self.tall_value = "l1\nl2\nl3\nl4\nl5"   # 5 lines -> bar offered
         self.short_value = "l1\nl2\nl3\nl4"     # exactly 4 -> no bar
@@ -7443,7 +7448,7 @@ class TestTinyLen(unittest.TestCase):
         out = _tiny_lens(self.render(self.tall_value,
                                      var_and_exp=self.var_and_exp))[0]
         self.assertIn('5 lines', out)
-        self.assertIn(exp_attr("x.count('\\n') + 1"), out)
+        self.assertIn(exp_attr(*self.LINE_EXPS), out)
         self.assertIn('draggable="true"', out)
 
     def test_the_line_count_offers_nothing_without_a_source_expression(self):
@@ -7460,7 +7465,7 @@ class TestTinyLen(unittest.TestCase):
         out = self.render(self.tall_value, small=True,
                           var_and_exp=self.var_and_exp)
         self.assertIn('5 lines', _tiny_len(out))
-        self.assertIn(exp_attr("x.count('\\n') + 1"), _tiny_len(out))
+        self.assertIn(exp_attr(*self.LINE_EXPS), _tiny_len(out))
 
 
 class TestExpandToggle(unittest.TestCase):

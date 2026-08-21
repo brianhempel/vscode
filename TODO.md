@@ -50,24 +50,26 @@
 - [x] extract row by grabbing index cell
 - [x] add dimmed `$i` header to index column
 - [x] add column left/right in col menu
-- [ ] grouped aggregations as new column instead of extra rows
+- [x] grouped aggregations as new column instead of extra rows
 - [x] nested action should still have imports added
 - [ ] need some better handling of long column names
+- [ ] still bouncing around when double-clicking on a line bc the cursor is the next line
 - [ ] more feedback for syntax errors
 - [ ] more feedback for errors in nested visualizers
 - [ ] better handling of tables that scroll offscreen
 - [ ] top level "add column" should be a menu much more like the subcolumns menu
 - [ ] add custom subcol menu item styling
-- [ ] checkbox styling for per-group aggregations menu
+- [ ] styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
-- [ ] need to able to select/delete rows (e.g. delete header row)
+- [ ] list in a table should use the `truncate_repr` helper by default until it is focused
+- [ ] if made some simple column edits (e.g. `int(col)`), need to be able to re-save whole table rather than just be transient
+- [x] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
 - [ ] $item instead of $, maybe?
 - [ ] drag-and-drop to align and add columns
 - [ ] zip
 - [ ] column pair to dict
-- [ ] better column handling: not just by type
-- [ ] still bouncing around when double-clicking on a line bc the cursor is the next line
+- [ ] better column handling: not just by type; dicts in particular need to be keyed by keys at least
 - [ ] hold shift for multi-select with the pick tool
 - [ ] string pick tool should work for literal string matches
 - [ ] show all loop iterations, somehow (table??)
