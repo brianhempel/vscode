@@ -52,6 +52,7 @@
 - [x] add column left/right in col menu
 - [x] grouped aggregations as new column instead of extra rows
 - [x] nested action should still have imports added
+- [ ] nested string visualizer actions can be in a dropdown
 - [ ] need some better handling of long column names
 - [ ] still bouncing around when double-clicking on a line bc the cursor is the next line
 - [ ] more feedback for syntax errors
