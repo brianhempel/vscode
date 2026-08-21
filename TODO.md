@@ -51,7 +51,12 @@
 - [x] add dimmed `$i` header to index column
 - [x] add column left/right in col menu
 - [ ] grouped aggregations as new column instead of extra rows
-- [ ] nested action should still have imports added
+- [x] nested action should still have imports added
+- [ ] need some better handling of long column names
+- [ ] more feedback for syntax errors
+- [ ] more feedback for errors in nested visualizers
+- [ ] better handling of tables that scroll offscreen
+- [ ] top level "add column" should be a menu much more like the subcolumns menu
 - [ ] add custom subcol menu item styling
 - [ ] checkbox styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
