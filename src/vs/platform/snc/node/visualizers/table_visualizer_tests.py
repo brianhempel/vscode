@@ -18414,7 +18414,7 @@ from table_visualizer import (
     RowActionClick, ROW_ACTIONS, LAST_ROW_ACTIONS,
     _row_actions, _row_tuple_expr, _row_without_expr, _row_headers_expr,
     _row_item_expr, _row_column_exprs, _row_handle_exprs, _names_from_end,
-    _render_row_index_cell,
+    _render_row_index_cell, _row_delete_matching_expr, _row_match_literal,
 )
 
 
@@ -18534,6 +18534,48 @@ class TestRowWithoutExpr(unittest.TestCase):
         self.assertIsNone(_row_without_expr(model, lst, 0))
 
 
+class TestRowDeleteMatchingExpr(unittest.TestCase):
+    """The list with every row that READS like this one taken out, where Delete
+    takes out the one row at that position."""
+
+    def test_it_compares_against_the_rows_own_value(self):
+        lst, model = row_model()
+        self.assertEqual(
+            _row_delete_matching_expr(model, lst, 1),
+            "[item for item in data if item != {'b': 1, 'c': 'y'}]")
+
+    def test_a_loose_source_is_parenthesized_before_it_is_walked(self):
+        lst, model = row_model([1, 2, 1], ['$'], source='xs + ys')
+        self.assertEqual(_row_delete_matching_expr(model, lst, 0),
+                         '[item for item in (xs + ys) if item != 1]')
+
+    def test_a_value_with_no_literal_has_no_line(self):
+        # Its repr describes the object rather than spelling it out, so there
+        # is nothing a comparison could be written against.
+        lst, model = row_model([object(), object()], ['$'])
+        self.assertIsNone(_row_delete_matching_expr(model, lst, 0))
+
+    def test_a_value_that_is_not_equal_to_itself_has_no_line(self):
+        lst, model = row_model([float('nan'), 1.0], ['$'])
+        self.assertIsNone(_row_delete_matching_expr(model, lst, 0))
+
+    def test_a_dicts_entry_is_not_matched_this_way(self):
+        # A dict's entries are unique by key, so every entry equal to this one
+        # IS this one -- Delete Entry under a second name.
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertIsNone(_row_delete_matching_expr(model, d, 0))
+
+    def test_no_source_means_no_line(self):
+        lst, model = row_model(source=None)
+        self.assertIsNone(_row_delete_matching_expr(model, lst, 0))
+
+    def test_the_literal_is_the_one_the_label_reads(self):
+        lst, model = row_model()
+        self.assertIn(_row_match_literal(model, lst, 2),
+                      _row_delete_matching_expr(model, lst, 2))
+
+
 class TestRowHeadersExpr(unittest.TestCase):
     """A row of headers over the rows under it: the list of lists a CSV reader
     hands back, read as the list of dicts it wants to be."""
@@ -18627,10 +18669,11 @@ class TestNamingTheLastRowFromTheEnd(unittest.TestCase):
 class TestRowActions(unittest.TestCase):
     """The rows of the menu, in the order it offers them."""
 
-    def test_a_middle_row_offers_the_four_numbered_ones(self):
+    def test_a_middle_row_offers_the_numbered_ones(self):
         lst, model = row_model()
         self.assertEqual([a for a, _l, _c in _row_actions(model, lst, 1)],
-                         ['delete', 'item', 'cells', 'headers'])
+                         ['delete', 'delete_matching', 'item', 'cells',
+                          'headers'])
 
     def test_the_last_row_offers_the_end_relative_ones_first(self):
         lst, model = row_model()
@@ -18641,9 +18684,36 @@ class TestRowActions(unittest.TestCase):
     def test_each_row_says_which_row_it_is_about(self):
         lst, model = row_model()
         self.assertEqual(row_labels(model, lst, 1),
-                         ['Delete Item 1', 'Extract Item 1',
+                         ['Delete Item 1',
+                          "Delete {'b': 1, 'c': 'y'} Items",
+                          'Extract Item 1',
                           'Extract Row 1 Cells as Tuple',
                           'Use Item 1 as Headers'])
+
+    def test_the_matching_row_names_the_value_rather_than_the_row(self):
+        # It is not about a position: the same line comes out whichever of the
+        # equal rows it was reached from.
+        lst, model = row_model(['a', 'b', 'a'], ['$'])
+        self.assertIn("Delete 'a' Items", row_labels(model, lst, 0))
+        self.assertEqual(row_codes(model, lst, 0)['delete_matching'],
+                         row_codes(model, lst, 2)['delete_matching'])
+
+    def test_a_long_value_is_named_short_enough_to_read(self):
+        lst, model = row_model([{'name': 'Alice', 'dept': 'engineering',
+                                 'id': 1}, {'name': 'Bob'}], ['$'])
+        label = [l for l in row_labels(model, lst, 0) if l.startswith('Delete ')
+                 and l.endswith(' Items')][0]
+        self.assertIn('…', label)
+        self.assertLess(len(label), len(f"Delete {lst[0]!r} Items"))
+
+    def test_a_row_with_no_literal_is_not_offered_it(self):
+        lst, model = row_model([object(), object()], ['$'])
+        self.assertNotIn('delete_matching', row_codes(model, lst, 0))
+
+    def test_a_dict_is_not_offered_it(self):
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertNotIn('delete_matching', row_codes(model, d, 0))
 
     def test_the_last_rows_own_three_read_from_the_end(self):
         lst, model = row_model()
@@ -18669,7 +18739,9 @@ class TestRowActions(unittest.TestCase):
         # that says so twice has a row to spare.
         lst, model = row_model(columns=['$'])
         self.assertEqual(row_labels(model, lst, 1),
-                         ['Delete Item 1', 'Extract Item 1',
+                         ['Delete Item 1',
+                          "Delete {'b': 1, 'c': 'y'} Items",
+                          'Extract Item 1',
                           'Use Item 1 as Headers'])
 
     def test_a_dicts_rows_are_called_entries(self):
@@ -18865,8 +18937,8 @@ class TestRowWidgetRendering(unittest.TestCase):
         _lst, _model, out = self.render([1, 2, 3], ['$'], open_row=0)
         rows = re.findall(r'<div class="snc-dropdown-option row-action[^"]*"',
                           self.index_cell(out, 0))
-        self.assertEqual(len(rows), 3)
-        self.assertIn('unselectable', rows[2])
+        self.assertEqual(len(rows), 4)
+        self.assertIn('unselectable', rows[3])
 
     def test_the_last_rows_menu_leads_with_its_end_relative_rows(self):
         _lst, _model, out = self.render(open_row=2)
@@ -18920,6 +18992,19 @@ class TestRowActionClick(unittest.TestCase):
         _model, commands = self.click('delete')
         self.assertEqual(commands[0][:2],
                          ('data_without_item_1', 'data[:1] + data[2:]'))
+
+    def test_delete_matching_writes_the_list_without_that_value(self):
+        _model, commands = self.click('delete_matching')
+        self.assertEqual(
+            commands[0][:2],
+            ('data_without_matching_items',
+             "[item for item in data if item != {'b': 1, 'c': 'y'}]"))
+
+    def test_a_matching_click_on_a_row_with_no_literal_writes_nothing(self):
+        # The menu never offered it there, so a stale click can't take it up.
+        _model, commands = self.click('delete_matching', row=0,
+                                      lst=[object(), object()], columns=['$'])
+        self.assertEqual(commands, [])
 
     def test_item_writes_the_item_itself(self):
         _model, commands = self.click('item')

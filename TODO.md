@@ -51,12 +51,21 @@
 - [x] add dimmed `$i` header to index column
 - [x] add column left/right in col menu
 - [ ] grouped aggregations as new column instead of extra rows
+- [ ] nested action should still have imports added
 - [ ] add custom subcol menu item styling
 - [ ] checkbox styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
 - [ ] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
 - [ ] $item instead of $, maybe?
+- [ ] drag-and-drop to align and add columns
+- [ ] zip
+- [ ] column pair to dict
+- [ ] better column handling: not just by type
+- [ ] still bouncing around when double-clicking on a line bc the cursor is the next line
+- [ ] hold shift for multi-select with the pick tool
+- [ ] string pick tool should work for literal string matches
+- [ ] show all loop iterations, somehow (table??)
 - [x] col action: convert to int, float
 - [ ] dictionary visualizer
 - [ ] tuple visualizer

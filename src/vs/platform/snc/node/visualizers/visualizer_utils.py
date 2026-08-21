@@ -75,6 +75,23 @@ def truncate_str(s, max_len):
     return s[:max(max_len - 1, 0)] + '…'
 
 
+def truncate_repr(value, max_len=30):
+    """A value's repr, cut down to somewhere it is only being NAMED.
+
+    A menu row saying which value it acts on, a preview chip saying what an
+    expression came to: places with one line's room, where a value long enough
+    to need scrolling would push everything beside it off the screen.
+
+    A repr that raises names nothing rather than taking the caller down with it
+    -- the caller drawing a label has no better answer to give than the ellipsis
+    a long value would have got.
+    """
+    try:
+        return truncate_str(repr(value), max_len)
+    except Exception:
+        return '…'
+
+
 def safe_repr(value):
     """HTML-escape repr(value), returning an error span on failure."""
     try:

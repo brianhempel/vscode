@@ -27,7 +27,7 @@ from visualizer_utils import (
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
     opens_block, with_pass_body, without_pass_body,
     supported_kwargs, call_with_supported_kwargs, keyword_params, wants_kwarg,
-    render_expand_toggle,
+    render_expand_toggle, truncate_str, truncate_repr,
 )
 
 
@@ -1265,6 +1265,26 @@ class TestSupportedKwargs(unittest.TestCase):
             pass
         self.assertIsNone(keyword_params(takes_all))
         self.assertEqual(keyword_params(takes_some), frozenset({'value', 'slots_config'}))
+
+
+class TestTruncateRepr(unittest.TestCase):
+    """How a value is named where it is only being mentioned in passing -- a
+    menu row, a preview chip -- rather than shown."""
+
+    def test_a_short_value_reads_as_its_repr(self):
+        self.assertEqual(truncate_repr('ab', 30), "'ab'")
+
+    def test_a_long_one_is_shortened_from_the_middle(self):
+        text = truncate_repr('x' * 100, 20)
+        self.assertEqual(text, truncate_str(repr('x' * 100), 20))
+        self.assertIn('…', text)
+        self.assertLessEqual(len(text), 20)
+
+    def test_a_repr_that_raises_names_nothing_rather_than_blowing_up(self):
+        class Awkward:
+            def __repr__(self):
+                raise ValueError('no')
+        self.assertEqual(truncate_repr(Awkward(), 30), '…')
 
 
 class TestRenderExpandToggle(unittest.TestCase):

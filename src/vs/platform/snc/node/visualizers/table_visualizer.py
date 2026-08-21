@@ -4063,13 +4063,25 @@ def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
 # person writes for "the last one" and the only naming here that survives the
 # list growing. So it gets its own rows, at the top, and the cells of that row
 # are handed the same naming (see _names_from_end).
+#
+# A row can also be named by what it CONTAINS rather than by where it sits, and
+# `delete_matching` is the one row of the menu written that way: the list
+# without every row equal to this one. Beside Delete, because the two answer the
+# same question ("not this") about different things -- a position and a value --
+# and a list where the difference doesn't show (no two rows alike) is one where
+# either will do.
 
 ROW_ACTIONS = ('last_delete', 'last_item', 'last_cells',
-               'delete', 'item', 'cells', 'headers')
+               'delete', 'delete_matching', 'item', 'cells', 'headers')
 
 # The ones that name the row from the end. First in the menu, because a row
 # that HAS an end-relative name is one the user reached for as "the last one".
 LAST_ROW_ACTIONS = ('last_delete', 'last_item', 'last_cells')
+
+# How much of a value the Delete-matching row spells out. Long enough to tell
+# two rows of a table apart, short enough that the panel is still a menu; the
+# whole value is one drag away, off the row's own handle.
+ROW_MATCH_LABEL_LEN = 30
 
 # What each one calls the line it writes. `{word}` is item or entry (see
 # _item_word), which is what the `$i` heading this very column already calls it.
@@ -4078,6 +4090,9 @@ _ROW_ACTION_NAMES = {
     'last_item': '{base}_last_{word}',
     'last_cells': '{base}_last_row',
     'delete': '{base}_without_{word}_{i}',
+    # Not `{i}` either: what it leaves out is a value, and any of the rows
+    # holding that value would have written this same line.
+    'delete_matching': '{base}_without_matching_{word}s',
     'item': '{base}_{word}_{i}',
     'cells': '{base}_row_{i}',
     # Not `{i}`: what it makes is the same list of dicts whichever row named
@@ -4211,6 +4226,51 @@ def _row_without_expr(model: dict, lst, i: int,
     return f'{src}[:{i}] + {src}[{i + 1}:]'
 
 
+def _row_match_literal(model: dict, lst, i: int) -> 'str | None':
+    """Row *i*'s value as Python source to compare against, or None where there
+    is none to write.
+
+    The tally's test, asked of a whole row rather than of one column's value:
+    most objects have no literal, since their repr describes them rather than
+    spelling them out, and a value that isn't equal to itself would match
+    nothing anyway.
+
+    A dict answers None whatever it holds. Its entries are unique by key, so
+    every entry equal to this one IS this one -- Delete Entry under a second
+    name, and a menu offering the same line twice is offering a choice that
+    isn't one.
+    """
+    if _is_dict_binds(_model_binds(model)):
+        return None
+    try:
+        value = lst[i]
+    except Exception:
+        return None
+    try:
+        return _tally_literal(value)
+    except Exception:
+        return None
+
+
+def _row_delete_matching_expr(model: dict, lst, i: int) -> 'str | None':
+    """The container with every row equal to row *i* left out.
+
+    A comprehension rather than a slice: what it takes out is a VALUE, and
+    where that value sits (or how many times) is exactly what the line is not
+    written in terms of. So the same line comes out of whichever of the equal
+    rows the user reached for.
+
+    `!=` against the row's own literal -- the one `_row_match_literal` reads, so
+    the label naming the value and the line comparing against it are the same
+    text.
+    """
+    source_expr = model.get('_source_expr')
+    literal = _row_match_literal(model, lst, i)
+    if source_expr is None or literal is None:
+        return None
+    return f'[item for item in {_atomize(source_expr)} if item != {literal}]'
+
+
 def _row_headers_expr(model: dict, lst, i: int) -> 'str | None':
     """The rows under row *i*, keyed by row *i*'s own values: what a list of
     lists straight out of a CSV reader wants to be.
@@ -4239,7 +4299,7 @@ def _row_headers_expr(model: dict, lst, i: int) -> 'str | None':
     return f'[dict(zip({header}, item)) for item in {rest}]'
 
 
-def _row_action_label(action: str, model: dict, i: int) -> str:
+def _row_action_label(action: str, model: dict, lst, i: int) -> str:
     """What a row of the menu reads as, naming the row it is about.
 
     Every row says which row, rather than the menu saying it once: the panel is
@@ -4254,11 +4314,20 @@ def _row_action_label(action: str, model: dict, i: int) -> str:
     # doesn't promise a tuple that isn't written.
     as_tuple = (' as Tuple'
                 if len(_leaf_columns(model.get('columns') or {})) > 1 else '')
+    # The one row named by a value instead of a number, so it has to show the
+    # value -- shortened, because a row of a table is a whole record often
+    # enough that its repr would run off the side of the menu. Read off the same
+    # literal the line compares against, so the two can't name different values;
+    # empty for every other row, which asks after a position and never reads it.
+    # Only ever plural where `word` is "item": a dict is offered no such row.
+    match = truncate_str(_row_match_literal(model, lst, i) or '',
+                         ROW_MATCH_LABEL_LEN)
     return {
         'last_delete': f'Delete Last {word}',
         'last_item': f'Extract Last {word}',
         'last_cells': f'Extract Last Row Cells{as_tuple}',
         'delete': f'Delete {word} {i}',
+        'delete_matching': f'Delete {match} {word}s',
         'item': f'Extract {word} {i}',
         'cells': f'Extract Row {i} Cells{as_tuple}',
         'headers': f'Use {word} {i} as Headers',
@@ -4282,6 +4351,8 @@ def _row_action_code(action: str, model: dict, lst, i: int,
         return None
     if action in ('delete', 'last_delete'):
         return _row_without_expr(model, lst, i, from_end)
+    if action == 'delete_matching':
+        return _row_delete_matching_expr(model, lst, i)
     if action in ('item', 'last_item'):
         return _row_item_expr(model, lst, i, from_end)
     if action == 'cells':
@@ -4315,6 +4386,25 @@ def _drop_repeats(rows: list) -> list:
     return out
 
 
+def _row_asks(action: str, model: dict, lst, i: int) -> bool:
+    """Whether the menu puts this question to row *i* at all.
+
+    Two rows are left out entirely rather than drawn inert where they don't
+    apply, because neither is a question this row was asked and answered
+    nothing to: an ordinary row is not a last row, and a row with no literal
+    has no value for the menu to name in the label -- the row would read
+    `Delete  Items` and say nothing at all.
+
+    Every other row stands whatever it can write, so one with no line still
+    says what can't be written here (see _render_row_menu's unselectable).
+    """
+    if action in LAST_ROW_ACTIONS:
+        return _names_from_end(model, lst, i)
+    if action == 'delete_matching':
+        return _row_match_literal(model, lst, i) is not None
+    return True
+
+
 def _row_actions(model: dict, lst, i: int,
                  parts=None) -> List[Tuple[str, str, Optional[str]]]:
     """`(action, label, code)` per row of the row ▾ menu, in menu order.
@@ -4323,16 +4413,11 @@ def _row_actions(model: dict, lst, i: int,
     itself from this, the handle on the number is built out of the same
     answers, and the click reads it back rather than working the line out a
     second time.
-
-    The end-relative rows are left out entirely rather than drawn inert where
-    they don't apply: an ordinary row is not a last row with nothing to say, it
-    is a row that was never asked the question.
     """
     return _drop_repeats([
-        (action, _row_action_label(action, model, i),
+        (action, _row_action_label(action, model, lst, i),
          _row_action_code(action, model, lst, i, parts))
-        for action in ROW_ACTIONS
-        if action not in LAST_ROW_ACTIONS or _names_from_end(model, lst, i)])
+        for action in ROW_ACTIONS if _row_asks(action, model, lst, i)])
 
 
 def _row_handle_exprs(model: dict, lst, i: int, parts=None) -> List[PyExp]:
@@ -9299,7 +9384,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # The expand/collapse bar is only offered when the pane is actually keeping
     # rows out of sight -- and a state left over from a longer list is ignored
     # for the same reason, since there'd be no bar left to collapse it with.
-    can_expand = wanted_height > collapsed_max_height
+    can_expand = wanted_height > collapsed_max_height or True
     expanded = can_expand and bool(model.get('expanded', False))
     actual_max_height = (max(EXPANDED_PANE_MAX_HEIGHT, collapsed_max_height)
                          if expanded else collapsed_max_height)

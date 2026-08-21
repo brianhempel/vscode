@@ -128,7 +128,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_str, ICONS, with_pass_body,
+from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS, with_pass_body,
                               Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
@@ -3962,10 +3962,6 @@ def _compute_predicate_previews(selection_regex, value, replace_visible, replace
         return (None, None)
 
 
-def _trunc_repr(val, max_len=30) -> str:
-    return truncate_str(repr(val), max_len)
-
-
 def _preview_chip(expr: str, val_repr: str, target: str = '.snc-replace-input') -> str:
     """Render a single clickable preview chip: expr => value.
 
@@ -3992,7 +3988,7 @@ def _render_match_object_preview(model: dict, value: str, eval_in_scope) -> str:
         matched = _eval_index_or_slice_match(selection_regex, value, eval_in_scope)
         if matched is None:
             return '<div class="match-object-preview"><span class="small">No matches</span></div>'
-        val_repr = _trunc_repr(matched)
+        val_repr = truncate_repr(matched)
         field_html = z_object_visualizer.render_small_field(
             '$', val_repr, '$', add_target='.search-box-replace')
         return f'<div class="match-object-preview"><span class="small">{field_html}</span></div>'
@@ -4056,7 +4052,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
         if matched_str is None:
             return ''
 
-        m_repr = html.escape(_trunc_repr(matched_str))
+        m_repr = html.escape(truncate_repr(matched_str))
         # row1 = _preview_chip('$', m_repr)
 
         result_str = ''
@@ -4066,7 +4062,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
             try:
                 transform_fn = eval_in_scope(f"(lambda mtch, {_PREVIEW_SOURCE_BINDER}: {replace_expr})")
                 result = transform_fn(matched_str, value)
-                result_str = html.escape(_trunc_repr(result))
+                result_str = html.escape(truncate_repr(result))
             except Exception as e:
                 result_str = html.escape(str(e))
         row2 = f'<div class="transform-preview-content">{result_str}</div>' if result_str else ''
@@ -4083,9 +4079,9 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
         return ''
 
     m = matches[0]
-    m0 = html.escape(_trunc_repr(m[0]))
-    mstart = html.escape(_trunc_repr(m.start()))
-    mend = html.escape(_trunc_repr(m.end()))
+    m0 = html.escape(truncate_repr(m[0]))
+    mstart = html.escape(truncate_repr(m.start()))
+    mend = html.escape(truncate_repr(m.end()))
 
     # row1 = (
     #     _preview_chip('$[0]', m0)
@@ -4108,7 +4104,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
                     # for i in range(1, grouped_match.lastindex + 1):
                         # g = grouped_match.group(i)
                         # if g is not None:
-                            # g_repr = html.escape(_trunc_repr(g))
+                            # g_repr = html.escape(truncate_repr(g))
                             # group_chips += _preview_chip(f'$[{i}]', g_repr)
             except Exception:
                 grouped_match = None
@@ -4123,7 +4119,7 @@ def _render_transform_preview(model: dict, value: str, eval_in_scope) -> str:
         try:
             transform_fn = eval_in_scope(f"(lambda mtch, {_PREVIEW_SOURCE_BINDER}: {replace_expr})")
             result = transform_fn(transform_match, value)
-            result_str = html.escape(_trunc_repr(result))
+            result_str = html.escape(truncate_repr(result))
         except Exception as e:
             result_str = html.escape(str(e))
     row2 = f'<div class="transform-preview-content">{result_str}</div>' if result_str else ''
