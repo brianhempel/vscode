@@ -18,7 +18,7 @@ import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
                               replace_dollars_in_py_exp, py_exp_attrs, PyExp,
-                              CHILD_SOURCE_BINDER)
+                              with_pass_body, AddImports, CHILD_SOURCE_BINDER)
 import table_visualizer
 
 
@@ -6118,9 +6118,14 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
     scope, where $ is the row -- and must evaluate for every row.
     """
 
-    def _drive(self, rows, column, events):
+    def _drive(self, rows, column, events, search="r'foo'"):
         """Run *events* through the string visualizer in row 0's cell of a list
-        whose single column is *column*. Returns (model, commands)."""
+        whose single column is *column*. Returns (model, commands).
+
+        *search* is what the cell is searching for -- a regex by default, which
+        is what clicking a character writes; a literal for the cases where the
+        difference matters, since only the regex spelling generates `re.` code.
+        """
         import string_visualizer
         eval_in_scope = lambda code: eval(code, {'re': re, 'rows': rows})
         get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
@@ -6131,7 +6136,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         key = f'0{CELL_KEY_SEP}{column}'
         model['focused_child'] = key
         cell = model['children'][key]
-        cell['search'] = "r'foo'"
+        cell['search'] = search
         cell['replace_visible'] = True
         cell['tool'] = 'pick'
 
@@ -6226,6 +6231,74 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
                 if isinstance(c, string_visualizer.CopyToClipboard)][0].text
         self.assertNotIn(CHILD_SOURCE_BINDER, text)
         ast.parse(text)  # raises if the pasted block wouldn't compile
+
+    def test_the_column_a_string_op_leaves_carries_its_import(self):
+        """A nested action writes its code into a column of this table rather
+        than into the file, so the declaration it made travels no further. The
+        column still reaches the editor everywhere the table hands it out --
+        the header, the cell, the row handle -- and the file it lands in has no
+        reason to have an `import re` already.
+        """
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        model, _cmds, _eval = self._drive(rows, '$', [
+            string_visualizer.ActionButtonClick(action='delete', copy=False),
+        ])
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
+        rendered = visualize(rows, model, get_vis,
+                             lambda code: eval(code, {'re': re, 'rows': rows}))
+        offered = [entry for handle in handles_in(rendered) for entry in handle
+                   if 're.' in entry['expr']]
+        self.assertTrue(offered, 'no handle offers the column the op wrote')
+        for entry in offered:
+            with self.subTest(expr=entry['expr']):
+                scope = {'rows': rows}  # a file with no import in it
+                for line in entry.get('imports', ()):
+                    exec(line, scope)
+                exec(with_pass_body(entry['expr']), scope)
+
+    def test_the_action_asks_for_the_import_even_with_no_line_to_show_for_it(self):
+        """A nested action writes a column rather than a line, but the column
+        is code the user's program has to be able to run: it is evaluated in
+        their scope on every run, so without the import there is nothing for
+        the column to show. The action asks for it the way any other would."""
+        import string_visualizer
+        rows = ['a,b,c', 'd,e,f']
+        model, commands, _eval = self._drive(rows, '$', [
+            string_visualizer.ActionButtonClick(action='split', copy=False),
+        ], search="r','")
+        self.assertIn("re.split(r',', ($), flags=re.M)", model['columns'])
+        self.assertEqual([c for c in commands if isinstance(c, AddImports)],
+                         [AddImports(imports=('import re',))])
+
+    def test_an_action_that_needs_nothing_asks_for_nothing(self):
+        import string_visualizer
+        rows = ['a,b,c', 'd,e,f']
+        model, commands, _eval = self._drive(rows, '$', [
+            string_visualizer.ActionButtonClick(action='split', copy=False),
+        ], search="','")
+        self.assertIn("($).split(',')", model['columns'])
+        self.assertEqual([c for c in commands if isinstance(c, AddImports)], [])
+
+    def test_a_line_written_over_that_column_carries_it_too(self):
+        """Sorting by the column writes a line of the file, and the column's
+        code goes into it -- so the line needs what the column needs."""
+        import string_visualizer
+        from table_visualizer import SortCodeClick
+        rows = ['foo bar', 'baz foo']
+        model, _cmds, _eval = self._drive(rows, '$', [
+            string_visualizer.ActionButtonClick(action='delete', copy=False),
+        ])
+        col = [c for c in model['columns'] if c != '$'][0]
+        event = make_column_mouse_event(
+            repr(SortCodeClick(col=col, direction='asc')))
+        _model, cmds = update(event, ('rows', 'rows'), model, rows,
+                              lambda v: string_visualizer if isinstance(v, str) else table_visualizer,
+                              eval_in_scope=lambda code: eval(code, {'re': re, 'rows': rows}))
+        written = [c for c in cmds if isinstance(c, tuple)]
+        self.assertEqual(len(written), 1, f'expected one line, got {cmds}')
+        self.assertIn('re.', written[0][1])
+        self.assertEqual(written[0][2:], (('import re',),))
 
     def test_column_is_row_generic_for_a_non_trivial_column(self):
         import string_visualizer

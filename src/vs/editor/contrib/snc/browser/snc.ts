@@ -4126,7 +4126,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private handleCommand(command: SNCCommand): void {
 		if (command.type === 'NewCode') {
 			const model = this.editor.getModel();
-			if (!model || command.edits.length === 0) {
+			if (!model || (command.edits.length === 0 && !command.imports?.length)) {
 				return;
 			}
 
@@ -4134,7 +4134,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// edits is ours, since only we know the file as it stands now. They
 			// join the command's own edits so everything below — the ordering,
 			// the scroll anchor, the shifted trigger line — sees one list.
+			//
+			// A nested action sends imports and no edits of its own: its code
+			// stayed in the visualizer as a column, but the file still has to
+			// be able to run it. Nothing lands on the trigger line, so nothing
+			// below links or moves the cursor, and the scroll anchor keeps the
+			// view still while the import goes in above.
 			const edits = [...command.edits, ...importEdits(model, command.imports)];
+			if (edits.length === 0) {
+				return;
+			}
 
 			// Sort edits bottom-to-top so line numbers remain valid as we insert
 			const sortedEdits = [...edits].sort((a, b) => b.afterLine - a.afterLine);

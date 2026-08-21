@@ -34,7 +34,7 @@ from python_runner import (
     transform_code_to_ast,
 )
 # python_runner puts the built-in visualizers on the path.
-from visualizer_utils import py_exp_attrs
+from visualizer_utils import py_exp_attrs, AddImports
 
 
 def exp_attr(*exprs):
@@ -358,6 +358,19 @@ class TestNewCodeImports(unittest.TestCase):
         dicts = self._dicts(('found', "re.findall(r'a', s)"))
         self.assertEqual(dicts[0]['imports'], [])
         self.assertEqual(len(dicts[0]['edits']), 1)
+
+    def test_an_import_with_no_line_under_it_is_still_new_code(self):
+        # A nested action keeps its code in the visualizer rather than the
+        # file, so there is nothing to insert -- but the file still has to be
+        # able to run it. The import is the whole edit.
+        dicts = self._dicts(AddImports(imports=('import re',)))
+        self.assertEqual(dicts[0]['type'], 'NewCode')
+        self.assertEqual(dicts[0]['edits'], [])
+        self.assertEqual(dicts[0]['imports'], ['import re'])
+        self.assertEqual(dicts[0]['triggerLine'], 1)
+
+    def test_an_import_command_with_nothing_to_add_is_not_sent(self):
+        self.assertEqual(self._dicts(AddImports(imports=())), [])
 
 
 @dataclass

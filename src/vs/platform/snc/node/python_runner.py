@@ -40,7 +40,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import io_cache
 
@@ -289,6 +289,12 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
     existing ``str1`` becomes ``str2``). Concrete linked assignment names are
     editor-owned and are intentionally not written into the visualizer model.
 
+    An ``AddImports`` goes out as a NewCode with no edits of its own: the
+    import IS the new code, and everything the editor does with one -- reading
+    the file for what is already there, holding the scroll still while lines
+    land above it -- is the same either way, so there is one command rather
+    than two that would have to agree.
+
     All commands are tagged with ``triggerLine`` / ``triggerVisIndex`` so the
     editor can route each update to the specific visualizer that emitted it
     (its own linked line), rather than to a single global link.
@@ -296,10 +302,22 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
     cmd_dicts: List[Dict[str, Any]] = []
     for cmd in commands:
         try:
-            if isinstance(cmd, tuple) and len(cmd) in (2, 3):
+            if isinstance(cmd, AddImports):
+                # Nothing to ask for is nothing to send: a command the editor
+                # would answer with no edit at all never reaches it.
+                if not cmd.imports:
+                    continue
+                cmd_dict: Dict[str, Any] = {
+                    "type": "NewCode",
+                    "triggerLine": line,
+                    "triggerVisIndex": idx_in_line,
+                    "edits": [],
+                    "imports": list(cmd.imports),
+                }
+            elif isinstance(cmd, tuple) and len(cmd) in (2, 3):
                 suggest_var_name, expr = cmd[0], cmd[1]
                 edits = _build_new_code_edits(source_code, line, suggest_var_name, expr)
-                cmd_dict: Dict[str, Any] = {
+                cmd_dict = {
                     "type": "NewCode",
                     "triggerLine": line,
                     "triggerVisIndex": idx_in_line,

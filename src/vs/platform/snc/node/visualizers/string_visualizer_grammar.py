@@ -1,6 +1,6 @@
 import re
 from bidirectional_dsl import BiTemplate, Alt, BASE_RULES, make_grammar, generate, parse
-from visualizer_utils import without_pass_body
+from visualizer_utils import without_pass_body, imports_for_code
 
 
 STRING_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
@@ -443,20 +443,16 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     return (_suggest_name_for_action(action, gen_ctx), result[0])
 
 
-# `re.` as the module, not the tail of a name like `score.`
-_RE_CALL_RE = re.compile(r'(?<![\w.])re\.')
-
-
 def code_imports(code: str) -> tuple:
     """What code generated from this grammar can't run without.
 
-    A statement about our own templates, not a rule about Python at large: the
-    ones that search, split and substitute are written with `re.` calls (see
-    STRING_VIZ_GRAMMAR), and they are the only reason generated code reaches
-    outside the builtins. The rest -- slices, `.upper()`, `.join(...)` -- needs
-    nothing.
+    The templates that search, split and substitute are written with `re.`
+    calls (see STRING_VIZ_GRAMMAR), and they are the only reason generated code
+    reaches outside the builtins. The rest -- slices, `.upper()`, `.join(...)`
+    -- needs nothing. Both answers come out of the one reader every visualizer
+    asks, so a handle and the line the same action writes cannot disagree.
     """
-    return ('import re',) if _RE_CALL_RE.search(code) else ()
+    return imports_for_code(code)
 
 
 def generate_copy_expr_for_if(action: str, ctx: dict) -> str | None:

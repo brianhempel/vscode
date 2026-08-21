@@ -20,7 +20,7 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               dollar_expr_names_index, dollar_expr_sigils,
                               py_exp_attrs, PyExp, nest_child_command,
                               wrap_drag_grab, defer_drag_grab,
-                              CHILD_SOURCE_BINDER)
+                              imports_for_code, CHILD_SOURCE_BINDER)
 from visualizer_utils import (
     config_key, parse_slots, parse_slot_cols, load_root_slots, save_slots_at_path,
     _save_dotfile_dict,
@@ -1023,6 +1023,49 @@ class TestNestChildCommandKeepsTheDeclaration(unittest.TestCase):
                          ('picked', '(item)[1:]'))
 
 
+class TestImportsForCode(unittest.TestCase):
+    """What an expression can't run without, read off the expression."""
+
+    def test_a_regex_call_needs_re(self):
+        self.assertEqual(imports_for_code("re.sub(r'a', '', s)"),
+                         ('import re',))
+
+    def test_the_others_this_code_reaches_for(self):
+        self.assertEqual(imports_for_code('np.mean(xs)'),
+                         ('import numpy as np',))
+        self.assertEqual(imports_for_code('sum(math.isnan(x) for x in xs)'),
+                         ('import math',))
+        self.assertEqual(imports_for_code('Counter(xs)'),
+                         ('from collections import Counter',))
+
+    def test_builtins_and_slices_need_nothing(self):
+        self.assertEqual(imports_for_code('[x[1:] for x in data]'), ())
+        self.assertEqual(imports_for_code('min(data)'), ())
+        self.assertEqual(imports_for_code(''), ())
+
+    def test_a_name_that_ends_in_the_module_is_not_the_module(self):
+        for code in ('_re.match(p, s)', 'score.mean()', 'row.math.pi',
+                     'self.np.array(xs)'):
+            with self.subTest(code=code):
+                self.assertEqual(imports_for_code(code), ())
+
+    def test_what_the_user_searched_for_is_text_rather_than_code(self):
+        # The pattern a string visualizer writes into its call is the user's
+        # own text: `import numpy as np` on a file that hasn't got numpy is a
+        # crash where the code it was added for ran fine.
+        self.assertEqual(imports_for_code("re.split(r'np\\.', s)"),
+                         ('import re',))
+        self.assertEqual(imports_for_code('s.replace("Counter(", "")'), ())
+
+    def test_an_f_string_is_code_and_is_read(self):
+        self.assertEqual(imports_for_code("f'{math.pi:.2f}'"),
+                         ('import math',))
+
+    def test_several_needs_come_back_in_one_order(self):
+        self.assertEqual(imports_for_code('Counter(np.round(xs))'),
+                         ('import numpy as np', 'from collections import Counter'))
+
+
 class TestPyExpAttrs(unittest.TestCase):
     """The attributes that hand expressions to the editor: the tooltip that
     lists them, the drag that carries the first, and the imports each one can't
@@ -1058,10 +1101,9 @@ class TestPyExpAttrs(unittest.TestCase):
                          [{'expr': 'data.count("c")'}, {'expr': 'set(data)'}])
 
     def test_each_expression_says_which_imports_it_needs(self):
-        # Declared by whatever produced the code; nothing downstream re-derives
-        # it from the text. Per expression, because the editor adds the imports
-        # of the one that was actually taken -- a union would import Counter
-        # for a dragged `min(data)`.
+        # Declared by whatever produced the code. Per expression, because the
+        # editor adds the imports of the one that was actually taken -- a union
+        # would import Counter for a dragged `min(data)`.
         attrs = py_exp_attrs([PyExp('Counter(data)',
                                     ('from collections import Counter',)),
                               'min(data)'])
@@ -1090,6 +1132,28 @@ class TestPyExpAttrs(unittest.TestCase):
 
     def test_an_expression_needing_nothing_says_nothing(self):
         self.assertEqual(self.exps(py_exp_attrs('xs[0]')), [{'expr': 'xs[0]'}])
+
+    def test_an_expression_nobody_declared_for_still_says_what_it_needs(self):
+        # An expression composed across visualizers -- a table's handle on a
+        # column a string cell wrote -- has no producer left to declare for it:
+        # only the text crosses the boundary, so the text is read.
+        self.assertEqual(self.exps(py_exp_attrs("re.sub(r'a', '', item)")),
+                         [{'expr': "re.sub(r'a', '', item)",
+                           'imports': ['import re']}])
+
+    def test_a_declaration_is_not_repeated_by_what_is_read(self):
+        attrs = py_exp_attrs(PyExp('Counter(data)',
+                                   ('from collections import Counter',)))
+        self.assertEqual(self.exps(attrs)[0]['imports'],
+                         ['from collections import Counter'])
+
+    def test_a_declaration_and_what_is_read_both_travel(self):
+        # A producer declaring one thing doesn't mean the expression needs
+        # nothing else: a Counter over a column a string cell wrote needs both.
+        attrs = py_exp_attrs(PyExp("Counter(re.sub(r'a', '', i) for i in xs)",
+                                   ('from collections import Counter',)))
+        self.assertEqual(self.exps(attrs)[0]['imports'],
+                         ['from collections import Counter', 'import re'])
 
     def test_no_expression_means_no_attributes_at_all(self):
         for nothing in ('', None, [], (), [None, ''], [PyExp(None)]):

@@ -899,6 +899,23 @@ class ChildEvent:
     py_ev_str: str
 
 @dataclass(frozen=True, slots=True)
+class AddImports:
+    """Asks the editor for imports with no line of code under them.
+
+    A visualizer that writes a line declares what it needs alongside it (see
+    new_code_command), but a nested action writes no line: its code becomes a
+    column of the parent instead. That column is still run in the user's own
+    scope on every run, so a file with no `import re` has nothing to show for a
+    column of `re.split(...)`. This is that action asking, with the code it
+    wrote staying where it put it.
+
+    Whether the file already has them, and where a missing one goes, stays the
+    editor's to answer, exactly as for a NewCode command.
+    """
+    imports: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Unlink:
     """Sent by the TypeScript front-end when an editor-visualizer link is broken."""
     pass
@@ -1123,13 +1140,57 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
         model['last_linked_expr'] = written
 
 
+# What generated code reaches outside the builtins for, and the line that puts
+# it back in reach. `re.` as the module rather than the tail of a name like
+# `score.`, which is why these are patterns rather than substrings.
+_CODE_NEEDS = tuple(
+    (re.compile(rf'(?<![\w.]){pattern}'), line) for pattern, line in (
+        (r're\.', 'import re'),
+        (r'np\.', 'import numpy as np'),
+        (r'math\.', 'import math'),
+        (r'Counter\(', 'from collections import Counter'),
+    ))
+
+# A string literal, prefix and all -- but not an f-string, whose braces hold
+# code like any other. The lookbehind is what tells the two apart: an `f` ahead
+# of the quote is a letter, so nothing here can start at that quote.
+_STRING_LITERAL_RE = re.compile(
+    r'''(?<![A-Za-z0-9_])[rRbBuU]{0,2}'''
+    r'''("""(?:\\.|[^\\])*?"""|\'\'\'(?:\\.|[^\\])*?\'\'\''''
+    r'''|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\')''',
+    re.S)
+
+
+def imports_for_code(code: str) -> tuple:
+    """What an expression can't run without, read off the expression itself.
+
+    A statement about the code these visualizers write, not a rule about Python
+    at large: the handful of modules their templates reach for is the whole
+    list, and a name is only one of them where it stands on its own.
+
+    Read rather than declared because an expression is composed across
+    visualizers -- a table hands out a column a string cell wrote, and a line it
+    writes puts that column inside a `sorted`. Only the text crosses that
+    boundary, so only the text can be asked. A producer that knows its own
+    needs still declares them (see PyExp); this is what catches the rest.
+
+    String literals are skipped: the pattern a string visualizer writes into a
+    call is the user's own text, and importing numpy because they searched for
+    "np." would break a file that hasn't got numpy over code that ran fine.
+    """
+    bare = _STRING_LITERAL_RE.sub("''", code or '')
+    return tuple(line for pattern, line in _CODE_NEEDS if pattern.search(bare))
+
+
 class PyExp(NamedTuple):
     """One expression a handle offers, and what it needs to be understood.
 
     *imports* is what the visualizer producing the code knows it can't run
     without, declared per expression because the editor adds the imports of the
     one the user actually took -- a handle offering both `Counter(data)` and
-    `min(data)` must not import Counter for the second.
+    `min(data)` must not import Counter for the second. Whatever goes
+    undeclared is read off the expression by imports_for_code, so an expression
+    that reached this handle from another visualizer still says what it needs.
 
     *label* is what the expression reads as, for a handle whose expressions are
     different values rather than different spellings of one value ("count" and
@@ -1153,8 +1214,9 @@ def py_exp_attrs(exprs, *, draggable: bool = True,
     stacked under it.
 
     Always the same shape, a JSON list, whether there is one expression or
-    five, so nothing downstream has a second form to know about. Nothing in
-    between reads the expression itself to guess at imports.
+    five, so nothing downstream has a second form to know about. What each one
+    needs imported goes with it: what its producer declared, and then whatever
+    imports_for_code reads off the text that nobody declared.
 
     *attr* is which tooltip system picks them up -- the py-exp one by default,
     or `data-action-expr` for an action button, whose tooltip offers the same
@@ -1172,8 +1234,10 @@ def py_exp_attrs(exprs, *, draggable: bool = True,
         if not exp.expr:
             continue
         entry = {'expr': exp.expr}
-        if exp.imports:
-            entry['imports'] = list(exp.imports)
+        imports = list(exp.imports) + [line for line in imports_for_code(exp.expr)
+                                       if line not in exp.imports]
+        if imports:
+            entry['imports'] = imports
         if exp.label:
             entry['label'] = exp.label
         entries.append(entry)
