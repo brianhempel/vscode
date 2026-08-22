@@ -14,6 +14,7 @@ import random
 import sys
 import tempfile
 import unittest
+import unittest.mock as _mock
 import urllib.request
 from dataclasses import dataclass
 from typing import Optional
@@ -34,7 +35,7 @@ from python_runner import (
     transform_code_to_ast,
 )
 # python_runner puts the built-in visualizers on the path.
-from visualizer_utils import py_exp_attrs, AddImports
+from visualizer_utils import py_exp_attrs, AddImports, UncaughtError
 
 
 def exp_attr(*exprs):
@@ -132,13 +133,14 @@ class TestReseed(unittest.TestCase):
         self.assertEqual(self._run_checkpoint1(source_code), self._run_checkpoint2(source_code))
 
     def test_reseed_survives_a_broken_numpy(self):
-        """A shadowing `numpy.py` on the user's path must not fail their run."""
-        sentinel = object()
-        sys.modules["numpy"] = sentinel  # type: ignore[assignment]
-        try:
+        """A shadowing `numpy.py` on the user's path must not fail their run.
+
+        Patched rather than assigned: a plain `del` afterward would evict the
+        real numpy another test already imported, and the re-import that
+        provokes warns -- which the aggregations read as no answer at all.
+        """
+        with _mock.patch.dict(sys.modules, {"numpy": object()}):
             reseed()
-        finally:
-            del sys.modules["numpy"]
 
     def test_import_errors_still_surface_inline(self):
         """Folding imports into execute_code must keep them inside the same
@@ -155,8 +157,72 @@ class TestReseed(unittest.TestCase):
 
         self.assertEqual(result["exitCode"], 1)
         self.assertEqual(errors[0][0], 1)
-        self.assertIn("ModuleNotFoundError", errors[0][1])
+        self.assertIsInstance(errors[0][1], UncaughtError)
+        self.assertIsInstance(errors[0][1].exception, ModuleNotFoundError)
         self.assertIn("nonexistent_module_xyz", result["stderr"])
+
+
+class TestUncaughtErrorItems(unittest.TestCase):
+    """The exception that ends a run is logged wrapped, so error_visualizer
+    claims it and it reads as an error rather than as a string the program
+    produced. An exception the program caught is left an ordinary value."""
+
+    def _logged(self, source_code):
+        logged = []
+        _, body_code = split_leading_imports(source_code)
+        globals_dict = {
+            "__name__": "__main__",
+            "_log_value": lambda line, value, *args, **kwargs: logged.append((line, value)),
+            "_log_and_return": lambda line, value, *args, **kwargs: value,
+        }
+        real_log_value = python_runner.log_value
+        python_runner.log_value = lambda line, value, *args, **kwargs: logged.append((line, value))
+        try:
+            result = execute_code(body_code, globals_dict)
+        finally:
+            python_runner.log_value = real_log_value
+        return logged, result
+
+    def _visualize(self, value):
+        def get_visualizer(v):
+            return next(x for x in python_runner._visualizers() if x.can_visualize(v))
+
+        vis = get_visualizer(value)
+        model = vis.init_model(value, get_visualizer)
+        return vis.visualize(value, model, get_visualizer, None)
+
+    def test_the_wrapped_exception_is_logged_not_its_message(self):
+        logged, result = self._logged("x = 1\ny = 1 / 0\n")
+
+        self.assertEqual(result["exitCode"], 1)
+        line, value = logged[-1]
+        self.assertEqual(line, 2)
+        self.assertIsInstance(value, UncaughtError)
+        self.assertIsInstance(value.exception, ZeroDivisionError)
+
+    def test_the_error_visualizer_claims_it_over_the_string_one(self):
+        logged, _ = self._logged("y = 1 / 0\n")
+        _, value = logged[-1]
+
+        html = self._visualize(value)
+
+        self.assertIn("snc-error-visualizer", html)
+        self.assertIn("ZeroDivisionError: division by zero", html)
+
+    def test_a_caught_exception_stays_an_ordinary_value(self):
+        """The run survives, so nothing wraps the exception and the object
+        visualizer gets it -- no red."""
+        source_code = ("try:\n"
+                       "    1 / 0\n"
+                       "except ZeroDivisionError as err:\n"
+                       "    e = err\n")
+        logged, result = self._logged(source_code)
+
+        self.assertEqual(result["exitCode"], 0)
+        _, value = logged[-1]
+        self.assertIsInstance(value, ZeroDivisionError)
+        self.assertNotIsInstance(value, UncaughtError)
+        self.assertNotIn("snc-error-visualizer", self._visualize(value))
 
 
 class TestFutureFlags(unittest.TestCase):

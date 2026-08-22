@@ -87,7 +87,32 @@ AGG_KEY_SEP = '\x02'
 
 @dataclass(frozen=True, slots=True)
 class AddColumnClick:
-    """User clicked the (+) button to add a new column."""
+    """User picked Add Column in the (+) menu, which opens the box that writes
+    one at the far right of the table."""
+    pass
+
+@dataclass(frozen=True, slots=True)
+class ColumnToggle:
+    """User checked or unchecked one of the (+) menu's rows, which puts a
+    column of the table on or takes it off.
+
+    Identified by the expression the row is showing rather than by a column,
+    like SubcolToggle: an unchecked row names a column the table hasn't got, so
+    there is nothing yet for `_named_column` to answer with.
+    """
+    expr: str
+
+@dataclass(frozen=True, slots=True)
+class ColumnShowAll:
+    """User clicked Show all in the (+) menu, which puts on every field the
+    rows have."""
+    pass
+
+@dataclass(frozen=True, slots=True)
+class ColumnHideAll:
+    """User clicked Hide all in the (+) menu, which takes every column away --
+    the ones they wrote as well as the ones detected, since the menu lists
+    both -- leaving a table of nothing but its row numbers."""
     pass
 
 @dataclass(frozen=True, slots=True)
@@ -2139,6 +2164,28 @@ def _subcol_candidates(col: str, lst, model, get_visualizer,
     return _get_all_possible_columns(values, get_visualizer) or []
 
 
+def _table_column_candidates(lst, get_visualizer) -> list:
+    """The columns the (+) menu offers to show.
+
+    The fields of the rows themselves, which is what the box's autocomplete
+    suggests -- so a field means the same thing whether it is ticked here or
+    typed there. A dict's are its key alongside its VALUES' fields, since a
+    dict's row is a pair and there is no tuple visualizer to ask for a pair's;
+    that is `_dict_value_columns`, the same answer detection opened the table
+    with.
+
+    Unioned rather than required of every row (which is what detection asks,
+    and why a ragged list opens as a single `$` column): a field only some rows
+    have is still a column worth offering, and one that isn't there reads as a
+    hole rather than an error.
+    """
+    if get_visualizer is None:
+        return []
+    if isinstance(lst, dict):
+        return _dict_value_columns(lst, get_visualizer)
+    return _get_all_possible_columns(lst, get_visualizer) or []
+
+
 def _drop_subcolumn(model, col: str, expr: str, eval_in_scope=None) -> None:
     """Take one sub-column away, and everything that was keyed to it.
 
@@ -2157,10 +2204,20 @@ def _drop_subcolumn(model, col: str, expr: str, eval_in_scope=None) -> None:
     _recompose_search(model, eval_in_scope)
 
 
-def _save_subcolumns(model, col: str) -> None:
-    """Persist a change to a column's sub-columns."""
+def _save_columns(model) -> None:
+    """Persist a change to which columns the table has.
+
+    Only where there is a type to file them under: a nested table renders from
+    the slots its parent handed down and has nothing of its own to write.
+    """
     if model.get('_config_root_type'):
         _save_slots(model)
+
+
+def _save_subcolumns(model, col: str) -> None:
+    """Persist a change to a column's sub-columns -- which is a change to the
+    columns, since that is the one record of a sub-column."""
+    _save_columns(model)
 
 
 def _menu_id(kind: str, col: str) -> str:
@@ -8044,6 +8101,117 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     )
 
 
+# The id of the menu the (+) opens. Not one of `_menu_id`'s, which name the
+# column they hang off: this one belongs to the table rather than to any column,
+# and asks which columns there are at all.
+ADD_MENU_ID = 'col-add-menu'
+
+
+def _render_add_column_header(lst, model, get_visualizer,
+                              span_attrs: str = '') -> str:
+    """The (+) at the right end of the header row, and the menu it opens.
+
+    A menu rather than the box it used to open. Which columns a table shows is
+    mostly a matter of ticking off fields the rows already have and only
+    sometimes of writing one, so the box is one row of a list -- Add Column,
+    over Show all / Hide all and a checkbox per field. That is exactly the shape
+    a column's Subcolumns submenu has, for the same reason: both are asking
+    which of a value's fields to spread into columns, one level apart.
+
+    A drop-down rather than a flyout, unlike every menu inside a column's ▾:
+    this one sits at the right end of the header with nothing beyond it, so it
+    hangs off the (+)'s own right edge rather than reaching further right for
+    room it hasn't got.
+
+    It shares the one `openDropdown` slot with the column menus, so opening this
+    puts one of those away and Escape closes it like any other.
+    """
+    menu_open = (model.get('openDropdown') or {}).get('id') == ADD_MENU_ID
+    toggle_event = repr(DropdownToggle(dropdown_id=ADD_MENU_ID))
+    # The open panel is hoisted out of the <th>, so the header stops being
+    # hovered as soon as the pointer reaches it; pin the (+) lit, the way the
+    # column menu's ▾ is.
+    icon_classes = ['col-add-icon', 'full-opacity-on-hover']
+    if menu_open:
+        icon_classes.append('open')
+    return (
+        f'<th class="col-add"{span_attrs}>'
+        f'<span class="snc-dropdown-trigger col-add-trigger">'
+        f'<span class="{" ".join(icon_classes)}" '
+        f'snc-mouse-down="{html.escape(toggle_event)}" '
+        f'data-tooltip="Add or remove columns">+</span>'
+        f'{_render_add_column_panel(lst, model, get_visualizer) if menu_open else ""}'
+        f'</span>'
+        f'</th>'
+    )
+
+
+def _render_add_column_panel(lst, model, get_visualizer) -> str:
+    """Add Column, then Show all and Hide all, then a checkbox per column the
+    table could show.
+
+    What is checked is read back out of the table's own columns rather than
+    stored, for the reason the Subcolumns submenu reads its boxes off the
+    column's: the config is the only record of a column, so the menu and the
+    table cannot come to disagree.
+
+    A column no field proposes -- one the user wrote, or the plain `$` a list of
+    numbers opens with -- is listed under the detected ones all the same, the
+    way Subcolumns lists the expressions written into it: it is checked by being
+    there at all, and Hide all reaches it, so a row is what puts it back. It
+    gets no box to edit though, unlike a sub-column's: a column is renamed by
+    double-clicking the header it is drawn under, and a sub-column has no header
+    of its own to double-click.
+
+    It carries the compute panel's classes as well as its own, for the reason
+    the three submenus do: they are all the same list of rows, styled once.
+    """
+    columns = model.get('columns') or {}
+    candidates = _table_column_candidates(lst, get_visualizer)
+
+    rows = [
+        f'<div class="col-compute-row col-add-row col-add-write">'
+        f'<span class="col-compute-toggle" '
+        f'snc-mouse-down="{html.escape(repr(AddColumnClick()))}">'
+        f'<span class="col-compute-nocheck"></span>'
+        f'<span class="col-compute-name">Add Column</span>'
+        f'</span></div>',
+        '<div class="col-compute-sep"></div>',
+    ]
+    rows += [
+        f'<div class="col-compute-row col-add-row col-add-all">'
+        f'<span class="col-compute-toggle" '
+        f'snc-mouse-down="{html.escape(repr(event))}">'
+        f'<span class="col-compute-nocheck"></span>'
+        f'<span class="col-compute-name">{label}</span>'
+        f'</span></div>'
+        for label, event in (('Show all', ColumnShowAll()),
+                             ('Hide all', ColumnHideAll()))
+    ]
+
+    listed = candidates + [c for c in columns if c not in candidates]
+    if listed:
+        rows.append('<div class="col-compute-sep"></div>')
+    for expr in listed:
+        checked = expr in columns
+        rows.append(
+            f'<div class="col-compute-row col-add-row'
+            f'{" checked" if checked else ""}">'
+            f'<span class="col-compute-toggle" snc-mouse-down="'
+            f'{html.escape(repr(ColumnToggle(expr=expr)))}">'
+            f'{_render_tally_check(checked)}'
+            f'<span class="col-compute-name">{html.escape(expr)}</span>'
+            f'</span></div>')
+
+    # The same event a column ▾ menu's panel carries: a click outside every open
+    # panel is a click away from whichever of them is open, and this is one of
+    # them -- it is held open by the same slot and closed by the same call.
+    dismiss = repr(ColumnMenuDismiss())
+    return (f'<div class="snc-dropdown-panel right col-compute-panel '
+            f'col-add-panel" snc-dropdown-align="right" '
+            f'snc-dismiss="{html.escape(dismiss)}">{"".join(rows)}</div>')
+
+
 def _render_row_index_header(model, n_header: int) -> str:
     """The cell over the row numbers.
 
@@ -9448,14 +9616,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                                  is_editing=False,
                                                  span_attrs=full_span))
             if not small:
-                add_event = repr(AddColumnClick())
-                strs.append(
-                    f'<th class="col-add"{full_span} '
-                    f'snc-mouse-down="{html.escape(add_event)}" '
-                    f'data-tooltip="Add column">'
-                    f'<span class="col-add-icon full-opacity-on-hover">+</span>'
-                    f'</th>'
-                )
+                strs.append(_render_add_column_header(
+                    lst, model, get_visualizer, span_attrs=full_span))
         strs.append('</tr>')
     strs.append('</thead>')
 
@@ -9861,6 +10023,30 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['adding_column'] = True
             model['column_input_value'] = ''
             model['editing_column'] = None
+
+        # The rest of the (+) menu. These leave it open, like the sub-column
+        # rows they are modelled on: ticking several in a row is what a list of
+        # boxes is for. Nothing re-points it either -- the id names the table
+        # rather than a column, so no column moving under it can take it
+        # elsewhere.
+        case ColumnToggle(expr=expr):
+            expr = expr.strip()
+            if expr:
+                if expr in model['columns']:
+                    _drop_column(model, expr, eval_in_scope)
+                else:
+                    _col_add(model['columns'], expr)
+                _save_columns(model)
+
+        case ColumnShowAll():
+            for expr in _table_column_candidates(value, get_visualizer):
+                _col_add(model['columns'], expr)
+            _save_columns(model)
+
+        case ColumnHideAll():
+            for expr in list(model['columns']):
+                _drop_column(model, expr, eval_in_scope)
+            _save_columns(model)
 
         case AddColumnAtClick(col=named, after=after):
             _close_column_menus(model)

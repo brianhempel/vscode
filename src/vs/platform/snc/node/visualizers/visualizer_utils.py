@@ -893,6 +893,19 @@ def eval_dollar_expr(field_expr: str, value, eval_in_scope=None, outer=(),
 
 
 @dataclass(frozen=True, slots=True)
+class UncaughtError:
+    """The exception that ended the user's run, logged on the line that raised.
+
+    A wrapper rather than the bare exception because the two mean different
+    things: an exception the program is holding -- `except ValueError as e` --
+    is a value like any other and goes to the object visualizer, while the one
+    that got away is an error and gets red text. Nothing distinguishes them at
+    the object, so the runner says which it caught by wrapping it.
+    """
+    exception: BaseException
+
+
+@dataclass(frozen=True, slots=True)
 class ChildEvent:
     """Envelope wrapping a child visualizer's event for parent routing."""
     child_key: str

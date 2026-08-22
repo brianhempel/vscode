@@ -835,6 +835,14 @@
 	padding: 0 4px;
 }
 
+/* === Runtime error visualizer === */
+/* Color and pre-wrap are inline in error_visualizer.py so it renders right
+   wherever it's nested; this just matches the generic visualizer's gutter. */
+
+.snc-error-visualizer {
+	padding: 0 4px;
+}
+
 /* === Object visualizer === */
 
 .obj-visualizer {
@@ -1811,6 +1819,16 @@
 	padding: 0 4px;
 	font-weight: 100;
 	margin: 0 2px;
+	border-radius: 3px;
+	user-select: none;
+}
+
+/* The (+)'s menu is hoisted out of the <th>, so the header stops being hovered
+   the moment the pointer reaches the panel — the same reason .col-menu.open
+   exists. Pin the (+) lit while its menu is open. (The lit BACKGROUND comes
+   from .snc-dropdown-trigger > .open, which every open trigger shares.) */
+.list-visualizer .col-add-icon.open {
+	opacity: 1;
 }
 
 .list-visualizer td.row-index {

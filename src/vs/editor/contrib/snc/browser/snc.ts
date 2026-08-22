@@ -4,7 +4,7 @@ import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js
 import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates } from '../../../browser/editorBrowser.js';
 import { Position } from '../../../common/core/position.js';
 import { Range } from '../../../common/core/range.js';
-import { Selection } from '../../../common/core/selection.js';
+import { Selection, SelectionDirection } from '../../../common/core/selection.js';
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
 import { ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
@@ -3198,7 +3198,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Re-render visualizations when cursor moves; do NOT rerun the program
 		const data = this.visualizationItems;
 		if (!data || data.length === 0) {
-			this.lastCursorLine = this.editor.getPosition()?.lineNumber ?? null;
+			this.lastCursorLine = this.cursorFocusLine();
 			return;
 		}
 		if (this.cursorUpdateTimer) {
@@ -3213,7 +3213,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// changes (cursor line is the default). Drop any pinned focus from a
 		// prior click and trigger a debounced re-run so non-focused widgets
 		// re-render with small=True (and the new focused widget renders full).
-		const newLine = this.editor.getPosition()?.lineNumber ?? null;
+		const newLine = this.cursorFocusLine();
 		if (newLine !== this.lastCursorLine) {
 			this.lastCursorLine = newLine;
 			this.explicitFocusedLine = null;
@@ -3228,6 +3228,29 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
+	 * The 1-indexed line the cursor is attending to.
+	 *
+	 * Usually just the cursor's line, but a whole-line selection (triple click,
+	 * or a drag that runs past the end of a line) swallows the trailing newline,
+	 * leaving the cursor parked at column 1 of the *next* line. The user is
+	 * looking at the selected text, not at the empty position after it, so
+	 * credit the last line that actually has something selected — otherwise
+	 * focus (and the scroll anchor pinned to it) slides one line down and the
+	 * selected line moves out from under the pointer.
+	 */
+	private cursorFocusLine(): number | null {
+		const selection = this.editor.getSelection();
+		if (!selection) { return null; }
+		if (!selection.isEmpty()
+			&& selection.getDirection() === SelectionDirection.LTR
+			&& selection.endLineNumber > selection.startLineNumber
+			&& selection.endColumn === 1) {
+			return selection.endLineNumber - 1;
+		}
+		return selection.getPosition().lineNumber;
+	}
+
+	/**
 	 * The 1-indexed line whose top-level visualizer should render full-size.
 	 * Cursor line by default; an explicit pin (from clicking a small widget)
 	 * wins until the cursor moves to a different line.
@@ -3236,7 +3259,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (this.explicitFocusedLine !== null) {
 			return this.explicitFocusedLine;
 		}
-		return this.editor.getPosition()?.lineNumber ?? null;
+		return this.cursorFocusLine();
 	}
 
 	/**
@@ -3882,9 +3905,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// console.log("visualizationData", visualizationData);
 
-		// Get current cursor position
-		const cursorPosition = this.editor.getPosition();
-		const cursorLine = cursorPosition?.lineNumber || 1;
+		// Get current cursor position. Uses the attended line, not the raw
+		// cursor line, so a whole-line selection doesn't read as "one line
+		// lower" and flip which loop iteration is shown.
+		const cursorLine = this.cursorFocusLine() ?? 1;
 
 		// Group visualization items by line number
 		const groupedByLine = new Map<number, IVisualizationItem[]>();

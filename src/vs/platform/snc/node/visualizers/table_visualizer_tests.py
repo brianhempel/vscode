@@ -2453,10 +2453,15 @@ class TestColumnVisualize(unittest.TestCase):
     """Test HTML rendering of column management controls in table mode."""
 
     def test_table_has_add_column_button(self):
+        # The (+) opens a menu, and Add Column is one row of it -- see
+        # TestAddColumnMenuRendering.
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('AddColumnClick', output)
+        self.assertIn('col-add', output)
+        self.assertIn(
+            f'DropdownToggle(dropdown_id={html.escape(repr(ADD_MENU_ID))})',
+            output)
 
     def test_table_headers_have_menu_button(self):
         # Remove lives in this menu now, not as a bare × in the header.
@@ -5935,13 +5940,9 @@ class TestColumnHeaderTooltips(unittest.TestCase):
         lst = [{'name': 'Alice'}, {'name': 'Bob'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        m = re.search(
-            r'<th([^>]*?)snc-mouse-down="AddColumnClick[^"]*"([^>]*?)>',
-            output,
-        )
-        self.assertIsNotNone(m, "AddColumnClick (+) button not found")
-        attrs = m.group(1) + ' ' + m.group(2)
-        self.assertIn('data-tooltip="Add column"', attrs)
+        m = re.search(r'<span class="[^"]*col-add-icon[^"]*"([^>]*?)>', output)
+        self.assertIsNotNone(m, "(+) button not found")
+        self.assertIn('data-tooltip="Add or remove columns"', m.group(1))
 
 
 class TestSearchBoxTooltips(unittest.TestCase):
@@ -14594,6 +14595,231 @@ class TestSubcolEvents(unittest.TestCase):
     def test_a_stale_index_is_a_noop(self):
         model, _ = self.click(self.model(), SubcolToggle(col='$.gone', expr='$[0]'))
         self.assertEqual(self.subs(model), [])
+
+
+from table_visualizer import (ColumnToggle, ColumnShowAll, ColumnHideAll,
+                              ColumnMenuDismiss, ADD_MENU_ID,
+                              _table_column_candidates)
+
+
+class AddColumnMenuCase(unittest.TestCase):
+    """The (+) at the right end of the header row, which opens a menu rather
+    than the box it used to."""
+
+    ROWS = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
+    NAME = "$['name']"
+    AGE = "$['age']"
+
+    gv = staticmethod(mock_get_visualizer)
+
+    def model(self, columns=None, lst=None, open_menu=True):
+        model = init_model(self.ROWS if lst is None else lst, self.gv)
+        if columns is not None:
+            model['columns'] = columns
+        model['openDropdown'] = {'id': ADD_MENU_ID} if open_menu else None
+        return model
+
+    def head(self, model, lst=None):
+        """The header rows -- everything the (+) and its menu are drawn in."""
+        out = visualize(self.ROWS if lst is None else lst, model, self.gv, None)
+        return out[:out.index('</thead>')]
+
+    def panel(self, model, lst=None):
+        head = self.head(model, lst)
+        self.assertIn('col-add-panel', head)
+        return head[head.index('col-add-panel'):]
+
+    def rows(self, panel):
+        return re.findall(r'<div class="[^"]*col-add-row[^"]*".*?'
+                          r'(?=<div class="[^"]*col-add-row|$)', panel,
+                          re.DOTALL)
+
+    def names(self, panel):
+        return [html.unescape(n)
+                for n in re.findall(r'col-compute-name">([^<]*)<', panel)]
+
+
+class TestAddColumnMenuRendering(AddColumnMenuCase):
+    """Which columns the table shows is mostly a matter of ticking the fields
+    the rows already have, so the (+) offers them: Add Column -- what it always
+    did -- over Show all / Hide all and a checkbox per field, exactly as a
+    column's Subcolumns submenu offers the fields of its values."""
+
+    def test_the_plus_opens_a_menu(self):
+        head = self.head(self.model(open_menu=False))
+        self.assertIn('col-add', head)
+        self.assertIn(
+            f'DropdownToggle(dropdown_id={html.escape(repr(ADD_MENU_ID))})',
+            head)
+
+    def test_the_plus_no_longer_writes_a_box_by_itself(self):
+        # Adding a column is one row of the menu now, not the whole of it.
+        self.assertNotIn('AddColumnClick', self.head(self.model(open_menu=False)))
+
+    def test_the_panel_is_only_there_when_the_menu_is_open(self):
+        self.assertNotIn('col-add-panel', self.head(self.model(open_menu=False)))
+
+    def test_add_column_leads_the_menu(self):
+        panel = self.panel(self.model())
+        self.assertEqual(self.names(panel)[0], 'Add Column')
+        self.assertIn(html.escape(repr(AddColumnClick())), panel)
+
+    def test_show_all_and_hide_all_sit_under_it(self):
+        panel = self.panel(self.model())
+        self.assertEqual(self.names(panel)[1:3], ['Show all', 'Hide all'])
+        self.assertIn(html.escape(repr(ColumnShowAll())), panel)
+        self.assertIn(html.escape(repr(ColumnHideAll())), panel)
+
+    def test_it_offers_the_fields_the_rows_have(self):
+        self.assertEqual(self.names(self.panel(self.model())),
+                         ['Add Column', 'Show all', 'Hide all',
+                          self.NAME, self.AGE])
+
+    def test_a_column_already_shown_is_checked(self):
+        rows = self.rows(self.panel(self.model({self.NAME: {}})))
+        self.assertIn('checked', rows[-2])
+        self.assertNotIn('checked', rows[-1])
+
+    def test_clicking_a_row_toggles_that_column(self):
+        self.assertIn(html.escape(repr(ColumnToggle(expr=self.NAME))),
+                      self.panel(self.model()))
+
+    def test_a_column_no_field_covers_is_listed_too(self):
+        # Checked by being there at all, like an aggregation the user wrote:
+        # the menu is where a column goes off as well as on, so one it never
+        # proposed still needs its row.
+        panel = self.panel(self.model({'len($)': {}}))
+        self.assertEqual(self.names(panel)[-1], 'len($)')
+        self.assertIn('checked', self.rows(panel)[-1])
+
+    def test_a_list_with_no_fields_still_offers_its_column(self):
+        # Nothing to detect on a list of numbers, but it has a column all the
+        # same, and this is the menu that takes one away.
+        panel = self.panel(self.model({'$': {}}, lst=[1, 2, 3]), lst=[1, 2, 3])
+        self.assertEqual(self.names(panel),
+                         ['Add Column', 'Show all', 'Hide all', '$'])
+
+    def test_the_trigger_stays_lit_while_the_menu_is_open(self):
+        # The panel is hoisted out of the header, so the pointer leaves the (+)
+        # the moment it reaches the menu.
+        self.assertIn('open', re.search(r'<span class="([^"]*col-add-icon[^"]*)"',
+                                        self.head(self.model())).group(1))
+        self.assertNotIn(
+            'open', re.search(r'<span class="([^"]*col-add-icon[^"]*)"',
+                              self.head(self.model(open_menu=False))).group(1))
+
+    def test_the_plus_says_what_it_does(self):
+        m = re.search(r'<span class="[^"]*col-add-icon[^"]*"([^>]*)>',
+                      self.head(self.model(open_menu=False)))
+        self.assertIn('data-tooltip="Add or remove columns"', m.group(1))
+
+    def test_a_click_away_puts_the_menu_away(self):
+        self.assertIn(f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}"',
+                      self.panel(self.model()))
+
+    def test_a_small_table_has_no_plus_and_so_no_menu(self):
+        model = self.model()
+        out = visualize(self.ROWS, model, self.gv, None, small=True)
+        self.assertNotIn('col-add-panel', out)
+
+    def test_the_plus_survives_hiding_every_column(self):
+        # What makes Hide all safe: the (+) is drawn beside the header row
+        # rather than after the last column, so a table of nothing but its row
+        # numbers still carries the menu that puts a column back.
+        panel = self.panel(self.model({}))
+        self.assertEqual(self.names(panel),
+                         ['Add Column', 'Show all', 'Hide all',
+                          self.NAME, self.AGE])
+
+
+class TestAddColumnMenuOverADict(AddColumnMenuCase):
+    """A dict's columns are its key alongside whatever its values have, so that
+    is what the menu offers over one."""
+
+    gv = staticmethod(mock_get_visualizer_dict_tables)
+    ROWS = {'a': 1, 'b': 2}
+
+    def test_it_offers_the_key_and_value_columns(self):
+        self.assertEqual(self.names(self.panel(self.model())),
+                         ['Add Column', 'Show all', 'Hide all', '$k', '$v'])
+
+
+class TestTableColumnCandidates(unittest.TestCase):
+    """What the (+) menu offers to show: the same fields the box's autocomplete
+    suggests, so a field means one thing wherever it is offered."""
+
+    def test_a_list_of_rows_offers_their_fields(self):
+        lst = [{'name': 'Alice'}, {'name': 'Bob', 'age': 25}]
+        self.assertEqual(_table_column_candidates(lst, mock_get_visualizer),
+                         ["$['name']", "$['age']"])
+
+    def test_a_dict_offers_its_key_beside_its_values_fields(self):
+        d = {'t1': {'who': 'ann'}}
+        self.assertEqual(
+            _table_column_candidates(d, mock_get_visualizer_dict_tables),
+            ['$k', "$v['who']"])
+
+    def test_a_list_of_numbers_offers_nothing(self):
+        self.assertEqual(_table_column_candidates([1, 2, 3], mock_get_visualizer),
+                         [])
+
+
+class TestAddColumnMenuEvents(AddColumnMenuCase):
+    """Ticking a box is the whole edit: what is checked is read back out of the
+    table's own columns, so there is nothing else to keep in step."""
+
+    def click(self, model, event, lst=None):
+        with patch('table_visualizer.save_columns_to_dotfile') as saved:
+            out, _cmds = update(make_column_mouse_event(repr(event)), None,
+                                model, self.ROWS if lst is None else lst,
+                                self.gv)
+        return out, saved
+
+    def test_checking_a_field_adds_the_column(self):
+        model, saved = self.click(self.model({self.NAME: {}}),
+                                  ColumnToggle(expr=self.AGE))
+        self.assertEqual(list(model['columns']), [self.NAME, self.AGE])
+        saved.assert_called()
+
+    def test_unchecking_takes_it_away(self):
+        model, _ = self.click(self.model({self.NAME: {}, self.AGE: {}}),
+                              ColumnToggle(expr=self.NAME))
+        self.assertEqual(list(model['columns']), [self.AGE])
+
+    def test_show_all_takes_every_field(self):
+        model, _ = self.click(self.model({}), ColumnShowAll())
+        self.assertEqual(list(model['columns']), [self.NAME, self.AGE])
+
+    def test_show_all_leaves_the_columns_already_there_where_they_are(self):
+        model, _ = self.click(self.model({self.AGE: {}}), ColumnShowAll())
+        self.assertEqual(list(model['columns']), [self.AGE, self.NAME])
+
+    def test_hide_all_takes_the_written_ones_too(self):
+        # Everything the menu lists is what it reaches, as in Subcolumns.
+        model, _ = self.click(self.model({self.NAME: {}, 'len($)': {}}),
+                              ColumnHideAll())
+        self.assertEqual(list(model['columns']), [])
+
+    def test_the_menu_stays_open_across_a_toggle(self):
+        # Ticking several boxes in a row is what a list of them is for.
+        model, _ = self.click(self.model(), ColumnToggle(expr=self.NAME))
+        self.assertEqual(model['openDropdown'], {'id': ADD_MENU_ID})
+
+    def test_a_search_goes_away_with_the_column_it_was_set_on(self):
+        model = self.model({self.NAME: {}})
+        model['column_searches'] = {self.NAME: {'op': '==', 'text': "'Alice'",
+                                                'compose': 'and'}}
+        out, _ = self.click(model, ColumnToggle(expr=self.NAME))
+        self.assertIsNone(out['column_searches'])
+
+    def test_add_column_still_opens_the_box_and_closes_the_menu(self):
+        model, _ = self.click(self.model(), AddColumnClick())
+        self.assertTrue(model['adding_column'])
+        self.assertIsNone(model['openDropdown'])
+
+    def test_an_empty_expression_is_a_noop(self):
+        model, _ = self.click(self.model({self.NAME: {}}), ColumnToggle(expr='  '))
+        self.assertEqual(list(model['columns']), [self.NAME])
 
 
 from table_visualizer import ColumnSubmenuDwell

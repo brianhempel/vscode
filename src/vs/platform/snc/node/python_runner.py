@@ -40,7 +40,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import io_cache
 
@@ -1832,11 +1832,13 @@ def execute_code(code_object: Any, globals_dict: Dict[str, Any], import_code: An
             exec(code_object, globals_dict)
         except Exception as e:
             tb_str = traceback.format_exc()
-            error_type = type(e).__name__
-            error_message = str(e)
             error_line = extract_error_line_from_traceback(tb_str)
-            error_msg_str = f"{error_type}: {error_message}"
-            log_value(error_line, error_msg_str)
+            # Wrapped, not a message string: error_visualizer claims the
+            # wrapper and renders red, where a string would have gone to the
+            # string visualizer and read as a value the program produced. The
+            # wrapper is also what keeps this red while an exception the
+            # program caught stays an ordinary value.
+            log_value(error_line, UncaughtError(e))
             print(tb_str, file=sys.stderr)
             exit_code = 1
 
