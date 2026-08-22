@@ -3971,6 +3971,12 @@ def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
 # click reads back -- so a row cannot offer one line and write another, and the
 # handle on the number is built out of the same answers.
 #
+# Pop is the one that does both at once, and the one exception to writing rather
+# than changing: `data.pop(2)` hands back the row AND takes it out of the very
+# list the rest of the file goes on using, where Delete writes a copy without it
+# and Extract writes a copy of it. That is what `.pop` means to anyone reading
+# the line, and it is the reason the row sits between the two groups.
+#
 # A row is two things at once and the menu says both: the ITEM, whatever `$` is
 # for this container, and the ROW OF CELLS, the columns that happen to be on
 # screen. They coincide often enough (a one-column table showing `$`) that the
@@ -3989,12 +3995,12 @@ def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
 # and a list where the difference doesn't show (no two rows alike) is one where
 # either will do.
 
-ROW_ACTIONS = ('last_delete', 'last_item', 'last_cells',
-               'delete', 'delete_matching', 'item', 'cells', 'headers')
+ROW_ACTIONS = ('last_delete', 'last_pop', 'last_item', 'last_cells',
+               'delete', 'delete_matching', 'pop', 'item', 'cells', 'headers')
 
 # The ones that name the row from the end. First in the menu, because a row
 # that HAS an end-relative name is one the user reached for as "the last one".
-LAST_ROW_ACTIONS = ('last_delete', 'last_item', 'last_cells')
+LAST_ROW_ACTIONS = ('last_delete', 'last_pop', 'last_item', 'last_cells')
 
 # How much of a value the Delete-matching row spells out. Long enough to tell
 # two rows of a table apart, short enough that the panel is still a menu; the
@@ -4005,9 +4011,14 @@ ROW_MATCH_LABEL_LEN = 30
 # _item_word), which is what the `$i` heading this very column already calls it.
 _ROW_ACTION_NAMES = {
     'last_delete': '{base}_without_last',
+    # Named for what the line IS -- the row that came out -- rather than for
+    # what the list became, which is the one thing about a pop that has no
+    # name to be bound to.
+    'last_pop': '{base}_popped_last_{word}',
     'last_item': '{base}_last_{word}',
     'last_cells': '{base}_last_row',
     'delete': '{base}_without_{word}_{i}',
+    'pop': '{base}_popped_{word}_{i}',
     # Not `{i}` either: what it leaves out is a value, and any of the rows
     # holding that value would have written this same line.
     'delete_matching': '{base}_without_matching_{word}s',
@@ -4144,6 +4155,38 @@ def _row_without_expr(model: dict, lst, i: int,
     return f'{src}[:{i}] + {src}[{i + 1}:]'
 
 
+def _row_pop_expr(model: dict, lst, i: int,
+                  from_end: bool = False) -> 'str | None':
+    """Row *i* taken out of the container and handed back: `data.pop(2)`.
+
+    The one line this menu writes that changes what everything downstream
+    sees. Delete writes the list without a row and Extract writes the row;
+    `.pop` does both to the list already there, which is what anyone reading
+    the line expects of it and the reason it is worth a row of its own beside
+    two that nearly say it.
+
+    `data.pop(-1)` off the last row -- the same row, said the way the row was
+    asked for, and the only naming that goes on meaning the last one once the
+    list grows. There is no shorter form for any other row: bare `.pop()` IS
+    the last one, so a numbered row has its number written out.
+
+    A dict pops by key, through the same key expression its cells are
+    addressed by, with the positional fallback for a key that has no source
+    form -- as `_row_without_expr` does, so the row a pop takes and the row a
+    delete leaves out cannot come to be different rows. It answers the VALUE
+    it took out where the rest of this menu answers the entry: `d.pop('b')` is
+    the one form anyone writes for taking an entry out, and nobody reading it
+    expects a pair back.
+    """
+    source_expr = model.get('_source_expr')
+    if source_expr is None:
+        return None
+    src = _atomize(source_expr)
+    if _is_dict_binds(_model_binds(model)):
+        return f'{src}.pop({_cell_binds(source_expr, i, lst)[0]["k"]})'
+    return f'{src}.pop({-1 if from_end else i})'
+
+
 def _row_match_literal(model: dict, lst, i: int) -> 'str | None':
     """Row *i*'s value as Python source to compare against, or None where there
     is none to write.
@@ -4242,10 +4285,12 @@ def _row_action_label(action: str, model: dict, lst, i: int) -> str:
                          ROW_MATCH_LABEL_LEN)
     return {
         'last_delete': f'Delete Last {word}',
+        'last_pop': f'Pop Last {word}',
         'last_item': f'Extract Last {word}',
         'last_cells': f'Extract Last Row Cells{as_tuple}',
         'delete': f'Delete {word} {i}',
         'delete_matching': f'Delete {match} {word}s',
+        'pop': f'Pop {word} {i}',
         'item': f'Extract {word} {i}',
         'cells': f'Extract Row {i} Cells{as_tuple}',
         'headers': f'Use {word} {i} as Headers',
@@ -4271,6 +4316,8 @@ def _row_action_code(action: str, model: dict, lst, i: int,
         return _row_without_expr(model, lst, i, from_end)
     if action == 'delete_matching':
         return _row_delete_matching_expr(model, lst, i)
+    if action in ('pop', 'last_pop'):
+        return _row_pop_expr(model, lst, i, from_end)
     if action in ('item', 'last_item'):
         return _row_item_expr(model, lst, i, from_end)
     if action == 'cells':

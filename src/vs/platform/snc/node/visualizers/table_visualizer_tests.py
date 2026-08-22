@@ -18687,6 +18687,7 @@ from table_visualizer import (
     _row_actions, _row_tuple_expr, _row_without_expr, _row_headers_expr,
     _row_item_expr, _row_column_exprs, _row_handle_exprs, _names_from_end,
     _render_row_index_cell, _row_delete_matching_expr, _row_match_literal,
+    _row_pop_expr,
 )
 
 
@@ -18804,6 +18805,51 @@ class TestRowWithoutExpr(unittest.TestCase):
     def test_no_source_means_no_line(self):
         lst, model = row_model(source=None)
         self.assertIsNone(_row_without_expr(model, lst, 0))
+
+
+class TestRowPopExpr(unittest.TestCase):
+    """The row taken out of the container the rest of the file goes on using,
+    and handed back -- Delete and Extract in one line."""
+
+    def test_a_row_is_popped_by_its_number(self):
+        lst, model = row_model()
+        self.assertEqual(_row_pop_expr(model, lst, 1), 'data.pop(1)')
+
+    def test_the_first_row_is_popped_by_its_number_too(self):
+        # `.pop()` bare is the last row, so there is no shorter form for 0.
+        lst, model = row_model()
+        self.assertEqual(_row_pop_expr(model, lst, 0), 'data.pop(0)')
+
+    def test_reached_as_the_last_row_it_counts_from_the_end(self):
+        lst, model = row_model()
+        self.assertEqual(_row_pop_expr(model, lst, 2, from_end=True),
+                         'data.pop(-1)')
+
+    def test_a_loose_source_is_parenthesized_before_it_is_popped(self):
+        lst, model = row_model(source='xs + ys')
+        self.assertEqual(_row_pop_expr(model, lst, 1), '(xs + ys).pop(1)')
+
+    def test_a_dict_pops_by_key(self):
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(_row_pop_expr(model, d, 1), "d.pop('b')")
+
+    def test_a_key_with_no_source_form_is_popped_by_position(self):
+        d = {(1, 2): 'a', float('nan'): 'b'}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(_row_pop_expr(model, d, 1), 'd.pop(list(d)[1])')
+
+    def test_it_pops_the_row_delete_would_have_left_out(self):
+        # The two are one question asked of the container and of the row, so
+        # they cannot come to disagree about which row is meant.
+        lst, model = row_model()
+        self.assertEqual(_row_pop_expr(model, lst, 1), 'data.pop(1)')
+        self.assertEqual(_row_without_expr(model, lst, 1),
+                         'data[:1] + data[2:]')
+
+    def test_no_source_means_no_line(self):
+        lst, model = row_model(source=None)
+        self.assertIsNone(_row_pop_expr(model, lst, 0))
 
 
 class TestRowDeleteMatchingExpr(unittest.TestCase):
@@ -18944,23 +18990,36 @@ class TestRowActions(unittest.TestCase):
     def test_a_middle_row_offers_the_numbered_ones(self):
         lst, model = row_model()
         self.assertEqual([a for a, _l, _c in _row_actions(model, lst, 1)],
-                         ['delete', 'delete_matching', 'item', 'cells',
+                         ['delete', 'delete_matching', 'pop', 'item', 'cells',
                           'headers'])
 
     def test_the_last_row_offers_the_end_relative_ones_first(self):
         lst, model = row_model()
         self.assertEqual([a for a, _l, _c in _row_actions(model, lst, 2)],
                          list(ROW_ACTIONS))
-        self.assertEqual(list(ROW_ACTIONS)[:3], list(LAST_ROW_ACTIONS))
+        self.assertEqual(list(ROW_ACTIONS)[:4], list(LAST_ROW_ACTIONS))
 
     def test_each_row_says_which_row_it_is_about(self):
         lst, model = row_model()
         self.assertEqual(row_labels(model, lst, 1),
                          ['Delete Item 1',
                           "Delete {'b': 1, 'c': 'y'} Items",
+                          'Pop Item 1',
                           'Extract Item 1',
                           'Extract Row 1 Cells as Tuple',
                           'Use Item 1 as Headers'])
+
+    def test_pop_sits_with_the_rows_that_take_a_row_out(self):
+        # It is Delete and Extract at once, so it ends the group that takes a
+        # row away and leads into the ones that read it.
+        lst, model = row_model()
+        actions = [a for a, _l, _c in _row_actions(model, lst, 1)]
+        self.assertLess(actions.index('delete_matching'), actions.index('pop'))
+        self.assertLess(actions.index('pop'), actions.index('item'))
+
+    def test_pop_hands_back_the_row_it_takes_out(self):
+        lst, model = row_model()
+        self.assertEqual(row_codes(model, lst, 1)['pop'], 'data.pop(1)')
 
     def test_the_matching_row_names_the_value_rather_than_the_row(self):
         # It is not about a position: the same line comes out whichever of the
@@ -18987,11 +19046,13 @@ class TestRowActions(unittest.TestCase):
         d, model = row_model(d, ['$k', '$v'], source='d')
         self.assertNotIn('delete_matching', row_codes(model, d, 0))
 
-    def test_the_last_rows_own_three_read_from_the_end(self):
+    def test_the_last_rows_own_four_read_from_the_end(self):
         lst, model = row_model()
-        self.assertEqual(row_labels(model, lst, 2)[:3],
-                         ['Delete Last Item', 'Extract Last Item',
+        self.assertEqual(row_labels(model, lst, 2)[:4],
+                         ['Delete Last Item', 'Pop Last Item',
+                          'Extract Last Item',
                           'Extract Last Row Cells as Tuple'])
+        self.assertEqual(row_codes(model, lst, 2)['last_pop'], 'data.pop(-1)')
 
     def test_the_item_and_the_cells_are_different_questions(self):
         # One is whatever `$` is, the other the columns on screen.
@@ -19013,6 +19074,7 @@ class TestRowActions(unittest.TestCase):
         self.assertEqual(row_labels(model, lst, 1),
                          ['Delete Item 1',
                           "Delete {'b': 1, 'c': 'y'} Items",
+                          'Pop Item 1',
                           'Extract Item 1',
                           'Use Item 1 as Headers'])
 
@@ -19021,8 +19083,13 @@ class TestRowActions(unittest.TestCase):
         # the menu hanging off it can't call the same thing an item.
         d = {'a': 1, 'b': 2}
         d, model = row_model(d, ['$k', '$v'], source='d')
-        self.assertEqual(row_labels(model, d, 0)[:2],
-                         ['Delete Entry 0', 'Extract Entry 0'])
+        self.assertEqual(row_labels(model, d, 0)[:3],
+                         ['Delete Entry 0', 'Pop Entry 0', 'Extract Entry 0'])
+
+    def test_a_dict_is_offered_a_pop_of_its_own(self):
+        d = {'a': 1, 'b': 2}
+        d, model = row_model(d, ['$k', '$v'], source='d')
+        self.assertEqual(row_codes(model, d, 1)['pop'], "d.pop('b')")
 
     def test_a_row_with_nothing_to_write_carries_no_code(self):
         lst, model = row_model([1, 2, 3], ['$'])
@@ -19209,8 +19276,8 @@ class TestRowWidgetRendering(unittest.TestCase):
         _lst, _model, out = self.render([1, 2, 3], ['$'], open_row=0)
         rows = re.findall(r'<div class="snc-dropdown-option row-action[^"]*"',
                           self.index_cell(out, 0))
-        self.assertEqual(len(rows), 4)
-        self.assertIn('unselectable', rows[3])
+        self.assertEqual(len(rows), 5)
+        self.assertIn('unselectable', rows[4])
 
     def test_the_last_rows_menu_leads_with_its_end_relative_rows(self):
         _lst, _model, out = self.render(open_row=2)
@@ -19278,6 +19345,17 @@ class TestRowActionClick(unittest.TestCase):
                                       lst=[object(), object()], columns=['$'])
         self.assertEqual(commands, [])
 
+    def test_pop_writes_the_row_taken_out_of_the_list(self):
+        _model, commands = self.click('pop')
+        self.assertEqual(commands[0][:2],
+                         ('data_popped_item_1', 'data.pop(1)'))
+
+    def test_a_dicts_pop_is_written_by_key(self):
+        d = {'a': 1, 'b': 2}
+        _model, commands = self.click('pop', lst=d, columns=['$k', '$v'],
+                                      source='d')
+        self.assertEqual(commands[0][:2], ('d_popped_entry_1', "d.pop('b')"))
+
     def test_item_writes_the_item_itself(self):
         _model, commands = self.click('item')
         self.assertEqual(commands[0][:2], ('data_item_1', 'data[1]'))
@@ -19287,9 +19365,11 @@ class TestRowActionClick(unittest.TestCase):
         self.assertEqual(commands[0][:2],
                          ('data_row_1', "(data[1]['b'], data[1]['c'])"))
 
-    def test_the_last_rows_three_are_written_from_the_end(self):
+    def test_the_last_rows_four_are_written_from_the_end(self):
         self.assertEqual(self.click('last_delete', row=2)[1][0][:2],
                          ('data_without_last', 'data[:-1]'))
+        self.assertEqual(self.click('last_pop', row=2)[1][0][:2],
+                         ('data_popped_last_item', 'data.pop(-1)'))
         self.assertEqual(self.click('last_item', row=2)[1][0][:2],
                          ('data_last_item', 'data[-1]'))
         self.assertEqual(self.click('last_cells', row=2)[1][0][:2],

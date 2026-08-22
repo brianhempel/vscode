@@ -72,6 +72,7 @@
 - [ ] column pair to dict
 - [ ] better column handling: not just by type; dicts in particular need to be keyed by keys at least
 - [ ] hold shift for multi-select with the pick tool
+- [ ] remove string index tool and simply use the pick tool with no search
 - [ ] string pick tool should work for literal string matches
 - [ ] show all loop iterations, somehow (table??)
 - [x] col action: convert to int, float
