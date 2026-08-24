@@ -133,7 +133,8 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS, with_pass_body,
+from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
+                              opens_block, with_pass_body,
                               Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
@@ -4193,7 +4194,6 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "replace_text": None,     # The replacement text (a Python string literal, e.g., "'world'")
         "linked_action": None,         # When linked: the action name (e.g. 'replace')
         "linked_source_expr": None,  # When linked: variable from parsed code (e.g. 'str1')
-        "linked_has_assignment": None, # When linked: whether the selected code is an assignment
         "last_linked_expr": None,      # Last expression written to the linked LOC; skip
                                        # ChangeSelectedText when unchanged (hover, etc.)
         "auto_linked_once": False,     # True once an interaction has auto-inserted+linked a LOC
@@ -5410,11 +5410,11 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             if anchor_type == 'index':
                 if not isinstance(idx, int):
                     return (model, commands)
-                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_has_assignment'))
+                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'))
                 saved_tool = model.get('tool', 'literal')
                 saved_expanded = model.get('expanded', False)
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-                model['linked_action'], model['linked_source_expr'], model['linked_has_assignment'] = saved_linked
+                model['linked_action'], model['linked_source_expr'] = saved_linked
                 model['tool'] = saved_tool
                 model['expanded'] = saved_expanded
                 model['anchorIdx'] = idx
@@ -5468,12 +5468,12 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             else:
                 # Fresh start: reset selection, preserving linked-editing state,
                 # search flags, active tool, and expand/collapse chrome.
-                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'), model.get('linked_has_assignment'))
+                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'))
                 saved_flags = get_search_flags(model.get('search'))
                 saved_tool = model.get('tool', 'literal')
                 saved_expanded = model.get('expanded', False)
                 model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-                model['linked_action'], model['linked_source_expr'], model['linked_has_assignment'] = saved_linked
+                model['linked_action'], model['linked_source_expr'] = saved_linked
                 model['tool'] = saved_tool
                 model['expanded'] = saved_expanded
                 if saved_flags:
@@ -5775,7 +5775,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             model['unlinked_action'] = model.get('linked_action')
             model['linked_action'] = None
             model['linked_source_expr'] = None
-            model['linked_has_assignment'] = None
             model['last_linked_expr'] = None
 
         case Relink(mode=mode, text=text):
@@ -5873,7 +5872,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             if not is_nested(var_and_exp):
                                 model['linked_action'] = action
                                 model['linked_source_expr'] = ctx.get('source_expr')
-                                model['linked_has_assignment'] = bool(result[0])
                                 model['last_linked_expr'] = result[1]
                                 model['auto_linked_once'] = True
 
@@ -5943,7 +5941,6 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     # block (which re-resolves via source_expr) rebuilds the same context.
     model['linked_action'] = _AUTO_LINK_ACTION
     model['linked_source_expr'] = ctx.get('source_expr')
-    model['linked_has_assignment'] = bool(suggest_name)
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
     commands.append(new_code_command(result, code_imports))
@@ -5957,10 +5954,17 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
     No-op when *expr* matches the last expression written for this link, so
     events that do not change the search context (e.g. hover) do not rewrite
     the linked line of code.
+
+    Whether the code being written can be assigned to a name is read off the
+    code itself rather than remembered from the action that linked the line: an
+    action change can turn an expression into a block header (Find into Loop)
+    or back, and a remembered answer would describe the shape that just stopped
+    being true -- probing `name = for i, mtch in ...:` raises, and the update
+    disappears in the except below.
     """
     if expr == model.get('last_linked_expr'):
         return
-    text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
+    text = expr if opens_block(expr) else '_linked_result = ' + expr
     try:
         ast.parse(with_pass_body(text))
     except SyntaxError:

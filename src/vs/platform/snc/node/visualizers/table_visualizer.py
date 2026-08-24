@@ -56,7 +56,7 @@ from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEM
 from visualizer_utils import (
     ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
-    with_pass_body,
+    opens_block, with_pass_body,
     LinkConfig, handle_relink,
     wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
     DOLLARS_RE, SIGILS, Dollar, DollarScope,
@@ -6425,10 +6425,17 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
 
     No-op when *expr* matches the last expression written for this link, so
     events that do not change the search context do not rewrite the linked LOC.
+
+    Whether the code being written can be assigned to a name is read off the
+    code itself rather than remembered from the action that linked the line: an
+    action change can turn an expression into a block header (Join to Loop) or
+    back, and a remembered answer would describe the shape that just stopped
+    being true -- probing `name = for item in ...:` raises, and the update
+    disappears in the except below.
     """
     if expr == model.get('last_linked_expr'):
         return
-    text = ('_linked_result = ' if model.get('linked_has_assignment') else '') + expr
+    text = expr if opens_block(expr) else '_linked_result = ' + expr
     try:
         ast.parse(with_pass_body(text))
     except SyntaxError:
@@ -6987,7 +6994,6 @@ _SEARCH_DEFAULTS = {
     'openDropdown': None,
     'linked_action': None,
     'linked_source_expr': None,
-    'linked_has_assignment': None,
     'last_linked_expr': None,
     'auto_linked_once': False,
     'unlinked_action': None,
@@ -10969,7 +10975,6 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             if not is_nested(var_and_exp):
                                 model['linked_action'] = action
                                 model['linked_source_expr'] = ctx.get('source_expr')
-                                model['linked_has_assignment'] = bool(result[0])
                                 model['last_linked_expr'] = result[1]
                                 model['auto_linked_once'] = True
 
@@ -10978,7 +10983,6 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['unlinked_action'] = model.get('linked_action')
             model['linked_action'] = None
             model['linked_source_expr'] = None
-            model['linked_has_assignment'] = None
             model['last_linked_expr'] = None
 
         case Relink(mode=mode, text=text):
@@ -11049,7 +11053,6 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
         return
     model['linked_action'] = _AUTO_LINK_ACTION
     model['linked_source_expr'] = ctx.get('source_expr')
-    model['linked_has_assignment'] = bool(suggest_name)
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
     commands.append(new_code_command(result, code_imports))

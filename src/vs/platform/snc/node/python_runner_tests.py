@@ -452,7 +452,7 @@ class TestCommandsToDicts(unittest.TestCase):
     def test_newcode_dedups_without_storing_concrete_name_in_model(self):
         # Source already binds str1, so a fresh `str1 = ...` must become `str2`.
         source = "str1 = open('f').read()\nstr1 = str1.upper()\n"
-        model = {'linked_action': 'find_or_map', 'linked_has_assignment': True}
+        model = {'linked_action': 'find_or_map'}
         dicts = _commands_to_dicts(
             [('str1', "str1.replace('a', 'b')")],
             line=2, idx_in_line=0, model=model, source_code=source,
@@ -466,7 +466,7 @@ class TestCommandsToDicts(unittest.TestCase):
     def test_newcode_increments_past_existing_generated_names(self):
         # str1 and str2 already present -> next available is str3.
         source = "str1 = 'x'\nstr2 = 'y'\n"
-        model = {'linked_action': 'find_or_map', 'linked_has_assignment': True}
+        model = {'linked_action': 'find_or_map'}
         dicts = _commands_to_dicts(
             [('str1', "str1 + str2")],
             line=2, idx_in_line=0, model=model, source_code=source,
@@ -476,7 +476,7 @@ class TestCommandsToDicts(unittest.TestCase):
 
     def test_newcode_no_var_name_leaves_model_untouched(self):
         # Bare-expression insert (no assignment) must not touch linked_prefix.
-        model = {'linked_action': 'loop', 'linked_has_assignment': False}
+        model = {'linked_action': 'loop'}
         dicts = _commands_to_dicts(
             [(None, "print(x)")],
             line=1, idx_in_line=0, model=model, source_code="x = 1\n",

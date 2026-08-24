@@ -54,11 +54,11 @@
 - [x] nested action should still have imports added
 - [ ] nested string visualizer actions can be in a dropdown
 - [ ] need some better handling of long column names
-- [ ] still bouncing around when double-clicking on a line bc the cursor is the next line
+- [x] still bouncing around when double-clicking on a line bc the cursor is the next line
 - [ ] more feedback for syntax errors
 - [ ] more feedback for errors in nested visualizers
 - [ ] better handling of tables that scroll offscreen
-- [ ] top level "add column" should be a menu much more like the subcolumns menu
+- [x] top level "add column" should be a menu much more like the subcolumns menu
 - [ ] add custom subcol menu item styling
 - [ ] styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
@@ -67,6 +67,7 @@
 - [x] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression
 - [ ] $item instead of $, maybe?
+- [ ] drag and drop to insert (non-mutating append)
 - [ ] drag-and-drop to align and add columns
 - [ ] zip
 - [ ] column pair to dict
@@ -76,7 +77,7 @@
 - [x] make string pick tool work for literal string matches, e.g. for 'asdf' rather than just regex r'asdf', and for string var searches like `x`
 - [ ] show all loop iterations, somehow (table??)
 - [x] col action: convert to int, float
-- [ ] dictionary visualizer
+- [x] dictionary visualizer
 - [ ] tuple visualizer
 - [ ] list of tuples
 - [ ] tuple of lists

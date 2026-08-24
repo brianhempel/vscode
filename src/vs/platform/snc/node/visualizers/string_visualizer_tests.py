@@ -3438,7 +3438,6 @@ class TestRelinkViaChainIcon(unittest.TestCase):
         self.assertEqual(len(change_cmds), 1)
         self.assertFalse(any(isinstance(c, tuple) for c in commands))
         self.assertEqual(model['linked_action'], 'count')
-        self.assertTrue(model['linked_has_assignment'])
 
     def test_relink_defaults_to_auto_link_action_when_none_stashed(self):
         model = init_model(self.value)
@@ -3474,7 +3473,6 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
                                  eval_in_scope=eval)
         self.assertEqual(model.get('linked_action'), 'find_or_map')
         self.assertEqual(model.get('linked_source_expr'), 'x')
-        self.assertTrue(model.get('linked_has_assignment'))
         self.assertTrue(model.get('auto_linked_once'))
         self.assertIsNotNone(model.get('search'))
         # The line is already in the editor; adoption must not rewrite it.
@@ -3545,7 +3543,6 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         self.assertEqual(model.get('linked_action'), 'find_or_map')
         self.assertEqual(model.get('linked_source_expr'), 'x')
         self.assertTrue(model.get('auto_linked_once'))
-        self.assertTrue(model.get('linked_has_assignment'))
 
     def test_next_interaction_edits_the_line_instead_of_inserting(self):
         model, _ = self._took_over(self.foreign)
@@ -3579,7 +3576,6 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         model, commands = self._took_over('if flag:')
         self.assertEqual(commands, [])
         self.assertIn(model.get('linked_action'), _STATEMENT_ACTIONS)
-        self.assertFalse(model.get('linked_has_assignment'))
 
     def test_next_interaction_after_header_takeover_stays_a_header(self):
         model, _ = self._took_over('if flag:')
@@ -3663,7 +3659,6 @@ class TestLinkedActionChangeRenamesVar(unittest.TestCase):
         self.model, first = update(make_search_box_input_event(r"r'hello'"),
                                    self.var_and_exp, self.model, self.value)
         self.assertEqual(first[0][0], 'x_matches')
-        self.assertTrue(self.model['linked_has_assignment'])
         self.assertNotIn('linked_prefix', self.model)
 
     def test_action_change_emits_expression_and_name_suggestion(self):
@@ -3699,8 +3694,71 @@ class TestLinkedActionChangeRenamesVar(unittest.TestCase):
         model, commands = update(make_action_button_event('if_any'),
                                  self.var_and_exp, self.model, self.value)
         change_cmds = [c for c in commands if isinstance(c, ChangeSelectedText)]
-        if change_cmds:
-            self.assertIsNone(change_cmds[0].suggested_var_name)
+        self.assertEqual(len(change_cmds), 1)
+        self.assertIsNone(change_cmds[0].suggested_var_name)
+
+
+class TestLinkedActionChangesShape(unittest.TestCase):
+    """Switching a linked line between an expression action and a statement one.
+
+    A header cannot be assigned to a name and an expression cannot open a block,
+    so the shape has to be read off the code being written rather than
+    remembered from the action that linked the line. A stale answer makes the
+    update unparseable and it is dropped in silence — the user clicks Loop and
+    nothing happens.
+    """
+
+    def setUp(self):
+        self.value = "hello world hello"
+        self.var_and_exp = ('x', 'x')
+
+    def _linked(self):
+        """Auto-linked via a search-box interaction (find_or_map -> x_matches)."""
+        model = init_model(self.value)
+        model, commands = update(make_search_box_input_event(r"r'hello'"),
+                                 self.var_and_exp, model, self.value)
+        self.assertEqual(commands[0][0], 'x_matches')
+        return model
+
+    def _switch_to(self, model, action):
+        model, commands = update(make_action_button_event(action),
+                                 self.var_and_exp, model, self.value)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1,
+                         f'switching to {action!r} wrote nothing to the linked line')
+        return model, changes[0]
+
+    def test_switches_to_loop(self):
+        model, change = self._switch_to(self._linked(), 'loop')
+        self.assertEqual(change.expression,
+                         "for i, mtch in enumerate(re.finditer(r'hello', x, flags=re.M)):")
+        self.assertEqual(model.get('last_linked_expr'), change.expression)
+
+    def test_switches_to_loop_match_strings(self):
+        _, change = self._switch_to(self._linked(), 'loop_match_strings')
+        self.assertEqual(change.expression,
+                         "for i, s in enumerate(re.findall(r'hello', x, flags=re.M)):")
+
+    def test_switches_to_if_any(self):
+        _, change = self._switch_to(self._linked(), 'if_any')
+        self.assertEqual(change.expression, "if re.search(r'hello', x, flags=re.M):")
+
+    def test_switches_back_to_an_expression(self):
+        model, _ = self._switch_to(self._linked(), 'loop')
+        _, change = self._switch_to(model, 'count')
+        self.assertEqual(change.expression,
+                         "sum(1 for _ in re.finditer(r'hello', x, flags=re.M))")
+
+    def test_search_change_after_a_shape_switch_still_updates(self):
+        """The switch must leave last_linked_expr describing what is actually on
+        the line, or the next interaction is suppressed as a no-op."""
+        model, _ = self._switch_to(self._linked(), 'loop')
+        model, commands = update(make_search_box_input_event(r"r'world'"),
+                                 self.var_and_exp, model, self.value)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].expression,
+                         "for i, mtch in enumerate(re.finditer(r'world', x, flags=re.M)):")
 
 
 class TestSingleQuoteEscaping(unittest.TestCase):
@@ -12839,7 +12897,6 @@ class TestSegmentSelection(unittest.TestCase):
         model['search'] = r"r'hello'"
         model['linked_action'] = 'match_strings'
         model['linked_source_expr'] = 'x'
-        model['linked_has_assignment'] = True
         model['last_linked_expr'] = "re.findall(r'hello', x, flags=re.M)"
         model['auto_linked_once'] = True
         model, commands = update(self._tool_select_event('pick'), ('x', 'x'), model, value)
@@ -12859,7 +12916,6 @@ class TestSegmentSelection(unittest.TestCase):
         model['search'] = r"r'hello'"
         model['linked_action'] = 'find_or_map'
         model['linked_source_expr'] = 'x'
-        model['linked_has_assignment'] = True
         model['last_linked_expr'] = "list(re.finditer(r'hello', x, flags=re.M))"
         model['auto_linked_once'] = True
         model, commands = update(self._tool_select_event('pick'), ('x', 'x'), model, value)

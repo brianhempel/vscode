@@ -4905,7 +4905,6 @@ class TestRelinkViaChainIcon(unittest.TestCase):
         self.assertEqual(len(change_cmds), 1)
         self.assertFalse(any(isinstance(c, tuple) for c in commands))
         self.assertEqual(model['linked_action'], 'filter')
-        self.assertTrue(model['linked_has_assignment'])
 
     def test_relink_defaults_to_auto_link_action_when_none_stashed(self):
         lst = [10, 20, 30]
@@ -4943,7 +4942,6 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
                                  mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model.get('linked_action'), 'filter')
         self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertTrue(model.get('linked_has_assignment'))
         self.assertTrue(model.get('auto_linked_once'))
         self.assertIsNotNone(model.get('search'))
         # The line is already in the editor; adoption must not rewrite it.
@@ -5060,7 +5058,6 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         model, _ = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer)
         self.assertIsNone(model.get('linked_action'))
         self.assertIsNone(model.get('linked_source_expr'))
-        self.assertIsNone(model.get('linked_has_assignment'))
 
     def test_linked_action_button_emits_change_selected_text(self):
         from table_visualizer import ChangeSelectedText
@@ -5076,7 +5073,6 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         from table_visualizer import ChangeSelectedText
         # Assignment-form line links with target 'data_filtered'.
         model = self._adopt('data_filtered = [item for item in data if item > 3]')
-        self.assertTrue(model.get('linked_has_assignment'))
         self.assertNotIn('linked_prefix', model)
         # Switch to delete -> suggested name becomes 'data'.
         event = make_action_button_event('delete')
@@ -5135,6 +5131,92 @@ class TestLinkedEditingBehavior(unittest.TestCase):
         model, commands = update(event, self.var_and_exp, model, self.lst, mock_get_visualizer, eval_in_scope=eval)
         tuple_cmds = [c for c in commands if isinstance(c, tuple)]
         self.assertTrue(len(tuple_cmds) > 0)
+
+
+class TestLinkedActionChangesShape(unittest.TestCase):
+    """Switching a linked line between an expression action and a statement one.
+
+    The two shapes are not interchangeable — `for ...:` cannot be assigned to a
+    name and `sum(...)` cannot open a block — so the shape has to be read off
+    the code being written rather than remembered from the action that linked
+    the line. A stale answer makes the update unparseable, and the emit is
+    dropped silently: the user clicks Loop and nothing happens at all.
+    """
+
+    def setUp(self):
+        self.lst = [10, 20, 30]
+        self.var_and_exp = ('data', 'data')
+
+    def _linked_via(self, action, search='$ > 15'):
+        model = init_model(self.lst, mock_get_visualizer)
+        model['search'] = search
+        model, commands = update(make_action_button_event(action), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertTrue(any(isinstance(c, tuple) for c in commands))
+        self.assertEqual(model.get('linked_action'), action)
+        return model
+
+    def _switch_to(self, model, action):
+        from table_visualizer import ChangeSelectedText
+        model, commands = update(make_action_button_event(action), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1,
+                         f'switching to {action!r} wrote nothing to the linked line')
+        return model, changes[0]
+
+    def test_expression_action_switches_to_loop(self):
+        model = self._linked_via('join')
+        model, change = self._switch_to(model, 'loop_no_idx')
+        self.assertEqual(change.expression,
+                         'for item in (item for item in data if item > 15):')
+        self.assertEqual(model.get('last_linked_expr'), change.expression)
+
+    def test_expression_action_switches_to_if_any(self):
+        model = self._linked_via('join')
+        model, change = self._switch_to(model, 'if_any')
+        self.assertEqual(change.expression, 'if any(item > 15 for item in data):')
+
+    def test_expression_action_switches_to_if_all(self):
+        model = self._linked_via('count')
+        model, change = self._switch_to(model, 'if_all')
+        self.assertEqual(change.expression, 'if all(item > 15 for item in data):')
+
+    def test_statement_action_switches_back_to_an_expression(self):
+        model = self._linked_via('loop_no_idx')
+        model, change = self._switch_to(model, 'count')
+        self.assertEqual(change.expression, 'sum(1 for item in data if item > 15)')
+
+    def test_switch_to_a_nested_header_action(self):
+        """loop_orig_idx is two header lines; the deeper shape must still go."""
+        model = self._linked_via('join')
+        model, change = self._switch_to(model, 'loop_orig_idx')
+        self.assertEqual(change.expression,
+                         'for i, item in enumerate(data):\n    if item > 15:')
+
+    def test_statement_switch_suggests_no_var_name(self):
+        """A header has nothing to assign to, so there is no name to rename to."""
+        model = self._linked_via('join')
+        _, change = self._switch_to(model, 'loop_no_idx')
+        self.assertIsNone(change.suggested_var_name)
+
+    def test_whole_list_switch_without_a_search(self):
+        model = self._linked_via('join', search='')
+        model, change = self._switch_to(model, 'loop_no_idx')
+        self.assertEqual(change.expression, 'for item in data:')
+
+    def test_search_change_after_a_shape_switch_still_updates(self):
+        """The switch must leave last_linked_expr describing what is actually on
+        the line, or the next interaction is suppressed as a no-op."""
+        from table_visualizer import ChangeSelectedText
+        model = self._linked_via('join')
+        model, _ = self._switch_to(model, 'loop_no_idx')
+        model, commands = update(make_search_input_event('$ > 25'), self.var_and_exp,
+                                 model, self.lst, mock_get_visualizer, eval_in_scope=eval)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].expression,
+                         'for item in (item for item in data if item > 25):')
 
 
 class TestStatementActionsGenerateHeadersOnly(unittest.TestCase):
@@ -5227,7 +5309,6 @@ class TestRelinkTakeoverOfStatementHeader(unittest.TestCase):
                                  mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model.get('linked_action'), 'loop_no_idx')
         self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertFalse(model.get('linked_has_assignment'))
         self.assertEqual(commands, [])
 
     def test_takeover_tolerates_a_body_in_the_taken_over_text(self):
@@ -5249,7 +5330,6 @@ class TestRelinkTakeoverOfStatementHeader(unittest.TestCase):
         changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
         self.assertEqual(len(changes), 1)
         self.assertEqual(model.get('linked_action'), 'loop_no_idx')
-        self.assertFalse(model.get('linked_has_assignment'))
 
     def _unlinked_after(self, action):
         model = init_model(self.lst, mock_get_visualizer)
@@ -5270,7 +5350,6 @@ class TestRelinkTakeoverOfStatementHeader(unittest.TestCase):
                                  mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model.get('linked_action'), 'loop_no_idx')
         self.assertEqual(model.get('linked_source_expr'), 'data')
-        self.assertFalse(model.get('linked_has_assignment'))
         self.assertEqual(commands, [])
 
 
@@ -5304,7 +5383,6 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         self.assertIsNotNone(model.get('linked_action'))
         self.assertEqual(model.get('linked_source_expr'), 'item_matches')
         self.assertTrue(model.get('auto_linked_once'))
-        self.assertTrue(model.get('linked_has_assignment'))
 
     def test_next_interaction_edits_the_line_instead_of_inserting(self):
         from table_visualizer import ChangeSelectedText
@@ -5335,7 +5413,6 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         model, commands = self._took_over('if flag:')
         self.assertEqual(commands, [])
         self.assertIn(model.get('linked_action'), _STATEMENT_ACTIONS)
-        self.assertFalse(model.get('linked_has_assignment'))
 
     def test_next_interaction_after_header_takeover_stays_a_header(self):
         from table_visualizer import ChangeSelectedText

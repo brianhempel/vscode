@@ -4560,6 +4560,42 @@ export class SNCController extends Disposable implements IEditorContribution {
 			.join('\n');
 	}
 
+	/** One level of Python block indentation. Mirrors BLOCK_INDENT in visualizer_utils.py. */
+	private static readonly BLOCK_INDENT = 4;
+
+	/**
+	 * The range of a linked statement's body: from the end of the linked range
+	 * down through the last line indented past the header's own level. Starts at
+	 * the header's end rather than the body's start so that removing it takes
+	 * the newline between them too — and at the linked range's end rather than
+	 * the line's, so anything the user has added after the header (a trailing
+	 * comment) is neither swallowed nor read as part of the body.
+	 *
+	 * Null when no line below is indented past the header — which is every
+	 * expression, and any header whose body the user has since deleted.
+	 */
+	private linkedBodyRange(headerRange: Range, baseIndent: string): Range | null {
+		const model = this.editor.getModel();
+		if (!model) {
+			return null;
+		}
+		let last = 0;
+		for (let l = headerRange.endLineNumber + 1; l <= model.getLineCount(); l++) {
+			const firstNonWhitespace = model.getLineFirstNonWhitespaceColumn(l);
+			if (firstNonWhitespace === 0) {
+				continue; // blank line within the body
+			}
+			if (firstNonWhitespace - 1 <= baseIndent.length) {
+				break; // dedent to the header's level or beyond ends the body
+			}
+			last = l;
+		}
+		return last === 0 ? null : new Range(
+			headerRange.endLineNumber, headerRange.endColumn,
+			last, model.getLineMaxColumn(last)
+		);
+	}
+
 	/** Leading whitespace of the last line of generated code, in characters. */
 	private static trailingHeaderDepth(code: string): number {
 		const lines = code.split('\n');
@@ -4682,10 +4718,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const baseIndent = this.getLineIndentText(trackedRange.startLineNumber);
 		const indented = SNCController.indentContinuationLines(expression, baseIndent);
 
-		// The editor range is the sole source of truth for assignment shape and
-		// target name. Python sends only a replacement expression plus an
-		// optional semantic rename request when the action changes.
-		const current = SNCController.splitAssignment(currentText);
+		// The editor range is the source of truth for the target name — Python
+		// sends only a replacement expression plus an optional semantic rename
+		// request when the action changes. The *shape* is the new expression's
+		// to decide, though: switching Join to Loop hands over a block header,
+		// and keeping the `name = ` the line happens to carry would write
+		// `name = for item in ...:`.
+		const current = SNCController.opensBlock(expression)
+			? null
+			: SNCController.splitAssignment(currentText);
 		let newText: string;
 		if (current) {
 			let targetName = current.name;
@@ -4703,12 +4744,33 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 
+		// The body has to follow the header's shape. A `pass` is scaffolding this
+		// code wrote itself (with_pass_body, in python_runner.py) and comes away
+		// with the block it was holding open; a body the user has written is
+		// theirs and stays where they put it, even where an expression leaves it
+		// stranded — better a break they can undo than code deleted under them.
+		const bodyRange = this.linkedBodyRange(trackedRange, baseIndent);
+		let editRange = trackedRange;
+		let editText = newText;
+		if (SNCController.opensBlock(expression)) {
+			if (!bodyRange) {
+				// An expression becoming a header has nothing indented below it,
+				// so it needs the placeholder a freshly inserted statement gets.
+				const depth = SNCController.trailingHeaderDepth(expression) + SNCController.BLOCK_INDENT;
+				editText = `${newText}\n${baseIndent}${' '.repeat(depth)}pass`;
+			}
+		} else if (bodyRange && editorModel.getValueInRange(bodyRange).trim() === 'pass') {
+			editRange = Range.fromPositions(trackedRange.getStartPosition(), bodyRange.getEndPosition());
+		}
+		const absorbedBody = editRange !== trackedRange;
+
 		this.isApplyingLinkedEdit = true;
 		editorModel.pushEditOperations([], [
-			{ range: trackedRange, text: newText },
+			{ range: editRange, text: editText },
 			// A deeper or shallower header has to take its body with it; done in
-			// the same operation so it is a single undo step.
-			...this.bodyReindentEdits(trackedRange, expression, baseIndent),
+			// the same operation so it is a single undo step. Nothing to reindent
+			// when the body just came away with the header.
+			...(absorbedBody ? [] : this.bodyReindentEdits(trackedRange, expression, baseIndent)),
 		], () => null);
 
 		// Update the tracked decoration to cover the newly inserted text

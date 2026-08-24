@@ -1081,11 +1081,10 @@ def adopt_linked_line(cfg: LinkConfig, owned: 'tuple[dict, str]', var_and_exp,
     reopen). Leaves the line's text untouched; only the model is updated.
     Returns True on success.
     """
-    parsed, prefix = owned
+    parsed, _ = owned
     cfg.ctx_to_model(parsed, model)
     model['linked_action'] = parsed['action']
     model['linked_source_expr'] = parsed['source_expr']
-    model['linked_has_assignment'] = bool(prefix)
     model['auto_linked_once'] = True
     # Snapshot the expression already in the editor so the next no-op event
     # (hover, etc.) does not rewrite it identically. Only the search context is
@@ -1148,8 +1147,6 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
         model['linked_source_expr'] = source_expr
         model['unlinked_action'] = None
         model['auto_linked_once'] = True
-        # Statement actions have no name to assign to.
-        model['linked_has_assignment'] = action not in cfg.statement_actions
         model['last_linked_expr'] = written
 
 
