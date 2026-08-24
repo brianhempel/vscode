@@ -56,6 +56,11 @@ TOOLS (the "tool toolbar" in the upper-right corner):
   a Replace expression. See "PICK TOOL" below.
 
 PICK TOOL:
+- Works with every kind of search: regex (r'pat'), literal string ('sub' /
+  "sub"), string-valued expression (`x`), and index / slice (5 or 2:7).
+  Literal and expression searches match via re.finditer(re.escape(...)), so
+  they hand back the same match object the regex path picks from - they just
+  have no capture groups, leaving 'group_0' as the only group chip.
 - Activated via the cursor-arrow tool button. While active:
     * Only the FIRST match is highlighted (so prefix/suffix are unambiguous).
     * The Replace box auto-opens; selections drive its content.
@@ -1651,6 +1656,30 @@ def is_slice_search(search: str | None) -> bool:
     """Check if the search is a slice expression like '5:', ':10', '5:10'."""
     p = parse_search_term(search)
     return p is not None and p[0] == 'slice'
+
+
+def is_literal_string_search(search: str | None, eval_in_scope=None) -> bool:
+    """Check if the search matches a literal string: 'sub', "sub", or `x`/x.
+
+    An expression search only counts when it evaluates to a string; the other
+    things an expression can be (an int, a list of ints, a list of pairs) are
+    index searches, not literal matches.
+
+    These searches run as re.finditer(re.escape(...)), so they yield the same
+    match objects the regex path does - they just have no capture groups.
+    """
+    p = parse_search_term(search)
+    if not p:
+        return False
+    kind, term, _flags = p
+    if kind == 'string':
+        return eval_string_search(search) is not None
+    if kind == 'expr' and term:
+        try:
+            return isinstance(eval_in_scope(term) if eval_in_scope else eval(term), str)
+        except Exception:
+            return False
+    return False
 
 
 def get_search_flags(search: str | None) -> str:
@@ -4736,15 +4765,18 @@ def _build_finditer_call(ctx: dict | None) -> str | None:
     src = ctx.get('source_expr', '')
     pat = ctx.get('regex_pattern')
     if pat is None:
-        # String/expr search - fall back to re.escape() form so the call still
+        # String/expr search - use the re.escape() form so the call still
         # produces match objects with .start()/.end() (no capture groups, but
         # group_0 / start / end / prefix / suffix all still make sense).
+        # Spelled exactly as the grammar's ExprFinditer spells it, so a chip
+        # dragged out here reads the same as generated Map Matches code: no
+        # re.M (an escaped literal has no anchors for it to mean anything to).
         if ctx.get('is_expr') and ctx.get('expr'):
             esc = f"re.escape({ctx['expr']})"
         else:
             return None
-        flags = 're.M|re.I' if ctx.get('is_ci') else 're.M'
-        return f"re.finditer({esc}, {src}, flags={flags})"
+        flags = ', flags=re.I' if ctx.get('is_ci') else ''
+        return f"re.finditer({esc}, {src}{flags})"
     flags = 're.M|re.I' if ctx.get('is_ci') else 're.M'
     return f"re.finditer(r'{pat}', {src}, flags={flags})"
 
@@ -5066,10 +5098,12 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
 
     # Get all highlights for the search, then filter to the first match.
     highlights = parse_regex_for_highlighting(selection_regex, value, eval_in_scope) if value else []
-    if is_index_slice:
-        # Index/slice produces 'slice' seg_type highlights, one per match. Take
-        # the first one as the "match" - other matches (multi-index, broadcast)
-        # are intentionally hidden by segment mode (see fix Q1 in plan).
+    if is_index_slice or is_literal_string_search(selection_regex, eval_in_scope):
+        # Index/slice produces 'slice' seg_type highlights and a literal string
+        # search produces 'literal' ones, both display-only (segment_index is
+        # None) and one per match. Take the first one as the "match" - other
+        # matches (multi-index, broadcast) are intentionally hidden by segment
+        # mode (see fix Q1 in plan).
         primary = highlights[:1] if highlights else []
     else:
         primary = [h for h in highlights if h[5] is not None]

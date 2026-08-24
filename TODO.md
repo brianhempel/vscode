@@ -33,7 +33,7 @@
     - [x] better var names
     - [x] shouldn't assign a for-loop expression (or similar) to a var
 - [x] nicer move/remove/add buttons for table columns (at one point they were just like braille six dots for move and an X and a plus)
-- [ ] errors shouldn't use string visualizer
+- [x] errors shouldn't use string visualizer
 - [x] tooltips (and maybe dropdowns too) shouldn't disappear before the mouse enters them
 - [x] expression tooltips: add + button that makes a new var with the expression
 - [x] make a pick segment mode for lists: can pick indices, whole rows, or just selected columns
@@ -73,7 +73,7 @@
 - [ ] better column handling: not just by type; dicts in particular need to be keyed by keys at least
 - [ ] hold shift for multi-select with the pick tool
 - [ ] remove string index tool and simply use the pick tool with no search
-- [ ] string pick tool should work for literal string matches
+- [x] make string pick tool work for literal string matches, e.g. for 'asdf' rather than just regex r'asdf', and for string var searches like `x`
 - [ ] show all loop iterations, somehow (table??)
 - [x] col action: convert to int, float
 - [ ] dictionary visualizer

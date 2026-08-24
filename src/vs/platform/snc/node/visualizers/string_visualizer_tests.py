@@ -13334,6 +13334,167 @@ class TestSegmentSelection(unittest.TestCase):
             rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("str[5]"))}',
         )
 
+    # --- literal string / string-expression searches ------------------------
+    #
+    # A literal search ('asdf' / "asdf") or an expression search evaluating to
+    # a string (`x`) matches through re.finditer(re.escape(...)), so it has the
+    # same match object the regex path picks from: start / end / prefix /
+    # group_0 / suffix all apply. Only capture groups are unavailable.
+
+    def test_segment_works_with_string_search_replace_text(self):
+        """Literal search 'world' picks like a single-segment regex."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'world'1"
+        model, _ = update(self._segment_toggle_event('group_0'), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], '$[0]')
+
+    def test_visualize_renders_chips_for_string_search(self):
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'world'1"
+        html_str = visualize(value, model, None, None)
+        for seg_id in ('start', 'end', 'prefix', 'group_0', 'suffix'):
+            self.assertIn(f"SegmentToggle(segment_id=&#x27;{seg_id}&#x27;)", html_str)
+
+    def test_visualize_renders_chips_for_double_quoted_string_search(self):
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '"world"1'
+        html_str = visualize(value, model, None, None)
+        self.assertIn("SegmentToggle(segment_id=&#x27;group_0&#x27;)", html_str)
+
+    def test_visualize_renders_chips_for_string_var_search(self):
+        """A backtick expression evaluating to a string picks like a literal."""
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '`x`1'
+        html_str = visualize(value, model, None, lambda c: eval(c, {'x': 'world'}))
+        for seg_id in ('start', 'end', 'prefix', 'group_0', 'suffix'):
+            self.assertIn(f"SegmentToggle(segment_id=&#x27;{seg_id}&#x27;)", html_str)
+
+    def test_visualize_renders_chips_for_bare_string_var_search(self):
+        """Bare (undelimited) expression text works the same as backticked."""
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = 'x'
+        html_str = visualize(value, model, None, lambda c: eval(c, {'x': 'world'}))
+        self.assertIn("SegmentToggle(segment_id=&#x27;group_0&#x27;)", html_str)
+
+    def test_string_search_chip_exprs_are_first_match_flavor(self):
+        """With the '1' flag the chips carry the match-object expressions."""
+        value = "hello world!"
+        model = init_model(value)
+        model['_source_expr'] = 'str1'
+        model['tool'] = 'pick'
+        model['search'] = "'world'1"
+        html_str = visualize(value, model, None, None)
+        self.assertIn(exp_attr('$[0]'), html_str)
+        self.assertIn(exp_attr('$.start()'), html_str)
+        self.assertIn(exp_attr('str1[:$.start()]'), html_str)
+        self.assertIn(exp_attr('str1[$.end():]'), html_str)
+
+    def test_visualize_string_search_only_first_match_gets_chips(self):
+        """Multiple literal matches, but only the first one is pickable."""
+        value = "ab ab ab"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'ab'"  # matches 3x
+        html_str = visualize(value, model, None, None)
+        # One 'segment-group' class per char of the FIRST match only (2 chars).
+        self.assertEqual(html_str.count('segment-group'), 2)
+
+    def test_string_search_multi_match_chip_exprs_use_finditer_list_comp(self):
+        """Without the '1' flag a dragged-out chip covers every match."""
+        value = "ab ab ab"
+        model = init_model(value)
+        model['_source_expr'] = 'str1'
+        model['tool'] = 'pick'
+        model['search'] = "'ab'"
+        html_str = visualize(value, model, None, None)
+        self.assertIn(
+            exp_attr("[m[0] for m in re.finditer(re.escape('ab'), str1)]"), html_str)
+        self.assertIn(
+            exp_attr("[m.start() for m in re.finditer(re.escape('ab'), str1)]"), html_str)
+
+    def test_string_search_chip_finditer_matches_generated_code_flags(self):
+        """Chip finditer calls spell flags the way Map Matches generates them.
+
+        For a literal search that is `re.finditer(re.escape(s), src)` with no
+        re.M (there are no anchors to make it mean anything), plus
+        `, flags=re.I` when the search is case-insensitive.
+        """
+        value = "ab AB ab"
+        model = init_model(value)
+        model['_source_expr'] = 'str1'
+        model['tool'] = 'pick'
+        model['search'] = "'ab'i"
+        html_str = visualize(value, model, None, None)
+        self.assertIn(
+            exp_attr("[m[0] for m in re.finditer(re.escape('ab'), str1, flags=re.I)]"),
+            html_str)
+
+    def test_string_var_search_chip_exprs_reference_the_variable(self):
+        value = "ab ab ab"
+        model = init_model(value)
+        model['_source_expr'] = 'str1'
+        model['tool'] = 'pick'
+        model['search'] = '`x`'
+        html_str = visualize(value, model, None, lambda c: eval(c, {'x': 'ab'}))
+        self.assertIn(
+            exp_attr("[m[0] for m in re.finditer(re.escape(x), str1)]"), html_str)
+
+    def test_string_search_start_chip_labels_are_numeric_positions(self):
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'world'1"  # match at positions 6..11
+        html_str = visualize(value, model, None, None)
+        self.assertRegex(html_str, r'<span class="segment-chip[^"]*"[^>]*>6</span>')
+        self.assertRegex(html_str, r'<span class="segment-chip[^"]*"[^>]*>11</span>')
+
+    def test_string_search_simplify_full_coverage(self):
+        """{prefix, group_0, suffix} on a literal search collapses to <src>."""
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'world'1"
+        for seg_id in ('prefix', 'group_0', 'suffix'):
+            model, _ = update(self._segment_toggle_event(seg_id), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1')
+
+    def test_string_search_simplify_tail(self):
+        value = "hello world!"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'hello'1"
+        for seg_id in ('group_0', 'suffix'):
+            model, _ = update(self._segment_toggle_event(seg_id), ('str1', 'str1'), model, value)
+        self.assertEqual(model['replace_text'], 'str1[$.start():]')
+
+    def test_string_search_no_match_renders_no_chips(self):
+        """A literal with no match has nothing to pick."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = "'nope'"
+        html_str = visualize(value, model, None, None)
+        self.assertNotIn('SegmentToggle', html_str)
+
+    def test_multi_index_expression_search_renders_no_chips(self):
+        """A list-of-ints search still has no first match to pick from."""
+        value = "hello world"
+        model = init_model(value)
+        model['tool'] = 'pick'
+        model['search'] = '`[1, 3]`'
+        html_str = visualize(value, model, None, lambda c: eval(c))
+        self.assertNotIn('SegmentToggle', html_str)
+
     # --- snc-py-exps vs Replace box differ for multi-match regex -------------
 
     def test_chip_snc_py_exp_uses_list_comp_for_multi_match_regex(self):
