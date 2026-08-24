@@ -20,10 +20,20 @@ export interface IVisualizationItem {
 export type UiEvent = { line: number; visIndex: number, pythonEventStr: string, eventJSON: any };
 
 export interface IProcessResult {
-	stdout: string;
-	stderr: string;
+	stdout: string; // Always empty from a run: program output streams as `output` messages
+	stderr: string; // As above, except on the syntax-error path, which reports the error here
 	exitCode: number;
 	syntaxError?: boolean;
+	/**
+	 * The run stopped on a read past the end of the recorded stdin. Not a
+	 * failure: the program is waiting for the user to type, so `exitCode` is 0
+	 * and no error item was logged.
+	 */
+	awaitingInput?: boolean;
+	/** `'line'` if more typing satisfies the read, `'eof'` if only ending the stream will. */
+	awaitingKind?: 'line' | 'eof';
+	/** Characters of the stdin document the program consumed. */
+	stdinConsumed?: number;
 }
 
 export interface IProcessOptions {
@@ -32,6 +42,8 @@ export interface IProcessOptions {
 	filePath?: string; // Path of the file being run; sites the .snc_url_cache dir beside it
 	modelsAndEventsJson?: string; // visualizers state, and events to apply
 	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
+	stdin?: string; // The console document, replayed through the program's stdin
+	stdinEof?: boolean; // Whether the document ends the stream; false makes a read past its end starve rather than see EOF
 }
 
 /**
@@ -115,7 +127,13 @@ export type SNCStreamMessage =
 	| { runId: string; type: 'end'; result: IProcessResult; timing?: SNCTimingData }
 	| { runId: string; type: 'spawn'; timing: SNCTimingData }
 	| { runId: string; type: 'error'; error: string }
-	| { runId: string; type: 'warning'; warning: string };
+	| { runId: string; type: 'warning'; warning: string }
+	/**
+	 * A chunk of the program's stdout/stderr. `stdinOffset` is how much of the
+	 * stdin document had been consumed when it was written, which is what
+	 * places the chunk between the right two lines of the console.
+	 */
+	| { runId: string; type: 'output'; stream: 'stdout' | 'stderr'; text: string; stdinOffset: number };
 
 export const ISNCProcessService = createDecorator<ISNCProcessService>('sncProcessService');
 

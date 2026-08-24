@@ -20,6 +20,7 @@ import { IClipboardService } from '../../../../platform/clipboard/common/clipboa
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { INotificationService, INotificationHandle, Severity } from '../../../../platform/notification/common/notification.js';
+import { ISNCConsoleService } from '../../../../workbench/contrib/snc/common/sncConsole.js';
 import * as dom from '../../../../base/browser/dom.js';
 import './snc.css';
 
@@ -2743,6 +2744,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	// Streaming state
 	private currentRunId: string | null = null;
+	/**
+	 * File whose console the run in flight belongs to. Held separately from the
+	 * editor's model because the user can switch tabs mid-run, and the output
+	 * still belongs to the file that produced it.
+	 */
+	private consoleFilePath: string = '';
 	// True from the moment runProgram commits to a run until that run has an id.
 	// It awaits the cancellation of the previous run in between, and a status
 	// poll landing in that gap would otherwise see no run in flight and no run
@@ -2839,8 +2846,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 		@ICommandService private readonly commandService: ICommandService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@ISNCConsoleService private readonly consoleService: ISNCConsoleService,
 	) {
 		super();
+
+		// The stdin document is an input to the program exactly like the source
+		// is, so editing it reruns on the same debounce.
+		this._register(this.consoleService.onDidChangeStdin(filePath => {
+			if (filePath === this.currentFilePath()) {
+				this.scheduleRun();
+			}
+		}));
 
 		// Register event handlers
 		this._register(editor.onDidChangeModelContent((e) => { this.onDidChangeModelContent(e); }));
@@ -5001,6 +5017,26 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 	}
 
+	/** Path of the file this controller is showing, or '' for an unsaved buffer. */
+	private currentFilePath(): string {
+		const modelUri = this.editor.getModel()?.uri;
+		return modelUri?.scheme === Schemas.file ? modelUri.fsPath : '';
+	}
+
+	/** Rerun after the usual debounce, as a source edit would. */
+	private scheduleRun(): void {
+		if (!this.isPythonModel()) {
+			return;
+		}
+		if (this.debounceTimer) {
+			clearTimeout(this.debounceTimer);
+		}
+		this.debounceTimer = setTimeout(() => {
+			this.debounceTimer = null;
+			this.runProgram(this.getProgram());
+		}, this.debounceDelay);
+	}
+
 	private async runProgram(content: string, uiEvent?: UiEvent): Promise<void> {
 		// Defensive guard: every caller should already gate on isPythonModel(),
 		// but make sure we never spawn a Python worker for a non-Python buffer.
@@ -5013,8 +5049,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Get the working directory from the first workspace folder
 		const workingDirectory = this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath || '';
-		const modelUri = this.editor.getModel()?.uri;
-		const filePath = modelUri?.scheme === Schemas.file ? modelUri.fsPath : '';
+		const filePath = this.currentFilePath();
 		const channel = this.mainProcessService.getChannel('sncProcess');
 
 		// Cancel any previous streaming run
@@ -5058,6 +5093,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 				if (msg.type === 'spawn') {
 					// Store backend spawn timing data
 					this.runSpawnTimingById.set(msg.runId, msg.timing);
+				} else if (msg.type === 'output') {
+					if (this.consoleFilePath) {
+						this.consoleService.appendOutput(this.consoleFilePath, {
+							stream: msg.stream,
+							text: msg.text,
+							stdinOffset: msg.stdinOffset
+						});
+					}
 				} else if (msg.type === 'item') {
 					// console.log(msg.item.model)
 					// Timing: first item arrival for this run
@@ -5165,11 +5208,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 						this.updateVisualizationWidgets(this.visualizationItems);
 					}
 
-					if (msg.result.stdout) {
-						console.log('Program output:', msg.result.stdout);
-					}
-					if (msg.result.stderr) {
-						console.error('Program errors:', msg.result.stderr);
+					// `awaitingInput` is a normal end, not a failure: the program
+					// is parked on a read the stdin document can't satisfy yet.
+					// It deliberately doesn't take the syntax-error path above,
+					// so the statements that did run keep their visualizers.
+					if (this.consoleFilePath) {
+						if (hasSyntaxError) {
+							// Half-typed code produces no transcript. Hold the last
+							// good one, the same way the widgets above are held.
+							this.consoleService.runAbandoned(this.consoleFilePath);
+						} else {
+							this.consoleService.runFinished(this.consoleFilePath, msg.result);
+						}
 					}
 
 					this.currentRunId = null;
@@ -5198,6 +5248,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 					this.runEventTargetRenderMsById.delete(msg.runId);
 					this.runEventTargetRenderFrameMsById.delete(msg.runId);
 
+					// Publish whatever the run managed to print before it died,
+					// so the console doesn't sit on the previous run's output.
+					if (this.consoleFilePath) {
+						this.consoleService.runFinished(this.consoleFilePath, undefined);
+					}
+
 					this.currentRunId = null;
 					this.eventsBeingHandledCurrentRun = [];
 					this.visualizationItems = [];
@@ -5221,6 +5277,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Start a new streaming run
 		const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.currentRunId = runId;
+		this.consoleFilePath = filePath;
+		if (filePath) {
+			this.consoleService.runStarted(filePath);
+		}
 		// The run has an id now, so `currentRunId` speaks for it from here.
 		this.runStarting = false;
 		const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -5238,16 +5298,27 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		try {
 			const focusedLine = this.effectiveFocusedLine();
+			// An unsaved buffer has nowhere to keep a stdin document, so it runs
+			// with an unterminated empty stream: a read starves rather than
+			// seeing a spurious EOF.
+			const { stdin, stdinEof } = filePath ? this.consoleService.stdinFor(filePath) : { stdin: '', stdinEof: false };
 			const options: IProcessOptions = {
 				modelsAndEventsJson: JSON.stringify(models_and_events),
 				timeout: 60_000,
 				workingDirectory,
 				filePath,
+				stdin,
+				stdinEof,
 				...(focusedLine !== null ? { focusedLine } : {})
 			};
 			await channel.call('startProgram', [content, options, runId]);
 		} catch (error) {
 			console.error('Failed to start streaming run:', error);
+			if (this.consoleFilePath) {
+				// The run never happened, so it has no transcript to publish, but
+				// its collection state has to be released either way.
+				this.consoleService.runAbandoned(this.consoleFilePath);
+			}
 			this.currentRunId = null;
 			this.eventsBeingHandledCurrentRun = [];
 			this.clearVisualizationWidgets();

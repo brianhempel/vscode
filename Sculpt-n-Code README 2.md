@@ -62,7 +62,8 @@ Node.js and Python communicate over stdio using **newline-delimited JSON (NDJSON
 | `checkpoint_ready` | Python → Node | Worker reached checkpoint 1 or 2 and is ready |
 | `item` | Python → Node → Renderer | A single visualization item (line, visIndex, html, model) |
 | `command` | Python → Node → Renderer | An Elm-style command for VS Code (e.g. `NewCode`) |
-| `end` | Python → Node → Renderer | Run completed, includes stdout/stderr/exitCode |
+| `output` | Python → Node → Renderer | A chunk of the program's stdout/stderr, tagged with how much stdin had been consumed |
+| `end` | Python → Node → Renderer | Run completed; includes exitCode and, when the program is waiting on input, `awaitingInput` |
 | `warning` | Python → Node → Renderer | Visualizer load/runtime warning |
 | `error` | Node → Renderer | Process error or timeout |
 | `spawn` | Node → Renderer | Timing data when process was spawned |
@@ -105,3 +106,41 @@ When a value is inside a loop, the visualizer displays either the **first** or *
 ## Network read cache
 
 Because a rerun happens every ~100ms and each one is a fresh process, network I/O could slow things down. `url_cache.py` patches `urllib.request.urlopen` so user code that fetches URLs are served from a `.snc_url_cache` directory next to the file being edited. Editing the line is what forces a refetch.
+
+## The console: program stdin/stdout/stderr
+
+A program that reads stdin can't be handed a live pipe here. The worker's real
+stdin is the runner's command channel, and every rerun is a brand-new process
+that would have nobody at the other end. So the console works the way
+`models_and_events` already works for visualizer state: **the renderer owns the
+state, ships it in on every run, and Python replays it.**
+
+The user's typed input is a *document* — `.snc_stdin/<name>.txt` beside the
+source file. It is sent as `stdin` on the run message, and `std_streams.py`
+replays it through a `sys.stdin` stand-in, so `input()`, `sys.stdin.read()` and
+`for line in sys.stdin:` behave as if the session had been typed live, and
+behave identically on every rerun. Unlike `.snc_url_cache`, `.snc_stdin` is the
+user's own input and is meant to be committed, so it is not gitignored.
+
+The console view (`vs/workbench/contrib/snc/browser/`) is structurally a second
+Sculpt-n-Code editor: editable stdin lines, with the program's stdout/stderr in
+view zones *between* them, placed by the `stdin_offset` each output chunk
+carries. Editing any line reruns the program on the same ~100ms debounce that a
+source edit uses. It is a panel view with `canMoveView`, so it can be dragged to
+the Secondary Side Bar to sit beside the code.
+
+Two things are worth knowing:
+
+- **A read past the end of the document is not an error.** It raises
+  `NeedsInput` (a `BaseException`, so a user's `except Exception:` can't swallow
+  it), which unwinds the run cleanly and reports `awaitingInput`. Statements
+  after the read simply don't run — exactly what a terminal session that hasn't
+  got there yet would show.
+- **End of stream is a line in the document,** literally `<EOF>` (Ctrl-D inserts
+  it). Only the renderer interprets it: it sends the text above the marker plus
+  `stdin_eof: true`. Python's contract stays "here is the text, here is whether
+  it ends", and every offset it reports maps 1:1 onto a document position. The
+  cost is that a program can't be fed the literal line `<EOF>`.
+
+`print()` keeps its inline visualizer as well as reaching the console: the
+widget shows the interactive *value*, the console shows the *text*.

@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import pathlib
 import random
 import sys
 import tempfile
@@ -1056,10 +1057,25 @@ class TestCheckpointsAgreeOnOutput(unittest.TestCase):
 
     Checkpoint 2 runs the imports during pre-warm, before there's a run to
     attribute their output to, so it holds the chunks and replays them ahead of
-    the body's.
+    the body's. The module below prints when it is imported, which is the only
+    way to get output out of the import phase.
     """
 
-    _SOURCE = "import os\nprint('from imports')\nprint('from body')\n"
+    @classmethod
+    def setUpClass(cls):
+        cls._dir = tempfile.mkdtemp()
+        pathlib.Path(cls._dir, 'snc_noisy_import.py').write_text("print('from imports')\n")
+        sys.path.insert(0, cls._dir)
+
+    @classmethod
+    def tearDownClass(cls):
+        sys.path.remove(cls._dir)
+
+    _SOURCE = "import snc_noisy_import\nprint('from body')\n"
+
+    def setUp(self):
+        # Each run has to import for real; a cached module wouldn't print again.
+        sys.modules.pop('snc_noisy_import', None)
 
     def _globals(self):
         return {
@@ -1086,9 +1102,14 @@ class TestCheckpointsAgreeOnOutput(unittest.TestCase):
             execute_code(body_code, globals_dict, replay_output=held)
         return msgs.output()
 
+    def test_the_import_really_does_print(self):
+        # Guards the fixture: without this the two paths could agree trivially.
+        self.assertIn('from imports', ''.join(t for _, t, _ in self._checkpoint1()))
+
     def test_import_output_is_not_dropped_by_checkpoint_2(self):
         self.assertIn('from imports', ''.join(t for _, t, _ in self._checkpoint2()))
 
     def test_both_checkpoints_produce_the_same_transcript(self):
-        self.assertEqual(''.join(t for _, t, _ in self._checkpoint1()),
-                         ''.join(t for _, t, _ in self._checkpoint2()))
+        first = ''.join(t for _, t, _ in self._checkpoint1())
+        self.setUp()
+        self.assertEqual(first, ''.join(t for _, t, _ in self._checkpoint2()))

@@ -355,7 +355,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 					} else {
 						console.warn('[SNC] Visualizer load warning (no active run):', msg.warning);
 					}
-				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'end') {
+				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'end' || msg.type === 'output') {
 					const runId = msg.run_id || (msg.item && msg.item.runId);
 					if (runId) {
 						this.handleRunMessage(runId, msg);
@@ -395,7 +395,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	// -------------------------------------------------------------------
 
 	/**
-	 * Handle a message (item/command/end) for a specific run.
+	 * Handle a message (item/command/output/end) for a specific run.
 	 */
 	private handleRunMessage(runId: string, msg: any): void {
 		const state = this.runs.get(runId);
@@ -415,6 +415,14 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				runId,
 				type: 'command',
 				command: msg.command as SNCCommand
+			});
+		} else if (msg.type === 'output') {
+			this._onStream.fire({
+				runId,
+				type: 'output',
+				stream: msg.stream === 'stderr' ? 'stderr' : 'stdout',
+				text: String(msg.text ?? ''),
+				stdinOffset: typeof msg.stdin_offset === 'number' ? msg.stdin_offset : 0
 			});
 		} else if (msg.type === 'end') {
 			state.ended = true;
@@ -560,7 +568,11 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				code: content,
 				file_path: options.filePath ?? null,
 				models_and_events: options.modelsAndEventsJson || '',
-				focused_line: options.focusedLine ?? null
+				focused_line: options.focusedLine ?? null,
+				stdin: options.stdin ?? '',
+				// Default false so a read past the end starves — which is what
+				// opens the console — rather than seeing a spurious EOF.
+				stdin_eof: options.stdinEof ?? false
 			}) + '\n';
 			worker.child.stdin?.write(cmd);
 			state.tStdinEnd = Date.now();
