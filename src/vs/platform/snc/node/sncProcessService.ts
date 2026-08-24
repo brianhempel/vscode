@@ -46,9 +46,9 @@ const CP2_POOL_SIZE = 10;
 
 /**
  * Directory the Python runner caches network reads in, beside the file being
- * edited. Must match `CACHE_DIR_NAME` in `io_cache.py`.
+ * edited. Must match `CACHE_DIR_NAME` in `url_cache.py`.
  */
-const IO_CACHE_DIR_NAME = '.snc_io_cache';
+const URL_CACHE_DIR_NAME = '.snc_url_cache';
 
 export class SNCProcessService extends Disposable implements ISNCProcessService {
 
@@ -98,7 +98,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 * service is created once per app session, so the presence of a key means
 	 * the cache has already been dealt with since the last reload.
 	 */
-	private readonly clearedIoCaches = new Map<string, Promise<void>>();
+	private readonly clearedUrlCaches = new Map<string, Promise<void>>();
 
 	private _disposed = false;
 
@@ -453,23 +453,23 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 * data. Clearing it here rather than in the runner matters because every
 	 * rerun is a brand-new worker process, which would leave nothing cached.
 	 */
-	private clearIoCacheOnce(options: IProcessOptions): Promise<void> {
-		// Mirrors `cache_dir_for` in io_cache.py: beside the file being edited,
+	private clearUrlCacheOnce(options: IProcessOptions): Promise<void> {
+		// Mirrors `cache_dir_for` in url_cache.py: beside the file being edited,
 		// falling back to the working directory the worker runs in.
 		const directory = options.filePath ? path.dirname(options.filePath) : options.workingDirectory;
-		const cacheDir = directory ? path.join(directory, IO_CACHE_DIR_NAME) : '';
+		const cacheDir = directory ? path.join(directory, URL_CACHE_DIR_NAME) : '';
 
 		// A relative or oddly shaped path could name any directory at all, so
 		// only ever delete something that is unmistakably a cache directory.
-		if (!path.isAbsolute(cacheDir) || path.basename(cacheDir) !== IO_CACHE_DIR_NAME) {
+		if (!path.isAbsolute(cacheDir) || path.basename(cacheDir) !== URL_CACHE_DIR_NAME) {
 			return Promise.resolve();
 		}
 
-		let cleared = this.clearedIoCaches.get(cacheDir);
+		let cleared = this.clearedUrlCaches.get(cacheDir);
 		if (!cleared) {
 			// A cache we can't delete is not a reason to fail the user's run.
 			cleared = Promises.rm(cacheDir).catch(() => { });
-			this.clearedIoCaches.set(cacheDir, cleared);
+			this.clearedUrlCaches.set(cacheDir, cleared);
 		}
 		return cleared;
 	}
@@ -538,7 +538,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 		// Drop a cache left over from before this app session started, before any
 		// worker can read through it.
-		await this.clearIoCacheOnce(options);
+		await this.clearUrlCacheOnce(options);
 
 		// Take a ready worker (or wait for one). The waiter promise rejects
 		// if the python executable can't be launched; in that case

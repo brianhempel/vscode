@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
-import io_cache
+import url_cache
 import python_runner
 from python_runner import (
     SEED,
@@ -28,7 +28,7 @@ from python_runner import (
     _build_new_code_edits,
     _commands_to_dicts,
     execute_code,
-    install_io_cache,
+    install_url_cache,
     log_value,
     reseed,
     split_leading_imports,
@@ -608,7 +608,7 @@ class TestGenericVisualizerDrag(unittest.TestCase):
         self.assertEqual(out, '<b>7</b>')
 
 
-class TestIoCacheAcrossRuns(unittest.TestCase):
+class TestUrlCacheAcrossRuns(unittest.TestCase):
     """The network read cache has to see through the source transform: the
     logging wrappers must not hide the user's line from the cache key."""
 
@@ -629,7 +629,7 @@ class TestIoCacheAcrossRuns(unittest.TestCase):
         self.addCleanup(lambda: setattr(python_runner, '_file_path', ''))
         self.addCleanup(lambda: setattr(python_runner, '_source_code', ''))
 
-        self.addCleanup(install_io_cache())
+        self.addCleanup(install_url_cache())
         self.assertIsNot(urllib.request.urlopen, fake_urlopen, 'cache did not install')
 
     def _run(self, source_code):
@@ -667,7 +667,7 @@ class TestIoCacheAcrossRuns(unittest.TestCase):
     def test_the_cache_lands_beside_the_edited_file(self):
         self._run('import urllib.request\n'
                   'str1 = urllib.request.urlopen("https://example.com/report.txt").read()\n')
-        cache_dir = os.path.join(os.path.dirname(python_runner._file_path), io_cache.CACHE_DIR_NAME)
+        cache_dir = os.path.join(os.path.dirname(python_runner._file_path), url_cache.CACHE_DIR_NAME)
         self.assertTrue(any(f.endswith('.body') for f in os.listdir(cache_dir)))
 
 

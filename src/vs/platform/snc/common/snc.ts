@@ -29,7 +29,7 @@ export interface IProcessResult {
 export interface IProcessOptions {
 	timeout?: number; // Optional timeout in milliseconds
 	workingDirectory: string; // Required working directory for code execution
-	filePath?: string; // Path of the file being run; sites the .snc_io_cache dir beside it
+	filePath?: string; // Path of the file being run; sites the .snc_url_cache dir beside it
 	modelsAndEventsJson?: string; // visualizers state, and events to apply
 	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
 }

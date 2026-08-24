@@ -42,7 +42,7 @@ if _BUILTIN_VISUALIZERS_DIR not in sys.path:
 
 from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
-import io_cache
+import url_cache
 
 # This is the only way to make a Module type in Python
 class StaticVisualizer(Protocol):
@@ -1888,19 +1888,19 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
     _stream_out.flush()
 
 
-def install_io_cache() -> Callable[[], None]:
+def install_url_cache() -> Callable[[], None]:
     """Serve the user program's network reads from disk across reruns.
 
     Must run before the user's imports so `from urllib.request import urlopen`
     binds the caching wrapper too. Returns a function that undoes the patch.
     """
     try:
-        return io_cache.install(
+        return url_cache.install(
             lambda: _source_code,
-            lambda: io_cache.cache_dir_for(_file_path, os.getcwd()),
+            lambda: url_cache.cache_dir_for(_file_path, os.getcwd()),
         )
     except Exception as e:
-        emit_meta(f'io-cache-install-failed-{type(e).__name__}')
+        emit_meta(f'url-cache-install-failed-{type(e).__name__}')
         return lambda: None
 
 
@@ -1936,8 +1936,8 @@ def run_pool_worker_mode(working_directory: str) -> None:
     _visualizers()
     emit_meta('visualizers-loaded')
 
-    install_io_cache()
-    emit_meta('io-cache-installed')
+    install_url_cache()
+    emit_meta('url-cache-installed')
 
     emit_checkpoint_ready(1)
 
@@ -2074,7 +2074,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     emit_meta('chdir-done')
-    install_io_cache()
+    install_url_cache()
     code = sys.stdin.read()
     emit_meta('code-received')
 

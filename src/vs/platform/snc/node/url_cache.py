@@ -5,7 +5,7 @@ Sculpt-n-Code reruns the whole file on a 100ms debounce, and every rerun is a
 brand-new worker process, so a plain `urllib.request.urlopen(...)` in the source
 would hit the network on every keystroke and block the visualization pipeline on
 each round trip. This module patches `urlopen` so the body is fetched once and
-then served from `.snc_io_cache/` next to the file being edited.
+then served from `.snc_url_cache/` next to the file being edited.
 
 An entry stays valid only while the source line that made the call is unchanged,
 so editing the line (the URL, or anything else on it) is how the user forces a
@@ -28,7 +28,7 @@ import time
 import urllib.error
 from typing import Any, Callable, Dict, Optional, Tuple
 
-CACHE_DIR_NAME = '.snc_io_cache'
+CACHE_DIR_NAME = '.snc_url_cache'
 
 # Filename the runner compiles user code under; frames from that file are the
 # user's own lines.

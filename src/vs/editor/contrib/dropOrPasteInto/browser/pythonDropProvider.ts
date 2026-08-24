@@ -81,7 +81,7 @@ function importPlacement(model: ITextModel, importStatement: string, position: I
  * Drops a file or a URL into Python as a line that reads it into a string.
  *
  * URLs are read with `urllib.request`; the runner caches the response so a
- * rerun on every keystroke doesn't refetch. See `io_cache.py`.
+ * rerun on every keystroke doesn't refetch. See `url_cache.py`.
  */
 export class PythonReadDropProvider implements DocumentDropEditProvider {
 

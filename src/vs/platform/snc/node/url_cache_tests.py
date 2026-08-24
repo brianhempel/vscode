@@ -1,8 +1,8 @@
 """
-Tests for io_cache.py.
+Tests for url_cache.py.
 
 Run:
-    python3 -m pytest src/vs/platform/snc/node/io_cache_tests.py -v
+    python3 -m pytest src/vs/platform/snc/node/url_cache_tests.py -v
 """
 
 import json
@@ -12,8 +12,8 @@ import unittest
 import urllib.error
 import urllib.request
 
-import io_cache
-from io_cache import (
+import url_cache
+from url_cache import (
     CACHE_DIR_NAME,
     cache_dir_for,
     current_line_source,
@@ -304,9 +304,9 @@ class TestErrorCaching(_CacheTestCase):
         self.assertEqual(str(second.exception), str(first.exception))
 
     def test_a_stale_failure_is_retried_so_transient_outages_recover(self):
-        original_ttl = io_cache.ERROR_TTL_SECONDS
-        io_cache.ERROR_TTL_SECONDS = 0
-        self.addCleanup(lambda: setattr(io_cache, 'ERROR_TTL_SECONDS', original_ttl))
+        original_ttl = url_cache.ERROR_TTL_SECONDS
+        url_cache.ERROR_TTL_SECONDS = 0
+        self.addCleanup(lambda: setattr(url_cache, 'ERROR_TTL_SECONDS', original_ttl))
 
         real = _FakeUrlopen(urllib.error.URLError('offline'), _FakeResponse(b'back online'))
         urlopen = self.wrapper(real)
@@ -316,9 +316,9 @@ class TestErrorCaching(_CacheTestCase):
         self.assertEqual(urlopen('https://example.com/a.txt').read(), b'back online')
 
     def test_a_successful_entry_never_goes_stale(self):
-        original_ttl = io_cache.ERROR_TTL_SECONDS
-        io_cache.ERROR_TTL_SECONDS = 0
-        self.addCleanup(lambda: setattr(io_cache, 'ERROR_TTL_SECONDS', original_ttl))
+        original_ttl = url_cache.ERROR_TTL_SECONDS
+        url_cache.ERROR_TTL_SECONDS = 0
+        self.addCleanup(lambda: setattr(url_cache, 'ERROR_TTL_SECONDS', original_ttl))
 
         real = _FakeUrlopen(_FakeResponse(b'hello'), _FakeResponse(b'CHANGED'))
         urlopen = self.wrapper(real)
@@ -386,7 +386,7 @@ class TestBypasses(_CacheTestCase):
         self.assertEqual(real.call_count, 2)
 
     def test_oversized_responses_stream_through_uncached(self):
-        headers = {'Content-Length': str(io_cache.MAX_CACHE_BYTES + 1)}
+        headers = {'Content-Length': str(url_cache.MAX_CACHE_BYTES + 1)}
         first = _FakeResponse(b'huge', headers=headers)
         real = _FakeUrlopen(first, _FakeResponse(b'huge', headers=headers))
         urlopen = self.wrapper(real)
@@ -432,7 +432,7 @@ class TestTimeout(_CacheTestCase):
         real = _FakeUrlopen(_FakeResponse(b'hello'))
         self.wrapper(real)('https://example.com/a.txt')
 
-        self.assertEqual(real.calls[0][2]['timeout'], io_cache.DEFAULT_TIMEOUT)
+        self.assertEqual(real.calls[0][2]['timeout'], url_cache.DEFAULT_TIMEOUT)
 
     def test_an_explicit_timeout_wins(self):
         real = _FakeUrlopen(_FakeResponse(b'hello'))

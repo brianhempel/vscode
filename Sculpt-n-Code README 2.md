@@ -104,4 +104,4 @@ When a value is inside a loop, the visualizer displays either the **first** or *
 
 ## Network read cache
 
-Because a rerun happens every ~100ms and each one is a fresh process, network I/O could slow things down. `io_cache.py` patches `urllib.request.urlopen` so user code that fetches URLs are served from a `.snc_io_cache` directory next to the file being edited. Editing the line is what forces a refetch.
+Because a rerun happens every ~100ms and each one is a fresh process, network I/O could slow things down. `url_cache.py` patches `urllib.request.urlopen` so user code that fetches URLs are served from a `.snc_url_cache` directory next to the file being edited. Editing the line is what forces a refetch.
