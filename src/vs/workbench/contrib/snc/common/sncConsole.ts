@@ -4,8 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Event } from '../../../../base/common/event.js';
+import { Schemas } from '../../../../base/common/network.js';
+import { basename, dirname, joinPath } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
-import { ITextModel } from '../../../../editor/common/model.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IProcessResult } from '../../../../platform/snc/common/snc.js';
 
@@ -19,13 +20,18 @@ import { IProcessResult } from '../../../../platform/snc/common/snc.js';
  * output is recomputed from scratch each time and shown as view zones between
  * the stdin lines. Editing a stdin line reruns the program exactly the way
  * editing a source line does.
+ *
+ * That document is an ordinary file opened in an ordinary editor tab, so it
+ * comes with line numbers, find, undo and multi-cursor already, and the user
+ * can drag it beside the source the same way they would split any two files.
+ * The console is a contribution *on* that editor, not a widget of its own.
  */
-
-/** Scheme of the stdin document's model. */
-export const SNC_STDIN_SCHEME = 'snc-stdin';
 
 /** Directory the stdin documents persist into, beside the file being edited. */
 export const SNC_STDIN_DIR_NAME = '.snc_stdin';
+
+/** File extension of a stdin document, so it opens as plain text. */
+const SNC_STDIN_EXTENSION = '.txt';
 
 /**
  * A line of exactly this ends the stream. It lives in the document rather than
@@ -55,9 +61,31 @@ export interface IConsoleTranscript {
 
 export const EMPTY_TRANSCRIPT: IConsoleTranscript = { chunks: [], stdinConsumed: 0, awaitingKind: undefined };
 
-/** The model URI for a source file's stdin document. */
-export function stdinModelUri(filePath: string): URI {
-	return URI.file(filePath).with({ scheme: SNC_STDIN_SCHEME });
+/**
+ * Where a source file's stdin document lives: `.snc_stdin/<name>.txt` beside it,
+ * mirroring how `.snc_url_cache` sits beside a file. Unlike that cache this is
+ * the user's own input, so it is meant to be committed.
+ */
+export function stdinFileUri(filePath: string): URI {
+	const source = URI.file(filePath);
+	return joinPath(dirname(source), SNC_STDIN_DIR_NAME, `${basename(source)}${SNC_STDIN_EXTENSION}`);
+}
+
+/**
+ * The inverse: the source file a stdin document belongs to, or `undefined` if
+ * this resource isn't one. This is what lets a plain editor contribution
+ * recognise the console among every other editor in the workbench.
+ */
+export function sourceFileForStdinUri(uri: URI | undefined): string | undefined {
+	if (!uri || uri.scheme !== Schemas.file) {
+		return undefined;
+	}
+	const name = basename(uri);
+	const folder = dirname(uri);
+	if (!name.endsWith(SNC_STDIN_EXTENSION) || basename(folder) !== SNC_STDIN_DIR_NAME) {
+		return undefined;
+	}
+	return joinPath(dirname(folder), name.slice(0, -SNC_STDIN_EXTENSION.length)).fsPath;
 }
 
 /**
@@ -125,8 +153,17 @@ export interface ISNCConsoleService {
 	/** What the console should currently display for this file. */
 	transcriptFor(filePath: string): IConsoleTranscript;
 
-	/** The editable stdin document, created (and loaded from disk) on demand. */
-	stdinModel(filePath: string): Promise<ITextModel>;
+	/**
+	 * Create the stdin document on disk if it isn't there yet and start tracking
+	 * its text, so it can be opened in an editor. Returns its resource.
+	 */
+	ensureStdinFile(filePath: string): Promise<URI>;
+
+	/**
+	 * Track the stdin document for this file if it already exists on disk, so a
+	 * recorded session is fed back into the program without opening anything.
+	 */
+	loadStdinIfPresent(filePath: string): Promise<void>;
 
 	/** Throw away the stored input and start the session over. */
 	clear(filePath: string): Promise<void>;

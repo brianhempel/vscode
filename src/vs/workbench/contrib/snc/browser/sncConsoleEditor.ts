@@ -5,40 +5,22 @@
 
 import './media/sncConsole.css';
 import * as dom from '../../../../base/browser/dom.js';
-import { Codicon } from '../../../../base/common/codicons.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
-import { Schemas } from '../../../../base/common/network.js';
-import { localize, localize2 } from '../../../../nls.js';
+import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { localize } from '../../../../nls.js';
 import { ICodeEditor, IViewZone } from '../../../../editor/browser/editorBrowser.js';
-import { CodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
-import { EditorOption, IEditorOptions } from '../../../../editor/common/config/editorOptions.js';
+import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
 import { Position } from '../../../../editor/common/core/position.js';
 import { Range } from '../../../../editor/common/core/range.js';
+import { IEditorContribution, IEditorDecorationsCollection } from '../../../../editor/common/editorCommon.js';
 import { IModelDeltaDecoration } from '../../../../editor/common/model.js';
-import { IEditorDecorationsCollection } from '../../../../editor/common/editorCommon.js';
-import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
-import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
-import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
-import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
-import { IOpenerService } from '../../../../platform/opener/common/opener.js';
-import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
-import { IThemeService } from '../../../../platform/theme/common/themeService.js';
-import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
-import { IViewDescriptorService } from '../../../common/views.js';
-import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { EOF_MARKER, IConsoleChunk, ISNCConsoleService, eofMarkerLine } from '../common/sncConsole.js';
+import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
+import { EOF_MARKER, IConsoleChunk, ISNCConsoleService, eofMarkerLine, sourceFileForStdinUri } from '../common/sncConsole.js';
 
-export const SNC_CONSOLE_VIEW_ID = 'workbench.panel.sncConsole';
-
-/** True while focus is inside the console's editor, so Ctrl-D can be rebound there. */
+/**
+ * True while the editor in focus is a stdin document, so Ctrl-D can mean
+ * end-of-input there without disturbing it anywhere else.
+ */
 export const CONTEXT_IN_SNC_CONSOLE = new RawContextKey<boolean>('inSNCConsole', false);
-
-export const sncConsoleViewIcon = registerIcon('snc-console-view-icon', Codicon.terminal,
-	localize('sncConsoleViewIcon', 'View icon of the Sculpt-n-Code console.'));
-
-export const SNC_CONSOLE_TITLE = localize2('sncConsole', "Console");
 
 /** Zones are keyed by the line they hang under; 0 means "above line 1". */
 interface IOutputZone {
@@ -50,137 +32,101 @@ interface IOutputZone {
 }
 
 /**
- * The program's console: the stdin document as an ordinary editable text
- * editor, with the run's stdout/stderr rendered in view zones between its
- * lines. Structurally this is a second Sculpt-n-Code editor — editing a line
- * reruns the program and the zones update, exactly as editing source does.
+ * The program's console, as a contribution on the stdin document's ordinary
+ * editor: the run's stdout/stderr rendered in view zones between the lines the
+ * program read. Structurally this is a second Sculpt-n-Code editor — editing a
+ * line reruns the program and the zones update, exactly as editing source does.
+ *
+ * It is registered against every editor and does nothing in almost all of them;
+ * `sourceFileForStdinUri` is what tells a console apart from any other file.
  */
-export class SNCConsoleViewPane extends ViewPane {
+export class SNCConsoleEditorContribution extends Disposable implements IEditorContribution {
 
-	private editor!: CodeEditorWidget;
-	private editorContainer!: HTMLElement;
-	private decorations!: IEditorDecorationsCollection;
+	static readonly ID = 'editor.contrib.sncConsole';
 
-	/** Source file the console is currently bound to. */
+	/** Source file whose transcript this editor shows, empty if it isn't a console. */
 	private filePath: string = '';
 	private readonly modelBinding = this._register(new DisposableStore());
+	private readonly inConsole: IContextKey<boolean>;
 
+	private decorations: IEditorDecorationsCollection;
 	private zones = new Map<number, IOutputZone>();
 
 	constructor(
-		options: IViewPaneOptions,
-		@IKeybindingService keybindingService: IKeybindingService,
-		@IContextMenuService contextMenuService: IContextMenuService,
-		@IConfigurationService configurationService: IConfigurationService,
+		private readonly editor: ICodeEditor,
 		@IContextKeyService contextKeyService: IContextKeyService,
-		@IViewDescriptorService viewDescriptorService: IViewDescriptorService,
-		@IInstantiationService instantiationService: IInstantiationService,
-		@IOpenerService openerService: IOpenerService,
-		@IThemeService themeService: IThemeService,
-		@IHoverService hoverService: IHoverService,
-		@IEditorService private readonly editorService: IEditorService,
 		@ISNCConsoleService private readonly consoleService: ISNCConsoleService,
 	) {
-		super(options, keybindingService, contextMenuService, configurationService, contextKeyService,
-			viewDescriptorService, instantiationService, openerService, themeService, hoverService);
+		super();
+		this.inConsole = CONTEXT_IN_SNC_CONSOLE.bindTo(contextKeyService);
+		this.decorations = this.editor.createDecorationsCollection();
 
-		this._register(this.editorService.onDidActiveEditorChange(() => this.bindToActiveFile()));
+		this._register(this.editor.onDidChangeModel(() => this.bindToModel()));
 		this._register(this.consoleService.onDidChangeTranscript(filePath => {
 			if (filePath === this.filePath) {
 				this.renderTranscript();
 			}
 		}));
+		this.bindToModel();
 	}
 
-	protected override renderBody(container: HTMLElement): void {
-		super.renderBody(container);
-		container.classList.add('snc-console');
-		this.editorContainer = dom.append(container, dom.$('.snc-console-editor'));
+	/** The console this editor is showing, if the caller wants to act on it. */
+	static get(editor: ICodeEditor): SNCConsoleEditorContribution | null {
+		return editor.getContribution<SNCConsoleEditorContribution>(SNCConsoleEditorContribution.ID);
+	}
 
-		this.editor = this._register(this.instantiationService.createInstance(
-			CodeEditorWidget,
-			this.editorContainer,
-			this.editorOptions(),
-			// No contributions: this is a plain input surface, and the code
-			// editor's usual machinery (suggest, format, folding) has nothing to
-			// offer a terminal transcript.
-			{ isSimpleWidget: true, contributions: [] }
-		));
-		this.decorations = this.editor.createDecorationsCollection();
+	get isConsole(): boolean {
+		return !!this.filePath;
+	}
 
-		this._register(dom.addDisposableListener(this.editorContainer, dom.EventType.CLICK, e => {
-			if ((e.target as HTMLElement).classList?.contains('snc-console-hint')) {
-				this.insertEofMarker();
+	private bindToModel(): void {
+		this.modelBinding.clear();
+		this.clearZones();
+		this.decorations.clear();
+
+		const model = this.editor.getModel();
+		this.filePath = (model && sourceFileForStdinUri(model.uri)) || '';
+		this.inConsole.set(this.isConsole);
+		if (!this.isConsole || !model) {
+			return;
+		}
+
+		this.modelBinding.add(model.onDidChangeContent(() => this.renderDecorations()));
+		// Zones added while the editor is still swapping its view over to the new
+		// model are attached to the view being torn down: the node lands in the
+		// DOM and is never positioned. Render once that has settled instead.
+		this.modelBinding.add(this.editor.onDidLayoutChange(() => this.relayoutZones()));
+
+		// Clicks are caught by one delegated listener rather than one per zone:
+		// zones are rebuilt on every rerun and per-zone listeners would pile up.
+		const domNode = this.editor.getDomNode();
+		if (domNode) {
+			this.modelBinding.add(dom.addDisposableListener(domNode, dom.EventType.CLICK, e => {
+				if ((e.target as HTMLElement).classList?.contains('snc-console-hint')) {
+					this.insertEofMarker();
+				}
+			}));
+		}
+
+		this.scheduleRender();
+	}
+
+	/**
+	 * Draw on a later turn than the event that asked for it. `onDidChangeModel`
+	 * fires while the editor is mid-swap between views, and a zone added at that
+	 * moment belongs to the view being discarded — it ends up in the DOM but
+	 * unpositioned, which looks exactly like output that never arrived.
+	 */
+	private scheduleRender(): void {
+		const domNode = this.editor.getDomNode();
+		if (!domNode) {
+			return;
+		}
+		this.modelBinding.add(dom.scheduleAtNextAnimationFrame(dom.getWindow(domNode), () => {
+			if (!this._store.isDisposed) {
+				this.renderTranscript();
 			}
 		}));
-
-		const inConsole = CONTEXT_IN_SNC_CONSOLE.bindTo(this.editor.contextKeyService);
-		this._register(this.editor.onDidFocusEditorText(() => inConsole.set(true)));
-		this._register(this.editor.onDidBlurEditorText(() => inConsole.set(false)));
-
-		this.bindToActiveFile();
-	}
-
-	private editorOptions(): IEditorOptions {
-		return {
-			// A terminal session, not code: no gutter furniture, and long output
-			// wraps rather than running off the side.
-			lineNumbers: 'off',
-			glyphMargin: false,
-			folding: false,
-			minimap: { enabled: false },
-			wordWrap: 'on',
-			lineDecorationsWidth: 0,
-			lineNumbersMinChars: 0,
-			renderLineHighlight: 'none',
-			scrollBeyondLastLine: false,
-			overviewRulerLanes: 0,
-			hideCursorInOverviewRuler: true,
-			scrollbar: { alwaysConsumeMouseWheel: false },
-			automaticLayout: false,
-			fontFamily: 'var(--monaco-monospace-font)',
-		};
-	}
-
-	protected override layoutBody(height: number, width: number): void {
-		super.layoutBody(height, width);
-		this.editorContainer.style.height = `${height}px`;
-		this.editor?.layout({ height, width });
-	}
-
-	override focus(): void {
-		super.focus();
-		this.editor?.focus();
-	}
-
-	// -- binding -------------------------------------------------------------
-
-	/** Which Python file the console follows: whichever one is in front. */
-	private activeFilePath(): string {
-		const resource = this.editorService.activeEditor?.resource;
-		return resource?.scheme === Schemas.file && resource.path.endsWith('.py') ? resource.fsPath : '';
-	}
-
-	private async bindToActiveFile(): Promise<void> {
-		if (!this.editor) {
-			return;
-		}
-		const filePath = this.activeFilePath();
-		// An unsaved buffer, or a non-Python tab: keep showing the last file's
-		// session rather than blanking out as the user glances at another tab.
-		if (!filePath || filePath === this.filePath) {
-			return;
-		}
-
-		this.filePath = filePath;
-		this.modelBinding.clear();
-		const model = await this.consoleService.stdinModel(filePath);
-		if (this.filePath !== filePath || this._store.isDisposed) {
-			return; // The user moved on while we were loading.
-		}
-		this.editor.setModel(model);
-		this.modelBinding.add(model.onDidChangeContent(() => this.renderDecorations()));
-		this.renderTranscript();
 	}
 
 	// -- rendering -----------------------------------------------------------
@@ -200,8 +146,8 @@ export class SNCConsoleViewPane extends ViewPane {
 	}
 
 	private renderTranscript(): void {
-		const model = this.editor?.getModel();
-		if (!model || !this.filePath) {
+		const model = this.editor.getModel();
+		if (!model || !this.isConsole) {
 			return;
 		}
 		const transcript = this.consoleService.transcriptFor(this.filePath);
@@ -231,8 +177,14 @@ export class SNCConsoleViewPane extends ViewPane {
 
 		// Anchor on the cursor's position in the viewport: zone heights above it
 		// change on every rerun, and without this the line being typed on jumps.
+		//
+		// Only once the user has actually scrolled, though. At the top there is
+		// no position to preserve, and anchoring there is actively wrong: the
+		// first zone usually goes *above* line 1, so holding line 1 still would
+		// scroll that zone straight off the top of the viewport.
+		const scrollTop = this.editor.getScrollTop();
 		const cursorLine = this.editor.getPosition()?.lineNumber ?? 1;
-		const cursorOffsetInViewport = this.editor.getTopForLineNumber(cursorLine) - this.editor.getScrollTop();
+		const cursorOffsetInViewport = this.editor.getTopForLineNumber(cursorLine) - scrollTop;
 
 		this.editor.changeViewZones(accessor => {
 			for (const [line, zone] of this.zones) {
@@ -268,8 +220,10 @@ export class SNCConsoleViewPane extends ViewPane {
 			}
 		});
 
-		const restored = this.editor.getTopForLineNumber(cursorLine) - cursorOffsetInViewport;
-		this.editor.setScrollTop(Math.max(0, restored));
+		if (scrollTop > 0) {
+			const restored = this.editor.getTopForLineNumber(cursorLine) - cursorOffsetInViewport;
+			this.editor.setScrollTop(Math.max(0, restored));
+		}
 
 		this.renderDecorations();
 		this.measureZonesAfterLayout();
@@ -283,8 +237,6 @@ export class SNCConsoleViewPane extends ViewPane {
 			node.appendChild(span);
 		}
 		if (eofHint) {
-			// Clicks are caught by one delegated listener on the container: zones
-			// are rebuilt on every rerun, and a listener per zone would pile up.
 			const hint = dom.$('a.snc-console-hint');
 			hint.textContent = localize('sncConsoleEofHint', "Reading until end of input — click or press Ctrl+D to end it");
 			node.appendChild(hint);
@@ -305,8 +257,12 @@ export class SNCConsoleViewPane extends ViewPane {
 	 * how much.
 	 */
 	private measureZonesAfterLayout(): void {
-		dom.scheduleAtNextAnimationFrame(dom.getWindow(this.editorContainer), () => {
-			if (this._store.isDisposed || !this.editor?.getModel()) {
+		const domNode = this.editor.getDomNode();
+		if (!domNode) {
+			return;
+		}
+		dom.scheduleAtNextAnimationFrame(dom.getWindow(domNode), () => {
+			if (this._store.isDisposed || !this.editor.getModel()) {
 				return;
 			}
 			// One pass only. The node's height doesn't depend on the zone's, so
@@ -328,8 +284,8 @@ export class SNCConsoleViewPane extends ViewPane {
 	 * reads as a marker rather than as input.
 	 */
 	private renderDecorations(): void {
-		const model = this.editor?.getModel();
-		if (!model || !this.filePath) {
+		const model = this.editor.getModel();
+		if (!model || !this.isConsole) {
 			return;
 		}
 		const text = model.getValue();
@@ -355,12 +311,41 @@ export class SNCConsoleViewPane extends ViewPane {
 		this.decorations.set(decorations);
 	}
 
+	/**
+	 * Re-assert every zone's height. A zone whose height was never applied — one
+	 * added against a view that was about to be replaced — is indistinguishable
+	 * from a correct one until the editor lays out again, so take that chance.
+	 */
+	private relayoutZones(): void {
+		if (this.zones.size === 0) {
+			return;
+		}
+		this.editor.changeViewZones(accessor => {
+			for (const zone of this.zones.values()) {
+				accessor.layoutZone(zone.id);
+			}
+		});
+		this.measureZonesAfterLayout();
+	}
+
+	private clearZones(): void {
+		if (this.zones.size === 0) {
+			return;
+		}
+		this.editor.changeViewZones(accessor => {
+			for (const zone of this.zones.values()) {
+				accessor.removeZone(zone.id);
+			}
+		});
+		this.zones.clear();
+	}
+
 	// -- actions -------------------------------------------------------------
 
 	/** Ctrl-D: end the stream here. */
 	insertEofMarker(): void {
-		const model = this.editor?.getModel();
-		if (!model) {
+		const model = this.editor.getModel();
+		if (!model || !this.isConsole) {
 			return;
 		}
 		const position = this.editor.getPosition() ?? new Position(model.getLineCount(), 1);
@@ -376,12 +361,15 @@ export class SNCConsoleViewPane extends ViewPane {
 
 	/** Throw the session away and start over from the program's first prompt. */
 	clearSession(): void {
-		if (this.filePath) {
+		if (this.isConsole) {
 			this.consoleService.clear(this.filePath);
 		}
 	}
 
-	get consoleEditor(): ICodeEditor | undefined {
-		return this.editor;
+	override dispose(): void {
+		// No `clearZones` here: the zones belong to an editor that is going away
+		// with them, and reaching into it mid-teardown is what breaks.
+		this.zones.clear();
+		super.dispose();
 	}
 }

@@ -122,12 +122,21 @@ replays it through a `sys.stdin` stand-in, so `input()`, `sys.stdin.read()` and
 behave identically on every rerun. Unlike `.snc_url_cache`, `.snc_stdin` is the
 user's own input and is meant to be committed, so it is not gitignored.
 
-The console view (`vs/workbench/contrib/snc/browser/`) is structurally a second
-Sculpt-n-Code editor: editable stdin lines, with the program's stdout/stderr in
-view zones *between* them, placed by the `stdin_offset` each output chunk
-carries. Editing any line reruns the program on the same ~100ms debounce that a
-source edit uses. It is a panel view with `canMoveView`, so it can be dragged to
-the Secondary Side Bar to sit beside the code.
+That document is opened as an **ordinary editor tab**, and the console
+(`vs/workbench/contrib/snc/browser/`) is an editor *contribution* on it rather
+than a view of its own — `sourceFileForStdinUri` is what tells a stdin document
+apart from any other file. So it is structurally a second Sculpt-n-Code editor:
+editable stdin lines, with the program's stdout/stderr in view zones *between*
+them, placed by the `stdin_offset` each output chunk carries. Editing any line
+reruns the program on the same ~100ms debounce that a source edit uses.
+
+Being a real editor is the point: line numbers, find, undo, multi-cursor and
+paste all come for free, and the tab can be split, dragged or moved anywhere the
+user would move any other tab — the workbench remembers it. It first opens in
+the group beside the source, which is where a console wants to be. The service
+holds a model reference so the document stays loaded and keeps driving reruns
+whether or not a tab is showing it, and saves it on a short debounce so typing
+input never leaves a dirty tab behind.
 
 Two things are worth knowing:
 

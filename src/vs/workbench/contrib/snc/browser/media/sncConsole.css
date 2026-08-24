@@ -3,34 +3,28 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-.snc-console,
-.snc-console .snc-console-editor {
-	height: 100%;
-	width: 100%;
-}
-
 /*
- * Output sits in view zones between the stdin lines. It is dimmed relative to
- * the input so the editable text reads as the primary thing on the surface --
- * the same reason the source editor's visualizers don't compete with the code.
+ * Output sits in view zones between the stdin lines of an ordinary text editor.
+ * It is dimmed relative to the input so the editable text reads as the primary
+ * thing on the surface -- the same reason the source editor's visualizers don't
+ * compete with the code.
  */
-.snc-console .snc-console-output {
+.monaco-editor .snc-console-output {
 	font-family: var(--monaco-monospace-font);
 	font-size: var(--vscode-editor-font-size);
 	line-height: var(--vscode-editor-line-height);
 	white-space: pre-wrap;
 	word-break: break-word;
-	padding: 0 0 0 var(--vscode-editor-padding-left, 0);
 	opacity: 0.85;
 	user-select: text;
 	cursor: text;
 }
 
-.snc-console .snc-console-output .snc-console-stdout {
+.monaco-editor .snc-console-output .snc-console-stdout {
 	color: var(--vscode-descriptionForeground);
 }
 
-.snc-console .snc-console-output .snc-console-stderr {
+.monaco-editor .snc-console-output .snc-console-stderr {
 	color: var(--vscode-errorForeground);
 }
 
@@ -50,14 +44,14 @@
  * Only shown when a run stalled on a read that can't finish until the stream
  * ends -- the one moment the end-of-stream marker needs explaining.
  */
-.snc-console .snc-console-output .snc-console-hint {
+.monaco-editor .snc-console-output .snc-console-hint {
 	display: block;
 	color: var(--vscode-textLink-foreground);
 	cursor: pointer;
 	font-style: italic;
 }
 
-.snc-console .snc-console-output .snc-console-hint:hover {
+.monaco-editor .snc-console-output .snc-console-hint:hover {
 	color: var(--vscode-textLink-activeForeground);
 	text-decoration: underline;
 }

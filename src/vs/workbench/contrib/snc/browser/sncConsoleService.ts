@@ -5,17 +5,16 @@
 
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
-import { basename, dirname, joinPath } from '../../../../base/common/resources.js';
+import { Disposable, IDisposable, IReference } from '../../../../base/common/lifecycle.js';
+import { dirname } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
-import { ITextModel } from '../../../../editor/common/model.js';
-import { IModelService } from '../../../../editor/common/services/model.js';
+import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IProcessResult } from '../../../../platform/snc/common/snc.js';
+import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import {
-	EMPTY_TRANSCRIPT, IConsoleChunk, IConsoleTranscript, ISNCConsoleService,
-	SNC_STDIN_DIR_NAME, splitAtEofMarker, stdinModelUri
+	EMPTY_TRANSCRIPT, IConsoleChunk, IConsoleTranscript, ISNCConsoleService, splitAtEofMarker, stdinFileUri
 } from '../common/sncConsole.js';
 
 /**
@@ -35,8 +34,8 @@ const SAVE_DELAY_MS = 400;
 interface IFileConsole {
 	/** Synchronous mirror of the model's text, so a run never waits on disk. */
 	stdinText: string;
-	loading?: Promise<ITextModel>;
-	model?: ITextModel;
+	loading?: Promise<void>;
+	modelRef?: IReference<IResolvedTextEditorModel>;
 	modelListener?: IDisposable;
 
 	/** What the console displays. */
@@ -69,7 +68,8 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 	private readonly consoles = new Map<string, IFileConsole>();
 
 	constructor(
-		@IModelService private readonly modelService: IModelService,
+		@ITextModelService private readonly textModelService: ITextModelService,
+		@ITextFileService private readonly textFileService: ITextFileService,
 		@IFileService private readonly fileService: IFileService,
 	) {
 		super();
@@ -88,68 +88,81 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 
 	stdinFor(filePath: string): { stdin: string; stdinEof: boolean } {
 		const state = this.stateFor(filePath);
-		if (!state.model && !state.loading) {
-			// First run for this file. It goes out with empty stdin, and the
-			// load below reruns it with the restored session a moment later.
-			this.stdinModel(filePath);
+		if (!state.modelRef && !state.loading) {
+			// First run for this file. It goes out with empty stdin, and if a
+			// session was recorded the load below reruns it a moment later.
+			this.loadStdinIfPresent(filePath);
 		}
 		return splitAtEofMarker(state.stdinText);
 	}
 
-	stdinModel(filePath: string): Promise<ITextModel> {
+	/**
+	 * Adopt an existing stdin document without creating one. A program that
+	 * never touches stdin must not leave a file behind, so the document only
+	 * comes into existence through `ensureStdinFile`.
+	 */
+	async loadStdinIfPresent(filePath: string): Promise<void> {
 		const state = this.stateFor(filePath);
-		if (state.model) {
-			return Promise.resolve(state.model);
+		if (state.modelRef || state.loading) {
+			return state.loading;
 		}
-		if (!state.loading) {
-			state.loading = this.loadStdinModel(filePath, state);
-		}
+		state.loading = (async () => {
+			if (await this.fileService.exists(stdinFileUri(filePath))) {
+				await this.track(filePath, state);
+			}
+		})();
 		return state.loading;
 	}
 
-	private async loadStdinModel(filePath: string, state: IFileConsole): Promise<ITextModel> {
-		let text = '';
-		try {
-			text = (await this.fileService.readFile(this.stdinFileUri(filePath))).value.toString();
-		} catch {
-			// No session recorded for this file yet.
+	async ensureStdinFile(filePath: string): Promise<URI> {
+		const uri = stdinFileUri(filePath);
+		const state = this.stateFor(filePath);
+		await state.loading?.catch(() => { });
+		if (!state.modelRef) {
+			if (!(await this.fileService.exists(uri))) {
+				// A text model can only be resolved for a resource that exists,
+				// and the tab has to have a file behind it to be saveable.
+				await this.fileService.createFolder(dirname(uri));
+				await this.fileService.writeFile(uri, VSBuffer.fromString(''));
+			}
+			await this.track(filePath, state);
 		}
+		return uri;
+	}
 
-		const uri = stdinModelUri(filePath);
-		const model = this.modelService.getModel(uri) ?? this.modelService.createModel(text, null, uri);
-		state.model = model;
+	/**
+	 * Hold a reference to the stdin document's model so it stays loaded whether
+	 * or not a tab is showing it, and rerun the program whenever it changes.
+	 */
+	private async track(filePath: string, state: IFileConsole): Promise<void> {
+		const ref = await this.textModelService.createModelReference(stdinFileUri(filePath));
+		if (state.modelRef || this._store.isDisposed) {
+			ref.dispose(); // Raced with another caller, or we're going away.
+			return;
+		}
+		state.modelRef = ref;
+		const model = ref.object.textEditorModel;
+		const stale = state.stdinText !== model.getValue();
 		state.stdinText = model.getValue();
 		state.modelListener = model.onDidChangeContent(() => {
 			state.stdinText = model.getValue();
 			this.scheduleSave(filePath, state);
 			this._onDidChangeStdin.fire(filePath);
 		});
-
-		if (state.stdinText) {
-			// The run that kicked this load off went out with empty stdin.
+		if (stale) {
+			// The run that kicked this load off went out without the recording.
 			this._onDidChangeStdin.fire(filePath);
 		}
-		return model;
 	}
 
 	async clear(filePath: string): Promise<void> {
-		const model = await this.stdinModel(filePath);
+		await this.ensureStdinFile(filePath);
 		// Goes through the model rather than the disk so it's one undoable edit
 		// and the rerun happens on the same path as any other stdin change.
-		model.setValue('');
+		this.stateFor(filePath).modelRef?.object.textEditorModel.setValue('');
 	}
 
 	// -- persistence ---------------------------------------------------------
-
-	/**
-	 * Where a file's stdin document lives: `.snc_stdin/<name>.txt` beside the
-	 * source, mirroring how `.snc_url_cache` sits beside it. Unlike that cache
-	 * this is the user's own input, so it is meant to be committed.
-	 */
-	private stdinFileUri(filePath: string): URI {
-		const source = URI.file(filePath);
-		return joinPath(dirname(source), SNC_STDIN_DIR_NAME, `${basename(source)}.txt`);
-	}
 
 	private scheduleSave(filePath: string, state: IFileConsole): void {
 		clearTimeout(state.saveTimer);
@@ -157,16 +170,13 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 	}
 
 	private async save(filePath: string, state: IFileConsole): Promise<void> {
-		const uri = this.stdinFileUri(filePath);
+		if (!state.modelRef) {
+			return;
+		}
 		try {
-			if (!state.stdinText) {
-				// An empty document is no session at all; leaving the file
-				// behind would put an empty artifact in the user's repo.
-				await this.fileService.del(uri).catch(() => { });
-				return;
-			}
-			await this.fileService.createFolder(dirname(uri)).catch(() => { });
-			await this.fileService.writeFile(uri, VSBuffer.fromString(state.stdinText));
+			// Saved for the user rather than left dirty: typing here is a program
+			// input, not an edit they are expected to commit deliberately.
+			await this.textFileService.save(stdinFileUri(filePath));
 		} catch (err) {
 			// Losing the recorded session is not worth interrupting the user
 			// mid-keystroke; the in-memory document is still correct.
@@ -183,7 +193,7 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 		clearTimeout(state.liveTimer);
 		state.liveTimer = setTimeout(() => {
 			state.live = true;
-			this.fireTranscript(filePath, state);
+			this.fireTranscript(filePath);
 		}, LIVE_OUTPUT_DELAY_MS);
 	}
 
@@ -193,7 +203,7 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 		if (state.live && !state.liveFireTimer) {
 			state.liveFireTimer = setTimeout(() => {
 				state.liveFireTimer = undefined;
-				this.fireTranscript(filePath, state);
+				this.fireTranscript(filePath);
 			}, LIVE_FIRE_THROTTLE_MS);
 		}
 	}
@@ -207,7 +217,7 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 		if (wasLive) {
 			// The display had switched to this run's output; put the last
 			// completed one back rather than leaving it half-drawn.
-			this.fireTranscript(filePath, state);
+			this.fireTranscript(filePath);
 		}
 	}
 
@@ -221,7 +231,7 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 			awaitingKind: result?.awaitingInput ? (result.awaitingKind ?? 'line') : undefined,
 		};
 		state.pending = [];
-		this.fireTranscript(filePath, state);
+		this.fireTranscript(filePath);
 
 		if (!state.opened && (state.committed.chunks.length > 0 || state.committed.awaitingKind)) {
 			state.opened = true;
@@ -247,7 +257,7 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 		state.liveTimer = state.liveFireTimer = undefined;
 	}
 
-	private fireTranscript(filePath: string, _state: IFileConsole): void {
+	private fireTranscript(filePath: string): void {
 		this._onDidChangeTranscript.fire(filePath);
 	}
 
@@ -257,6 +267,7 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 			clearTimeout(state.liveFireTimer);
 			clearTimeout(state.saveTimer);
 			state.modelListener?.dispose();
+			state.modelRef?.dispose();
 		}
 		this.consoles.clear();
 		super.dispose();
