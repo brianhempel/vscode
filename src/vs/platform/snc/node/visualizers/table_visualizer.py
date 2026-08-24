@@ -2164,15 +2164,30 @@ def _subcol_candidates(col: str, lst, model, get_visualizer,
     return _get_all_possible_columns(values, get_visualizer) or []
 
 
-def _table_column_candidates(lst, get_visualizer) -> list:
-    """The columns the (+) menu offers to show.
+# The (+) menu offers two kinds of column, in two sections, because Show all
+# and Hide all reach one of them and not the other.
+#
+# The FIELDS are what this table's rows turn out to have -- detected, so they
+# differ from table to table, and "show every field" is exactly what Show all
+# means. That section is the one the pair acts on, and it is drawn directly
+# under them.
+#
+# The ROW columns ask about the row itself rather than about anything read off
+# it. They are true of every table rather than found in one, so a user asking
+# for the fields is asking about neither, in either direction: ticking one is a
+# separate thought and unticking it is another. They sit ABOVE Show all and Hide
+# all, under Add Column, so that nothing between the pair and the list they
+# reach is something they don't.
 
-    The fields of the rows themselves, which is what the box's autocomplete
-    suggests -- so a field means the same thing whether it is ticked here or
-    typed there. A dict's are its key alongside its VALUES' fields, since a
-    dict's row is a pair and there is no tuple visualizer to ask for a pair's;
-    that is `_dict_value_columns`, the same answer detection opened the table
-    with.
+
+def _table_field_candidates(lst, get_visualizer) -> list:
+    """The fields the (+) menu offers to show, which is what Show all reaches.
+
+    What the box's autocomplete suggests -- so a field means the same thing
+    whether it is ticked here or typed there. A dict's are its key alongside its
+    VALUES' fields, since a dict's row is a pair and there is no tuple
+    visualizer to ask for a pair's; that is `_dict_value_columns`, the same
+    answer detection opened the table with.
 
     Unioned rather than required of every row (which is what detection asks,
     and why a ragged list opens as a single `$` column): a field only some rows
@@ -2182,8 +2197,47 @@ def _table_column_candidates(lst, get_visualizer) -> list:
     if get_visualizer is None:
         return []
     if isinstance(lst, dict):
-        return _dict_value_columns(lst, get_visualizer)
-    return _get_all_possible_columns(lst, get_visualizer) or []
+        fields = _dict_value_columns(lst, get_visualizer)
+    else:
+        fields = _get_all_possible_columns(lst, get_visualizer) or []
+    # A `get_fields` is free to name the value it was asked about or to write
+    # the length itself, and a column offered in both sections would be a row
+    # that unticks the box the other one ticked. The row section is the one that
+    # keeps it: that is where a reader is told these two are not Show all's.
+    row_cols = set(_table_row_candidates(lst))
+    return [f for f in fields if f not in row_cols]
+
+
+def _table_row_candidates(lst) -> list:
+    """The columns the (+) menu offers about the ROW rather than about a field
+    read off it. Their own section at the top, which Show all and Hide all both
+    leave alone.
+
+    `$` always. It is the row itself, so it is nothing detection could turn up
+    or fail to -- every table has it, whatever its rows are made of, and a list
+    of numbers whose only column is `$` needs it here or Hide all would take
+    away the one column the menu could put back.
+
+    `len($)` where the rows have a length -- `len($v)` over a dict, whose row is
+    a pair and so is two long whatever is in it; the VALUE is the thing with an
+    interesting size, which over the dict of lists Group By writes is how big
+    each group is. Asked of the values rather than of a visualizer, because
+    having a length is a fact about the object rather than about how it draws.
+
+    One sampled row with a length is enough, by the rule a field only some rows
+    have goes by: the column means something wherever it is defined, and reads
+    as a hole where it isn't. An empty container has no row to ask, so it is not
+    offered one -- and must not be sampled, since row 0 of nothing is an error
+    rather than an absence.
+    """
+    if not lst:
+        return ['$']
+    is_dict = isinstance(lst, dict)
+    for idx in _sample_indices(lst):
+        row = _row_at(lst, idx)
+        if hasattr(row.bindings['v'] if is_dict else row.item, '__len__'):
+            return ['$', 'len($v)' if is_dict else 'len($)']
+    return ['$']
 
 
 def _drop_subcolumn(model, col: str, expr: str, eval_in_scope=None) -> None:
@@ -8194,27 +8248,42 @@ def _render_add_column_header(lst, model, get_visualizer,
 
 
 def _render_add_column_panel(lst, model, get_visualizer) -> str:
-    """Add Column, then Show all and Hide all, then a checkbox per column the
-    table could show.
+    """Add Column, then the row columns, then Show all and Hide all over the
+    fields they reach -- two sections of checkboxes with the pair between them,
+    acting on the one below (see the note above `_table_field_candidates`).
 
     What is checked is read back out of the table's own columns rather than
     stored, for the reason the Subcolumns submenu reads its boxes off the
     column's: the config is the only record of a column, so the menu and the
     table cannot come to disagree.
 
-    A column no field proposes -- one the user wrote, or the plain `$` a list of
-    numbers opens with -- is listed under the detected ones all the same, the
-    way Subcolumns lists the expressions written into it: it is checked by being
-    there at all, and Hide all reaches it, so a row is what puts it back. It
-    gets no box to edit though, unlike a sub-column's: a column is renamed by
-    double-clicking the header it is drawn under, and a sub-column has no header
-    of its own to double-click.
+    A column neither list covers -- one the user wrote, like `sorted($)` -- is
+    listed with the fields all the same, the way Subcolumns lists the
+    expressions written into it: it is checked by being there at all, and Hide
+    all reaches it, so a row is what puts it back. It gets no box to edit
+    though, unlike a sub-column's: a column is renamed by double-clicking the
+    header it is drawn under, and a sub-column has no header of its own to
+    double-click.
 
     It carries the compute panel's classes as well as its own, for the reason
-    the three submenus do: they are all the same list of rows, styled once.
+    the three submenus do: they are all the same list of rows, styled once. Its
+    own is what CSS reads it back to menu size by -- those three are nested in a
+    column's ▾ and shrink to suit, and this one is a top-level menu.
     """
     columns = model.get('columns') or {}
-    candidates = _table_column_candidates(lst, get_visualizer)
+    fields = _table_field_candidates(lst, get_visualizer)
+    row_cols = _table_row_candidates(lst)
+
+    def check_row(expr):
+        checked = expr in columns
+        return (
+            f'<div class="col-compute-row col-add-row'
+            f'{" checked" if checked else ""}">'
+            f'<span class="col-compute-toggle" snc-mouse-down="'
+            f'{html.escape(repr(ColumnToggle(expr=expr)))}">'
+            f'{_render_tally_check(checked)}'
+            f'<span class="col-compute-name">{html.escape(expr)}</span>'
+            f'</span></div>')
 
     rows = [
         f'<div class="col-compute-row col-add-row col-add-write">'
@@ -8223,6 +8292,11 @@ def _render_add_column_panel(lst, model, get_visualizer) -> str:
         f'<span class="col-compute-nocheck"></span>'
         f'<span class="col-compute-name">Add Column</span>'
         f'</span></div>',
+        '<div class="col-compute-sep"></div>',
+        # The row columns first, because Show all and Hide all reach past them
+        # to the fields: anything between the pair and the list they act on
+        # would read as theirs.
+        *(check_row(expr) for expr in row_cols),
         '<div class="col-compute-sep"></div>',
     ]
     rows += [
@@ -8236,19 +8310,13 @@ def _render_add_column_panel(lst, model, get_visualizer) -> str:
                              ('Hide all', ColumnHideAll()))
     ]
 
-    listed = candidates + [c for c in columns if c not in candidates]
-    if listed:
+    # A column the user wrote goes with the fields rather than up with the row
+    # columns: it is read off the row the way they are, and it is the pair's to
+    # hide.
+    written = [c for c in columns if c not in fields and c not in row_cols]
+    if fields or written:
         rows.append('<div class="col-compute-sep"></div>')
-    for expr in listed:
-        checked = expr in columns
-        rows.append(
-            f'<div class="col-compute-row col-add-row'
-            f'{" checked" if checked else ""}">'
-            f'<span class="col-compute-toggle" snc-mouse-down="'
-            f'{html.escape(repr(ColumnToggle(expr=expr)))}">'
-            f'{_render_tally_check(checked)}'
-            f'<span class="col-compute-name">{html.escape(expr)}</span>'
-            f'</span></div>')
+        rows += [check_row(expr) for expr in (*fields, *written)]
 
     # The same event a column ▾ menu's panel carries: a click outside every open
     # panel is a click away from whichever of them is open, and this is one of
@@ -10085,14 +10153,23 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _col_add(model['columns'], expr)
                 _save_columns(model)
 
+        # The fields only. The row columns are their own section for exactly
+        # this reason: they are true of every table rather than detected off
+        # this one, so asking to see the fields is not asking for them.
         case ColumnShowAll():
-            for expr in _table_column_candidates(value, get_visualizer):
+            for expr in _table_field_candidates(value, get_visualizer):
                 _col_add(model['columns'], expr)
             _save_columns(model)
 
+        # The fields only, like Show all: the pair acts on the section it is
+        # drawn against, and the row columns above it are neither's to touch.
+        # So a column the user wrote goes -- it is one of the fields as far as
+        # the menu is concerned -- and `$` stays.
         case ColumnHideAll():
+            spared = set(_table_row_candidates(value))
             for expr in list(model['columns']):
-                _drop_column(model, expr, eval_in_scope)
+                if expr not in spared:
+                    _drop_column(model, expr, eval_in_scope)
             _save_columns(model)
 
         case AddColumnAtClick(col=named, after=after):

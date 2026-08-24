@@ -1577,6 +1577,24 @@
 	}
 }
 
+/* The (+)'s menu borrows those rows -- a checkbox, a name -- but is not one of
+   those submenus: it hangs off the table header rather than out of a column's
+   ▾, so it reads at the size every other top-level menu does instead of the
+   9px a menu nested inside one shrinks to. Rows and panel take the
+   .snc-dropdown-option metrics to match.
+
+   Unscoped for the same reason as .col-menu-panel above: an open panel has been
+   hoisted out of the widget. */
+.snc-dropdown-panel.col-add-panel {
+	font-size: var(--snc-menu-font-size);
+	line-height: normal;
+	padding: 3px;
+
+	.col-compute-row {
+		padding: 1px 4px;
+	}
+}
+
 .list-visualizer .empty-list {
 	font-family: var(--snc-ui-widget-font-family);
 	letter-spacing: -0.025em;

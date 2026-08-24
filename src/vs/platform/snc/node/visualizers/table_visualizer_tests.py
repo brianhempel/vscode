@@ -14599,7 +14599,7 @@ class TestSubcolEvents(unittest.TestCase):
 
 from table_visualizer import (ColumnToggle, ColumnShowAll, ColumnHideAll,
                               ColumnMenuDismiss, ADD_MENU_ID,
-                              _table_column_candidates)
+                              _table_field_candidates, _table_row_candidates)
 
 
 class AddColumnMenuCase(unittest.TestCase):
@@ -14638,6 +14638,19 @@ class AddColumnMenuCase(unittest.TestCase):
         return [html.unescape(n)
                 for n in re.findall(r'col-compute-name">([^<]*)<', panel)]
 
+    def checks(self, panel):
+        """Which of the rows that HAVE a box have it ticked -- so the three
+        action rows over them don't have to be counted past."""
+        return [' checked' in row for row in self.rows(panel)
+                if 'col-tally-check' in row]
+
+    def sections(self, panel):
+        """The names in each run of rows between separators, so a test can say
+        which section a row is in rather than counting to it."""
+        return [[html.unescape(n)
+                 for n in re.findall(r'col-compute-name">([^<]*)<', part)]
+                for part in panel.split('col-compute-sep')]
+
 
 class TestAddColumnMenuRendering(AddColumnMenuCase):
     """Which columns the table shows is mostly a matter of ticking the fields
@@ -14664,21 +14677,36 @@ class TestAddColumnMenuRendering(AddColumnMenuCase):
         self.assertEqual(self.names(panel)[0], 'Add Column')
         self.assertIn(html.escape(repr(AddColumnClick())), panel)
 
-    def test_show_all_and_hide_all_sit_under_it(self):
+    def test_show_all_and_hide_all_sit_directly_over_the_fields(self):
+        # Neither reaches the section above them, so they are drawn against the
+        # one list they do reach.
         panel = self.panel(self.model())
-        self.assertEqual(self.names(panel)[1:3], ['Show all', 'Hide all'])
+        self.assertEqual(self.names(panel)[3:5], ['Show all', 'Hide all'])
         self.assertIn(html.escape(repr(ColumnShowAll())), panel)
         self.assertIn(html.escape(repr(ColumnHideAll())), panel)
 
     def test_it_offers_the_fields_the_rows_have(self):
+        # Under the two questions about the row itself, which sit at the top --
+        # see TestTableRowCandidates.
         self.assertEqual(self.names(self.panel(self.model())),
-                         ['Add Column', 'Show all', 'Hide all',
+                         ['Add Column', '$', 'len($)', 'Show all', 'Hide all',
                           self.NAME, self.AGE])
 
+    def test_the_row_columns_sit_in_a_section_of_their_own(self):
+        # Over Show all / Hide all rather than under the fields, because
+        # neither of those reaches them: a section they act on and a section
+        # they don't can't read as one list, and the pair belongs against the
+        # one it acts on.
+        self.assertEqual(self.sections(self.panel(self.model())),
+                         [['Add Column'],
+                          ['$', 'len($)'],
+                          ['Show all', 'Hide all'],
+                          [self.NAME, self.AGE]])
+
     def test_a_column_already_shown_is_checked(self):
-        rows = self.rows(self.panel(self.model({self.NAME: {}})))
-        self.assertIn('checked', rows[-2])
-        self.assertNotIn('checked', rows[-1])
+        # The name is on; the whole row, its length and the age are not.
+        self.assertEqual(self.checks(self.panel(self.model({self.NAME: {}}))),
+                         [False, False, True, False])
 
     def test_clicking_a_row_toggles_that_column(self):
         self.assertIn(html.escape(repr(ColumnToggle(expr=self.NAME))),
@@ -14688,16 +14716,21 @@ class TestAddColumnMenuRendering(AddColumnMenuCase):
         # Checked by being there at all, like an aggregation the user wrote:
         # the menu is where a column goes off as well as on, so one it never
         # proposed still needs its row.
-        panel = self.panel(self.model({'len($)': {}}))
-        self.assertEqual(self.names(panel)[-1], 'len($)')
-        self.assertIn('checked', self.rows(panel)[-1])
+        # With the detected fields rather than with `$` and `len($)`: it is a
+        # column read off the row like they are, and Show all and Hide all are
+        # what the section above is separated from.
+        panel = self.panel(self.model({'sorted($)': {}}))
+        self.assertEqual(self.sections(panel)[3],
+                         [self.NAME, self.AGE, 'sorted($)'])
+        self.assertEqual(self.checks(panel), [False, False, False, False, True])
 
-    def test_a_list_with_no_fields_still_offers_its_column(self):
-        # Nothing to detect on a list of numbers, but it has a column all the
-        # same, and this is the menu that takes one away.
+    def test_a_list_with_no_fields_offers_the_row_and_nothing_else(self):
+        # Nothing to detect on a list of numbers, and `$` is the whole of what
+        # such a table can show -- which is the column it opens with.
         panel = self.panel(self.model({'$': {}}, lst=[1, 2, 3]), lst=[1, 2, 3])
         self.assertEqual(self.names(panel),
-                         ['Add Column', 'Show all', 'Hide all', '$'])
+                         ['Add Column', '$', 'Show all', 'Hide all'])
+        self.assertEqual(self.checks(panel), [True])
 
     def test_the_trigger_stays_lit_while_the_menu_is_open(self):
         # The panel is hoisted out of the header, so the pointer leaves the (+)
@@ -14717,6 +14750,15 @@ class TestAddColumnMenuRendering(AddColumnMenuCase):
         self.assertIn(f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}"',
                       self.panel(self.model()))
 
+    def test_it_reads_as_a_top_level_menu_rather_than_a_submenu(self):
+        # It borrows the compute submenu's rows, but it is not one: it hangs
+        # off the header rather than out of a column's ▾, so it carries
+        # `.col-add-panel` for CSS to size it at menu size by.
+        classes = re.search(r'<div class="([^"]*col-add-panel[^"]*)"',
+                            self.head(self.model())).group(1).split()
+        self.assertIn('col-add-panel', classes)
+        self.assertIn('col-compute-panel', classes)
+
     def test_a_small_table_has_no_plus_and_so_no_menu(self):
         model = self.model()
         out = visualize(self.ROWS, model, self.gv, None, small=True)
@@ -14728,8 +14770,9 @@ class TestAddColumnMenuRendering(AddColumnMenuCase):
         # numbers still carries the menu that puts a column back.
         panel = self.panel(self.model({}))
         self.assertEqual(self.names(panel),
-                         ['Add Column', 'Show all', 'Hide all',
+                         ['Add Column', '$', 'len($)', 'Show all', 'Hide all',
                           self.NAME, self.AGE])
+        self.assertEqual(self.checks(panel), [False, False, False, False])
 
 
 class TestAddColumnMenuOverADict(AddColumnMenuCase):
@@ -14741,27 +14784,114 @@ class TestAddColumnMenuOverADict(AddColumnMenuCase):
 
     def test_it_offers_the_key_and_value_columns(self):
         self.assertEqual(self.names(self.panel(self.model())),
-                         ['Add Column', 'Show all', 'Hide all', '$k', '$v'])
+                         ['Add Column', '$', 'Show all', 'Hide all',
+                          '$k', '$v'])
 
 
-class TestTableColumnCandidates(unittest.TestCase):
-    """What the (+) menu offers to show: the same fields the box's autocomplete
-    suggests, so a field means one thing wherever it is offered."""
+class TestAddColumnMenuOverGroups(AddColumnMenuCase):
+    """The shape Group By writes: a dict of lists, where how big each group is
+    is the question the table is usually being read for."""
+
+    gv = staticmethod(mock_get_visualizer_dict_tables)
+    ROWS = {'eng': [1, 2], 'mkt': [3]}
+
+    def test_it_offers_the_size_of_each_group(self):
+        self.assertEqual(self.sections(self.panel(self.model()))[1],
+                         ['$', 'len($v)'])
+
+    def test_ticking_it_adds_the_column(self):
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            model, _ = update(make_column_mouse_event(
+                repr(ColumnToggle(expr='len($v)'))), None, self.model(),
+                self.ROWS, self.gv)
+        self.assertIn('len($v)', model['columns'])
+
+
+class TestTableFieldCandidates(unittest.TestCase):
+    """The fields the (+) menu offers to show, which are the ones the box's
+    autocomplete suggests -- so a field means one thing wherever it is offered.
+    What Show all reaches, and nothing else."""
 
     def test_a_list_of_rows_offers_their_fields(self):
         lst = [{'name': 'Alice'}, {'name': 'Bob', 'age': 25}]
-        self.assertEqual(_table_column_candidates(lst, mock_get_visualizer),
+        self.assertEqual(_table_field_candidates(lst, mock_get_visualizer),
                          ["$['name']", "$['age']"])
 
     def test_a_dict_offers_its_key_beside_its_values_fields(self):
         d = {'t1': {'who': 'ann'}}
         self.assertEqual(
-            _table_column_candidates(d, mock_get_visualizer_dict_tables),
+            _table_field_candidates(d, mock_get_visualizer_dict_tables),
             ['$k', "$v['who']"])
 
-    def test_a_list_of_numbers_offers_nothing(self):
-        self.assertEqual(_table_column_candidates([1, 2, 3], mock_get_visualizer),
+    def test_a_list_of_numbers_has_no_fields_to_offer(self):
+        self.assertEqual(_table_field_candidates([1, 2, 3], mock_get_visualizer),
                          [])
+
+    def test_the_row_columns_are_not_among_them(self):
+        # They are the other section, so Show all can leave them alone.
+        for value, gv in (([{'a': 1}], mock_get_visualizer),
+                          ({'k': {'a': 1}}, mock_get_visualizer_dict_tables),
+                          (['ab', 'cd'], mock_get_visualizer),
+                          ([1, 2], mock_get_visualizer)):
+            with self.subTest(value=value):
+                fields = _table_field_candidates(value, gv)
+                for row_col in _table_row_candidates(value):
+                    self.assertNotIn(row_col, fields)
+
+    def test_nothing_to_ask_for_fields_offers_none(self):
+        self.assertEqual(_table_field_candidates([{'a': 1}], None), [])
+
+
+class TestTableRowCandidates(unittest.TestCase):
+    """The columns about the ROW rather than about a field read off it: `$`,
+    and how long the row is where it has a length -- the first thing asked of a
+    table of strings or lists, and of a dict of groups how big each group is.
+
+    Their own section of the menu, and their own list here, because Show all
+    does not reach them: they are true of every table rather than detected off
+    one, so "show every field this table has" is not an ask for them.
+    """
+
+    def candidates(self, value):
+        return _table_row_candidates(value)
+
+    def test_the_row_itself_is_always_offered(self):
+        for value in ([{'a': 1}], [1, 2], ['ab'], [], {}, {'a': 1}):
+            with self.subTest(value=value):
+                self.assertEqual(self.candidates(value)[0], '$')
+
+    def test_a_list_of_strings_offers_their_length(self):
+        self.assertEqual(self.candidates(['ab', 'cde']), ['$', 'len($)'])
+
+    def test_a_list_of_lists_offers_it_too(self):
+        self.assertEqual(self.candidates([[1, 2], [3]]), ['$', 'len($)'])
+
+    def test_a_dict_measures_its_values_rather_than_its_pairs(self):
+        # A pair is two long whatever is in it, so `len($)` over a dict would
+        # be a column of 2s. The group is what has an interesting size.
+        self.assertEqual(self.candidates({'eng': [1, 2], 'mkt': [3]}),
+                         ['$', 'len($v)'])
+
+    def test_rows_with_no_length_are_not_offered_one(self):
+        for value in ([1, 2, 3], [None, None], {'a': 1}):
+            with self.subTest(value=value):
+                self.assertEqual(self.candidates(value), ['$'])
+
+    def test_one_row_with_a_length_is_enough(self):
+        # The same rule a field only some rows have goes by: the column means
+        # something wherever it is defined, and reads as a hole where it isn't.
+        self.assertIn('len($)', self.candidates(['ab', 2, 3]))
+
+    def test_an_empty_container_has_no_row_to_measure(self):
+        # And nothing to sample either, so asking must not reach for a row 0
+        # that isn't there.
+        for value in ([], {}):
+            with self.subTest(value=value):
+                self.assertEqual(self.candidates(value), ['$'])
+
+    def test_the_length_is_offered_under_the_row(self):
+        # `$` is the row; `len($)` is a question about it.
+        self.assertEqual(self.candidates(['ab']), ['$', 'len($)'])
 
 
 class TestAddColumnMenuEvents(AddColumnMenuCase):
@@ -14790,13 +14920,50 @@ class TestAddColumnMenuEvents(AddColumnMenuCase):
         model, _ = self.click(self.model({}), ColumnShowAll())
         self.assertEqual(list(model['columns']), [self.NAME, self.AGE])
 
+    def test_show_all_leaves_the_row_columns_alone(self):
+        # They are true of every table rather than detected off this one, so
+        # "show every field this table has" is not an ask for them.
+        model, _ = self.click(self.model({}), ColumnShowAll())
+        self.assertNotIn('$', model['columns'])
+        self.assertNotIn('len($)', model['columns'])
+
+    def test_show_all_does_not_take_away_a_row_column_already_on(self):
+        # Untouched means untouched: it adds fields, it never tidies.
+        model, _ = self.click(self.model({'$': {}}), ColumnShowAll())
+        self.assertEqual(list(model['columns']), ['$', self.NAME, self.AGE])
+
     def test_show_all_leaves_the_columns_already_there_where_they_are(self):
         model, _ = self.click(self.model({self.AGE: {}}), ColumnShowAll())
         self.assertEqual(list(model['columns']), [self.AGE, self.NAME])
 
+    def test_hide_all_leaves_the_row_columns_alone(self):
+        # Symmetric with Show all: the pair acts on the section it is drawn
+        # against, and the one above it is neither's to touch.
+        model, _ = self.click(self.model({'$': {}, self.NAME: {}, 'len($)': {}}),
+                              ColumnHideAll())
+        self.assertEqual(list(model['columns']), ['$', 'len($)'])
+
+    def test_hide_all_over_a_dict_spares_the_length_of_its_values(self):
+        # `len($v)` is that table's row column, so it is the one spared there.
+        groups = {'eng': [1, 2], 'mkt': [3]}
+        model = init_model(groups, mock_get_visualizer_dict_tables)
+        model['columns'] = {'$k': {}, 'len($v)': {}}
+        with patch('table_visualizer.save_columns_to_dotfile'):
+            out, _ = update(make_column_mouse_event(repr(ColumnHideAll())),
+                            None, model, groups,
+                            mock_get_visualizer_dict_tables)
+        self.assertEqual(list(out['columns']), ['len($v)'])
+
+    def test_the_row_itself_can_be_put_on_and_taken_off(self):
+        model, _ = self.click(self.model({self.NAME: {}}), ColumnToggle(expr='$'))
+        self.assertEqual(list(model['columns']), [self.NAME, '$'])
+        model, _ = self.click(model, ColumnToggle(expr='$'))
+        self.assertEqual(list(model['columns']), [self.NAME])
+
     def test_hide_all_takes_the_written_ones_too(self):
-        # Everything the menu lists is what it reaches, as in Subcolumns.
-        model, _ = self.click(self.model({self.NAME: {}, 'len($)': {}}),
+        # Everything in the section it acts on, as in Subcolumns: a column the
+        # user wrote is one of the fields as far as the menu is concerned.
+        model, _ = self.click(self.model({self.NAME: {}, 'sorted($)': {}}),
                               ColumnHideAll())
         self.assertEqual(list(model['columns']), [])
 
