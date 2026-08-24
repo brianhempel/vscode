@@ -28,8 +28,6 @@ import importlib.util
 import glob
 import random
 import time
-from contextlib import redirect_stdout, redirect_stderr
-from io import StringIO
 from typing import List, Dict, Any, Optional, Callable, Protocol, TextIO, Tuple, cast
 
 # Make the built-in visualizers dir importable so we can share helpers (e.g.
@@ -42,6 +40,7 @@ if _BUILTIN_VISUALIZERS_DIR not in sys.path:
 
 from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
+import std_streams
 import url_cache
 
 # This is the only way to make a Module type in Python
@@ -619,6 +618,28 @@ def emit_meta(meta: str) -> None:
     """Emit a meta message for debugging/timing."""
     try:
         _stream_out.write(json.dumps({"type": "meta", "meta": meta, "t": time.time()}, ensure_ascii=False) + "\n")
+        _stream_out.flush()
+    except Exception:
+        pass
+
+
+def emit_output(stream: str, text: str, stdin_offset: int) -> None:
+    """Stream a chunk of the program's stdout/stderr to the editor.
+
+    `stdin_offset` is how much of the stdin document had been consumed when the
+    text was written, which is what places the chunk between the right two lines
+    of the console.
+    """
+    try:
+        msg: Dict[str, Any] = {
+            "type": "output",
+            "stream": stream,
+            "text": text,
+            "stdin_offset": stdin_offset,
+        }
+        if _current_run_id:
+            msg["run_id"] = _current_run_id
+        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
         _stream_out.flush()
     except Exception:
         pass
@@ -1810,26 +1831,51 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
 # ============================================================================
 
 
-def execute_code(code_object: Any, globals_dict: Dict[str, Any], import_code: Any = None) -> Dict[str, Any]:
-    """Execute compiled code and return result with stdout/stderr/exitCode.
+def execute_code(
+    code_object: Any,
+    globals_dict: Dict[str, Any],
+    import_code: Any = None,
+    stdin_text: str = '',
+    stdin_eof: bool = True,
+    replay_output: Optional[List[Tuple[str, str, int]]] = None,
+) -> Dict[str, Any]:
+    """Execute compiled code and return the run's result.
 
     `import_code` is the user's leading imports, when they haven't been run
     already (the checkpoint 1 path). They execute inside the same try as the
     body so that a failing import stays an inline error item on its own line,
     and they execute before `reseed` so that generators owned by the modules
     they pull in are seeded too.
-    """
-    out_buf = StringIO()
-    err_buf = StringIO()
-    exit_code = 0
 
-    with redirect_stdout(out_buf), redirect_stderr(err_buf):
+    `stdin_text` is the console document the editor recorded for this file, and
+    `stdin_eof` says whether the stream ends there. `replay_output` is output
+    captured before this call (the checkpoint 2 import phase), emitted first so
+    both checkpoint paths produce the same transcript.
+
+    stdout/stderr are streamed as they're written rather than returned, so the
+    `stdout`/`stderr` keys here stay empty; they remain in the result only
+    because the syntax-error path still fills `stderr` in.
+    """
+    exit_code = 0
+    awaiting: Optional[std_streams.NeedsInput] = None
+
+    for chunk in (replay_output or []):
+        emit_output(*chunk)
+
+    streams = std_streams.StdStreams(stdin_text, stdin_eof, emit_output)
+    with streams.installed():
         emit_meta('exec-start')
         try:
             if import_code is not None:
                 exec(import_code, globals_dict)
             reseed()
             exec(code_object, globals_dict)
+        except std_streams.NeedsInput as e:
+            # Not an error: the program is asking the user for input we don't
+            # have yet. It gets no red item and no traceback — the editor shows
+            # the prompt and waits. The statements after the read simply don't
+            # run, exactly as they wouldn't have in a terminal.
+            awaiting = e
         except Exception as e:
             tb_str = traceback.format_exc()
             error_line = extract_error_line_from_traceback(tb_str)
@@ -1842,15 +1888,20 @@ def execute_code(code_object: Any, globals_dict: Dict[str, Any], import_code: An
             print(tb_str, file=sys.stderr)
             exit_code = 1
 
-    return {
-        "stdout": out_buf.getvalue(),
-        "stderr": err_buf.getvalue(),
+    result: Dict[str, Any] = {
+        "stdout": "",
+        "stderr": "",
         "exitCode": exit_code,
-        "syntaxError": False
+        "syntaxError": False,
+        "stdinConsumed": streams.consumed,
     }
+    if awaiting is not None:
+        result["awaitingInput"] = True
+        result["awaitingKind"] = awaiting.kind
+    return result
 
 
-def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None) -> None:
+def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None) -> None:
     """Execute a run with the given code object and models/events.
 
     If globals_dict is provided (e.g. pre-populated with imports for checkpoint 2),
@@ -1858,6 +1909,10 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
 
     `import_code` is passed through to `execute_code` on the checkpoint 1 path,
     where the imports haven't been run yet.
+
+    `stdin_eof` defaults to False here because a pool run with no console
+    document yet should *starve* on a read rather than see EOF — starving is
+    what opens the console and lets the user type.
     """
     global models_and_events, execution_step, line_emit_counter, _current_run_id, _focused_line
 
@@ -1883,7 +1938,8 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
         }
     sys.argv = []
 
-    result = execute_code(code_object, globals_dict, import_code=import_code)
+    result = execute_code(code_object, globals_dict, import_code=import_code,
+                          stdin_text=stdin_text, stdin_eof=stdin_eof, replay_output=replay_output)
     _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")
     _stream_out.flush()
 
@@ -1956,6 +2012,11 @@ def run_pool_worker_mode(working_directory: str) -> None:
         code = cmd.get('code', '')
         emit_meta('init-imports-start')
 
+        # Held rather than emitted: there is no run yet to attribute it to. It
+        # goes out ahead of the body's output on the run below, so that a file
+        # whose imports print looks the same whichever checkpoint served it.
+        import_output: List[Tuple[str, str, int]] = []
+
         try:
             import_code, body_code = split_leading_imports(code)
 
@@ -1965,7 +2026,13 @@ def run_pool_worker_mode(working_directory: str) -> None:
                 '_log_value': log_value,
                 '_log_and_return': log_and_return
             }
-            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            # No console document exists at import time, so an import that reads
+            # stdin sees EOF — what it would get from any non-interactive run.
+            # (Checkpoint 1 would starve it instead; imports that read stdin are
+            # pathological enough not to be worth reconciling.)
+            import_streams = std_streams.StdStreams(
+                '', True, lambda *chunk: import_output.append(chunk))
+            with import_streams.installed():
                 exec(import_code, import_globals)
         except Exception as e:
             _stream_out.write(json.dumps({"type": "error", "error": f"Import error: {e}"}) + "\n")
@@ -2001,7 +2068,9 @@ def run_pool_worker_mode(working_directory: str) -> None:
         globals_dict: Dict[str, Any] = dict(import_globals)
         globals_dict['_log_value'] = log_value
         globals_dict['_log_and_return'] = log_and_return
-        _execute_run(body_code, m_and_e_json, run_id, focused_line=focused_line, globals_dict=globals_dict)
+        _execute_run(body_code, m_and_e_json, run_id, focused_line=focused_line, globals_dict=globals_dict,
+                     stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
+                     replay_output=import_output)
         sys.exit(0)
 
     elif cmd.get('type') == 'run':
@@ -2036,7 +2105,8 @@ def run_pool_worker_mode(working_directory: str) -> None:
             sys.exit(0)
 
         emit_meta('compile-done')  # split_leading_imports transforms and compiles in one step
-        _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line, import_code=import_code)
+        _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line, import_code=import_code,
+                     stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)))
         sys.exit(0)
 
     else:

@@ -6,6 +6,7 @@ Run:
 """
 
 import __future__
+import contextlib
 import importlib.util
 import io
 import json
@@ -19,6 +20,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+import std_streams
 import url_cache
 import python_runner
 from python_runner import (
@@ -42,6 +44,37 @@ def exp_attr(*exprs):
     """The `snc-py-exps` attribute a handle offering these expressions carries,
     as it reads inside the tag it was written into."""
     return py_exp_attrs(list(exprs), draggable=False).strip()
+
+
+class _StreamMessages:
+    """The NDJSON messages the runner wrote to the editor."""
+
+    def __init__(self, buf):
+        self._buf = buf
+
+    def all(self):
+        return [json.loads(line) for line in self._buf.getvalue().splitlines() if line.strip()]
+
+    def output(self, stream=None):
+        """(stream, text, stdin_offset) for each output chunk, in order."""
+        return [(m['stream'], m['text'], m['stdin_offset'])
+                for m in self.all()
+                if m.get('type') == 'output' and (stream is None or m['stream'] == stream)]
+
+    def text_of(self, stream):
+        return ''.join(text for _, text, _ in self.output(stream))
+
+
+@contextlib.contextmanager
+def capture_stream_messages():
+    """Redirect the runner's message channel into a buffer for the block."""
+    buf = io.StringIO()
+    old = python_runner._stream_out
+    python_runner._stream_out = buf
+    try:
+        yield _StreamMessages(buf)
+    finally:
+        python_runner._stream_out = old
 
 
 class TestSplitLeadingImports(unittest.TestCase):
@@ -151,7 +184,8 @@ class TestReseed(unittest.TestCase):
         python_runner.log_value = lambda line, value, *args, **kwargs: errors.append((line, value))
         try:
             import_code, body_code = split_leading_imports("import nonexistent_module_xyz\nx = 1\n")
-            result = execute_code(body_code, self._globals([]), import_code=import_code)
+            with capture_stream_messages() as msgs:
+                result = execute_code(body_code, self._globals([]), import_code=import_code)
         finally:
             python_runner.log_value = real_log_value
 
@@ -159,7 +193,7 @@ class TestReseed(unittest.TestCase):
         self.assertEqual(errors[0][0], 1)
         self.assertIsInstance(errors[0][1], UncaughtError)
         self.assertIsInstance(errors[0][1].exception, ModuleNotFoundError)
-        self.assertIn("nonexistent_module_xyz", result["stderr"])
+        self.assertIn("nonexistent_module_xyz", msgs.text_of('stderr'))
 
 
 class TestUncaughtErrorItems(unittest.TestCase):
@@ -870,3 +904,191 @@ class TestSourceSpanReachesTheVisualizer(unittest.TestCase):
     def test_one_that_does_not_ask_still_renders(self):
         self.assertIn('no span asked for',
                       self.html(self._DoesNot(), (1, 7, 1, 16)))
+
+
+class TestProgramIO(unittest.TestCase):
+    """The user program's stdout/stderr stream to the editor, and its stdin is
+    replayed from the console document rather than read from a live pipe."""
+
+    def _globals(self, logged):
+        return {
+            "__name__": "__main__",
+            "__file__": "<string>",
+            "_log_value": lambda line, value, *a, **k: logged.append((line, value)),
+            "_log_and_return": lambda line, value, *a, **k: (logged.append((line, value)), value)[1],
+        }
+
+    def _run(self, source_code, stdin_text='', stdin_eof=True, **kwargs):
+        """Run through the checkpoint 1 path; returns (result, messages, logged)."""
+        logged = []
+        import_code, body_code = split_leading_imports(source_code)
+        real_log_value = python_runner.log_value
+        python_runner.log_value = lambda line, value, *a, **k: logged.append((line, value))
+        try:
+            with capture_stream_messages() as msgs:
+                result = execute_code(body_code, self._globals(logged), import_code=import_code,
+                                      stdin_text=stdin_text, stdin_eof=stdin_eof, **kwargs)
+        finally:
+            python_runner.log_value = real_log_value
+        return result, msgs, logged
+
+    def test_print_reaches_the_editor_as_a_stdout_chunk(self):
+        _, msgs, _ = self._run("print('hi')\n")
+        self.assertEqual(msgs.text_of('stdout'), 'hi\n')
+
+    def test_the_result_no_longer_carries_the_output(self):
+        # It streams instead; leaving a copy in the result would double-render.
+        result, _, _ = self._run("print('hi')\n")
+        self.assertEqual(result["stdout"], '')
+        self.assertEqual(result["stderr"], '')
+
+    def test_input_is_replayed_from_the_recorded_stdin(self):
+        _, _, logged = self._run("name = input('Name? ')\n", stdin_text='Brian\n')
+        self.assertIn('Brian', [value for _, value in logged])
+
+    def test_prompts_and_output_carry_the_offset_they_were_written_at(self):
+        _, msgs, _ = self._run(
+            "a = input('Name? ')\nb = input('Age? ')\nprint('hi', a, b)\n",
+            stdin_text='Brian\n30\n')
+        self.assertEqual(msgs.output(), [
+            ('stdout', 'Name? ', 0),
+            ('stdout', 'Age? ', 6),
+            ('stdout', 'hi Brian 30\n', 9),
+        ])
+
+    def test_the_result_reports_how_much_stdin_was_consumed(self):
+        result, _, _ = self._run("input()\n", stdin_text='Brian\n30\n')
+        self.assertEqual(result["stdinConsumed"], 6)
+
+    def test_stderr_is_tagged_separately_from_stdout(self):
+        _, msgs, _ = self._run("import sys\nprint('out')\nprint('err', file=sys.stderr)\n")
+        self.assertEqual(msgs.text_of('stdout'), 'out\n')
+        self.assertEqual(msgs.text_of('stderr'), 'err\n')
+
+    def test_output_interleaves_across_the_two_streams(self):
+        _, msgs, _ = self._run(
+            "import sys\nprint('a')\nprint('b', file=sys.stderr)\nprint('c')\n")
+        self.assertEqual([(stream, text) for stream, text, _ in msgs.output()],
+                         [('stdout', 'a\n'), ('stderr', 'b\n'), ('stdout', 'c\n')])
+
+
+class TestStarvedRuns(unittest.TestCase):
+    """A read past the end of an unterminated stdin document ends the run
+    waiting for the user, not in an error."""
+
+    _SOURCE = "a = input('Name? ')\nb = 2\n"
+
+    def _run(self, source_code, stdin_text='', stdin_eof=False):
+        logged = []
+        import_code, body_code = split_leading_imports(source_code)
+        globals_dict = {
+            "__name__": "__main__",
+            "__file__": "<string>",
+            "_log_value": lambda line, value, *a, **k: logged.append((line, value)),
+            "_log_and_return": lambda line, value, *a, **k: (logged.append((line, value)), value)[1],
+        }
+        real_log_value = python_runner.log_value
+        python_runner.log_value = lambda line, value, *a, **k: logged.append((line, value))
+        try:
+            with capture_stream_messages() as msgs:
+                result = execute_code(body_code, globals_dict, import_code=import_code,
+                                      stdin_text=stdin_text, stdin_eof=stdin_eof)
+        finally:
+            python_runner.log_value = real_log_value
+        return result, msgs, logged
+
+    def test_the_run_reports_that_it_is_awaiting_input(self):
+        result, _, _ = self._run(self._SOURCE)
+        self.assertTrue(result["awaitingInput"])
+        self.assertEqual(result["awaitingKind"], 'line')
+
+    def test_waiting_is_not_a_failure(self):
+        result, _, _ = self._run(self._SOURCE)
+        self.assertEqual(result["exitCode"], 0)
+        self.assertFalse(result["syntaxError"])
+
+    def test_no_red_error_item_is_logged(self):
+        _, _, logged = self._run(self._SOURCE)
+        self.assertEqual([v for _, v in logged if isinstance(v, UncaughtError)], [])
+
+    def test_no_traceback_is_printed(self):
+        _, msgs, _ = self._run(self._SOURCE)
+        self.assertEqual(msgs.text_of('stderr'), '')
+
+    def test_the_prompt_still_reaches_the_editor(self):
+        _, msgs, _ = self._run(self._SOURCE)
+        self.assertEqual(msgs.text_of('stdout'), 'Name? ')
+
+    def test_statements_after_the_starved_read_do_not_run(self):
+        _, _, logged = self._run(self._SOURCE)
+        self.assertNotIn(2, [value for _, value in logged])
+
+    def test_earlier_statements_still_visualize(self):
+        _, _, logged = self._run("x = 1\ny = input()\n")
+        self.assertIn(1, [value for _, value in logged])
+
+    def test_a_read_to_end_of_stream_asks_for_eof(self):
+        result, _, _ = self._run("import sys\ntext = sys.stdin.read()\n", stdin_text='a\n')
+        self.assertEqual(result["awaitingKind"], 'eof')
+
+    def test_ending_the_stream_lets_a_read_to_end_complete(self):
+        result, _, logged = self._run("import sys\ntext = sys.stdin.read()\n",
+                                      stdin_text='a\n', stdin_eof=True)
+        self.assertNotIn("awaitingInput", result)
+        self.assertIn('a\n', [value for _, value in logged])
+
+    def test_a_user_except_exception_cannot_swallow_the_wait(self):
+        result, _, _ = self._run("try:\n    a = input()\nexcept Exception:\n    a = 'swallowed'\n")
+        self.assertTrue(result["awaitingInput"])
+
+    def test_reading_past_a_stream_that_did_end_is_an_ordinary_eof_error(self):
+        # Once the user marks the end, `input()` failing is the program's bug
+        # and belongs in red like any other exception.
+        result, _, logged = self._run("a = input()\n", stdin_text='', stdin_eof=True)
+        self.assertNotIn("awaitingInput", result)
+        self.assertEqual(result["exitCode"], 1)
+        self.assertTrue(any(isinstance(v, UncaughtError) and isinstance(v.exception, EOFError)
+                            for _, v in logged))
+
+
+class TestCheckpointsAgreeOnOutput(unittest.TestCase):
+    """A file whose imports print must look the same whichever pool served it.
+
+    Checkpoint 2 runs the imports during pre-warm, before there's a run to
+    attribute their output to, so it holds the chunks and replays them ahead of
+    the body's.
+    """
+
+    _SOURCE = "import os\nprint('from imports')\nprint('from body')\n"
+
+    def _globals(self):
+        return {
+            "__name__": "__main__",
+            "__file__": "<string>",
+            "_log_value": lambda line, value, *a, **k: None,
+            "_log_and_return": lambda line, value, *a, **k: value,
+        }
+
+    def _checkpoint1(self):
+        import_code, body_code = split_leading_imports(self._SOURCE)
+        with capture_stream_messages() as msgs:
+            execute_code(body_code, self._globals(), import_code=import_code)
+        return msgs.output()
+
+    def _checkpoint2(self):
+        import_code, body_code = split_leading_imports(self._SOURCE)
+        globals_dict = self._globals()
+        held = []
+        import_streams = std_streams.StdStreams('', True, lambda *chunk: held.append(chunk))
+        with import_streams.installed():
+            exec(import_code, globals_dict)
+        with capture_stream_messages() as msgs:
+            execute_code(body_code, globals_dict, replay_output=held)
+        return msgs.output()
+
+    def test_import_output_is_not_dropped_by_checkpoint_2(self):
+        self.assertIn('from imports', ''.join(t for _, t, _ in self._checkpoint2()))
+
+    def test_both_checkpoints_produce_the_same_transcript(self):
+        self.assertEqual(''.join(t for _, t, _ in self._checkpoint1()),
+                         ''.join(t for _, t, _ in self._checkpoint2()))
