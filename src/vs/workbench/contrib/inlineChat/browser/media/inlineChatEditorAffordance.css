@@ -18,6 +18,10 @@
 	z-index: 100;
 }
 
+.inline-chat-content-widget .action-item.inline-chat-affordance-empty {
+	display: none;
+}
+
 .inline-chat-content-widget .action-label.codicon.codicon-light-bulb,
 .inline-chat-content-widget .action-label.codicon.codicon-lightbulb-sparkle,
 .inline-edits-view-gutter-indicator .codicon.codicon-light-bulb,

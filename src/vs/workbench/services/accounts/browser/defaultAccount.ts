@@ -88,7 +88,26 @@ interface IMcpRegistryResponse {
 	readonly mcp_registries: ReadonlyArray<IMcpRegistryProvider>;
 }
 
-function toDefaultAccountConfig(defaultChatAgent: IDefaultChatAgent): IDefaultAccountConfig {
+const NO_DEFAULT_ACCOUNT_CONFIG: IDefaultAccountConfig = {
+	preferredExtensions: [],
+	authenticationProvider: {
+		default: { id: '', name: '' },
+		enterprise: { id: '', name: '' },
+		enterpriseProviderConfig: '',
+		enterpriseProviderUriSetting: '',
+		scopes: [],
+	},
+	entitlementUrl: '',
+	tokenEntitlementUrl: '',
+	mcpRegistryDataUrl: '',
+	managedSettingsUrl: '',
+};
+
+function toDefaultAccountConfig(defaultChatAgent: IDefaultChatAgent | undefined): IDefaultAccountConfig {
+	if (!defaultChatAgent) {
+		return NO_DEFAULT_ACCOUNT_CONFIG; // no default chat agent configured in `product.json`
+	}
+
 	return {
 		preferredExtensions: [
 			defaultChatAgent.chatExtensionId,
@@ -145,6 +164,10 @@ export class DefaultAccountService extends Disposable implements IDefaultAccount
 	) {
 		super();
 		this.defaultAccountConfig = toDefaultAccountConfig(productService.defaultChatAgent);
+
+		if (!productService.defaultChatAgent) {
+			this.initBarrier.open(); // no provider will ever be set, do not block callers forever
+		}
 	}
 
 	async getDefaultAccount(): Promise<IDefaultAccount | null> {
@@ -1175,6 +1198,11 @@ class DefaultAccountProviderContribution extends Disposable implements IWorkbenc
 		@IDefaultAccountService defaultAccountService: IDefaultAccountService,
 	) {
 		super();
+
+		if (!productService.defaultChatAgent) {
+			return; // no default chat agent configured in `product.json`, nothing to authenticate against
+		}
+
 		const defaultAccountProvider = this._register(instantiationService.createInstance(DefaultAccountProvider, toDefaultAccountConfig(productService.defaultChatAgent)));
 		defaultAccountService.setDefaultAccountProvider(defaultAccountProvider);
 	}

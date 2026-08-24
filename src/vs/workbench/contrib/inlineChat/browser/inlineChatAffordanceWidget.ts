@@ -12,7 +12,7 @@ import { ContentWidgetPositionPreference, ICodeEditor, IContentWidget, IContentW
 import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
 import { Selection, SelectionDirection } from '../../../../editor/common/core/selection.js';
 import { computeIndentLevel } from '../../../../editor/common/model/utils.js';
-import { autorun, IObservable } from '../../../../base/common/observable.js';
+import { autorun, IObservable, IReader, observableSignalFromEvent } from '../../../../base/common/observable.js';
 import { MenuId, MenuItemAction } from '../../../../platform/actions/common/actions.js';
 import { HiddenItemStrategy, MenuWorkbenchToolBar } from '../../../../platform/actions/browser/toolbar.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -92,6 +92,11 @@ class QuickFixActionViewItem extends MenuEntryActionViewItem {
 
 		store.add(autorun(reader => {
 			const info = controller.lightBulbState.read(reader);
+
+			// No code actions at this position: take the item out of the toolbar rather
+			// than offering a lightbulb that opens an empty menu.
+			this.element?.classList.toggle('inline-chat-affordance-empty', !info);
+
 			if (this.label) {
 				// Update icon
 				const icon = info?.icon ?? Codicon.lightBulb;
@@ -190,9 +195,12 @@ export class InlineChatAffordanceWidget extends Disposable implements IContentWi
 			this.#hide();
 		}));
 
+		const menuItemsChanged = observableSignalFromEvent(this, toolbar.onDidChangeMenuItems);
+
 		this._store.add(autorun(r => {
+			menuItemsChanged.read(r);
 			const sel = selection.read(r);
-			if (sel) {
+			if (sel && this.#hasContent(toolbar, r)) {
 				this.#show(sel);
 			} else {
 				this.#hide();
@@ -211,6 +219,28 @@ export class InlineChatAffordanceWidget extends Disposable implements IContentWi
 				this.#hide();
 			}
 		}));
+	}
+
+	/**
+	 * The quick fix item stays in the menu whenever a code action *provider* exists, even
+	 * when that provider has nothing to offer at this position. Showing the affordance for
+	 * it alone would put an empty box on screen, so require it to actually have actions.
+	 */
+	#hasContent(toolbar: MenuWorkbenchToolBar, reader: IReader): boolean {
+		let hasQuickFix = false;
+		for (let i = 0; i < toolbar.getItemsLength(); i++) {
+			const action = toolbar.getItemAction(i);
+			if (!action) {
+				continue;
+			}
+			if (action.id === quickFixCommandId) {
+				hasQuickFix = true;
+			} else {
+				return true; // something other than the quick fix, always worth showing
+			}
+		}
+
+		return hasQuickFix && !!CodeActionController.get(this.#editor)?.lightBulbState.read(reader);
 	}
 
 	#show(selection: Selection): void {

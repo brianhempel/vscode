@@ -482,7 +482,7 @@ export class ChatStatusDashboard extends DomWidget {
 		// Update status text when completions setting changes
 		if (statusEl) {
 			this._store.add(this.configurationService.onDidChangeConfiguration(e => {
-				if (e.affectsConfiguration(defaultChat.completionsEnablementSetting)) {
+				if (defaultChat && e.affectsConfiguration(defaultChat.completionsEnablementSetting)) {
 					statusEl!.textContent = getStatusText();
 				}
 			}));
@@ -600,7 +600,7 @@ export class ChatStatusDashboard extends DomWidget {
 
 		let descriptionText: string | MarkdownString;
 		let descriptionClass = '.description';
-		if (newUser && anonymousUser) {
+		if (newUser && anonymousUser && defaultChat) {
 			descriptionText = new MarkdownString(localize({ key: 'activeDescriptionAnonymous', comment: ['{Locked="]({2})"}', '{Locked="]({3})"}'] }, "By continuing with {0} Copilot, you agree to {1}'s [Terms]({2}) and [Privacy Statement]({3})", defaultChat.provider.default.name, defaultChat.provider.default.name, defaultChat.termsStatementUrl, defaultChat.privacyStatementUrl), { isTrusted: true });
 			descriptionClass = `${descriptionClass}.terms`;
 		} else if (newUser) {
@@ -949,7 +949,7 @@ export class ChatStatusDashboard extends DomWidget {
 
 			const overriddenHint = globalSetting.appendChild($('span.setting-overridden'));
 			const updateOverriddenHint = () => {
-				const obj = this.configurationService.getValue<Record<string, boolean>>(defaultChat.completionsEnablementSetting);
+				const obj = this.configurationService.getValue<Record<string, boolean>>(defaultChat?.completionsEnablementSetting ?? '');
 				const configuredValue = modeId ? this.findConfiguredCompletionsValue(modeId) : undefined;
 				const hasOverride = modeId && configuredValue && isObject(obj) && Boolean(configuredValue.value[modeId]) !== Boolean(obj['*']);
 				overriddenHint.textContent = hasOverride ? localize('settings.overridden', "(overridden)") : '';
@@ -1008,11 +1008,11 @@ export class ChatStatusDashboard extends DomWidget {
 	}
 
 	private createInlineSuggestionsSetting(container: HTMLElement, label: string, modeId: string | undefined): void {
-		this.createSetting(container, [defaultChat.completionsEnablementSetting], label, this.getCompletionsSettingAccessor(modeId));
+		this.createSetting(container, [defaultChat?.completionsEnablementSetting ?? ''], label, this.getCompletionsSettingAccessor(modeId));
 	}
 
 	private createTriStateLanguageSetting(container: HTMLElement, label: string, modeId: string, onStateChange: () => void): void {
-		const settingId = defaultChat.completionsEnablementSetting;
+		const settingId = defaultChat?.completionsEnablementSetting ?? '';
 
 		const getState = (): boolean | 'mixed' => {
 			const configuredValue = this.findConfiguredCompletionsValue(modeId);
@@ -1114,7 +1114,7 @@ export class ChatStatusDashboard extends DomWidget {
 	}
 
 	private findConfiguredCompletionsValues(modeId?: string): { target: ConfigurationTarget; value: Record<string, boolean> }[] {
-		const inspected = this.configurationService.inspect<Record<string, boolean>>(defaultChat.completionsEnablementSetting);
+		const inspected = this.configurationService.inspect<Record<string, boolean>>(defaultChat?.completionsEnablementSetting ?? '');
 		const result: { target: ConfigurationTarget; value: Record<string, boolean> }[] = [];
 		for (const target of completionsConfigurationTargets) {
 			const value = getConfigValueInTarget(inspected, target);
@@ -1126,7 +1126,7 @@ export class ChatStatusDashboard extends DomWidget {
 	}
 
 	private getCompletionsSettingAccessor(modeId = '*'): ISettingsAccessor {
-		const settingId = defaultChat.completionsEnablementSetting;
+		const settingId = defaultChat?.completionsEnablementSetting ?? '';
 
 		return {
 			readSetting: () => isCompletionsEnabled(this.configurationService, modeId),
@@ -1148,8 +1148,8 @@ export class ChatStatusDashboard extends DomWidget {
 	}
 
 	private createNextEditSuggestionsSetting(container: HTMLElement, label: string, completionsSettingAccessor: ISettingsAccessor): void {
-		const nesSettingId = defaultChat.nextEditSuggestionsSetting;
-		const completionsSettingId = defaultChat.completionsEnablementSetting;
+		const nesSettingId = defaultChat?.nextEditSuggestionsSetting ?? '';
+		const completionsSettingId = defaultChat?.completionsEnablementSetting ?? '';
 		const resource = EditorResourceAccessor.getOriginalUri(this.editorService.activeEditor, { supportSideBySide: SideBySideEditor.PRIMARY });
 
 		const checkbox = this.createSetting(container, [nesSettingId, completionsSettingId], label, {
@@ -1254,7 +1254,7 @@ export class ChatStatusDashboard extends DomWidget {
 		}));
 
 		this._store.add(this.configurationService.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration(defaultChat.completionsEnablementSetting)) {
+			if (defaultChat && e.affectsConfiguration(defaultChat.completionsEnablementSetting)) {
 				button.enabled = isEnabled();
 			}
 			updateIntervalTimer();

@@ -133,6 +133,9 @@ suite('ExtensionEnablementService Test', () => {
 
 	const disposableStore = ensureNoDisposablesAreLeakedInTestSuite();
 
+	// The chat extension only exists when `product.json` configures a default chat agent.
+	const chatExtensionTest = productService.defaultChatAgent ? test : test.skip;
+
 	let instantiationService: TestInstantiationService;
 	let testObject: TestExtensionEnablementService;
 
@@ -1186,7 +1189,7 @@ suite('ExtensionEnablementService Test', () => {
 		assert.deepStrictEqual((<IExtension>target.args[0][0][0]).identifier, { id: 'pub.a' });
 	});
 
-	test('test chat extension is disabled on profile switch when setup is not completed', async () => {
+	chatExtensionTest('test chat extension is disabled on profile switch when setup is not completed', async () => {
 		const chatExtensionId = productService.defaultChatAgent!.chatExtensionId;
 		const chatExtension = aLocalExtension(chatExtensionId, undefined, ExtensionType.System);
 		installed.push(chatExtension);

@@ -387,6 +387,8 @@ export class ChatEntitlementService extends Disposable implements IChatEntitleme
 	readonly context: Lazy<ChatEntitlementContext> | undefined;
 	readonly requests: Lazy<ChatEntitlementRequests> | undefined;
 
+	private hiddenAlways = false; // no chat agent configured: nothing can un-hide chat
+
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IProductService productService: IProductService,
@@ -455,6 +457,8 @@ export class ChatEntitlementService extends Disposable implements IChatEntitleme
 		}
 
 		if (!productService.defaultChatAgent) {
+			this.hiddenAlways = true;
+			ChatEntitlementContextKeys.Setup.hidden.bindTo(this.contextKeyService).set(true); // hide copilot UI when no chat agent is configured
 			return; // we need a default chat agent configured going forward from here
 		}
 
@@ -717,6 +721,10 @@ export class ChatEntitlementService extends Disposable implements IChatEntitleme
 	}
 
 	setForceHidden(hidden: boolean): void {
+		if (this.hiddenAlways) {
+			return; // no chat agent is configured, so chat stays hidden regardless
+		}
+
 		if (this.context) {
 			this.context.value.setForceHidden(hidden);
 		} else {

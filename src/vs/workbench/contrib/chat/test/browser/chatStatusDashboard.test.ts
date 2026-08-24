@@ -216,6 +216,10 @@ class TestCompletionsConfigurationService extends TestConfigurationService {
 suite('ChatStatusDashboard', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
+	// The inline suggestion settings are driven by the default chat agent's setting ids,
+	// so these tests only apply when `product.json` configures one.
+	const completionsSettingTest = product.defaultChatAgent ? test : test.skip;
+
 	function createDashboard(entitlementService: IChatEntitlementService, options: {
 		dashboardOptions?: IChatStatusDashboardOptions;
 		configurationService?: TestConfigurationService;
@@ -257,7 +261,7 @@ suite('ChatStatusDashboard', () => {
 		return dashboard;
 	}
 
-	test('preserves inline suggestion language setting state across writes', async () => {
+	completionsSettingTest('preserves inline suggestion language setting state across writes', async () => {
 		const defaultChat = product.defaultChatAgent;
 		assert.ok(defaultChat);
 
@@ -375,7 +379,7 @@ suite('ChatStatusDashboard', () => {
 		});
 	});
 
-	test('removes inherited language overrides from every configured scope', async () => {
+	completionsSettingTest('removes inherited language overrides from every configured scope', async () => {
 		const defaultChat = product.defaultChatAgent;
 		assert.ok(defaultChat);
 
@@ -433,7 +437,7 @@ suite('ChatStatusDashboard', () => {
 		});
 	});
 
-	test('restores the override hint when the final queued write fails', async () => {
+	completionsSettingTest('restores the override hint when the final queued write fails', async () => {
 		const defaultChat = product.defaultChatAgent;
 		assert.ok(defaultChat);
 
