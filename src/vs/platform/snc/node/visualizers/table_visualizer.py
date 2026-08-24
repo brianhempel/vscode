@@ -66,7 +66,7 @@ from visualizer_utils import (
     new_code_command, imports_for_code, AddImports,
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
     parse_slot_cols,
-    get_full_class_name, truncate_str,
+    get_full_class_name, truncate_str, truncate_repr, wrap_drag_grab,
     config_key, parse_slots, load_root_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
     nerd_font_icon, render_tool_toolbar,
@@ -110,9 +110,13 @@ class ColumnShowAll:
 
 @dataclass(frozen=True, slots=True)
 class ColumnHideAll:
-    """User clicked Hide all in the (+) menu, which takes every column away --
-    the ones they wrote as well as the ones detected, since the menu lists
-    both -- leaving a table of nothing but its row numbers."""
+    """User clicked Hide all in the (+) menu, which takes those same fields
+    away -- the ones they wrote as well as the ones detected, since the menu
+    lists both in the one section this pair acts on.
+
+    Not the row columns over it: `$` and `len($)` are true of every table rather
+    than found in this one, so neither half of the pair is an ask about them.
+    """
     pass
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +455,17 @@ class DropdownToggle:
 @dataclass(frozen=True, slots=True)
 class ExpandToggle:
     """Expand/collapse the table pane (only offered when the pane clips it)."""
+    pass
+
+@dataclass(frozen=True, slots=True)
+class PinFocus:
+    """A click on the collapsed repr a nested table draws, which exists only to
+    be one.
+
+    route_child_event pins focus on the first mousedown an unfocused child
+    receives and drops the payload unread, so this has no case in `update` on
+    purpose: by the time a table would handle its own events it is focused, and
+    a focused table draws the table rather than the repr that sends this."""
     pass
 
 @dataclass(frozen=True, slots=True)
@@ -2693,12 +2708,14 @@ def _set_column_computes(model: dict, col: str, exprs) -> None:
     else:
         computes.pop(col, None)
     model['column_computes'] = computes or None
+    _drop_agg_children(model, col, set(ordered))
 
 
 def _remove_column_compute(model: dict, col: str) -> None:
     computes = dict(model.get('column_computes') or {})
     computes.pop(col, None)
     model['column_computes'] = computes or None
+    _drop_agg_children(model, col, ())
 
 
 def _rename_column_compute(model: dict, old_name: str, new_name: str) -> None:
@@ -9188,6 +9205,42 @@ def _parse_agg_child_key(key: str):
     return parts[1], parts[2], shown_col
 
 
+def _agg_child_nesting(model, key: str, value, child_init_model) -> dict:
+    """What an answer's visualizer is told about where it sits.
+
+    Nested, like a cell's: it is drawn inside somebody else's table and so it
+    draws small until it is focused, whatever it holds.
+
+    But with no root type, which is the one place it parts from a cell. A cell
+    holds a value the config can describe the way to -- this column of this
+    type -- and saves its own columns at that path. An answer holds something
+    the table WORKED OUT, which is nowhere in the shape of the value and so has
+    no path to be saved at; a missing root type is what save_slots_at_path reads
+    as "don't". Left inheriting the root's, an answer would read and rewrite the
+    columns every list of its element type opens with.
+    """
+    extra = child_nesting_kwargs(model, key, value, child_init_model)
+    # Only if the child asked for it -- an older visualizer that names none of
+    # these gets {} back and must keep getting it.
+    if 'config_root_type' in extra:
+        extra['config_root_type'] = None
+    return extra
+
+
+def _drop_agg_children(model: dict, col: str, keep) -> None:
+    """Forget the models of the answers a column no longer shows.
+
+    The counterpart to _remove_column_children, which reaches the answers under
+    a column that is going away; this one is for the answers that go while the
+    column stays. Only an answer's key parses, so a cell's is never read as one.
+    """
+    children = model.get('children') or {}
+    for child_key in list(children):
+        parsed = _parse_agg_child_key(child_key)
+        if parsed is not None and parsed[0] == col and parsed[1] not in keep:
+            del children[child_key]
+
+
 def _agg_child_value(key: str, lst, model, eval_in_scope=None):
     """The answer a key points at, worked out from the list again.
 
@@ -9295,8 +9348,16 @@ def _render_agg_answer(template, answer, key, code, model, get_visualizer,
     vis = get_visualizer(value)
     child_model = model.get('children', {}).get(key)
     if child_model is None:
-        child_model = vis.init_model(value, get_visualizer,
-                                     eval_in_scope=eval_in_scope)
+        child_model = vis.init_model(
+            value, get_visualizer, eval_in_scope=eval_in_scope,
+            **_agg_child_nesting(model, key, value, vis.init_model))
+        # Kept, so that the model an event runs against is this one rather than
+        # the bare fallback route_child_event builds for a child its parent has
+        # none for -- which asks for no nesting, and so hands the answer the
+        # root's config to read and to overwrite. Keeping it is also what lets
+        # an answer the user has opened stay open across a render.
+        if child_model is not None:
+            model.setdefault('children', {})[key] = child_model
     small = key != model.get('focused_child')
     var_and_exp = (None, code) if code else None
     if hasattr(vis, 'visualize_els'):
@@ -9974,6 +10035,27 @@ def _adopt_source(model: dict, var_and_exp=None, source_span=None) -> None:
         model['_source_span'] = source_span
 
 
+def _visualize_collapsed(value, var_and_exp) -> str:
+    """A nested table nobody is looking at: the value's repr, cut to the length
+    of a label.
+
+    A table inside a cell spends a cell's worth of room on what a dozen
+    characters say as well, and spends it again on every row -- so it is drawn
+    only once someone has asked for it, by clicking (see PinFocus).
+
+    The click and the drag are what the table it replaced was carrying, so the
+    repr carries them instead: a mousedown for the front-end to route, and the
+    whole-value handle a small string preview takes for the same reason -- with
+    no cells left inside to offer their own more specific expressions, an outer
+    handle has nothing to claim the hover from, and without one this would be
+    the one value on screen that can't be dragged out.
+    """
+    return wrap_drag_grab(
+        f'<span class="small" snc-mouse-down="{html.escape(repr(PinFocus()))}">'
+        f'{html.escape(truncate_repr(value))}</span>',
+        var_and_exp)
+
+
 def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, source_span=None):
     _adopt_source(model, var_and_exp, source_span)
     model['_is_dict'] = isinstance(lst, dict)
@@ -9981,6 +10063,15 @@ def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=N
     # Depth-capped leaf: render a plain truncated repr instead of a nested table.
     if model.get('_too_deep'):
         return f'<span class="small">{html.escape(truncate_str(repr(lst), 200))}</span>'
+
+    # Nested and unfocused -- a cell of some other table, or a field of an
+    # object. Decided here rather than by the parent drawing the repr itself:
+    # the parent would have to know which of its cells hold containers, and
+    # would have to except the focused one anyway. A non-empty config path is
+    # what nesting is (see init_model), and `small` alone is not: a table on an
+    # unfocused LINE is still the biggest thing on that line.
+    if small and model.get('_config_path'):
+        return _visualize_collapsed(lst, var_and_exp)
 
     # No whole-area drag handle in either size: the cells and column headers
     # carry their own snc-py-exps, and a handle wrapping all of them would claim

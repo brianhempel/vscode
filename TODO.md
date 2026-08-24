@@ -62,7 +62,7 @@
 - [ ] add custom subcol menu item styling
 - [ ] styling for per-group aggregations menu
 - [ ] need to be able to pick or select columns without a filter predicate first
-- [ ] list in a table should use the `truncate_repr` helper by default until it is focused
+- [x] list in a table should use the `truncate_repr` helper by default until it is focused
 - [ ] if made some simple column edits (e.g. `int(col)`), need to be able to re-save whole table rather than just be transient
 - [x] need to able to select/delete rows (e.g. delete header row)
 - [ ] certain drags modify their exp so you can drag into e.g. the col expression

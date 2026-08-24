@@ -18,7 +18,8 @@ import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
                               replace_dollars_in_py_exp, py_exp_attrs, PyExp,
-                              with_pass_body, AddImports, CHILD_SOURCE_BINDER)
+                              with_pass_body, AddImports, CHILD_SOURCE_BINDER,
+                              truncate_repr)
 import table_visualizer
 
 
@@ -83,7 +84,8 @@ from table_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
-    ColumnKeyDown, ExpandToggle, COLUMN_DOTFILE_NAME, CELL_KEY_SEP, SUBCOL_SEP,
+    ColumnKeyDown, ExpandToggle, PinFocus,
+    COLUMN_DOTFILE_NAME, CELL_KEY_SEP, SUBCOL_SEP,
     CopyToClipboard, ChangeSelectedText,
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_column_suggestions, _get_all_possible_columns,
@@ -2717,6 +2719,119 @@ class TestListNeverSelfWraps(unittest.TestCase):
         html_output = visualize(lst, model, mock_get_visualizer, None,
                                 small=True, var_and_exp=(None, 'nums'))
         self.assertNotIn('py-exp-grab', html_output)
+
+
+class TestNestedCollapsesToRepr(unittest.TestCase):
+    """A list or dict inside a cell shows its repr until it is focused.
+
+    A table inside a cell is a table nobody asked for: it spends a cell's worth
+    of room on what a dozen characters of repr say as well, once per row. So an
+    unfocused nested table draws `truncate_repr` instead, and clicking it pins
+    focus (see route_child_event) and brings the table back.
+
+    Nested is the whole of the condition -- a table on an unfocused LINE is
+    still the biggest thing on that line and still renders as a table.
+    """
+
+    PEOPLE = [{'name': 'Alice', 'tags': ['a', 'b']}]
+    TAGS_KEY = f"0{CELL_KEY_SEP}$['tags']"
+
+    ADDRESSED = [{'name': 'Alice', 'addr': {'city': 'SD'}}]
+    ADDR_KEY = f"0{CELL_KEY_SEP}$['addr']"
+
+    def render(self, lst, gv=mock_get_visualizer, focused=None):
+        model = init_model(lst, gv, var_and_exp=('people', 'people'))
+        if focused is not None:
+            model['focused_child'] = focused
+        return visualize(lst, model, gv, None)
+
+    def nested_model(self, value, gv=mock_get_visualizer):
+        """A child model as a parent builds one: carrying the config path that
+        says where under the root value it sits."""
+        return init_model(value, gv, config_path=[("$['tags']", 'builtins.str')],
+                          config_root_type='builtins.dict',
+                          config_root_dotfile=COLUMN_DOTFILE_NAME)
+
+    def test_nested_list_cell_renders_truncated_repr(self):
+        out = self.render(self.PEOPLE)
+        self.assertEqual(out.count('<table'), 1)  # the outer one only
+        self.assertIn(html.escape(truncate_repr(['a', 'b'])), out)
+
+    def test_nested_list_cell_renders_table_when_focused(self):
+        out = self.render(self.PEOPLE, focused=self.TAGS_KEY)
+        self.assertEqual(out.count('<table'), 2)
+
+    def test_nested_dict_cell_renders_truncated_repr(self):
+        out = self.render(self.ADDRESSED, gv=mock_get_visualizer_dict_tables)
+        self.assertEqual(out.count('<table'), 1)
+        self.assertIn(html.escape(truncate_repr({'city': 'SD'})), out)
+
+    def test_nested_dict_cell_renders_table_when_focused(self):
+        out = self.render(self.ADDRESSED, gv=mock_get_visualizer_dict_tables,
+                          focused=self.ADDR_KEY)
+        self.assertEqual(out.count('<table'), 2)
+
+    def test_long_nested_value_is_cut_to_a_label(self):
+        value = list(range(100))
+        out = visualize(value, self.nested_model(value), mock_get_visualizer,
+                        None, small=True)
+        self.assertIn('…', out)
+        self.assertNotIn(html.escape(repr(value)), out)
+
+    def test_nested_full_mode_still_renders_table(self):
+        value = ['a', 'b']
+        out = visualize(value, self.nested_model(value), mock_get_visualizer,
+                        None, small=False)
+        self.assertIn('<table', out)
+
+    def test_root_table_small_still_renders_table(self):
+        """An unfocused LINE, not an unfocused cell: still a table."""
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
+        out = visualize(lst, model, mock_get_visualizer, None, small=True,
+                        var_and_exp=(None, 'nums'))
+        self.assertIn('<table', out)
+
+    def test_collapsed_repr_is_clickable_to_focus(self):
+        """The click that pins focus has to land on something that sends an
+        event; the table it replaced was made of them."""
+        value = ['a', 'b']
+        out = visualize(value, self.nested_model(value), mock_get_visualizer,
+                        None, small=True)
+        self.assertIn(f'snc-mouse-down="{html.escape(repr(PinFocus()))}"', out)
+
+    def test_collapsed_repr_carries_the_whole_value_handle(self):
+        """With no cells left inside to carry their own, the repr is what the
+        value is dragged out by -- the small string preview's bargain."""
+        value = ['a', 'b']
+        out = visualize(value, self.nested_model(value), mock_get_visualizer,
+                        None, small=True, var_and_exp=(None, "people[0]['tags']"))
+        self.assertIn('class="py-exp-grab"', out)
+        self.assertIn(exp_attr("people[0]['tags']"), out)
+
+    def test_collapsed_repr_renders_bare_without_an_access_path(self):
+        value = ['a', 'b']
+        out = visualize(value, self.nested_model(value), mock_get_visualizer,
+                        None, small=True)
+        self.assertNotIn('py-exp-grab', out)
+
+    def test_pin_focus_is_inert_in_update(self):
+        """It is only ever sent by a child, and route_child_event answers it by
+        pinning focus without unwrapping it. Arriving here at all means the
+        table is already focused, and a focused table draws no repr to click."""
+        lst = [1, 2, 3]
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('nums', 'nums'))
+        before = copy.deepcopy(model)
+        new_model, commands = update({'pythonEventStr': repr(PinFocus()),
+                                      'eventJSON': {}},
+                                     ('nums', 'nums'), model, lst,
+                                     mock_get_visualizer)
+        self.assertEqual(commands, [])
+        # The one-shot flags that EVERY event clears are not this event doing
+        # something; nothing else about the model may move.
+        for one_shot in ('_scroll_to_match', '_col_search_focus'):
+            before[one_shot] = new_model.get(one_shot)
+        self.assertEqual(new_model, before)
 
 
 class TestSourceExprInModel(unittest.TestCase):
@@ -11676,6 +11791,7 @@ from table_visualizer import (
     _agg_value, _agg_code, _agg_name, _format_agg_value,
     _agg_row_index_code, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
     _table_child_value_getter, _agg_child_expr, _agg_layout,
+    _agg_child_key, _set_column_computes, _remove_column_compute, _save_slots,
 )
 
 
@@ -11730,6 +11846,142 @@ def agg_row(label):
         if row_label == label:
             return i
     raise AssertionError(f'no aggregation named {label}')
+
+
+class TestAggAnswerIsAKeptChild(unittest.TestCase):
+    """An answer is a child like a cell's, and the model that draws it says so.
+
+    It used to be built fresh on every render and never kept, so the model that
+    events actually ran against was route_child_event's fallback -- the one an
+    event builds when the parent has none stored, which asks for no nesting at
+    all. An answer came back stamped as a ROOT table of its element type: it
+    drew full-size however small the cell, and a column written inside one saved
+    itself as the config every list of that type opens with.
+    """
+
+    # An answer that is a list, so it has a table of its own to draw (or not).
+    LIST_AGG = 'sorted($)'
+    ANSWER = sorted(COMPUTE_LIST)
+
+    def table(self, computes=None):
+        model = init_model(COMPUTE_LIST, mock_get_visualizer,
+                           var_and_exp=('nums', 'nums'))
+        model['column_computes'] = {'$': list(computes or [self.LIST_AGG])}
+        return model
+
+    def key(self, agg=None):
+        return _agg_child_key('$', agg or self.LIST_AGG, '$')
+
+    def render(self, model):
+        return visualize(COMPUTE_LIST, model, mock_get_visualizer, None)
+
+    def answer_model(self, model=None):
+        model = model or self.table()
+        self.render(model)
+        return model['children'].get(self.key())
+
+    def test_the_answer_model_is_kept_under_its_key(self):
+        model = self.table()
+        self.render(model)
+        self.assertIn(self.key(), model['children'])
+
+    def test_the_answer_is_a_nested_visualizer(self):
+        self.assertTrue(self.answer_model()['_config_path'])
+
+    def test_the_answer_has_no_root_type_to_save_against(self):
+        """An answer is not a place in the value's shape, so a column written
+        inside one has nowhere to be saved -- see save_slots_at_path, which
+        reads a missing root type as "don't"."""
+        self.assertIsNone(self.answer_model()['_config_root_type'])
+
+    def test_an_event_does_not_swap_in_a_root_model(self):
+        """The kept model is what route_child_event finds, so its fallback --
+        the one that did the stamping -- never runs."""
+        model = self.table()
+        self.render(model)
+        ev = make_child_mouse_event(self.key(), repr(ExpandToggle()))
+        model, _ = update(ev, ('nums', 'nums'), model, COMPUTE_LIST,
+                          mock_get_visualizer)  # the first click pins focus
+        model, _ = update(ev, ('nums', 'nums'), model, COMPUTE_LIST,
+                          mock_get_visualizer)  # and this one is dispatched
+        child = model['children'][self.key()]
+        self.assertIsNone(child['_config_root_type'])
+        self.assertTrue(child['_config_path'])
+
+    def test_a_list_answer_draws_its_repr_until_it_is_focused(self):
+        out = self.render(self.table())
+        self.assertEqual(out.count('<table'), 1)  # the outer one only
+        self.assertIn(html.escape(truncate_repr(self.ANSWER)), out)
+
+    def test_a_focused_answer_draws_its_table(self):
+        model = self.table()
+        model['focused_child'] = self.key()
+        self.assertEqual(self.render(model).count('<table'), 2)
+
+    def test_an_answer_no_longer_asked_for_is_forgotten(self):
+        model = self.table()
+        self.render(model)
+        _set_column_computes(model, '$', [])
+        self.assertNotIn(self.key(), model['children'])
+
+    def test_the_answers_still_asked_for_are_kept(self):
+        # Both answer with a list: an answer that is a number is drawn by a
+        # visualizer with no model to keep, so it would prove nothing here.
+        other = 'sorted($, reverse=True)'
+        model = self.table(computes=[self.LIST_AGG, other])
+        self.render(model)
+        _set_column_computes(model, '$', [other])
+        self.assertNotIn(self.key(), model['children'])
+        self.assertIn(self.key(other), model['children'])
+
+    def test_dropping_a_columns_aggregations_forgets_its_answers(self):
+        model = self.table()
+        self.render(model)
+        _remove_column_compute(model, '$')
+        self.assertNotIn(self.key(), model['children'])
+
+    def test_the_cells_children_are_left_alone(self):
+        """Pruning reads the key, and only an answer's parses as one."""
+        model = self.table()
+        self.render(model)
+        cells = [k for k in model['children'] if k != self.key()]
+        _set_column_computes(model, '$', [])
+        self.assertEqual([k for k in model['children']], cells)
+
+
+class TestAggAnswerSavesNothing(unittest.TestCase):
+    """The dotfile end of it: an answer's columns are its own and go nowhere.
+
+    Left as it was, a column added inside `sorted($)` over a list of ints was
+    saved under `builtins.int` -- the key a plain list of ints reads its columns
+    back out of, so every one of them in the project opened with it.
+    """
+
+    def setUp(self):
+        self.orig_cwd = os.getcwd()
+        self.tmp_dir = tempfile.mkdtemp()
+        os.chdir(self.tmp_dir)
+        # This class genuinely writes the dotfile; the module-level patches
+        # neuter that for everyone else.
+        for p in _module_patches:
+            p.stop()
+
+    def tearDown(self):
+        for p in _module_patches:
+            p.start()
+        os.chdir(self.orig_cwd)
+        shutil.rmtree(self.tmp_dir)
+
+    def test_a_column_inside_an_answer_writes_no_dotfile(self):
+        model = init_model(COMPUTE_LIST, mock_get_visualizer,
+                           var_and_exp=('nums', 'nums'))
+        model['column_computes'] = {'$': ['sorted($)']}
+        visualize(COMPUTE_LIST, model, mock_get_visualizer, None)
+        child = model['children'][_agg_child_key('$', 'sorted($)', '$')]
+        _col_add(child['columns'], 'len(str($))')
+        _save_slots(child)
+        self.assertFalse(os.path.exists(COLUMN_DOTFILE_NAME))
+        self.assertIsNone(load_columns_from_dotfile('builtins.int'))
 
 
 class TestAggHoles(unittest.TestCase):
@@ -12773,8 +13025,11 @@ class TestComputeCellRendering(unittest.TestCase):
 
     def test_an_answer_that_is_a_list_reads_as_a_list(self):
         # The point of handing it over: an answer no line of text can show.
+        # Asked of the picked cell, since a nested list draws its repr until
+        # then -- the table it can draw is what picking it asks for.
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)'])
+        model['focused_child'] = self.child_keys(model, lst)[0]
         # A nested table has cells of its own, so read the row: self.cells
         # would stop at the first </td> inside it.
         self.assertIn('list-visualizer', self.rows(model, lst)[0])
@@ -12811,11 +13066,18 @@ class TestComputeCellRendering(unittest.TestCase):
         self.assertNotIn('np.float64', cell)
 
     def test_the_answer_is_small_until_it_is_picked(self):
+        # Small, for an answer that is a list, is the repr a nested table
+        # draws in place of itself -- so there is no table in the cell at all
+        # until it is picked.
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)'])
-        self.assertIn('list-visualizer small', self.table(model, lst))
+        row = self.rows(model, lst)[0]
+        self.assertNotIn('list-visualizer', row)
+        self.assertIn(html.escape(truncate_repr(sorted(COMPUTE_LIST))), row)
         model['focused_child'] = self.child_keys(model, lst)[0]
-        self.assertNotIn('list-visualizer small', self.table(model, lst))
+        picked = self.rows(model, lst)[0]
+        self.assertIn('list-visualizer', picked)
+        self.assertNotIn('list-visualizer small', picked)
 
     def test_a_histogram_is_still_drawn_rather_than_handed_over(self):
         # A pair of arrays reads as bars or as nothing; no visualizer of its
