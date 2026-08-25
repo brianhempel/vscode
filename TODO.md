@@ -54,6 +54,14 @@
 - [x] nested action should still have imports added
 - [ ] nested string visualizer actions can be in a dropdown
 - [ ] need some better handling of long column names
+- [ ] dragging string off screen needs to work
+- [ ] starting a fuzzy selection in middle of string is wonky
+- [ ] string search is sometimes behind
+- [ ] keypresses getting lost in search box (because of round-trip: DOM-diffing or some other special handling might be warranted)
+- [ ] need to be able to unfocus string visualizer in the table
+- [ ] instrumentation so we can log how people use it
+- [ ] need loop iteration handling
+    - [ ] lines not hit need to not show a visualizer
 - [x] still bouncing around when double-clicking on a line bc the cursor is the next line
 - [ ] more feedback for syntax errors
 - [ ] more feedback for errors in nested visualizers
