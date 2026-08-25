@@ -42,7 +42,6 @@
 - [x] aggregations
 - [x] x button for group by aggregations
 - [x] snc-py-exp for per-group aggregations
-- [x] reify as...list of dict etc, to persist transient columns
 - [ ] make it clearer what kind of object you are looking at. *jacob says: representing everything as a table is a little funky because it's hard to realize that what you're looking at isn't a table. it is structurally something else?*
 - [x] drag to reorder subcolumns
 - [x] need to show list length somewhere
@@ -52,6 +51,13 @@
 - [x] add column left/right in col menu
 - [x] grouped aggregations as new column instead of extra rows
 - [x] nested action should still have imports added
+- [ ] **better column handling: not just by type; dicts in particular need to be keyed by keys at least**
+- [ ] **need to be able to pick or select columns without a filter predicate first**
+- [ ] **hold shift for multi-select with the pick tool**
+- [ ] **reify as...list of dict etc, to persist transient columns**
+- [ ] need loop iteration handling
+    - [ ] lines not hit need to not show a visualizer
+- [ ] 
 - [ ] nested string visualizer actions can be in a dropdown
 - [ ] need some better handling of long column names
 - [ ] dragging string off screen needs to work
@@ -60,9 +66,7 @@
 - [ ] keypresses getting lost in search box (because of round-trip: DOM-diffing or some other special handling might be warranted)
 - [ ] need to be able to unfocus string visualizer in the table
 - [ ] instrumentation so we can log how people use it
-- [ ] need loop iteration handling
-    - [ ] lines not hit need to not show a visualizer
-- [x] still bouncing around when double-clicking on a line bc the cursor is the next line
+- [ ] still bouncing around when double-clicking on a line bc the cursor is the next line
 - [ ] regex selections clear too easily on click
 - [ ] greedy regex by default??? anchored exps??
 - [ ] josh really wants to select between matches
@@ -92,7 +96,6 @@
 - [x] top level "add column" should be a menu much more like the subcolumns menu
 - [ ] add custom subcol menu item styling
 - [ ] styling for per-group aggregations menu
-- [ ] need to be able to pick or select columns without a filter predicate first
 - [x] list in a table should use the `truncate_repr` helper by default until it is focused
 - [ ] if made some simple column edits (e.g. `int(col)`), need to be able to re-save whole table rather than just be transient
 - [x] need to able to select/delete rows (e.g. delete header row)
@@ -102,8 +105,6 @@
 - [ ] drag-and-drop to align and add columns
 - [ ] zip
 - [ ] column pair to dict
-- [ ] better column handling: not just by type; dicts in particular need to be keyed by keys at least
-- [ ] hold shift for multi-select with the pick tool
 - [ ] remove string index tool and simply use the pick tool with no search
 - [x] make string pick tool work for literal string matches, e.g. for 'asdf' rather than just regex r'asdf', and for string var searches like `x`
 - [ ] show all loop iterations, somehow (table??)
