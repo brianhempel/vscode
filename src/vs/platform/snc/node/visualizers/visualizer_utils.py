@@ -75,7 +75,7 @@ def truncate_str(s, max_len):
     return s[:max(max_len - 1, 0)] + '…'
 
 
-def truncate_repr(value, max_len=30):
+def truncate_repr(value, max_len=60):
     """A value's repr, cut down to somewhere it is only being NAMED.
 
     A menu row saying which value it acts on, a preview chip saying what an
