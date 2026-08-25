@@ -90,7 +90,7 @@ from table_visualizer import (
     load_columns_from_dotfile, save_columns_to_dotfile,
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
-    _table_child_value_getter, _leaf_columns, _column_groups,
+    _table_child_value_getter, _leaf_columns, _leaf_for, _column_groups,
     _col_add, _col_at, _col_rename_at, _col_remove_at,
     _leaf_values_expr, _menu_targets, _named_column, _col_subs,
     _promote_expr, _adopt_expr,
@@ -790,6 +790,59 @@ class TestLeafColumns(unittest.TestCase):
             'cols': {'$.who': {}, '$.age': {}}}})
         self.assertEqual([(g.col, g.width) for g in groups],
                          [('$.name', 1), ('*$.members', 2)])
+
+
+class TestLeafFor(unittest.TestCase):
+    """The leaf a composed key names, found by walking that key's own path
+    rather than by expanding the table and looking for a match.
+
+    A key IS the path -- _leaf_columns joins it -- so the answer is a few steps
+    down `columns`. It is asked once per column by the header and again by
+    everything the header asks, so a sweep here costs the table's width
+    squared: 675 columns turned one render into three seconds of walking
+    sub-column maps that were not there."""
+
+    CONFIGS = [
+        {},
+        {'$.a': {}, '$.b': {}},
+        {'$k': {}, '*$v': {}},
+        {'$.name': {}, '*$.members': {'cols': {'$.who': {}, '$.age': {}}}},
+        {'*$.a': {'cols': {'$.x': {}}}, '*$.b': {'cols': {'$.x': {}}}},
+        # A plain parent, which adds a header level but no grouping level.
+        {'$.a': {'cols': {'$.b': {'cols': {'$.c': {}}}}}},
+        # A splat nested under a plain column: no leading star on the key.
+        {'$.a': {'cols': {'*$.b': {'cols': {'$.c': {}}}}}},
+        # A bare list of expressions is a legal `columns` too.
+        ['$.a', '$.b'],
+    ]
+
+    def keys(self, columns):
+        """Every key worth asking about: the leaves, their ancestors, and a few
+        that name nothing."""
+        found = [leaf.expr for leaf in _leaf_columns(columns)]
+        parents = {SUBCOL_SEP.join(leaf.header[:n])
+                   for leaf in _leaf_columns(columns)
+                   for n in range(1, len(leaf.header))}
+        return found + sorted(parents) + ['', '$.nope', '$.a' + SUBCOL_SEP + '$.nope']
+
+    def sweep(self, columns, expr):
+        """What _leaf_for meant when it expanded every leaf."""
+        return next((leaf for leaf in _leaf_columns(columns)
+                     if leaf.expr == expr), None)
+
+    def test_it_answers_what_the_sweep_answered(self):
+        for columns in self.CONFIGS:
+            for key in self.keys(columns):
+                with self.subTest(columns=columns, key=key):
+                    self.assertEqual(_leaf_for(columns, key),
+                                     self.sweep(columns, key))
+
+    def test_it_does_not_expand_the_whole_table(self):
+        columns = {f'$[{n!r}]': {} for n in range(200)}
+        with _mock.patch.object(table_visualizer, '_leaf_columns') as expand:
+            leaf = _leaf_for(columns, '$[100]')
+        expand.assert_not_called()
+        self.assertEqual(leaf.expr, '$[100]')
 
 
 class TestMenuTargets(unittest.TestCase):

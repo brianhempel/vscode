@@ -1190,10 +1190,48 @@ def _is_leaf_identity(col: str) -> bool:
 
 
 def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
-    """The leaf a composed column key names, or None."""
-    for leaf in _leaf_columns(columns):
-        if leaf.expr == expr:
-            return leaf
+    """The leaf a composed column key names, or None.
+
+    Walks that key's own path down `columns` rather than expanding the whole
+    table and looking for a match: the key IS the path -- _leaf_columns joins
+    it with SUBCOL_SEP, which no expression can contain -- so the answer is a
+    few steps rather than a sweep. It is asked once per column by the header
+    and again by everything the header asks, so a sweep here costs the table's
+    width squared, which a wide table pays in seconds.
+
+    The leaf it builds is _leaf_columns' own, made the same way from the same
+    three things: the ancestors, the splats among them, and whether the column
+    it lands on carries sub-columns (in which case it isn't drawn, and so isn't
+    a leaf).
+    """
+    if not expr:
+        return None
+    path = tuple(expr.split(SUBCOL_SEP))
+    cols = columns
+    chain = ()
+    for depth, col in enumerate(path):
+        if not cols or col not in cols:
+            return None
+        if _col_subs(cols, col):
+            # Not drawn itself: its sub-columns are the leaves. Only an
+            # ancestor of the key can carry them.
+            if depth == len(path) - 1:
+                return None
+            if _split_splat(col)[0]:
+                chain += (col,)
+            cols = _col_subs(cols, col)
+            continue
+        if depth != len(path) - 1:
+            return None
+        here = chain + (col,) if _split_splat(col)[0] else chain
+        return LeafColumn(
+            expr=expr,
+            splat=here[-1] if here else None,
+            sub=('$' if _split_splat(col)[0]
+                 else _sub_expr(col, path[:depth], chain)),
+            header=path,
+            chain=here,
+            depth=len(here))
     return None
 
 
