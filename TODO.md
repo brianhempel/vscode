@@ -63,6 +63,29 @@
 - [ ] need loop iteration handling
     - [ ] lines not hit need to not show a visualizer
 - [x] still bouncing around when double-clicking on a line bc the cursor is the next line
+- [ ] regex selections clear too easily on click
+- [ ] greedy regex by default??? anchored exps??
+- [ ] josh really wants to select between matches
+- [ ] list of tuples from pick tool made a bajillion ugly columns in the table
+- [ ] "map matches" unclear when using the pick tool (partly because it's the first match)
+
+- confused by vertical 2-element list
+- 2-item pattern `for (a,b) in ...` only displays `a`
+- "i want to do it all in a table" but can't scroll horizontally, and can't choose what to extract out of each table
+- fascinating that the linear log with printf debugging was still necessary
+- lots of the difficulty is regex difficulty
+
+- [ ] need more clarity when an error is preventing full code execution with loops
+- [ ] some nice way to get to iteration with an error
+- [ ] exps in super nested table visualizer should be generalized per column rather than specified per cell
+- [ ] get the $ and ^ in regexes correctly displaying in the highlighted regex regions
+- [ ] string vis in table cell in table cell is so tiny and doesn't scroll
+- [ ] user-resizable columns
+- [ ] filter+pick on for where item 0 matches has no way to pick "everything before"
+- [ ] make variable when you drag out to a new line
+- [ ] box showing what you're picking for table pick tool?
+- [ ] n items n lines n chars should always display even if collapse bar not needed
+- [ ] exit col expression input by clicking away rather than just esc or enter
 - [ ] more feedback for syntax errors
 - [ ] more feedback for errors in nested visualizers
 - [ ] better handling of tables that scroll offscreen
