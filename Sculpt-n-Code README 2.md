@@ -5,7 +5,7 @@
 When a Python file is open in the editor, SNC:
 
 1. **Parses** the user's code into a Python AST.
-2. **Transforms** the AST by injecting `_log_value()` calls after every assignment, expression, conditional, loop iteration, and return statement.
+2. **Transforms** the AST by injecting `_log_value()` calls after every assignment, expression, conditional, loop iteration, and return statement, and loop/call context hooks around loops and function bodies.
 3. **Executes** the transformed code in a pooled Python worker subprocess.
 4. **Streams** JSON-encoded visualization items (one per logged value) back to the editor over stdout.
 5. **Renders** each item as an HTML overlay widget positioned at the end of the corresponding source line.
@@ -62,6 +62,7 @@ Node.js and Python communicate over stdio using **newline-delimited JSON (NDJSON
 | `checkpoint_ready` | Python → Node | Worker reached checkpoint 1 or 2 and is ready |
 | `item` | Python → Node → Renderer | A single visualization item (line, visIndex, html, model) |
 | `command` | Python → Node → Renderer | An Elm-style command for VS Code (e.g. `NewCode`) |
+| `loop` | Python → Node → Renderer | A loop/function finished: `{line, path, count}`; sizes its slider (see Loops below) |
 | `output` | Python → Node → Renderer | A chunk of the program's stdout/stderr, tagged with how much stdin had been consumed |
 | `end` | Python → Node → Renderer | Run completed; includes exitCode and, when the program is waiting on input, `awaitingInput` |
 | `warning` | Python → Node → Renderer | Visualizer load/runtime warning |
@@ -148,9 +149,58 @@ Visualizers are loaded from three directories, checked in priority order:
 
 Any Python file matching `*_visualizer.py` that exports `can_visualize()` and `visualize()` is loaded. The first visualizer whose `can_visualize(value)` returns `True` wins.
 
-## Cursor Position Awareness
+## Loops: which iteration a line shows
 
-When a value is inside a loop, the visualizer displays either the **first** or **last** iteration's value depending on where the cursor is. If the cursor is positioned within the loop body (at or before the loop's last line, or on the line right after the loop), the first iteration is shown; otherwise, the last iteration is shown. This is tracked via the `last_line_in_containing_loop` field injected by the `CodeTransformer`.
+A line inside a loop runs once per iteration, so "the value of this line" is
+really "the value of this line *in some iteration*". Every item carries the
+iteration it came from, and a slider on the loop's header line picks which one
+the body shows.
+
+**Identity.** An item is identified by `(line, visIndex)`, where `visIndex` is
+the *static* index of the log site on that line, assigned by the
+`CodeTransformer` (`for a, b in ...` has sites 0 and 1). It does not change
+with how many times the line runs, so a visualizer's model and pending events
+stay attached to it across iterations and across runs.
+
+**Dynamic context.** The transformer wraps each `for`/`while` as
+`_snc_loop_enter(L); try: <loop, with _snc_loop_iter(L) first in its body>
+finally: _snc_ctx_exit(L)`, where `L` is the header line, and each function
+body (except generators/async, which suspend) as `_snc_call_enter(D); try:
+<body> finally: _snc_ctx_exit(D)` -- a function is a loop over its calls, and
+its parameters are logged on the `def` line at the top of each call the way a
+`for` target is logged on its line, one site per parameter. The
+runner keeps a stack of `[id_line, iteration]` frames, and every item carries
+its **`path`**: that stack at the moment it was logged, outermost first, e.g.
+`[[1, 2], [2, 0]]` for the first inner iteration of the third outer one.
+Counts are kept per enclosing path (minus the frames of the thing being
+counted), so an inner loop's count is "under this outer iteration", a
+function called from a loop is call 0 in each iteration, and a recursive
+function's activations are numbered in entry order -- `fact(4)` is
+activation 0 and `fact(0)` is 4 -- with a pin matching the *innermost*
+activation a value was logged in.
+
+**Selection happens in Python, and a slider move is a rerun.** The editor
+sends `loop_selections` (`{header_line: iteration}`) with every run, exactly
+as it sends the focused line. `log_value` drops any value whose path
+disagrees with a pinned loop before choosing a visualizer, so only the pinned
+iteration is rendered or transmitted, and a branch the pinned iteration didn't
+take simply has no item. Rendering at the moment of logging is also what makes
+this correct for values that are mutated across iterations; recording every
+iteration and scrubbing locally would need deep copies. A loop with no pin
+renders every iteration, each item replacing the last on the front end, so
+the last iteration is what stays on screen. When a loop ends, `_snc_ctx_exit`
+emits a **`loop` message** (`{line, path, count}`, only under a selected path)
+which sizes the slider; on it, the editor also drops items of an unpinned loop
+that came from an iteration other than the last (a branch the last iteration
+didn't take), and moves a pin that now points past the end of a shortened
+loop. A site logged repeatedly in one run replays its pending events on the
+first logging and carries the resulting model through the rest
+(`_run_models`), so a command a visualizer emits in response goes out once.
+
+**Front end.** `SNCController.loopSelections` keys each pin by a decoration on
+the header line, so edits above the loop don't re-key it. `LoopSliderWidget`
+(one per loop/def line that ran at least twice) sits at the end of the header
+line ahead of the line's own visualizer, which moves over by its width.
 
 ## Network read cache
 

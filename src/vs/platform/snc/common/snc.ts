@@ -8,13 +8,32 @@ import { Event } from '../../../base/common/event.js';
 
 export interface IVisualizationItem {
 	line: number;
-	visIndex: number; // within line
+	visIndex: number; // static index of the log site within the line
 	runId: string;
 	execution_step: number;
 	html: string;
 	model?: unknown;
 	unhandledEvents?: UiEvent[];
-	last_line_in_containing_loop?: number;
+	/**
+	 * Which iteration of which loops the value was produced under: one
+	 * `[headerLine, iteration]` per enclosing loop, outermost first. A function
+	 * body counts as a loop over its calls (`[defLine, callNumber]`).
+	 */
+	path: LoopPath;
+}
+
+export type LoopPath = [number, number][];
+
+/**
+ * A loop (or function) finished running under `path`, having run `count`
+ * iterations (calls). Sizes the slider on its header line.
+ */
+export interface ILoopReport {
+	line: number;
+	path: LoopPath;
+	count: number;
+	/** A real loop, or a function body (`count` is then its activations, numbered in entry order). */
+	kind: 'loop' | 'call';
 }
 
 export type UiEvent = { line: number; visIndex: number, pythonEventStr: string, eventJSON: any };
@@ -42,6 +61,7 @@ export interface IProcessOptions {
 	filePath?: string; // Path of the file being run; sites the .snc_url_cache dir beside it
 	modelsAndEventsJson?: string; // visualizers state, and events to apply
 	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
+	loopSelections?: Record<string, number>; // header line -> iteration (0-based) the loop is pinned to; unpinned loops render every iteration
 	stdin?: string; // The console document, replayed through the program's stdin
 	stdinEof?: boolean; // Whether the document ends the stream; false makes a read past its end starve rather than see EOF
 }
@@ -135,6 +155,7 @@ export interface SNCTimingData {
 export type SNCStreamMessage =
 	| { runId: string; type: 'item'; item: IVisualizationItem }
 	| { runId: string; type: 'command'; command: SNCCommand }
+	| { runId: string; type: 'loop'; loop: ILoopReport }
 	| { runId: string; type: 'end'; result: IProcessResult; timing?: SNCTimingData }
 	| { runId: string; type: 'spawn'; timing: SNCTimingData }
 	| { runId: string; type: 'error'; error: string }

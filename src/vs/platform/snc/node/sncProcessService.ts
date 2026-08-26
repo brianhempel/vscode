@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Promises } from '../../../base/node/pfs.js';
-import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData } from '../common/snc.js';
+import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData, ILoopReport } from '../common/snc.js';
 import { Emitter } from '../../../base/common/event.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -355,7 +355,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 					} else {
 						console.warn('[SNC] Visualizer load warning (no active run):', msg.warning);
 					}
-				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'end' || msg.type === 'output') {
+				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'loop' || msg.type === 'end' || msg.type === 'output') {
 					const runId = msg.run_id || (msg.item && msg.item.runId);
 					if (runId) {
 						this.handleRunMessage(runId, msg);
@@ -415,6 +415,12 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				runId,
 				type: 'command',
 				command: msg.command as SNCCommand
+			});
+		} else if (msg.type === 'loop' && msg.loop) {
+			this._onStream.fire({
+				runId,
+				type: 'loop',
+				loop: msg.loop as ILoopReport
 			});
 		} else if (msg.type === 'output') {
 			this._onStream.fire({
@@ -569,6 +575,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				file_path: options.filePath ?? null,
 				models_and_events: options.modelsAndEventsJson || '',
 				focused_line: options.focusedLine ?? null,
+				loop_selections: options.loopSelections ?? {},
 				stdin: options.stdin ?? '',
 				// Default false so a read past the end starves — which is what
 				// opens the console — rather than seeing a spurious EOF.

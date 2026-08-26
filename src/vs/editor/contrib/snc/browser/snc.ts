@@ -8,7 +8,7 @@ import { Selection, SelectionDirection } from '../../../common/core/selection.js
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
 import { IModelDeltaDecoration, ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
-import { IProcessOptions, IVisualizationItem, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, UiEvent } from '../../../../platform/snc/common/snc.js';
+import { ILoopReport, IProcessOptions, IVisualizationItem, LoopPath, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, UiEvent } from '../../../../platform/snc/common/snc.js';
 import { IPythonImportInsertion, pythonImportInsertion } from '../../../../platform/snc/common/pythonImports.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -104,6 +104,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly domNode: HTMLElement;
 	private position: Position | null = null;
 	private lastOnscreenPixelPosition: IOverlayWidgetPositionCoordinates | null = null;
+	/** Room left at the end of the line for a loop slider ahead of this widget. */
+	leftInset = 0;
 	private readonly visIndex: number;
 	private readonly lineNumber: number;
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
@@ -1613,7 +1615,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			pixelPosition.top += this.useBlockLayout ? lineHeight : -1;
 
 			// 8px of padding for visualizers on the same line
-			pixelPosition.left += this.useBlockLayout ? 0 : 8;
+			pixelPosition.left += this.useBlockLayout ? 0 : 8 + this.leftInset;
 
 			if (pixelPosition.top < 0 && this.lastOnscreenPixelPosition) {
 				// x coordinate is not reliable when lines are offscreen, use last known coordinate
@@ -2472,6 +2474,106 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 }
 
 /**
+ * The slider beside a loop header (or a `def`) that picks which iteration (or
+ * call) the lines inside it show. It sits at the end of the line, ahead of the
+ * line's own visualizer, which moves over by `WIDTH` to make room.
+ */
+class LoopSliderWidget extends Disposable implements IOverlayWidget {
+	/** Width in px, including the gap to the visualizer after it. */
+	static readonly WIDTH = 136;
+
+	private readonly domNode: HTMLElement;
+	private readonly input: HTMLInputElement;
+	private readonly label: HTMLElement;
+	private count = 0;
+	/** The thumb is the user's while it's pressed; nothing else moves it. */
+	private dragging = false;
+
+	constructor(
+		private readonly editor: ICodeEditor,
+		private readonly lineNumber: number,
+		private readonly onChange: (iteration: number) => void,
+	) {
+		super();
+		this.domNode = document.createElement('div');
+		this.domNode.className = 'snc-loop-slider';
+		this.input = document.createElement('input');
+		this.input.type = 'range';
+		this.input.min = '0';
+		this.input.step = '1';
+		this.label = document.createElement('span');
+		this.label.className = 'snc-loop-slider-label';
+		this.domNode.appendChild(this.input);
+		this.domNode.appendChild(this.label);
+
+		this._register(dom.addDisposableListener(this.input, 'input', () => {
+			const iteration = Number(this.input.value);
+			this.setLabel(iteration);
+			this.onChange(iteration);
+		}));
+		// A press on the slider is not a click in the editor: it must not move
+		// the cursor (which would also change the focused line and rerun).
+		this._register(dom.addDisposableListener(this.domNode, 'mousedown', (ev: MouseEvent) => { ev.stopPropagation(); }));
+		this._register(dom.addDisposableListener(this.input, 'pointerdown', () => { this.dragging = true; }));
+		this._register(dom.addDisposableListener(this.input, 'pointerup', () => { this.dragging = false; }));
+		this._register(dom.addDisposableListener(this.input, 'pointercancel', () => { this.dragging = false; }));
+		// Arrow keys step the slider rather than moving the cursor.
+		this._register(dom.addDisposableListener(this.input, 'keydown', (ev: KeyboardEvent) => { ev.stopPropagation(); }));
+
+		this.editor.addOverlayWidget(this);
+	}
+
+	getId(): string {
+		return `editor.contrib.sncLoopSlider-${this.lineNumber}`;
+	}
+
+	getDomNode(): HTMLElement {
+		return this.domNode;
+	}
+
+	getPosition(): IOverlayWidgetPosition | null {
+		const model = this.editor.getModel();
+		if (!model || this.lineNumber > model.getLineCount()) {
+			return null;
+		}
+		const column = model.getLineMaxColumn(this.lineNumber);
+		const pixelPosition = this.editor.getScrolledVisiblePosition({ lineNumber: this.lineNumber, column });
+		if (!pixelPosition) {
+			return null;
+		}
+		return { preference: { top: pixelPosition.top, left: pixelPosition.left + 8 } };
+	}
+
+	/** Show `iteration` of `count`. */
+	update(count: number, iteration: number): void {
+		this.count = count;
+		if (this.dragging) {
+			// Repositioning the thumb under a drag would end it; the label
+			// tracks what the thumb says, and the next update settles the rest.
+			this.input.max = String(Math.max(Number(this.input.max), count - 1));
+			this.setLabel(Number(this.input.value));
+			return;
+		}
+		this.input.max = String(Math.max(0, count - 1));
+		this.input.value = String(iteration);
+		this.setLabel(iteration);
+	}
+
+	private setLabel(iteration: number): void {
+		this.label.textContent = `${iteration + 1} / ${this.count}`;
+	}
+
+	updatePosition(): void {
+		this.editor.layoutOverlayWidget(this);
+	}
+
+	override dispose(): void {
+		this.editor.removeOverlayWidget(this);
+		super.dispose();
+	}
+}
+
+/**
  * If the inserted edit text introduces a new identifier the user is likely to want
  * to rename (an assignment target or a `for` loop iteration variable), return a
  * Selection covering that identifier in the post-edit document.
@@ -2795,6 +2897,33 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// output, indicating Python is working again.
 	private pythonSpawnFailureNotification: INotificationHandle | null = null;
 	private eventsBeingHandledCurrentRun: { line: number; visIndex: number; events: UiEvent[] }[] = [];
+
+	// ---- Loop sliders ----
+	/**
+	 * The iteration each loop (or function) is pinned to. A pin is keyed by a
+	 * decoration on the header line rather than the line number, so inserting
+	 * lines above it doesn't re-key it. Sent to Python on every run as
+	 * `loopSelections`; a loop with no pin renders every iteration and the
+	 * last one is what stays on screen.
+	 */
+	private loopSelections: { decorationId: string; iteration: number }[] = [];
+	/**
+	 * How many iterations each loop/def header line ran, from `loop` messages.
+	 * Mid-run this only grows (a function reports after every call, and a
+	 * slider that shrank -- or vanished, at count 1 -- under a drag would end
+	 * it); the run's final counts replace it when the run ends.
+	 */
+	private loopCounts: Map<number, number> = new Map();
+	/** Counts reported by the run in flight. */
+	private loopCountsThisRun: Map<number, number> = new Map();
+	/**
+	 * What the run in flight was told to show for loops with no pin: their
+	 * last iteration, as counted by the run before. Every iteration would
+	 * otherwise stream in and be drawn in turn -- on each hover's rerun.
+	 */
+	private implicitLoopSelections: Map<number, number> = new Map();
+	private loopSliders: Map<number, LoopSliderWidget> = new Map();
+
 	private _visualizationItems: IVisualizationItem[] = [];
 	/**
 	 * How far the DOM is behind the items. Bumped by every assignment to
@@ -2903,6 +3032,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.cancelCurrentRun();
 			this.visualizationItems = [];
 			this.clearVisualizationWidgets();
+			this.loopSelections = [];
 			// Set up language change listener for the new model
 			this.setupLanguageChangeListener();
 			// Re-resolve the Python interpreter for the new model's workspace
@@ -3849,6 +3979,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 		this.visualizationWidgets.clear();
 		this.clearLinkArrows();
+		for (const slider of this.loopSliders.values()) {
+			slider.dispose();
+		}
+		this.loopSliders.clear();
+		this.loopCounts.clear();
 
 		// Remove all view zones (including the top spacer)
 		this.editor.changeViewZones((accessor) => {
@@ -3895,6 +4030,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 			for (const widget of widgets) {
 				widget.updatePosition();
 			}
+		}
+		for (const slider of this.loopSliders.values()) {
+			slider.updatePosition();
 		}
 		// Keep link arrows glued to their (moved) chain icons and code lines.
 		this.updateLinkChrome();
@@ -3959,11 +4097,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private updateVisualizationWidgets(visualizationData: IVisualizationItem[]): void {
 
 		// console.log("visualizationData", visualizationData);
-
-		// Get current cursor position. Uses the attended line, not the raw
-		// cursor line, so a whole-line selection doesn't read as "one line
-		// lower" and flip which loop iteration is shown.
-		const cursorLine = this.cursorFocusLine() ?? 1;
 
 		// Group visualization items by line number
 		const groupedByLine = new Map<number, IVisualizationItem[]>();
@@ -4066,22 +4199,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 			// Update or create for each present line
 			for (const [lineNumber, items] of groupedByLine.entries()) {
-				// Decide first vs last iteration
-				const shouldUseFirst = items.some(item =>
-					item.last_line_in_containing_loop !== undefined &&
-					cursorLine <= item.last_line_in_containing_loop + 1
-				);
-
-				// Group by execution step and pick one step
-				const groupedByStep = new Map<number, IVisualizationItem[]>();
-				for (const item of items) {
-					if (!groupedByStep.has(item.execution_step)) {
-						groupedByStep.set(item.execution_step, []);
-					}
-					groupedByStep.get(item.execution_step)!.push(item);
-				}
-				const selectedStep = (shouldUseFirst ? Math.min : Math.max)(...groupedByStep.keys());
-				const stepItems = groupedByStep.get(selectedStep) || [];
+				// One item per log site on the line (Python picks the iteration;
+				// see loopSelections), in source order.
+				const stepItems = items.slice().sort((a, b) => a.visIndex - b.visIndex);
 
 				const existing = this.visualizationWidgets.get(lineNumber);
 				// console.log("existing", lineNumber, existing)
@@ -4146,7 +4266,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 					const widgets: VisualizationWidget[] = [];
 					for (let i = 0; i < stepItems.length; i++) {
 						const item = stepItems[i];
-						const visIndex = (item as any).visIndex ?? i;
+						const visIndex = item.visIndex;
 						const widget = new VisualizationWidget(
 							this.editor,
 							lineNumber,
@@ -4160,6 +4280,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							() => { this.onLinkChainClick(lineNumber, visIndex); },
 							this.clipboardService
 						);
+						widget.leftInset = this.loopSliders.has(lineNumber) ? LoopSliderWidget.WIDTH : 0;
 						widget.updateContent(item.html);
 						widgets.push(widget);
 					}
@@ -4213,6 +4334,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 			: widgetsToReposition;
 		for (const widget of repositionTargets) {
 			widget.updatePosition();
+		}
+		if (zonesChanged) {
+			for (const slider of this.loopSliders.values()) {
+				slider.updatePosition();
+			}
 		}
 		this.applySyntaxErrorClassToWidgets();
 		this.updateLinkChrome();
@@ -5162,6 +5288,183 @@ export class SNCController extends Disposable implements IEditorContribution {
 		return modelUri?.scheme === Schemas.file ? modelUri.fsPath : '';
 	}
 
+	// ---- Loop sliders ----
+
+	private loopSelectionLine(selection: { decorationId: string }): number | null {
+		const model = this.editor.getModel();
+		return model?.getDecorationRange(selection.decorationId)?.startLineNumber ?? null;
+	}
+
+	/**
+	 * `{ headerLine: iteration }` as Python takes it: every pinned loop, and
+	 * for the rest the last iteration of the previous run (recorded in
+	 * `implicitLoopSelections` so the run's end can tell whether that guess
+	 * held). A loop nothing is known about yet streams every iteration.
+	 */
+	private loopSelectionsByLine(): Record<string, number> {
+		const out: Record<string, number> = {};
+		this.implicitLoopSelections = new Map();
+		for (const [line, count] of this.loopCounts) {
+			if (count > 0 && this.selectedIteration(line) === null) {
+				out[String(line)] = count - 1;
+				this.implicitLoopSelections.set(line, count - 1);
+			}
+		}
+		for (const selection of this.loopSelections) {
+			const line = this.loopSelectionLine(selection);
+			if (line !== null) {
+				out[String(line)] = selection.iteration;
+			}
+		}
+		return out;
+	}
+
+	private selectedIteration(line: number): number | null {
+		const selection = this.loopSelections.find(s => this.loopSelectionLine(s) === line);
+		return selection ? selection.iteration : null;
+	}
+
+	/** Pin the loop whose header is `line` to `iteration`, or unpin it with `null`. */
+	private setLoopSelection(line: number, iteration: number | null): void {
+		const model = this.editor.getModel();
+		if (!model) {
+			return;
+		}
+		const existing = this.loopSelections.find(s => this.loopSelectionLine(s) === line);
+		if (iteration === null) {
+			if (existing) {
+				model.deltaDecorations([existing.decorationId], []);
+				this.loopSelections = this.loopSelections.filter(s => s !== existing);
+			}
+			return;
+		}
+		if (existing) {
+			existing.iteration = iteration;
+			return;
+		}
+		const [decorationId] = model.deltaDecorations([], [{
+			range: new Range(line, 1, line, 1),
+			options: {
+				description: 'snc-loop-selection',
+				stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+			}
+		}]);
+		if (decorationId) {
+			this.loopSelections.push({ decorationId, iteration });
+		}
+	}
+
+	/**
+	 * A loop finished. Size its slider, and:
+	 *
+	 * - Unpinned, the loop shows its last iteration. Its items arrive one
+	 *   iteration after another, each replacing the last, so a line that ran
+	 *   in some earlier iteration but not the last is still showing the earlier
+	 *   one -- a branch the last iteration didn't take. Now that the count is
+	 *   known, those go.
+	 *
+	 * A pin past the end is dealt with when the run ends (clampLoopSelections):
+	 * a function reports after every call, so mid-run its count is still
+	 * climbing and isn't something to clamp against.
+	 */
+	private onLoopReport(loop: ILoopReport): void {
+		this.loopCountsThisRun.set(loop.line, loop.count);
+		this.loopCounts.set(loop.line, Math.max(this.loopCounts.get(loop.line) ?? 0, loop.count));
+		const selected = this.selectedIteration(loop.line);
+		if (selected === null && loop.kind === 'loop') {
+			// (A function's activations nest under recursion, so "the last
+			// one" isn't one thing; there, whatever arrived last stays.)
+			const last = loop.count - 1;
+			const under = (path: LoopPath): boolean => {
+				const depth = path.findIndex(([line]) => line === loop.line);
+				if (depth < 0 || depth !== loop.path.length) {
+					return false;
+				}
+				return loop.path.every(([line, k], i) => path[i][0] === line && path[i][1] === k);
+			};
+			const kept = this.visualizationItems.filter(item =>
+				!under(item.path) || item.path[loop.path.length][1] === last);
+			if (kept.length !== this.visualizationItems.length) {
+				this.visualizationItems = kept;
+			}
+		}
+		this.updateLoopSliders();
+	}
+
+	/**
+	 * A pin past the end of its loop (the code changed and the loop got
+	 * shorter) moves to the last iteration, and the program reruns for it.
+	 * Only against counts this run finished reporting.
+	 */
+	private clampLoopSelections(): void {
+		let changed = false;
+		for (const selection of [...this.loopSelections]) {
+			const line = this.loopSelectionLine(selection);
+			if (line === null || !this.loopCountsThisRun.has(line)) {
+				continue;
+			}
+			const count = this.loopCountsThisRun.get(line) ?? 0;
+			if (selection.iteration >= count) {
+				this.setLoopSelection(line, count > 0 ? count - 1 : null);
+				changed = true;
+			}
+		}
+		// An unpinned loop was shown at the previous run's last iteration; if
+		// this run counted differently (the code changed), that isn't its last
+		// any more.
+		for (const [line, shown] of this.implicitLoopSelections) {
+			const count = this.loopCountsThisRun.get(line);
+			if (count !== undefined && this.selectedIteration(line) === null && count - 1 !== shown) {
+				changed = true;
+			}
+		}
+		if (changed) {
+			this.updateLoopSliders();
+			this.scheduleRun();
+		}
+	}
+
+	/** One slider per loop/def line that ran more than once; none elsewhere. */
+	private updateLoopSliders(): void {
+		for (const [line, count] of this.loopCounts) {
+			let slider = this.loopSliders.get(line);
+			if (count < 2) {
+				if (slider) {
+					slider.dispose();
+					this.loopSliders.delete(line);
+				}
+				continue;
+			}
+			if (!slider) {
+				slider = new LoopSliderWidget(this.editor, line, iteration => {
+					this.setLoopSelection(line, iteration);
+					this.scheduleRun();
+				});
+				this.loopSliders.set(line, slider);
+			}
+			slider.update(count, this.selectedIteration(line) ?? count - 1);
+		}
+		for (const [line, slider] of Array.from(this.loopSliders.entries())) {
+			if (!this.loopCounts.has(line)) {
+				slider.dispose();
+				this.loopSliders.delete(line);
+			}
+		}
+		// The visualizer on a slider's line sits after the slider.
+		for (const [line, widgets] of this.visualizationWidgets) {
+			const inset = this.loopSliders.has(line) ? LoopSliderWidget.WIDTH : 0;
+			for (const widget of widgets) {
+				if (widget.leftInset !== inset) {
+					widget.leftInset = inset;
+					widget.updatePosition();
+				}
+			}
+		}
+		for (const slider of this.loopSliders.values()) {
+			slider.updatePosition();
+		}
+	}
+
 	/** Rerun after the usual debounce, as a source edit would. */
 	private scheduleRun(): void {
 		if (!this.isPythonModel()) {
@@ -5310,6 +5613,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				} else if (msg.type === 'command') {
 					// Handle commands from visualizers
 					this.handleCommand(msg.command);
+				} else if (msg.type === 'loop') {
+					this.onLoopReport(msg.loop);
 				} else if (msg.type === 'end') {
 					// console.log('program end');
 					const tEnd = now();
@@ -5344,6 +5649,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 						// Every model is fresh now: reconcile front-end links against
 						// the models so the chain icon and decorations can't drift.
 						this.reconcileLinksWithModels();
+						// The run's own counts are the truth now: a loop that got
+						// shorter, or is gone from the program, loses its slider.
+						this.loopCounts = new Map(this.loopCountsThisRun);
+						this.updateLoopSliders();
+						this.clampLoopSelections();
 						this.updateVisualizationWidgets(this.visualizationItems);
 					}
 
@@ -5448,8 +5758,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 				filePath,
 				stdin,
 				stdinEof,
+				loopSelections: this.loopSelectionsByLine(),
 				...(focusedLine !== null ? { focusedLine } : {})
 			};
+			this.loopCountsThisRun = new Map();
 			await channel.call('startProgram', [content, options, runId]);
 		} catch (error) {
 			console.error('Failed to start streaming run:', error);

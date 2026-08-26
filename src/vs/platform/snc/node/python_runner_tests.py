@@ -88,7 +88,7 @@ class TestSplitLeadingImports(unittest.TestCase):
         logged = []
         globals_dict = {
             "__name__": "__main__",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: logged.append((line, value)),
+            "_log_value": lambda line, value, *a, **k: logged.append((line, value)),
         }
 
         exec(import_code, globals_dict)
@@ -103,7 +103,7 @@ class TestSplitLeadingImports(unittest.TestCase):
         logged = []
         globals_dict = {
             "__name__": "__main__",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: logged.append((line, value)),
+            "_log_value": lambda line, value, *a, **k: logged.append((line, value)),
         }
 
         exec(import_code, globals_dict)
@@ -120,8 +120,8 @@ class TestReseed(unittest.TestCase):
         return {
             "__name__": "__main__",
             "__file__": "<string>",
-            "_log_value": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: logged.append((line, value)),
-            "_log_and_return": lambda line, value, last_line_in_containing_loop=None, eval_in_scope=None, var_and_exp=None, source_span=None: (logged.append((line, value)), value)[1],
+            "_log_value": lambda line, value, *a, **k: logged.append((line, value)),
+            "_log_and_return": lambda line, value, *a, **k: (logged.append((line, value)), value)[1],
         }
 
     def _run_checkpoint1(self, source_code):
@@ -588,18 +588,18 @@ class TestLogValueForwardsVarAndExp(unittest.TestCase):
     def _log_html(self, value, var_and_exp=None, focused_line=None):
         buf = io.StringIO()
         old_out = python_runner._stream_out
-        old_counter = python_runner.line_emit_counter
+        old_counter = python_runner._run_models
         old_models = python_runner.models_and_events
         old_focused = python_runner._focused_line
         try:
             python_runner._stream_out = buf
-            python_runner.line_emit_counter = {}
+            python_runner._run_models = {}
             python_runner.models_and_events = []
             python_runner._focused_line = focused_line
             log_value(1, value, var_and_exp=var_and_exp)
         finally:
             python_runner._stream_out = old_out
-            python_runner.line_emit_counter = old_counter
+            python_runner._run_models = old_counter
             python_runner.models_and_events = old_models
             python_runner._focused_line = old_focused
 
@@ -750,11 +750,12 @@ class TestSourceSpan(unittest.TestCase):
         """{line: source_span} for every _log_value the transform emits."""
         spans = {}
 
-        def record(line, value, last_line_in_containing_loop=None,
-                   eval_in_scope=None, var_and_exp=None, source_span=None):
+        def record(line, value, site=0, eval_in_scope=None, var_and_exp=None,
+                   source_span=None):
             spans[line] = source_span
 
         globals_dict = {
+            **python_runner._runtime_hooks(),
             '__name__': '__main__',
             '_log_value': record,
             '_log_and_return': (lambda line, value, *a, **k: value),
@@ -908,19 +909,19 @@ class TestSourceSpanReachesTheVisualizer(unittest.TestCase):
 
     def html(self, vis, source_span):
         buf = io.StringIO()
-        saved = (python_runner._stream_out, python_runner.line_emit_counter,
+        saved = (python_runner._stream_out, python_runner._run_models,
                  python_runner.models_and_events, python_runner._source_code,
                  python_runner._visualizers)
         try:
             python_runner._stream_out = buf
-            python_runner.line_emit_counter = {}
+            python_runner._run_models = {}
             python_runner.models_and_events = []
             python_runner._source_code = 'data = [3, 1, 2]\n'
             python_runner._visualizers = lambda: [vis]
             log_value(1, [3, 1, 2], var_and_exp=('data', 'data'),
                       source_span=source_span)
         finally:
-            (python_runner._stream_out, python_runner.line_emit_counter,
+            (python_runner._stream_out, python_runner._run_models,
              python_runner.models_and_events, python_runner._source_code,
              python_runner._visualizers) = saved
         msgs = [json.loads(line) for line in buf.getvalue().splitlines()
@@ -966,18 +967,18 @@ class TestConfigComment(unittest.TestCase):
 
     def _log(self, source, line, models_and_events=None):
         buf = io.StringIO()
-        saved = (python_runner._stream_out, python_runner.line_emit_counter,
+        saved = (python_runner._stream_out, python_runner._run_models,
                  python_runner.models_and_events, python_runner._source_code,
                  python_runner._visualizers)
         try:
             python_runner._stream_out = buf
-            python_runner.line_emit_counter = {}
+            python_runner._run_models = {}
             python_runner.models_and_events = models_and_events or []
             python_runner._source_code = source
             python_runner._visualizers = lambda: [self._Vis()]
             log_value(line, [1], var_and_exp=('xs', 'xs'))
         finally:
-            (python_runner._stream_out, python_runner.line_emit_counter,
+            (python_runner._stream_out, python_runner._run_models,
              python_runner.models_and_events, python_runner._source_code,
              python_runner._visualizers) = saved
         msgs = [json.loads(l) for l in buf.getvalue().splitlines() if l.strip()]
@@ -1241,3 +1242,202 @@ class TestCheckpointsAgreeOnOutput(unittest.TestCase):
         first = ''.join(t for _, t, _ in self._checkpoint1())
         self.setUp()
         self.assertEqual(first, ''.join(t for _, t, _ in self._checkpoint2()))
+
+
+class TestLoopIterations(unittest.TestCase):
+    """A line inside a loop runs once per iteration. Each logged item carries
+    the dynamic `path` it was logged under -- `[[loop_line, iteration], ...]`
+    for the loops (and function calls) enclosing it -- and the editor can pin
+    a loop to one iteration with `loop_selections`, in which case only items
+    under that iteration are rendered at all."""
+
+    def _run(self, source_code, loop_selections=None):
+        import_code, body_code = split_leading_imports(source_code)
+        with capture_stream_messages() as msgs:
+            python_runner._execute_run(body_code, '', 'run-1', import_code=import_code,
+                                       loop_selections=loop_selections)
+        return msgs.all()
+
+    @staticmethod
+    def _items(msgs):
+        """[(line, visIndex, path, value_text)] in emission order."""
+        import re
+        out = []
+        for m in msgs:
+            if m.get('type') != 'item':
+                continue
+            it = m['item']
+            found = re.search(r'snc-generic-visualizer">(.*?)</span>', it['html'])
+            out.append((it['line'], it['visIndex'], it['path'], found.group(1) if found else it['html']))
+        return out
+
+    @staticmethod
+    def _loops(msgs):
+        return [(m['loop']['line'], m['loop']['path'], m['loop']['count'])
+                for m in msgs if m.get('type') == 'loop']
+
+    def test_a_recursive_function_numbers_its_activations_in_entry_order(self):
+        src = (
+            "def fact(n):\n"
+            "    if n == 0:\n"
+            "        return 1\n"
+            "    else:\n"
+            "        return n * fact(n-1)\n"
+            "fact(3)\n"
+        )
+        # Activation 2 is fact(1): its condition and its return.
+        msgs = self._run(src, {'1': 2})
+        self.assertEqual(self._items(msgs), [
+            (1, 0, [[1, 0], [1, 1], [1, 2]], '1'),
+            (2, 0, [[1, 0], [1, 1], [1, 2]], 'False'),
+            (5, 0, [[1, 0], [1, 1], [1, 2]], '1'),
+            (6, 0, [], '6'),
+        ])
+        # Every exit reports how many activations began; the outermost last.
+        self.assertEqual(self._loops(msgs)[-1], (1, [], 4))
+        self.assertEqual(self._run(src)[-1]['type'], 'end')
+        kinds = {m['loop']['kind'] for m in self._run(src) if m.get('type') == 'loop'}
+        self.assertEqual(kinds, {'call'})
+
+    SRC = (
+        "for i in range(3):\n"
+        "    y = i * 10\n"
+        "z = 1\n"
+    )
+
+    def test_every_iteration_is_emitted_when_the_loop_is_not_pinned(self):
+        items = self._items(self._run(self.SRC))
+        self.assertEqual(items, [
+            (1, 0, [[1, 0]], '0'), (2, 0, [[1, 0]], '0'),
+            (1, 0, [[1, 1]], '1'), (2, 0, [[1, 1]], '10'),
+            (1, 0, [[1, 2]], '2'), (2, 0, [[1, 2]], '20'),
+            (3, 0, [], '1'),
+        ])
+
+    def test_the_loop_reports_its_iteration_count_when_it_ends(self):
+        self.assertEqual(self._loops(self._run(self.SRC)), [(1, [], 3)])
+
+    def test_pinning_a_loop_renders_only_that_iteration(self):
+        items = self._items(self._run(self.SRC, {'1': 1}))
+        self.assertEqual(items, [(1, 0, [[1, 1]], '1'), (2, 0, [[1, 1]], '10'), (3, 0, [], '1')])
+
+    def test_a_branch_not_taken_in_the_pinned_iteration_shows_nothing(self):
+        src = (
+            "for i in range(4):\n"
+            "    if i % 2 == 0:\n"
+            "        even = i\n"
+        )
+        items = self._items(self._run(src, {'1': 1}))
+        self.assertEqual(items, [(1, 0, [[1, 1]], '1'), (2, 0, [[1, 1]], 'False')])
+
+    def test_nested_loops_count_per_outer_iteration(self):
+        src = (
+            "for i in range(2):\n"
+            "    for j in range(i + 1):\n"
+            "        p = i * 10 + j\n"
+        )
+        msgs = self._run(src, {'1': 1, '2': 0})
+        self.assertEqual(self._items(msgs), [
+            (1, 0, [[1, 1]], '1'),
+            (2, 0, [[1, 1], [2, 0]], '0'),
+            (3, 0, [[1, 1], [2, 0]], '10'),
+        ])
+        # Only the pinned outer iteration's inner loop reports; the outer
+        # loop itself reports once it ends.
+        self.assertEqual(self._loops(msgs), [(2, [[1, 1]], 2), (1, [], 2)])
+
+    def test_visindex_is_the_static_position_on_the_line(self):
+        src = "for a, b in [(1, 2), (3, 4)]:\n    pass\n"
+        items = self._items(self._run(src))
+        self.assertEqual(items, [
+            (1, 0, [[1, 0]], '1'), (1, 1, [[1, 0]], '2'),
+            (1, 0, [[1, 1]], '3'), (1, 1, [[1, 1]], '4'),
+        ])
+
+    def test_a_function_is_a_loop_over_its_calls(self):
+        src = (
+            "def f(x):\n"
+            "    return x + 1\n"
+            "a = f(1)\n"
+            "b = f(10)\n"
+        )
+        msgs = self._run(src, {'1': 1})
+        self.assertEqual(self._items(msgs), [
+            (3, 0, [], '2'),
+            (1, 0, [[1, 1]], '10'),
+            (2, 0, [[1, 1]], '11'),
+            (4, 0, [], '11'),
+        ])
+        # Each call reports the count so far; the editor keeps the last.
+        self.assertEqual(self._loops(msgs), [(1, [], 1), (1, [], 2)])
+
+    def test_a_functions_parameters_are_logged_on_the_def_line(self):
+        src = (
+            "def f(a, b=2, *rest, k=3, **kw):\n"
+            "    return a\n"
+            "f(1, 5, 6, k=7, z=8)\n"
+        )
+        items = self._items(self._run(src))
+        self.assertEqual([it[:3] for it in items[:5]], [
+            (1, 0, [[1, 0]]), (1, 1, [[1, 0]]), (1, 2, [[1, 0]]), (1, 3, [[1, 0]]), (1, 4, [[1, 0]]),
+        ])
+        # (`rest` and `kw` are a tuple and a dict, which get real visualizers.)
+        self.assertEqual([items[i][3] for i in (0, 1, 3)], ['1', '5', '7'])
+
+    def test_a_break_still_pops_the_loop(self):
+        src = (
+            "for i in range(10):\n"
+            "    if i == 1:\n"
+            "        break\n"
+            "after = 5\n"
+        )
+        msgs = self._run(src)
+        self.assertEqual(self._loops(msgs), [(1, [], 2)])
+        self.assertEqual(self._items(msgs)[-1], (4, 0, [], '5'))
+
+    def test_a_while_loop_counts_too(self):
+        src = "n = 0\nwhile n < 3:\n    n += 1\n"
+        msgs = self._run(src, {'2': 2})
+        self.assertEqual(self._items(msgs), [(1, 0, [], '0'), (3, 0, [[2, 2]], '3')])
+        self.assertEqual(self._loops(msgs), [(2, [], 3)])
+
+    def test_an_uncaught_error_belongs_to_the_iteration_that_raised_it(self):
+        src = "for i in range(3):\n    x = 1 // (1 - i)\n"
+        msgs = self._run(src)
+        items = self._items(msgs)
+        self.assertEqual(items[-1][:3], (2, 0, [[1, 1]]))
+        self.assertEqual(self._loops(msgs), [(1, [], 2)])
+        # Pinned elsewhere, the error isn't that iteration's to show.
+        self.assertEqual([it[:3] for it in self._items(self._run(src, {'1': 0}))],
+                         [(1, 0, [[1, 0]]), (2, 0, [[1, 0]])])
+
+    def test_an_error_raised_in_a_call_belongs_to_that_call(self):
+        src = "def f(n):\n    return 1 // n\nf(1)\nf(0)\n"
+        items = self._items(self._run(src))
+        # (Reported at the call site, as uncaught errors are; the path is the
+        # call's.)
+        self.assertEqual(items[-1][2], [[1, 1]])
+
+    def test_events_replay_once_per_site_per_run(self):
+        """A site logged three times in one run replays its pending events
+        once and carries the resulting model forward, so a command a
+        visualizer emits in response goes out once."""
+        class Vis:
+            def can_visualize(value): return isinstance(value, int)
+            def init_model(value, get_visualizer): return {'n': 0}
+            def visualize(value, model, get_visualizer, eval_in_scope): return f'<b>{model["n"]}</b>'
+            def update(event, var_and_exp, model, value, get_visualizer): return ({'n': model['n'] + 1}, [])
+        model = {'n': 5, '_type_fingerprint': python_runner._type_fingerprint(0),
+                 '_source_expr_sig': ['y', 'y']}
+        m_and_e = json.dumps([{'line': 2, 'visIndex': 0, 'model': model,
+                               'events': [{'pythonEventStr': 'e', 'eventJSON': {}}]}])
+        import_code, body_code = split_leading_imports(self.SRC)
+        saved = python_runner._visualizers
+        python_runner._visualizers = lambda: [Vis]
+        try:
+            with capture_stream_messages() as msgs:
+                python_runner._execute_run(body_code, m_and_e, 'run-1', import_code=import_code)
+        finally:
+            python_runner._visualizers = saved
+        htmls = [m['item']['html'] for m in msgs.all() if m.get('type') == 'item' and m['item']['line'] == 2]
+        self.assertEqual(htmls, ['<b>6</b>'] * 3)
