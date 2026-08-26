@@ -1335,6 +1335,33 @@ def whole_grab_body(child_html: str, expr: str) -> 'str | None':
     return None
 
 
+# What the readings on one handle are called once there is more than one: the
+# value being pointed at, and the same question asked of the whole column.
+# Named only in company -- a lone expression has nothing to be told apart from,
+# which is why _column_header_exps leaves a list's single reading unlabelled.
+READING_ONE = 'One'
+READING_LIST = 'List'
+
+
+def label_readings(primary, extras) -> list:
+    """The readings of one value, named so the tooltip's rows can be told apart.
+
+    The value itself leads and is `One`; anything that already said what it is
+    -- a dict column's `List` and `Dict` -- keeps its own word, and the rest are
+    the list reading. Returns PyExps with everything else about them (declared
+    imports) carried through.
+    """
+    def as_exp(e):
+        return e if isinstance(e, PyExp) else PyExp(e)
+
+    first = as_exp(primary)
+    out = [first._replace(label=first.label or READING_ONE)]
+    for extra in extras:
+        exp = as_exp(extra)
+        out.append(exp._replace(label=exp.label or READING_LIST))
+    return out
+
+
 def add_drag_readings(child_html: str, expr: str, extra) -> str:
     """Give a child's whole-value handle the other ways its value can be read.
 
@@ -1352,7 +1379,8 @@ def add_drag_readings(child_html: str, expr: str, extra) -> str:
     body = whole_grab_body(child_html, expr) if extra else None
     if body is None:
         return child_html
-    return f'<span{py_exp_attrs([expr, *extra])} class="py-exp-grab">{body}'
+    return (f'<span{py_exp_attrs(label_readings(expr, extra))} '
+            f'class="py-exp-grab">{body}')
 
 
 # A name no program has, standing in for a scope while a dollar expression is

@@ -12110,6 +12110,106 @@ class TestCellInnerExps(unittest.TestCase):
             ['[v[1] for v in d.values()]', '{k: v[1] for k, v in d.items()}'])
 
 
+class TestNestedTableCellReadings(unittest.TestCase):
+    """A table that is itself a CELL passes the reach on up.
+
+    `x = [['id','name'], ...]` under one `$` column draws an inner table per
+    row, and `x[0][1]` is one column of THAT -- but it is also `[item[1] for
+    item in x]`, the CSV column, which nothing on screen said. So a nested
+    table composes its cell's own path onto the question the table above asks,
+    exactly as a tuple composes its slot.
+    """
+
+    def readings(self, f, sub_expr):
+        return [getattr(e, 'expr', e) for e in f(sub_expr)]
+
+    def outer(self, sub_expr):
+        """The real thing, as the table above would ask it."""
+        from table_visualizer import _cell_inner_exps
+        return _cell_inner_exps({'$': {}}, '$', 'x', None, sub_expr)
+
+    def test_a_table_nobody_nested_offers_only_its_own_reading(self):
+        from table_visualizer import _cell_every_row
+        f = _cell_every_row({'$': {}}, '$', 'x', None, None, True)
+        self.assertEqual(self.readings(f, '$[1]'), ['[item[1] for item in x]'])
+
+    def test_a_nested_table_adds_the_outer_one(self):
+        from table_visualizer import _cell_every_row
+        f = _cell_every_row({'$': {}}, '$', 'x[0]', None, self.outer, True)
+        self.assertEqual(self.readings(f, '$[1]'),
+                         ['[item[1] for item in x[0]]',
+                          '[[item2[1] for item2 in item] for item in x]'])
+
+    def test_the_nearest_scope_leads(self):
+        # Innermost first, the way the value is read on screen: the inner
+        # table is the one the user is looking down.
+        from table_visualizer import _cell_every_row
+        f = _cell_every_row({'$': {}}, '$', 'x[0]', None, self.outer, True)
+        self.assertIn('x[0]', self.readings(f, '$[1]')[0])
+
+    def test_a_cell_with_nothing_to_say_hands_down_nothing(self):
+        from table_visualizer import _cell_every_row
+        self.assertIsNone(_cell_every_row({'$': {}}, None, 'x', None, None, True))
+
+    def test_a_splat_cell_says_nothing_of_the_outer_table_either(self):
+        # No relative path: the cell shows one element of a spread list.
+        from table_visualizer import _cell_every_row
+        f = _cell_every_row({'$': {}}, '$', 'x[0]', None, self.outer, False)
+        self.assertEqual(self.readings(f, '$[1]'), ['[item[1] for item in x[0]]'])
+
+
+class TestNestedTableSendsCodeToTheOutermost(unittest.TestCase):
+    """A table that is a CELL takes no column of its own.
+
+    Every row of the table above draws its own inner table, and a column
+    written into one of them is a fact about that row alone -- nothing keeps
+    the others in step with it. So the code is mapped over this table's rows
+    and travels on up, and the outermost table is the one that takes it.
+    """
+
+    LIST = ['a', 'b']
+
+    def get_vis(self, v):
+        return _mock_list_vis if isinstance(v, list) else _mock_code_vis
+
+    def fire(self, var_and_exp):
+        model = init_model(self.LIST, self.get_vis, var_and_exp=var_and_exp)
+        model['_source_expr'] = 'x[0]'
+        key = f'0{CELL_KEY_SEP}$'
+        model['focused_child'] = key
+        return update(make_child_mouse_event(key, 'None'), var_and_exp, model,
+                      self.LIST, self.get_vis)
+
+    def code(self, cmds):
+        return [c[1] for c in cmds if isinstance(c, tuple) and 2 <= len(c) <= 4]
+
+    def test_the_code_is_mapped_over_this_tables_rows(self):
+        from table_visualizer import _map_over_rows_code
+        self.assertEqual(
+            _map_over_rows_code(f'len({CHILD_SOURCE_BINDER})'),
+            f'[len(item2) for item2 in {CHILD_SOURCE_BINDER}]')
+
+    def test_the_element_steps_past_a_name_the_code_already_binds(self):
+        from table_visualizer import _map_over_rows_code
+        self.assertEqual(
+            _map_over_rows_code(f'f(item2, {CHILD_SOURCE_BINDER})'),
+            f'[f(item2, item3) for item3 in {CHILD_SOURCE_BINDER}]')
+
+    def test_a_nested_table_hands_it_up_and_keeps_no_column(self):
+        model, cmds = self.fire((None, CHILD_SOURCE_BINDER))
+        self.assertEqual([c for c in (model.get('columns') or {}) if c != '$'], [])
+        self.assertEqual(self.code(cmds),
+                         [f'[item2 for item2 in {CHILD_SOURCE_BINDER}]'])
+
+    def test_a_root_table_still_takes_the_column_itself(self):
+        model, cmds = self.fire(('x', 'x'))
+        # `($)` -- the binder resolved to this table's own column, the
+        # parenthesising nest_generated_expr has always done.
+        self.assertEqual([c for c in (model.get('columns') or {}) if c != '$'],
+                         ['($)'])
+        self.assertEqual(self.code(cmds), [])
+
+
 class _AggCodeVis:
     """An answer's visualizer that writes code about the answer, the way the
     string visualizer's action buttons do."""

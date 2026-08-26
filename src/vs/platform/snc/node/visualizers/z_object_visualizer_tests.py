@@ -26,7 +26,7 @@ from z_object_visualizer import (
 from visualizer_utils import (ChildEvent, get_full_class_name as _get_full_class_name,
                               set_line_config, take_line_config,
                              wrap_drag_grab, py_exp_attrs, MAX_NEST_DEPTH,
-                             CHILD_SOURCE_BINDER)
+                             CHILD_SOURCE_BINDER, label_readings)
 import z_object_visualizer
 import table_visualizer
 
@@ -35,6 +35,12 @@ def exp_attr(*exprs):
     """The `snc-py-exps` attribute a handle offering these expressions carries,
     as it reads inside the tag it was written into."""
     return py_exp_attrs(list(exprs), draggable=False).strip()
+
+
+def reads_attr(primary, *extras):
+    """The `snc-py-exps` attribute of a handle offering several readings, named
+    the way the tooltip names them (One / List / Dict)."""
+    return py_exp_attrs(label_readings(primary, extras), draggable=False).strip()
 
 
 
@@ -2141,13 +2147,13 @@ class TestEveryRowReading(unittest.TestCase):
                          every_row_exps=self.every_row if every_row else None)
 
     def test_a_field_offers_the_column_reading_too(self):
-        self.assertIn(exp_attr('x[0].name', '[item.name for item in x]'),
+        self.assertIn(reads_attr('x[0].name',  '[item.name for item in x]'),
                       self.render())
 
     def test_the_compact_chip_offers_it_as_well(self):
         # What an UNFOCUSED object in a cell actually shows, so this is where
         # the offer is most often seen.
-        self.assertIn(exp_attr('x[0].name', '[item.name for item in x]'),
+        self.assertIn(reads_attr('x[0].name',  '[item.name for item in x]'),
                       self.render(small=True))
 
     def test_this_rows_value_is_what_the_handle_drags(self):

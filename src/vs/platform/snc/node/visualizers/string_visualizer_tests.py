@@ -14138,5 +14138,60 @@ class TestSearchBoxLegends(unittest.TestCase):
                 self.assertIn('$$ the whole string', legend)
 
 
+class TestActionsReadDownEveryRow(unittest.TestCase):
+    """A string in a table's CELL: an action is two questions at once.
+
+    Clicking one always generalized -- the code goes up and becomes a column,
+    one expression every row answers. Only the PREVIEW named a single row, so
+    the button offered `re.split(r',', parts[0], ...)` while the column it was
+    about to write said `re.split(r',', $, ...)`. Both readings are offered now.
+    """
+
+    import json as _json
+    import html as _html
+    import re as _re
+
+    VALUE = 'id,name,age'
+    ROWS = [VALUE, 'a,b,c']
+
+    def every_row(self, column_expr):
+        """Stands in for the table lifting a column expression."""
+        return [f'[{column_expr.replace("$", "item")} for item in parts]']
+
+    def render(self, every_row=True):
+        from string_visualizer import _render_action_buttons
+        scope = {'parts': self.ROWS, 're': re}
+        eval_in_scope = lambda code: eval(code, scope)
+        model = init_model(self.VALUE, None, eval_in_scope=eval_in_scope,
+                           var_and_exp=(None, 'parts[0]'))
+        model['_source_expr'] = 'parts[0]'
+        model['search'] = "r','"
+        return _render_action_buttons(
+            model, self.VALUE, eval_in_scope, None,
+            self.every_row if every_row else None)
+
+    def action_exps(self, out):
+        return [[e['expr'] for e in self._json.loads(self._html.unescape(a))]
+                for a in self._re.findall(r'data-action-expr="([^"]*)"', out)]
+
+    def test_split_offers_the_every_row_reading_too(self):
+        pairs = [e for e in self.action_exps(self.render())
+                 if e and e[0].startswith('re.split(')]
+        self.assertEqual(
+            pairs,
+            [["re.split(r',', parts[0], flags=re.M)",
+              "[re.split(r',', item, flags=re.M) for item in parts]"]])
+
+    def test_this_rows_answer_is_what_the_button_hands_over(self):
+        # The user is looking at THIS string; the column reading is the extra.
+        for exps in self.action_exps(self.render()):
+            if len(exps) > 1:
+                self.assertNotIn(' for item in parts]', exps[0])
+
+    def test_with_no_table_above_there_is_only_the_one_reading(self):
+        for exps in self.action_exps(self.render(every_row=False)):
+            self.assertEqual(len(exps), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

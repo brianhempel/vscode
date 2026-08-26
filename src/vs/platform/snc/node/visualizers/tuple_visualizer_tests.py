@@ -22,6 +22,7 @@ import table_visualizer
 from visualizer_utils import (
     CHILD_SOURCE_BINDER, ChildEvent, MAX_NEST_DEPTH, py_exp_attrs,
     set_line_config, take_line_config, truncate_repr, wrap_drag_grab,
+    label_readings,
 )
 
 
@@ -32,6 +33,12 @@ def exp_attr(*exprs):
     """The `snc-py-exps` attribute a handle offering these expressions carries,
     as it reads inside the tag it was written into."""
     return py_exp_attrs(list(exprs), draggable=False).strip()
+
+
+def reads_attr(primary, *extras):
+    """The `snc-py-exps` attribute of a handle offering several readings, named
+    the way the tooltip names them (One / List / Dict)."""
+    return py_exp_attrs(label_readings(primary, extras), draggable=False).strip()
 
 
 def child_keys(out: str) -> list:
@@ -733,7 +740,7 @@ class TestEveryRowReading(unittest.TestCase):
                          every_row_exps=self.every_row if every_row else None)
 
     def test_an_element_offers_the_column_reading_too(self):
-        self.assertIn(exp_attr('x[0][1]', '[item[1] for item in x]'),
+        self.assertIn(reads_attr('x[0][1]',  '[item[1] for item in x]'),
                       self.render())
 
     def test_this_rows_value_is_what_the_handle_drags(self):
@@ -748,13 +755,13 @@ class TestEveryRowReading(unittest.TestCase):
 
     def test_a_named_tuples_field_reads_by_name(self):
         out = self.render(value=Point(1, 2))
-        self.assertIn(exp_attr('x[0].y', '[item.y for item in x]'), out)
+        self.assertIn(reads_attr('x[0].y',  '[item.y for item in x]'), out)
 
     def test_a_tuple_inside_a_tuple_asks_from_where_it_sits(self):
         # Composed on the way down, so the inner element asks about `$[0][1]`
         # rather than starting over at `$[1]`.
         out = self.render(value=(('a', 'b'), 2))
-        self.assertIn(exp_attr('x[0][0][1]', '[item[0][1] for item in x]'), out)
+        self.assertIn(reads_attr('x[0][0][1]',  '[item[0][1] for item in x]'), out)
 
     def test_the_whole_tuple_keeps_its_own_handle(self):
         # The parens name the cell, which the column header already answers for.

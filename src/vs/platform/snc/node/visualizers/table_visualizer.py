@@ -60,7 +60,7 @@ from visualizer_utils import (
     route_child_event, aggregate_handled_keys,
     opens_block, with_pass_body,
     LinkConfig, handle_relink,
-    wrap_child_prefix, wrap_child_suffix, defer_drag_grab,
+    wrap_child_prefix, wrap_child_suffix, defer_drag_grab, add_drag_readings,
     DOLLARS_RE, SIGILS, Dollar, DollarScope,
     eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs, PyExp,
@@ -1168,6 +1168,70 @@ def _cell_inner_exps(columns, row_expr: str, source_expr: str,
     """
     return _column_header_exps(columns, compose_dollar_expr(sub_expr, row_expr),
                                source_expr, binds)
+
+
+def _cell_every_row(columns, col_row_expr, source_expr, binds,
+                    outer_every_row, cell_is_row):
+    """The callback a cell hands its child: every way a value inside it reads.
+
+    This table's own answer first -- the same reach down THIS list -- and then,
+    when this table is itself a cell, the same question asked of the table
+    above, with the cell's own path composed in. A tuple two tables deep gets
+    both: its element down the inner list, and that same element down the
+    outer one.
+
+    None when there is nothing to say, so a caller can test it and skip the
+    kwarg entirely.
+    """
+    if col_row_expr is None and (outer_every_row is None or not cell_is_row):
+        return None
+
+    def readings(sub_expr):
+        out = []
+        if col_row_expr is not None:
+            out += list(_cell_inner_exps(columns, col_row_expr, source_expr,
+                                         binds, sub_expr))
+        if outer_every_row is not None and cell_is_row:
+            # One list per outer row, so it says so: two rows of the tooltip
+            # both called `List` would be a distinction with nothing in it.
+            out += [e._replace(label=e.label or 'List of lists')
+                    for e in (r if isinstance(r, PyExp) else PyExp(r)
+                              for r in outer_every_row(_mapped_over_rows(sub_expr)))]
+        return out
+
+    return readings
+
+
+def _map_over_rows_code(code: str) -> str:
+    """A child's generated code, asked of every row of the table it came from.
+
+    The reading half of this is _mapped_over_rows; this is the code half, and
+    the difference is only what stands for the value -- a binder on the way up
+    rather than a dollar. Kept beside it so the tooltip and the column the
+    button writes cannot drift apart.
+    """
+    elem = _fresh_elem_name(0, code)
+    return (f'[{code.replace(CHILD_SOURCE_BINDER, elem)} '
+            f'for {elem} in {CHILD_SOURCE_BINDER}]')
+
+
+def _mapped_over_rows(sub_expr: str) -> str:
+    """*sub_expr*, asked of every row of the list it was written against.
+
+    What a nested table hands the table above. Reaching by POSITION -- the same
+    index in each outer row -- is the wrong generalization for anything derived:
+    a count made in one cell of an inner table is a count of THAT element, and
+    every row's answer is a count per element, not the count of its fourth. So
+    the inner list is mapped rather than indexed, and the result is one list per
+    outer row.
+
+    `$` stays the inner list, which is what the table above composes its column
+    onto. The element binds by the same rule a splat's does, stepped past any
+    name the expression already uses (see _fresh_elem_name), so the two
+    comprehensions that end up nested don't both say `item`.
+    """
+    elem = _fresh_elem_name(0, sub_expr)
+    return f'[{replace_dollars_in_py_exp(sub_expr, [elem])} for {elem} in $]'
 
 
 def _column_row_expr(columns, col: str) -> 'str | None':
@@ -9662,7 +9726,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
 
-def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False):
+def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, every_row_exps=None):
     children = model.get('children', {})
     columns = model.get('columns', [])
     focused_child = model.get('focused_child')
@@ -9963,26 +10027,40 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 # its own handles keeps them instead of being covered by one.
                 child_var_and_exp = (None, cell_expr) if cell_expr else None
 
-                # And the other reading of whatever it draws inside: the same
+                # And the other readings of whatever it draws inside: the same
                 # reach down every row (see _cell_inner_exps). None under a
                 # splat -- the cell shows one ELEMENT there, so there is no
                 # once-per-row expression for anything in it, which is the same
                 # question _column_row_expr answers with None.
                 col_row_expr = (None if source_expr is None
                                 else _column_row_expr(columns, col))
-                every_row_exps = (
-                    None if col_row_expr is None else
-                    functools.partial(_cell_inner_exps, columns, col_row_expr,
-                                      source_expr, _model_binds(model)))
-                inner = ({'every_row_exps': every_row_exps}
-                         if every_row_exps is not None
-                         and wants_kwarg(cell_vis.visualize, 'every_row_exps')
+                # When this table is itself a cell, the reach goes on up: the
+                # `name` of a CSV row inside a cell is `x[0][1]` here, one
+                # column of the inner table, AND `[item[1] for item in x]`
+                # read down the outer one. The cell's path within THIS list --
+                # built against `$` rather than the source -- is what the table
+                # above composes onto, exactly as a tuple hands up its slot.
+                rel_cell_expr = (None if leaf.splat is not None else
+                                 _leaf_cell_expr(leaf, '$', row, lst, from_end))
+                outer_reads = (list(every_row_exps(rel_cell_expr))
+                               if every_row_exps is not None and rel_cell_expr
+                               else [])
+                cell_every_row = _cell_every_row(
+                    columns, col_row_expr, source_expr, _model_binds(model),
+                    every_row_exps, leaf.splat is None)
+                draw_cell = getattr(cell_vis, 'visualize_els', None) or cell_vis.visualize
+                inner = ({'every_row_exps': cell_every_row}
+                         if cell_every_row is not None
+                         and wants_kwarg(draw_cell, 'every_row_exps')
                          else {})
 
                 if hasattr(cell_vis, 'visualize_els'):
-                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)
+                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp, **inner)
                 else:
                     cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp, **inner)]
+                if outer_reads and cell_expr:
+                    cell_htmls = [add_drag_readings(h, cell_expr, outer_reads)
+                                  for h in cell_htmls]
 
                 # A column drawn once for a group has to span it -- otherwise
                 # the cell occupies the first row only and every row under it
@@ -10080,7 +10158,7 @@ def _visualize_collapsed(value, var_and_exp) -> str:
         var_and_exp)
 
 
-def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, source_span=None):
+def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, source_span=None, every_row_exps=None):
     _adopt_source(model, var_and_exp, source_span)
     model['_is_dict'] = isinstance(lst, dict)
     model['columns'] = _as_columns(model.get('columns'))
@@ -10100,7 +10178,7 @@ def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=N
     # No whole-area drag handle in either size: the cells and column headers
     # carry their own snc-py-exps, and a handle wrapping all of them would claim
     # every hover in between. Only the generic visualizers self-wrap.
-    return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+    return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, every_row_exps=every_row_exps)
 
 
 def _table_child_value_getter(key, lst, model, eval_in_scope=None):
@@ -10223,8 +10301,23 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 else:
                     concrete_cell = _column_cell_expr(cell_col, src, idx,
                                                       value, from_end)
-            commands = [nest_child_command(cmd, generic_cell, concrete_cell)
-                        for cmd in commands]
+            # A table that is itself a CELL does not take the column: each
+            # row of the table above draws its own inner table, and a column
+            # written into one of them is a fact about that row alone -- there
+            # is nothing keeping the others in step with it. So the code is
+            # mapped over this table's rows and travels on up, still carrying
+            # the binder, and the OUTERMOST table is the one that takes it.
+            # Its clipboard text is unaffected: that names this row and always
+            # did, so it is resolved here as before.
+            if is_nested(var_and_exp):
+                commands = [
+                    (cmd[0], _map_over_rows_code(cmd[1]), *cmd[2:])
+                    if is_new_code(cmd) and not is_agg
+                    else nest_child_command(cmd, generic_cell, concrete_cell)
+                    for cmd in commands]
+            else:
+                commands = [nest_child_command(cmd, generic_cell, concrete_cell)
+                            for cmd in commands]
 
         filtered_commands: List[Any] = []
         has_rows = bool(value)
@@ -10242,7 +10335,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # The declaration is still asked for now, though: the column is
             # evaluated in the user's scope on every run, so until the file has
             # the import there is nothing for the column to show.
-            if is_new_code(cmd) and not is_agg:
+            if is_new_code(cmd) and not is_agg and is_nested(var_and_exp):
+                # Mapped above and headed for the outermost table.
+                filtered_commands.append(cmd)
+            elif is_new_code(cmd) and not is_agg:
                 _add_derived_column(new_model, cell_col, cmd[1])
                 if len(cmd) > 2 and cmd[2]:
                     filtered_commands.append(AddImports(imports=tuple(cmd[2])))

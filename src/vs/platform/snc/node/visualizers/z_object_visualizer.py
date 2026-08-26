@@ -55,7 +55,7 @@ from visualizer_utils import (
     Dollar, DollarScope, is_nested, add_drag_readings, compose_dollar_expr,
     wants_kwarg,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
-    get_full_class_name, truncate_str, py_exp_attrs,
+    get_full_class_name, truncate_str, py_exp_attrs, label_readings,
     parse_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
 )
@@ -576,7 +576,7 @@ def render_small_field(display_key: str, val_repr: str, expr: str, add_target: s
     field taken down every row. The chip is the whole of an unfocused object in
     a cell, so this is where that offer is most often seen.
     """
-    exp_attr = py_exp_attrs([expr, *also])
+    exp_attr = py_exp_attrs(label_readings(expr, also) if also else expr)
     add_attr = ''
     if add_target:
         add_attr = (f' snc-add-at-cursor="{html.escape(expr)}"'

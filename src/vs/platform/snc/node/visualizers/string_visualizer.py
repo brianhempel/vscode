@@ -138,7 +138,7 @@ from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncat
                               Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
-                              dollar_expr_parses, is_nested,
+                              dollar_expr_parses, is_nested, label_readings,
                               nerd_font_icon, render_tool_toolbar,
                               render_expand_toggle, wrap_drag_grab)
 import z_object_visualizer
@@ -3176,21 +3176,31 @@ def build_preview_regex(model, string_value: str) -> str | None:
             return append_segment_to_regex(current_regex, 'literal', selected_text)
 
 def _action_btn(label: str, action: str, enabled: bool = True,
-                expr: str = '', linked: bool = False) -> str:
+                expr: str = '', linked: bool = False, also=()) -> str:
     event = repr(ActionButtonClick(action=action, copy=False))
     cls = 'action-button'
     if not enabled:
         cls += ' dimmed'
     if linked:
         cls += ' linked'
-    expr_attr = py_exp_attrs(PyExp(expr, code_imports(expr)), draggable=False,
-                             attr='data-action-expr')
+    primary = PyExp(expr, code_imports(expr))
+    reads = (label_readings(primary, [
+        (e if isinstance(e, PyExp) else PyExp(e))._replace(
+            imports=code_imports(e.expr if isinstance(e, PyExp) else e))
+        for e in also]) if also else primary)
+    expr_attr = py_exp_attrs(reads, draggable=False, attr='data-action-expr')
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
             f'{expr_attr}>{label}</span>')
 
-def _preview_expr(model: dict, action: str, eval_in_scope) -> str:
-    """Pre-compute the expression that an action button would generate."""
-    source_expr = model.get('_source_expr')
+def _preview_expr(model: dict, action: str, eval_in_scope, source_expr=None) -> str:
+    """Pre-compute the expression that an action button would generate.
+
+    *source_expr* overrides what the value is called. Passing `$` yields the
+    action as a COLUMN expression -- what it would say of any row rather than
+    of this one -- which is what a table above lifts to a comprehension (see
+    _every_row_action_exps).
+    """
+    source_expr = source_expr or model.get('_source_expr')
     if not source_expr:
         return ''
     ctx = _get_search_context(model, source_expr=source_expr, eval_in_scope=eval_in_scope)
@@ -3218,7 +3228,24 @@ def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '') -> str
     )
 
 
-def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=None) -> str:
+def _every_row_action_exps(model: dict, action: str, eval_in_scope,
+                           every_row_exps) -> list:
+    """What this action says of EVERY row, when the string is a table's cell.
+
+    Clicking already generalizes -- the code goes up as a column, one
+    expression each row answers. Only the preview named one row, so the button
+    offered `re.split(r',', parts[0], ...)` while the column it was about to
+    write said `re.split(r',', $, ...)`. The action generated against `$` IS
+    that column, so the table lifts it the same way it lifts an access path.
+    """
+    if every_row_exps is None:
+        return []
+    column = _preview_expr(model, action, eval_in_scope, source_expr='$')
+    return list(every_row_exps(column)) if column else []
+
+
+def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=None,
+                           every_row_exps=None) -> str:
     """Render the action button bar below the search/replace boxes."""
     selection_regex = model.get('search')
     has_search = selection_regex is not None and selection_regex != ''
@@ -3232,10 +3259,14 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     def expr(action):
         return _preview_expr(model, action, eval_in_scope)
 
+    def also(action):
+        return _every_row_action_exps(model, action, eval_in_scope, every_row_exps)
+
     def btn(label, action, enabled=True):
         return _action_btn(label, action, enabled,
                            expr(action) if enabled else '',
-                           linked=linked_action == action)
+                           linked=linked_action == action,
+                           also=also(action) if enabled else ())
 
     # these are nerd font glyphs, embedded in the bundled Pragmasevka font
     #   ┆ ┊   
@@ -3243,7 +3274,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     parts = []
 
     parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', has_search,
-                             expr('count') if has_search else ''))
+                             expr('count') if has_search else '',
+                             also=also('count') if has_search else ()))
     # parts.append('<div class="action-button-divider"></div>')
 
     magnifying_glass_icon = '<span class="search-icon" style="width:10px;font-family:Pragmasevka;font-size:12px"></span>' # Pragmasevka's Nerf Font regions have the glyph
@@ -3485,10 +3517,10 @@ def _render_expand_bar(expanded: bool, value: str, model, *,
     )
 
 
-def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> str:
-    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, var_and_exp))
+def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, every_row_exps=None) -> str:
+    return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, var_and_exp, every_row_exps))
 
-def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None) -> List[str]:
+def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, every_row_exps=None) -> List[str]:
     if eval_in_scope is None:
         eval_in_scope = lambda _c: eval(_c)
 
@@ -3751,7 +3783,8 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
         # Action buttons bar (hidden when small)
         action_buttons_html = (
-            "" if small else _render_action_buttons(model, value, eval_in_scope, max_width)
+            "" if small else _render_action_buttons(model, value, eval_in_scope,
+                                                    max_width, every_row_exps)
         )
 
         search_box_html = (
