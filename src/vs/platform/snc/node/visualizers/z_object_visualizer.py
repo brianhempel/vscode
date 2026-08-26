@@ -42,6 +42,7 @@ Fields shown for each type are configurable and persisted:
 ================================================================================
 """
 
+import functools
 import html
 
 from dataclasses import dataclass
@@ -51,7 +52,8 @@ from visualizer_utils import (
     ChildEvent, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
     strip_leading_dollar, eval_dollar_expr, replace_dollars_in_py_exp,
-    Dollar, DollarScope,
+    Dollar, DollarScope, is_nested, add_drag_readings, compose_dollar_expr,
+    wants_kwarg,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
     get_full_class_name, truncate_str, py_exp_attrs,
     parse_slots, save_slots_at_path,
@@ -240,6 +242,36 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None):
 
 # === Elm architecture functions ===
 
+def _source_of(var_and_exp) -> 'str | None':
+    """How the line names the value: the variable it was assigned to, or the
+    expression that produced it."""
+    if not var_and_exp:
+        return None
+    var_name, expr = var_and_exp
+    return var_name if var_name else expr
+
+
+def _adopt_source(model: dict, var_and_exp=None) -> None:
+    """Take in what this run says about where the value came from.
+
+    Refreshed at every render rather than remembered from init, for the two
+    reasons the table's `_adopt_source` gives. A NESTED object is the sharp one:
+    no parent calls a child's init_model with `var_and_exp`, so an object that
+    only read it there had `_source_expr` None forever, `can_extract` false, and
+    nothing inside it could be dragged out -- however good an expression the
+    parent handed it at render. The other is the ordinary one: a model outlives
+    an edit to its line, and one holding the old name would offer handles naming
+    a variable that is gone.
+
+    Only visualize may call this. A child's update is dispatched with the
+    PARENT's var_and_exp (the binder -- see route_child_event), so adopting
+    there would overwrite the path with `_snc_cell_`.
+    """
+    source_expr = _source_of(var_and_exp)
+    if source_expr:
+        model['_source_expr'] = source_expr
+
+
 def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                slots_config=None, config_path=None, persist=True):
     """
@@ -249,10 +281,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     the root, the parent's slot children when nested -- see
     child_nesting_kwargs) > DEFAULT_FIELDS_FOR_TYPE > non-trivial dir() names.
     """
-    source_expr = None
-    if var_and_exp:
-        var_name, expr = var_and_exp
-        source_expr = var_name if var_name else expr
+    source_expr = _source_of(var_and_exp)
 
     config_fields = {
         "_config_path": list(config_path or []),
@@ -359,12 +388,22 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
             var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
-        # Resolve the binder back to this field. Unlike a list column - which is
-        # stored row-generically - an object visualizer's generated code goes
-        # straight to the editor, same as its clipboard text, so the accessor is
-        # resolved all the way to a concrete path for both.
-        field_expr = replace_dollars_in_py_exp(
-            msg.child_key, [model.get('_source_expr') or link_source_expr(var_and_exp) or 'obj'])
+        # Resolve the binder back to this field. At the ROOT, all the way to a
+        # concrete path for both destinations: an object visualizer's generated
+        # code goes straight to the editor, same as its clipboard text, unlike a
+        # list column which is stored row-generically.
+        #
+        # Nested, the object is a way THROUGH to a field, like the tuple. The
+        # code becomes a column of whatever holds it, so the binder travels on
+        # with the accessor on the end and the parent -- which knows both
+        # spellings of where the value came from -- resolves it two ways. This
+        # used to fall out of `_source_expr` being None on a nested object; now
+        # that it takes its source in (see _adopt_source) it has to be said, or
+        # a table's column through an object would read `x[0].name` on every row.
+        source = (link_source_expr(var_and_exp) if is_nested(var_and_exp)
+                  else (model.get('_source_expr')
+                        or link_source_expr(var_and_exp) or 'obj'))
+        field_expr = replace_dollars_in_py_exp(msg.child_key, [source])
         child_cmds = [nest_child_command(cmd, field_expr, field_expr)
                       for cmd in child_cmds]
         new_model['handledKeys'] = aggregate_handled_keys(new_model.get('children', {}), _OWN_KEYS)
@@ -529,9 +568,15 @@ def _is_dunder(key):
     return name.startswith('__') and name.endswith('__')
 
 
-def render_small_field(display_key: str, val_repr: str, expr: str, add_target: str = None) -> str:
-    """Render a single interactive field chip: key=value, draggable with snc-py-exps."""
-    exp_attr = py_exp_attrs(expr)
+def render_small_field(display_key: str, val_repr: str, expr: str, add_target: str = None,
+                       also=()) -> str:
+    """Render a single interactive field chip: key=value, draggable with snc-py-exps.
+
+    *also* is the other ways the field reads -- in a table's cell, the same
+    field taken down every row. The chip is the whole of an unfocused object in
+    a cell, so this is where that offer is most often seen.
+    """
+    exp_attr = py_exp_attrs([expr, *also])
     add_attr = ''
     if add_target:
         add_attr = (f' snc-add-at-cursor="{html.escape(expr)}"'
@@ -545,7 +590,8 @@ def render_small_field(display_key: str, val_repr: str, expr: str, add_target: s
     )
 
 
-def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None):
+def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None,
+                     every_row_exps=None):
     short_class_name = type(obj).__name__
     fields = model.get('fields', [])
     source_expr = model.get('_source_expr')
@@ -598,7 +644,8 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
             parts.append(f'<span class="punct">+{html.escape(val)}</span>')
         elif source_expr and not is_error:
             field_expr = replace_dollars_in_py_exp(acc, [source_expr])
-            parts.append(render_small_field(key, val, field_expr, add_target))
+            also = every_row_exps(acc) if every_row_exps is not None else ()
+            parts.append(render_small_field(key, val, field_expr, add_target, also))
         else:
             parts.append(f'<span class="field">{html.escape(key)}</span>')
             parts.append('<span class="punct">=</span>')
@@ -622,12 +669,25 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None)
     return f'<span class="small"{style_attr}>{content}</span>'
 
 
-def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None):
+def _nested_every_row_exps(every_row_exps, accessor: str, sub_expr: str) -> list:
+    """The same question, asked from one field further in: a child's `$[1]`
+    inside this object's `$.pair` is the table's `$.pair[1]`."""
+    return every_row_exps(compose_dollar_expr(sub_expr, accessor))
+
+
+def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, every_row_exps=None):
     """
     Render the object as HTML with configurable field inspection.
 
     Objects render as a table of accessor → value with interactive controls.
+
+    *every_row_exps* is how a table above says what a value in one of its cells
+    also reads as, taken down every row: an object drawn in a cell has no header
+    of its own, so `x[0].name` is offered alongside `[item.name for item in x]`.
+    Absent when there is no table above, and then there are no rows to read.
     """
+    if isinstance(model, dict):
+        _adopt_source(model, var_and_exp)
 
     if obj is None or isinstance(obj, (int, float)):
         return repr(obj)
@@ -640,7 +700,8 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
         # No whole-area drag handle for the object expression: the field chips
         # carry their own snc-py-exps, and a handle around them would claim every
         # hover over them. Only the generic visualizers self-wrap.
-        return _visualize_small(obj, model, eval_in_scope, max_width, max_height)
+        return _visualize_small(obj, model, eval_in_scope, max_width, max_height,
+                                every_row_exps)
 
     full_class_name = get_full_class_name(obj)
     source_expr = model.get('_source_expr')
@@ -661,7 +722,10 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
             can_extract = source_expr and not is_error and not placeholder_args
             if can_extract:
                 field_expr = replace_dollars_in_py_exp(accessor_code, [source_expr])
-                exp_attr = py_exp_attrs(field_expr)
+                # In a table's cell the field is also a value every row has.
+                reads = ([field_expr] + list(every_row_exps(accessor_code))
+                         if every_row_exps is not None else field_expr)
+                exp_attr = py_exp_attrs(reads)
             else:
                 exp_attr = ''
 
@@ -682,7 +746,14 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 # its own handles keeps them instead of being covered by one.
                 child_expr = field_expr if can_extract else None
                 child_var_and_exp = (None, child_expr) if child_expr else None
-                child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small, var_and_exp=child_var_and_exp)
+                inner = {}
+                if every_row_exps is not None and wants_kwarg(child_vis.visualize, 'every_row_exps'):
+                    inner['every_row_exps'] = functools.partial(
+                        _nested_every_row_exps, every_row_exps, accessor_code)
+                child_html = child_vis.visualize(raw_value, child_model, get_visualizer, eval_in_scope, max_width=500, small=child_small, var_and_exp=child_var_and_exp, **inner)
+                if every_row_exps is not None and child_expr:
+                    child_html = add_drag_readings(child_html, child_expr,
+                                                   every_row_exps(accessor_code))
                 child_wrapped = wrap_child_html(child_html, accessor_code)
                 value_td = f'<td>{child_wrapped}</td>'
             else:

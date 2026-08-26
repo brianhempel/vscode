@@ -70,7 +70,7 @@ from visualizer_utils import (
     parse_slot_cols,
     get_full_class_name, truncate_str, truncate_repr, wrap_drag_grab,
     parse_slots, save_slots_at_path,
-    child_nesting_kwargs, too_deep,
+    child_nesting_kwargs, too_deep, wants_kwarg, compose_dollar_expr,
     nerd_font_icon, render_tool_toolbar,
     render_expand_toggle, EXPANDED_PANE_MAX_HEIGHT,
     ICONS,
@@ -1150,6 +1150,26 @@ def _column_header_exps(columns, col: str, source_expr: str,
     return exps
 
 
+def _cell_inner_exps(columns, row_expr: str, source_expr: str,
+                     binds: 'dict | None', sub_expr: str) -> list:
+    """What a value drawn INSIDE a cell also reads as: the same reach, applied
+    to every row.
+
+    A column header answers that question for the cell -- `[item['n'] for item
+    in x]` -- but a tuple element or an object field drawn inside a cell has no
+    header of its own, and the one on screen names the cell rather than what is
+    in it. So a cell hands its child the way to ask, and the child composes its
+    own sub-expression onto the column on the way down; ask it with `$` and the
+    answer is the column's own reading.
+
+    Handed to `_column_header_exps` rather than built here, so a value inside a
+    cell and the header of the column it would be cannot disagree -- and so a
+    dict's second, keyed reading comes along without this knowing about it.
+    """
+    return _column_header_exps(columns, compose_dollar_expr(sub_expr, row_expr),
+                               source_expr, binds)
+
+
 def _column_row_expr(columns, col: str) -> 'str | None':
     """A column as one row reads it, or None when the target has 0..n values
     per row rather than one.
@@ -1556,11 +1576,11 @@ def _collect_fields_from_samples(lst, get_visualizer, require_all=False):
     Otherwise skips items without get_fields.
     """
     # Detecting a dict's columns is its own thing -- the key alongside the
-    # values' fields -- and arrives with the column expressions. Sampling a
-    # dict's rows here would sample PAIRS, and there is no tuple visualizer to
-    # give fields for one, so a dict declines detection and takes the ['$']
-    # fallback rather than borrowing the list shape, which would address it
-    # wrong rather than merely plainly.
+    # values' fields -- and arrives with the column expressions. A dict's row
+    # is a pair the table makes up rather than a value it holds, so there is
+    # nothing here to sample the fields OF; it declines detection and takes the
+    # ['$'] fallback rather than borrowing the list shape, which would address
+    # it wrong rather than merely plainly.
     if isinstance(lst, dict):
         return None if require_all else []
 
@@ -6913,9 +6933,10 @@ _DICT_DEFAULT_COLUMNS = ['$k', '$v']
 def _dict_value_columns(d, get_visualizer):
     """A dict's columns: `$k`, then whatever its VALUES have to show.
 
-    The values rather than the rows, because a dict's row is a pair and there
-    is no tuple visualizer to ask for a pair's fields. Each field comes back
-    written against the value as `$`, so the leading dollar is rebound to `$v`
+    The values rather than the rows, because a dict's row is a pair this table
+    made up to draw with -- there is no such object to hand a visualizer and
+    ask. Each field comes back written against the value as `$`, so the leading
+    dollar is rebound to `$v`
     -- through the substitution rather than str.replace, since a field may have
     a `$` inside a string literal.
     """
@@ -9941,10 +9962,27 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 # access-path expression and decides for itself, so a child with
                 # its own handles keeps them instead of being covered by one.
                 child_var_and_exp = (None, cell_expr) if cell_expr else None
+
+                # And the other reading of whatever it draws inside: the same
+                # reach down every row (see _cell_inner_exps). None under a
+                # splat -- the cell shows one ELEMENT there, so there is no
+                # once-per-row expression for anything in it, which is the same
+                # question _column_row_expr answers with None.
+                col_row_expr = (None if source_expr is None
+                                else _column_row_expr(columns, col))
+                every_row_exps = (
+                    None if col_row_expr is None else
+                    functools.partial(_cell_inner_exps, columns, col_row_expr,
+                                      source_expr, _model_binds(model)))
+                inner = ({'every_row_exps': every_row_exps}
+                         if every_row_exps is not None
+                         and wants_kwarg(cell_vis.visualize, 'every_row_exps')
+                         else {})
+
                 if hasattr(cell_vis, 'visualize_els'):
                     cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)
                 else:
-                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp)]
+                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp, **inner)]
 
                 # A column drawn once for a group has to span it -- otherwise
                 # the cell occupies the first row only and every row under it
@@ -10134,12 +10172,25 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         src = model.get('_source_expr')
         if is_agg:
             # An answer is one value the aggregation worked out, not a value
-            # each row has, so there is no row-generic form of it: the same
-            # expression names it wherever it is headed.
-            agg_expr = _agg_child_expr(msg.child_key, src, _model_binds(model),
+            # each row has, so at the ROOT there is no row-generic form of it:
+            # the same expression names it wherever it is headed.
+            #
+            # Nested, that stops being true. This table is a cell, drawn once
+            # per row of the table above, and the answer is THAT row's -- so
+            # code made in it becomes a column up there and has to stay generic.
+            # The answer is asked of the source, so writing it against the
+            # binder instead of the concrete cell is the whole of it, and the
+            # parent resolves that two ways with the two expressions it has.
+            # Resolved here, the parent's column read `''.join(x[0])` on every
+            # row: one row's answer, repeated down the table.
+            def agg_expr_from(source):
+                return _agg_child_expr(msg.child_key, source, _model_binds(model),
                                        model.get('columns') or {},
                                        value) or cell_col
-            commands = [nest_child_command(cmd, agg_expr, agg_expr)
+            agg_expr = agg_expr_from(src)
+            agg_code = (agg_expr_from(CHILD_SOURCE_BINDER)
+                        if is_nested(var_and_exp) else agg_expr)
+            commands = [nest_child_command(cmd, agg_code, agg_expr)
                         for cmd in commands]
         else:
             # A column stays generic (a dollar expression); anything bound for

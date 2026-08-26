@@ -878,6 +878,46 @@
 	padding: 0 4px;
 }
 
+/* === Tuple visualizer === */
+/* `(a, b, c)`, where everything between the punctuation belongs to a child
+   visualizer. So the colours are hung on the tuple's OWN spans -- its direct
+   children, and the one level of drag handle around the parens -- rather than
+   on descendants, which would reach down into whatever a child drew. */
+
+.snc-tuple-visualizer {
+	font-family: var(--snc-code-font-family);
+
+	> .punct,
+	> .py-exp-grab > .punct {
+		color: var(--snc-text-muted);
+	}
+
+	> .py-exp-grab > .name {
+		color: var(--snc-string-color);
+	}
+
+	/* A named tuple's `x=` */
+	> .field {
+		color: var(--snc-string-color);
+		opacity: 0.7;
+	}
+
+	/* An element the user has opened draws a block of its own -- a table, a
+	   character grid. Inline-block keeps it in the row between the parens
+	   instead of breaking out of the span holding it. */
+	> [snc-child-key]:has(> .visualizer-container) {
+		display: inline-block;
+		vertical-align: top;
+	}
+}
+
+/* Not flush against the widget's frame, the same gutter the generic and error
+   visualizers take. Only at the top level: inside a table cell or a field the
+   surrounding padding is already the cell's. */
+.monaco-editor .snc-visualization-widget > .snc-tuple-visualizer {
+	padding: 0 4px;
+}
+
 /* === Object visualizer === */
 
 .obj-visualizer {

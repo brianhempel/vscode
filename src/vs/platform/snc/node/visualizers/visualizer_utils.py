@@ -1306,9 +1306,22 @@ def defer_drag_grab(child_html: str, expr: str) -> str:
     only when it is the whole of what the child drew -- handles the child drew
     inside its own content are its own and keep their expressions.
     """
+    body = whole_grab_body(child_html, expr)
+    if body is None:
+        return child_html
+    return f'<span class="py-exp-grab">{body}'
+
+
+def whole_grab_body(child_html: str, expr: str) -> 'str | None':
+    """What is inside the handle a child wrapped its WHOLE self in, or None.
+
+    The test both rewriters make: a child that self-wrapped for *expr* -- the
+    generic and static visualizers, which have nothing of their own to hover --
+    has a handle its parent may speak for, and anything else does not.
+    """
     prefix = f'<span{py_exp_attrs(expr)} class="py-exp-grab">'
     if not expr or not child_html.startswith(prefix):
-        return child_html
+        return None
     # Where the wrapper closes, which has to be the end of what the child drew:
     # one that drew two wrapped things side by side opens and closes the same
     # way, and rewriting the first tag would speak for the last as well.
@@ -1317,9 +1330,47 @@ def defer_drag_grab(child_html: str, expr: str) -> str:
         depth += 1 if tag.group() == '<span' else -1
         if depth == 0:
             if child_html[tag.start():] != '</span>':
-                return child_html
-            return f'<span class="py-exp-grab">{child_html[len(prefix):]}'
-    return child_html
+                return None
+            return child_html[len(prefix):]
+    return None
+
+
+def add_drag_readings(child_html: str, expr: str, extra) -> str:
+    """Give a child's whole-value handle the other ways its value can be read.
+
+    A value drawn inside a table cell is also a value every row has: the `2` of
+    a tuple in a cell is `x[0][1]`, and it is `[item[1] for item in x]` read
+    down the column. A column header says that second thing for the cell itself,
+    but nothing says it for what a nested visualizer draws INSIDE one, so the
+    parent that knows both adds it to the handle that is already there.
+
+    Added to the child's own wrapper rather than wrapped around it: two nested
+    `py-exp-grab` spans would draw two borders on one hover and the outer would
+    claim the gaps. A child with handles inside its own content keeps them
+    untouched -- each names a different value, all more specific than this.
+    """
+    body = whole_grab_body(child_html, expr) if extra else None
+    if body is None:
+        return child_html
+    return f'<span{py_exp_attrs([expr, *extra])} class="py-exp-grab">{body}'
+
+
+# A name no program has, standing in for a scope while a dollar expression is
+# rewritten against it -- see compose_dollar_expr.
+_COMPOSE_HOLDER = '_snc_outer_'
+
+
+def compose_dollar_expr(inner: str, outer: str) -> str:
+    """Write *inner* -- a dollar expression about some value -- against the
+    expression that reaches that value from one level out.
+
+    `$[1]` inside a cell whose column is `$['data']` is `$['data'][1]` in the
+    row's own scope. Substituted through a dollar-free placeholder rather than
+    directly, for the reason _dict_value_columns gives: a replacement that
+    itself holds a dollar would be re-read as a scope on the next pass.
+    """
+    return replace_dollars_in_py_exp(inner, [_COMPOSE_HOLDER]).replace(
+        _COMPOSE_HOLDER, outer)
 
 
 def wrap_child_prefix(child_key: str) -> str:

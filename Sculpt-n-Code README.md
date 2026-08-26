@@ -29,7 +29,7 @@ pip install pytest
 # Build, may have to run `npm run watch` the first time to build extensions
 npm run snc # runs `npm run watch-snc` in a restart loop. agent edits occasionally crash npm run watch-snc
 
-# Launch app. Run in separate terminal from watch-snc
+# In a separate terminal, launch app.
 ./scripts/code.sh
 .\scripts\code.bat # Windows
 ```

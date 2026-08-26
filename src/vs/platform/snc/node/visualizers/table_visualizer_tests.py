@@ -12071,6 +12071,114 @@ class TestAggAnswerSavesNothing(unittest.TestCase):
         self.assertEqual(take_line_config(), (None, False))
 
 
+class TestCellInnerExps(unittest.TestCase):
+    """What a cell tells a nested visualizer a value inside it also reads as.
+
+    A column header says `[item['n'] for item in x]` for the column; a tuple
+    element or object field drawn inside a cell has no header, so the cell hands
+    down the way to ask and the child composes its own reach onto it.
+    """
+
+    def exps(self, columns, row_expr, sub_expr, source='x', binds=None):
+        from table_visualizer import _cell_inner_exps
+        return [e.expr for e in _cell_inner_exps(columns, row_expr, source,
+                                                 binds, sub_expr)]
+
+    def test_asking_with_a_bare_dollar_is_the_columns_own_reading(self):
+        self.assertEqual(self.exps({'$': {}}, '$', '$'), ['x'])
+
+    def test_an_element_inside_a_whole_row_cell(self):
+        self.assertEqual(self.exps({'$': {}}, '$', '$[1]'),
+                         ['[item[1] for item in x]'])
+
+    def test_it_composes_onto_the_column_the_cell_is(self):
+        self.assertEqual(self.exps({"$['d']": {}}, "$['d']", '$[1]'),
+                         ["[item['d'][1] for item in x]"])
+
+    def test_composition_nests(self):
+        self.assertEqual(self.exps({'$': {}}, '$', '$[0][1]'),
+                         ['[item[0][1] for item in x]'])
+
+    def test_a_dollar_in_a_string_literal_is_not_a_scope(self):
+        self.assertEqual(self.exps({'$': {}}, '$', "$['a$b']"),
+                         ["[item['a$b'] for item in x]"])
+
+    def test_a_dict_keeps_both_of_its_readings(self):
+        from table_visualizer import _DICT_BINDS
+        self.assertEqual(
+            self.exps({'$v': {}}, '$v', '$[1]', source='d', binds=dict(_DICT_BINDS)),
+            ['[v[1] for v in d.values()]', '{k: v[1] for k, v in d.items()}'])
+
+
+class _AggCodeVis:
+    """An answer's visualizer that writes code about the answer, the way the
+    string visualizer's action buttons do."""
+    def can_visualize(self, value):
+        return True
+    def get_fields(self, value):
+        return None
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        return {'handledKeys': []}
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None,
+                  max_height=None, small=False, var_and_exp=None):
+        return html.escape(repr(value))
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        return (model, [('n', f'len({CHILD_SOURCE_BINDER})')])
+
+
+class TestNestedAggAnswerCodeStaysRowGeneric(unittest.TestCase):
+    """Code written about the answer of a table that is itself a CELL.
+
+    At the root an answer has no row-generic form -- it is the one value the
+    aggregation worked out -- so the same expression goes to the editor and to
+    the clipboard. Nested, that stops being true: the table is drawn once per
+    row of the table above and its answer is THAT row's, so code made in it
+    becomes a column of the parent and has to be written against the binder.
+    Resolved to the concrete source instead, the parent's new column read
+    `''.join(x[0])` on every row -- one row's answer, repeated down the table.
+    """
+
+    ROWS = [['ab', 'cd'], ['ab', 'ef']]
+    AGG = "''.join($)"
+
+    def inner_model(self, nested: bool):
+        model = init_model(self.ROWS[0], mock_get_visualizer,
+                           var_and_exp=('x', 'x'))
+        model['column_computes'] = {'$': [self.AGG]}
+        if nested:
+            # What rendering hands a cell: the concrete path to this row.
+            model['_source_expr'] = 'x[0]'
+        model['focused_child'] = _agg_child_key('$', self.AGG, '$')
+        return model
+
+    def fire(self, nested: bool):
+        model = self.inner_model(nested)
+        key = _agg_child_key('$', self.AGG, '$')
+        var_and_exp = (None, CHILD_SOURCE_BINDER) if nested else ('x', 'x')
+        get_vis = lambda v: _AggCodeVis()
+        model['children'][key] = _AggCodeVis().init_model(''.join(self.ROWS[0]))
+        _, cmds = update(make_child_mouse_event(key, 'None'), var_and_exp,
+                         model, self.ROWS[0], get_vis)
+        code = [c[1] for c in cmds if isinstance(c, tuple) and 2 <= len(c) <= 4]
+        self.assertEqual(len(code), 1, f'expected one generated line, got {cmds}')
+        return code[0]
+
+    def test_at_the_root_it_names_the_list_it_was_asked_of(self):
+        self.assertEqual(self.fire(nested=False), "len((''.join(x)))")
+
+    def test_nested_it_keeps_the_binder_for_the_parent(self):
+        self.assertEqual(self.fire(nested=True),
+                         f"len((''.join({CHILD_SOURCE_BINDER})))")
+
+    def test_the_parents_column_answers_for_every_row(self):
+        # The whole point: read down the outer table, each row's own answer.
+        from visualizer_utils import eval_dollar_expr, nest_generated_expr
+        code = self.fire(nested=True)
+        column = nest_generated_expr(code, '$')
+        self.assertEqual([eval_dollar_expr(column, row) for row in self.ROWS],
+                         [len('abcd'), len('abef')])
+
+
 class TestAggHoles(unittest.TestCase):
     """A {{...}} in an aggregation is a text box, and what's typed in it is
     part of the expression rather than a setting stored beside it."""

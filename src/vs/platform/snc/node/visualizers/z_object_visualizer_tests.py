@@ -25,7 +25,8 @@ from z_object_visualizer import (
 )
 from visualizer_utils import (ChildEvent, get_full_class_name as _get_full_class_name,
                               set_line_config, take_line_config,
-                             wrap_drag_grab, py_exp_attrs, MAX_NEST_DEPTH)
+                             wrap_drag_grab, py_exp_attrs, MAX_NEST_DEPTH,
+                             CHILD_SOURCE_BINDER)
 import z_object_visualizer
 import table_visualizer
 
@@ -57,7 +58,7 @@ class _ZObjectVisAdapter:
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
         return z_object_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
-        return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+        return z_object_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, var_and_exp=var_and_exp)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return z_object_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
@@ -71,7 +72,7 @@ class _ListVisAdapter:
     def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None, **kwargs):
         return table_visualizer.init_model(value, get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp, **kwargs)
     def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
-        return table_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small)
+        return table_visualizer.visualize(value, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, var_and_exp=var_and_exp)
     def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
         return table_visualizer.update(event, var_and_exp, model, value, get_visualizer, eval_in_scope=eval_in_scope)
 
@@ -2008,6 +2009,154 @@ class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):
         copies = [c for c in commands if isinstance(c, CopyToClipboard)]
         self.assertEqual(len(copies), 1, f'expected one copy, got {commands}')
         self.assertEqual(eval_in_scope(copies[0].text), [''])
+
+
+class TestNestedObjectTakesInWhereItSits(unittest.TestCase):
+    """An object drawn inside somebody else's cell is handed the path to the
+    value it is showing, and has to take it in.
+
+    It used to accept `var_and_exp` in visualize and never read it -- it set
+    `_source_expr` in init_model only, which no parent calls with one -- so a
+    nested object's `_source_expr` was always None, `can_extract` was always
+    false, and NOTHING inside it could be dragged out. The table and the tuple
+    both re-adopt at render; this is that, for the same reason.
+    """
+
+    class Person:
+        def __init__(self, name):
+            self.name = name
+
+    def render(self, var_and_exp, model=None):
+        p = self.Person('asdf')
+        model = model if model is not None else init_model(p, _get_visualizer)
+        return p, model, visualize(p, model, _get_visualizer, None,
+                                   var_and_exp=var_and_exp)
+
+    def test_a_nested_objects_fields_can_be_dragged_out(self):
+        _, _, out = self.render((None, 'x[0]'))
+        self.assertIn(exp_attr('x[0].name'), out)
+
+    def test_a_field_of_a_root_object_still_names_the_variable(self):
+        _, _, out = self.render(('p', 'p'))
+        self.assertIn(exp_attr('p.name'), out)
+
+    def test_a_line_with_nothing_to_name_it_renders_without_handles(self):
+        _, _, out = self.render(None)
+        self.assertNotIn('snc-py-exps', out)
+
+    def test_a_renamed_line_is_taken_in_rather_than_remembered(self):
+        # The model outlives an edit to the line it was made for.
+        p = self.Person('asdf')
+        model = init_model(p, _get_visualizer, var_and_exp=('p', 'p'))
+        out = visualize(p, model, _get_visualizer, None, var_and_exp=('q', 'q'))
+        self.assertIn(exp_attr('q.name'), out)
+        self.assertNotIn(exp_attr('p.name'), out)
+
+
+class _FieldCodeVis:
+    """A field's visualizer that writes code about the field it is showing."""
+    def can_visualize(self, value):
+        return True
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        return {'handledKeys': []}
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None,
+                  max_height=None, small=False, var_and_exp=None):
+        return html_module.escape(repr(value))
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        return (model, [('n', f'len({CHILD_SOURCE_BINDER})')])
+
+
+class TestNestedObjectKeepsTheBinderForItsParent(unittest.TestCase):
+    """The other half of taking the source in.
+
+    Resolving a field accessor all the way is right at the ROOT -- the code goes
+    straight to the editor. Nested, the object is a way through to a field and
+    the code becomes a column of whatever holds it, so the binder has to travel
+    with it. This used to fall out of `_source_expr` being None; now that the
+    object takes its source in, it has to be said outright, or a table's derived
+    column through an object would read `x[0].name` on every row.
+    """
+
+    class Person:
+        def __init__(self, name):
+            self.name = name
+
+    ROWS = None  # set per test
+
+    def fire(self, var_and_exp, source_expr=None):
+        p = self.Person('asdf')
+        get_vis = lambda v: _FieldCodeVis()
+        model = init_model(p, get_vis)
+        if source_expr is not None:
+            model['_source_expr'] = source_expr
+        model['focused_child'] = '$.name'
+        event = {'pythonEventStr': repr(ChildEvent(child_key='$.name',
+                                                   py_ev_str='None')),
+                 'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1}}
+        _, cmds = update(event, var_and_exp, model, p, get_vis)
+        code = [c[1] for c in cmds if isinstance(c, tuple) and 2 <= len(c) <= 4]
+        self.assertEqual(len(code), 1, f'expected one generated line, got {cmds}')
+        return code[0]
+
+    def test_at_the_root_the_accessor_is_resolved_all_the_way(self):
+        self.assertEqual(self.fire(('p', 'p'), source_expr='p'), 'len((p.name))')
+
+    def test_nested_the_binder_travels_with_it(self):
+        # `_source_expr` now holds the concrete cell (rendering put it there).
+        # Reading it here is exactly the trap: the parent needs the generic form.
+        code = self.fire((None, CHILD_SOURCE_BINDER), source_expr='x[0]')
+        self.assertIn(CHILD_SOURCE_BINDER, code)
+        self.assertNotIn('x[0]', code)
+
+    def test_the_parents_column_answers_for_every_row(self):
+        from visualizer_utils import eval_dollar_expr, nest_generated_expr
+        rows = [self.Person('asdf'), self.Person('qw')]
+        column = nest_generated_expr(
+            self.fire((None, CHILD_SOURCE_BINDER), source_expr='x[0]'), '$')
+        self.assertEqual([eval_dollar_expr(column, r) for r in rows],
+                         [len('asdf'), len('qw')])
+
+
+class TestEveryRowReading(unittest.TestCase):
+    """A field of an object in a table's CELL is also a value every row has.
+
+    The column header answers that for the cell; nothing answers it for a field
+    drawn inside one, so the field's own handle carries it as a second reading.
+    """
+
+    class Person:
+        def __init__(self, name):
+            self.name = name
+
+    def every_row(self, sub_expr):
+        """Stands in for the table: `$.name` -> `[item.name for item in x]`."""
+        return [f'[item{sub_expr[1:]} for item in x]']
+
+    def render(self, small=False, every_row=True, cell='x[0]'):
+        p = self.Person('asdf')
+        model = init_model(p, _get_visualizer)
+        model['fields'] = ['$.name']
+        return visualize(p, model, _get_visualizer, None, small=small,
+                         var_and_exp=(None, cell),
+                         every_row_exps=self.every_row if every_row else None)
+
+    def test_a_field_offers_the_column_reading_too(self):
+        self.assertIn(exp_attr('x[0].name', '[item.name for item in x]'),
+                      self.render())
+
+    def test_the_compact_chip_offers_it_as_well(self):
+        # What an UNFOCUSED object in a cell actually shows, so this is where
+        # the offer is most often seen.
+        self.assertIn(exp_attr('x[0].name', '[item.name for item in x]'),
+                      self.render(small=True))
+
+    def test_this_rows_value_is_what_the_handle_drags(self):
+        self.assertNotIn(exp_attr('[item.name for item in x]', 'x[0].name'),
+                         self.render())
+
+    def test_with_no_table_above_there_is_only_the_one_reading(self):
+        self.assertIn(exp_attr('p.name'),
+                      self.render(every_row=False, cell='p'))
 
 
 # === What the field box says its dollar means ================================
