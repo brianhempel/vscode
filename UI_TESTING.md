@@ -68,15 +68,15 @@ so prefix a selector with it when more than one visualizer is on screen:
 
 ## Gotchas
 
-**The columns you see may not be the columns this data implies.** Column layouts
-persist in the gitignored `.snc_table_columns.json`, keyed by the type of the
-*row* rather than of the table — so `builtins.dict` is a single entry shared by
-every list of dicts you have ever opened, and a fresh
-`[{'who': 'a', 'n': 3}, ...]` can come up drawing `$['Family']`, `$['Version']`
-and `$['Designer']` from some unrelated fonts run, every cell blank. (A
-dict-of-lists is keyed `builtins.str->builtins.list`, key type before the
-arrow.) Delete the offending type key and `reload.js`. Do not worry about
-backing up the file first.
+**A table's columns are saved in a comment above its line.** Column and field
+layouts persist in a `#%click {...}` comment that binds to the next non-comment,
+non-empty line below it (blank lines and ordinary comments may sit between).
+The editor folds the JSON to a `…` token (the whole line shows when the
+cursor is on it), so read the buffer rather than the DOM when checking one.
+Nothing is
+shared across lines or files any more: a fresh `[{'who': 'a', 'n': 3}, ...]`
+comes up with its own auto-detected columns unless a `#%click` comment sits
+above it. To reset a line's layout, delete its comment and `reload.js`.
 
 **Check which editor you are actually driving.** VS Code restores the previous
 session's tabs, so a second `snc_test.py` — `working_examples/snc_test.py`, or

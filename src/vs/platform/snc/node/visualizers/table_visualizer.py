@@ -13,7 +13,7 @@ This visualizer follows the Elm architecture with three core functions:
 2. init_model(value) -> dict
    - Returns the initial model state
    - Auto-detects columns from item fields, or defaults to ['$'] (the item)
-   - Loads saved column configuration from dotfile
+   - Loads the column configuration saved with the line (its #%click comment)
 
 3. update(event, var_and_exp, model, value) -> (new_model, commands)
    - Processes UI events (click, input, keyboard, drag) and returns updated model
@@ -26,9 +26,11 @@ COLUMN CONFIGURATION
 
 Columns shown in the table are configurable and persisted:
 
-1. DOTFILE (.snc_table_columns.json in working directory):
-   - JSON mapping {item_type_key: [column_name, ...]}
-   - Highest priority: user-customized columns
+1. THE LINE'S #%click COMMENT (see visualizer_utils, "Per-line config"):
+   - Under the 'table' namespace, JSON mapping {item_type_key: [slot, ...]}
+   - Highest priority: user-customized columns, for this line only
+   - The runner installs it before init_model runs (load_root_slots reads it)
+     and turns a save into a rewrite of the comment
 
 2. Auto-detection via _detect_table_columns:
    - Samples items and returns union of fields if all support get_fields
@@ -516,36 +518,36 @@ class ChangeSourceExpr:
     end_col: int
 
 
-# === Dotfile operations ===
+# === Saved config (the line's #%click comment, 'table' namespace) ===
 
-COLUMN_DOTFILE_NAME = '.snc_table_columns.json'
+COLUMN_CONFIG_NS = 'table'
 
 
-def load_columns_from_dotfile(type_key: str):
-    """Load the saved slot list for an item type from the dotfile (or None).
+def load_columns_config(type_key: str):
+    """Load the saved slot list for an item type from the line's config (or None).
 
     Kept as the single root-read entry point so tests can patch it for isolation.
     Returns the raw slot list (bare strings and/or {"expr", "children"} dicts).
     """
-    return load_root_slots(COLUMN_DOTFILE_NAME, type_key)
+    return load_root_slots(COLUMN_CONFIG_NS, type_key)
 
 
-def save_columns_to_dotfile(root_type, path, exprs, dotfile=COLUMN_DOTFILE_NAME):
+def save_columns_config(root_type, path, exprs, namespace=COLUMN_CONFIG_NS):
     """Path-scoped writer: persist a (sub-)table's column exprs at its location.
 
     `path` is the list of (slot_expr, child_type) steps from the root type.
     """
-    save_slots_at_path(dotfile, root_type, path, exprs)
+    save_slots_at_path(namespace, root_type, path, exprs)
 
 
 def _save_slots(model: dict) -> None:
     """Persist a table model's columns at its config path (preserves nested
-    children of surviving columns and other types on disk)."""
-    save_columns_to_dotfile(
+    children of surviving columns and other types already saved)."""
+    save_columns_config(
         model.get('_config_root_type'),
         model.get('_config_path') or [],
         _slots_from_columns(model.get('columns') or {}),
-        model.get('_config_root_dotfile') or COLUMN_DOTFILE_NAME,
+        model.get('_config_root_ns') or COLUMN_CONFIG_NS,
     )
 
 
@@ -734,10 +736,10 @@ def _col_move(columns, frm: int, to: int) -> bool:
 
 
 def _slots_from_columns(columns) -> list:
-    """The columns map as the slot list the dotfile stores.
+    """The columns map as the slot list the saved config stores.
 
-    A plain column stays a bare string, so a table with no splat writes exactly
-    the file it always did; only a splat carrying sub-columns needs the object
+    A plain column stays a bare string, so a table with no splat saves exactly
+    what it always did; only a splat carrying sub-columns needs the object
     form.
     """
     slots = []
@@ -749,12 +751,12 @@ def _slots_from_columns(columns) -> list:
 
 
 def _columns_from_slots(exprs, slot_cols, depth: int = 0) -> dict:
-    """Build the columns map from what the dotfile gave up.
+    """Build the columns map from what the saved config gave up.
 
     Recursive, because a splat's sub-column may splat in turn and `cols` has
     the same shape as `columns` itself. Capped at MAX_SPLAT_DEPTH: the depth is
     bounded by the config rather than by the data, so it cannot run away the
-    way a deep value can -- but a hand-edited dotfile is a real input, and a cap
+    way a deep value can -- but a hand-edited comment is a real input, and a cap
     is cheaper than the header arithmetic going wrong.
     """
     columns = {}
@@ -768,7 +770,7 @@ def _columns_from_slots(exprs, slot_cols, depth: int = 0) -> dict:
 
 
 def _sub_columns_from_entries(entries, depth: int) -> dict:
-    """A splat's sub-columns as the dotfile stores them: a bare expression, or
+    """A splat's sub-columns as the saved config stores them: a bare expression, or
     -- when the sub-column splats in turn -- one carrying `cols` of its own."""
     out = {}
     for entry in entries:
@@ -896,7 +898,7 @@ def _leaf_columns(columns, path: tuple = (), chain: tuple = ()) -> list:
     return leaves
 
 
-# A hand-edited dotfile is a real input, and nesting depth is bounded by the
+# A hand-edited comment is a real input, and nesting depth is bounded by the
 # config rather than by the data -- so it cannot run away the way a deep value
 # can, but a cap is still cheaper than the header arithmetic going wrong. It
 # caps sub-columns of any kind, not just splats: the splat levels it bounds are
@@ -4056,9 +4058,9 @@ def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
     about some other dict of lists.
     """
     type_key = _grouped_type_key(col, lst, eval_in_scope)
-    if type_key is None or load_columns_from_dotfile(type_key) is not None:
+    if type_key is None or load_columns_config(type_key) is not None:
         return
-    save_columns_to_dotfile(type_key, [],
+    save_columns_config(type_key, [],
                             _grouped_slots(col, model.get('columns')))
 
 
@@ -7049,14 +7051,14 @@ _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 def _resolve_columns(lst, get_visualizer, slots_config, config_path):
     """Return (columns, slot_children) for a list at this nesting position.
 
-    At the root (config_path is None) the dotfile is read by item type. When
+    At the root (config_path is None) the line's config is read by item type. When
     nested, only the parent-supplied slots_config is used -- the type config is
     NOT re-read, which is what breaks the infinite recursion. A missing config
     falls back to auto-detected columns (or ['$']).
     """
     if config_path is None:
         type_key = config_key(lst)
-        loaded = load_columns_from_dotfile(type_key) if type_key else None
+        loaded = load_columns_config(type_key) if type_key else None
     else:
         loaded = slots_config
 
@@ -7072,15 +7074,15 @@ def _resolve_columns(lst, get_visualizer, slots_config, config_path):
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
-               slots_config=None, config_root_type=None, config_root_dotfile=None,
+               slots_config=None, config_root_type=None, config_root_ns=None,
                config_path=None):
     is_root = config_path is None
     root_type = config_key(lst) if is_root else config_root_type
-    root_dotfile = COLUMN_DOTFILE_NAME if is_root else config_root_dotfile
+    root_ns = COLUMN_CONFIG_NS if is_root else config_root_ns
     path = [] if is_root else config_path
     config_fields = {
         '_config_root_type': root_type,
-        '_config_root_dotfile': root_dotfile,
+        '_config_root_ns': root_ns,
         '_config_path': path,
     }
 
@@ -10155,7 +10157,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         model = {'children': {}, 'handledKeys': [], 'display_mode': 'table',
                  'columns': {'$': {}},
                  '_slot_children': {}, '_config_root_type': None,
-                 '_config_root_dotfile': None, '_config_path': [],
+                 '_config_root_ns': None, '_config_path': [],
                  **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
     # The span only, and only when this run brought one: see _adopt_source.
@@ -10241,7 +10243,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # code travels on up to whoever asked for it.
             #
             # A column is the expression and nothing else -- it outlives the
-            # command, gets saved to the dotfile and comes back -- so what the
+            # command, gets saved with the line and comes back -- so what the
             # child declared it needed imported is not kept here. It is read
             # back off the column instead, wherever the column is handed to the
             # editor (see code_imports and imports_for_code).

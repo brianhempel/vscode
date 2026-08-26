@@ -38,7 +38,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -279,6 +279,18 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     return edits
 
 
+@dataclass
+class SetConfigComment:
+    """Ask the editor to rewrite the `#%click` comment bound to the trigger line.
+
+    `comment` is the whole comment text (no indentation); None removes it. The
+    editor finds the existing comment by the same binding rule the runner reads
+    it with -- the nearest config comment above, with only blank lines and
+    comments between -- and replaces it, or inserts a new line above.
+    """
+    comment: Optional[str]
+
+
 def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
                        model: Any, source_code: str) -> List[Dict[str, Any]]:
     """Convert visualizer commands into the wire dicts sent to the front-end.
@@ -413,6 +425,13 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
 
     model = None
 
+    # What the line's `#%click` comment holds is this visualizer's saved config
+    # (columns, fields, ...). It is installed for the visualizer to read while
+    # it runs, and collected afterwards to see whether it saved anything.
+    line_config = parse_config_comment(_source_code, line)
+    line_config_sig = config_sig(line_config)
+    set_line_config(line_config)
+
     try:
         item_model_and_events = next((m_e for m_e in models_and_events if m_e.get('line') == line and m_e.get('visIndex') == idx_in_line), {})
 
@@ -426,11 +445,15 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         span = (_span_text(source_span)
                 if wants_kwarg(vis.visualize, 'source_span') else None)
         cached_model = item_model_and_events.get('model')
+        # A model is stamped with the config it reflects; a comment that says
+        # something else was edited by hand (or a checkout), and the model is
+        # rebuilt from it.
         fingerprint_matches = (
             cached_model is not None
             and isinstance(cached_model, dict)
             and cached_model.get('_type_fingerprint') == fingerprint
             and cached_model.get('_source_expr_sig') == source_sig
+            and cached_model.get('_config_sig', line_config_sig) == line_config_sig
         )
 
         if fingerprint_matches:
@@ -438,6 +461,7 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
             if isinstance(model, dict):
                 del model['_type_fingerprint']
                 del model['_source_expr_sig']
+                model.pop('_config_sig', None)
         else:
             model = call_with_supported_kwargs(vis.init_model, value, get_visualizer,
                                                eval_in_scope=eval_in_scope,
@@ -471,6 +495,16 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
 
     except Exception as vis_err:
         html_content = f'<div style="white-space: pre-wrap;">{html.escape(type(vis_err).__name__)} during visualization. {html.escape(traceback.format_exc())}</div>'
+    finally:
+        line_config, config_dirty = take_line_config()
+
+    # A save is a change to the file: the comment above the line is rewritten
+    # by the editor, and this model already reflects what it will say.
+    if config_dirty:
+        commands.append(SetConfigComment(
+            format_config_comment(line_config) if line_config else None))
+    if isinstance(model, dict):
+        model['_config_sig'] = config_sig(line_config)
 
     # Convert commands to wire dicts before streaming them.
     cmd_dicts = _commands_to_dicts(commands, line, idx_in_line, model, _source_code)

@@ -187,39 +187,99 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 
 
 # =============================================================================
-# Dotfile persistence (generic JSON key→list storage)
+# Per-line config: the `#%click` comment
 # =============================================================================
+#
+# What a visualizer persists -- a table's columns, an object's fields -- is
+# saved with the line of code that produced the value, in a comment above it:
+#
+#     #%click {"table": {"builtins.dict": [{"expr": "$['name']"}]}}
+#     people = [{'name': 'Alice'}, ...]
+#
+# The comment binds to the next non-comment, non-empty line, so blank lines and
+# ordinary comments may come between. Nothing is shared across lines: two lists
+# of dicts on two lines each have their own comment (or none).
+#
+# The comment's JSON is a namespace (one per persisting visualizer, 'table' /
+# 'object') of type key -> [slot, ...]. The type key -- see `config_key` --
+# stays inside the comment so a config written for a list of dicts does not
+# get applied to what the line holds after it is edited into a list of strings.
+#
+# Visualizers never see the source. The runner parses the comment for a line,
+# installs it here with `set_line_config` before calling the line's visualizer,
+# and afterwards `take_line_config` tells it whether anything was saved -- if
+# so, it asks the editor to rewrite the comment.
 
-def load_dotfile_list(dotfile_name: str, key: str, transform=None):
-    """Load a list for a key from a JSON dotfile in the cwd.
+CONFIG_COMMENT_PREFIX = '#%click'
 
-    Returns the list (optionally transformed), or None if not found.
+_line_config: dict = {}
+_line_config_dirty: bool = False
+
+
+def set_line_config(config: 'dict | None') -> None:
+    """Install the config the current line's comment holds (a deep copy, so
+    saving never writes into the caller's dict)."""
+    global _line_config, _line_config_dirty
+    _line_config = json.loads(json.dumps(config)) if isinstance(config, dict) else {}
+    _line_config_dirty = False
+
+
+def take_line_config() -> 'tuple[dict, bool]':
+    """Hand back (config, dirty) for the current line and reset to empty."""
+    global _line_config, _line_config_dirty
+    result = (_line_config, _line_config_dirty)
+    _line_config = {}
+    _line_config_dirty = False
+    return result
+
+
+def config_sig(config: 'dict | None') -> str:
+    """A canonical rendering, for telling whether a comment changed."""
+    return json.dumps(config or {}, sort_keys=True, separators=(',', ':'))
+
+
+def format_config_comment(config: dict) -> str:
+    """The comment text (no indentation) that holds `config`."""
+    return f'{CONFIG_COMMENT_PREFIX} {json.dumps(config, ensure_ascii=False)}'
+
+
+def _is_config_comment(line_text: str) -> bool:
+    stripped = line_text.lstrip()
+    return (stripped.startswith(CONFIG_COMMENT_PREFIX)
+            and stripped[len(CONFIG_COMMENT_PREFIX):len(CONFIG_COMMENT_PREFIX) + 1] in ('', ' ', '\t'))
+
+
+def config_comment_line(source_code: str, line: int) -> 'int | None':
+    """The 1-indexed line of the `#%click` comment bound to `line`, or None.
+
+    Scans upward over blank lines and comments; the nearest config comment
+    wins. Any code in between means the comment is somebody else's.
     """
-    try:
-        path = os.path.join(os.getcwd(), dotfile_name)
-        with open(path, 'r') as f:
-            data = json.load(f)
-        items = data.get(key)
-        if isinstance(items, list):
-            return [transform(item) for item in items] if transform else items
+    lines = source_code.split('\n')
+    if line < 1 or line > len(lines):
         return None
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        return None
+    for n in range(line - 1, 0, -1):
+        text = lines[n - 1].strip()
+        if not text:
+            continue
+        if not text.startswith('#'):
+            return None
+        if _is_config_comment(text):
+            return n
+    return None
 
 
-def save_dotfile_list(dotfile_name: str, key: str, items: list):
-    """Save a list for a key to a JSON dotfile in the cwd, preserving other keys."""
-    path = os.path.join(os.getcwd(), dotfile_name)
+def parse_config_comment(source_code: str, line: int) -> dict:
+    """The config bound to `line`, or {} when there is none or it is unreadable."""
+    n = config_comment_line(source_code, line)
+    if n is None:
+        return {}
+    text = source_code.split('\n')[n - 1].strip()[len(CONFIG_COMMENT_PREFIX):]
     try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            data = {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        data = {}
-    data[key] = items
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+        config = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return config if isinstance(config, dict) else {}
 
 
 # =============================================================================
@@ -395,7 +455,7 @@ def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value,
     """Compute the nesting kwargs to hand a child (sub-)visualizer.
 
     The child receives the slot's nested config for the cell's type (or None ->
-    default), the inherited root type/dotfile, and the path extended by this
+    default), the inherited root type/namespace, and the path extended by this
     (slot_expr, cell_type) step (so it can persist edits at its own location).
 
     A visualizer opts into all this by naming the parameters in its init_model;
@@ -410,7 +470,7 @@ def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value,
     kwargs = {
         'slots_config': slots_config,
         'config_root_type': parent_model.get('_config_root_type'),
-        'config_root_dotfile': parent_model.get('_config_root_dotfile'),
+        'config_root_ns': parent_model.get('_config_root_ns'),
         'config_path': (parent_model.get('_config_path') or []) + [(slot_expr, t2)],
     }
     if child_init_model is None:
@@ -418,29 +478,13 @@ def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value,
     return supported_kwargs(child_init_model, **kwargs)
 
 
-def load_root_slots(dotfile_name: str, root_type: 'str | None'):
-    """Load the raw slot list for a type from a dotfile (or None)."""
+def load_root_slots(namespace: str, root_type: 'str | None'):
+    """Load the raw slot list for a type from the line's config (or None)."""
     if not root_type:
         return None
-    return load_dotfile_list(dotfile_name, root_type)
-
-
-def _load_dotfile_dict(dotfile_name: str) -> dict:
-    try:
-        path = os.path.join(os.getcwd(), dotfile_name)
-        with open(path, 'r') as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    return {}
-
-
-def _save_dotfile_dict(dotfile_name: str, data: dict) -> None:
-    path = os.path.join(os.getcwd(), dotfile_name)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    slots = _line_config.get(namespace)
+    slots = slots.get(root_type) if isinstance(slots, dict) else None
+    return slots if isinstance(slots, list) else None
 
 
 def _normalize_slot_list(slot_list: list) -> None:
@@ -457,18 +501,22 @@ def _find_slot(slot_list: list, expr: str):
     return None
 
 
-def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
+def save_slots_at_path(namespace: str, root_type: 'str | None',
                        path, exprs: list) -> None:
-    """Persist a (sub-)level's slot exprs at its path in the dotfile.
+    """Persist a (sub-)level's slot exprs at its path in the line's config.
 
     `path` is a list of (slot_expr, child_type) steps from the root type. Only
     this level's expr list is rewritten; each surviving slot keeps its existing
-    `children` (matched by expr), and other types/branches on disk are left
-    untouched. So an ancestor never clobbers a descendant's nested config.
+    `children` (matched by expr), and other types/branches already saved are
+    left untouched. So an ancestor never clobbers a descendant's nested config.
     """
+    global _line_config_dirty
     if not root_type:
         return
-    data = _load_dotfile_dict(dotfile_name)
+    data = _line_config.get(namespace)
+    if not isinstance(data, dict):
+        data = {}
+        _line_config[namespace] = data
 
     target = data.get(root_type)
     if not isinstance(target, list):
@@ -509,8 +557,7 @@ def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
                     slot[key] = value
         rebuilt.append(slot)
     target[:] = rebuilt
-
-    _save_dotfile_dict(dotfile_name, data)
+    _line_config_dirty = True
 
 
 # =============================================================================

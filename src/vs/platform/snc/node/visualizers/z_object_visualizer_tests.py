@@ -11,23 +11,20 @@ Or use pytest with verbose output:
 """
 
 import unittest
-import json
-import os
-import tempfile
-import shutil
 from unittest.mock import patch
 
 import html as html_module
 
 from z_object_visualizer import (
     visualize, init_model, update, can_visualize,
-    TRIVIAL_NAMES, DEFAULT_FIELDS_FOR_TYPE, DOTFILE_NAME,
+    TRIVIAL_NAMES, DEFAULT_FIELDS_FOR_TYPE, CONFIG_NS,
     AddFieldClick, FieldInput, FieldSelect, FieldClick, KeyDown,
     RemoveFieldClick, DragStart, DragOver, DragEnd,
-    load_fields_from_dotfile, save_fields_to_dotfile,
+    load_fields_config, save_fields_config,
     _get_autocomplete_suggestions, _resolve_fields,
 )
 from visualizer_utils import (ChildEvent, get_full_class_name as _get_full_class_name,
+                              set_line_config, take_line_config,
                              wrap_drag_grab, py_exp_attrs, MAX_NEST_DEPTH)
 import z_object_visualizer
 import table_visualizer
@@ -111,7 +108,7 @@ class TestObj:
 
 
 class AnotherObj:
-    """Another test object to test dotfile with multiple types."""
+    """Another test object to test saved config with multiple types."""
     def __init__(self):
         self.alpha = 1
         self.beta = 2
@@ -160,8 +157,16 @@ def make_key_down_event(key: str) -> dict:
 # TestInitModel
 # =============================================================================
 
+def setUpModule():
+    set_line_config(None)
+
+
 class TestInitModel(unittest.TestCase):
     """Test init_model returns correct initial state."""
+
+    def setUp(self):
+        # What another test saved must not become this line's config.
+        set_line_config(None)
 
     def test_init_model_returns_expected_structure(self):
         """init_model returns a dict with all expected keys."""
@@ -203,34 +208,34 @@ class TestInitModel(unittest.TestCase):
                              f"Trivial name '{attr_name}' should not be in fields")
 
     def test_init_model_uses_default_fields_for_known_type(self):
-        """For types in DEFAULT_FIELDS_FOR_TYPE (when no dotfile), use those defaults."""
+        """For types in DEFAULT_FIELDS_FOR_TYPE (when nothing saved), use those defaults."""
         import re
         match = re.search(r'hello', 'hello world')
         self.assertIsNotNone(match)
 
-        # Ensure no dotfile interferes
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+        # Ensure no saved config interferes
+        with patch('z_object_visualizer.load_fields_config', return_value=None):
             model = init_model(match)
 
         self.assertEqual(model['fields'], DEFAULT_FIELDS_FOR_TYPE['re.Match'])
 
-    def test_init_model_loads_from_dotfile(self):
-        """When dotfile has fields for this type, use those."""
+    def test_init_model_loads_from_config(self):
+        """When the line's config has fields for this type, use those."""
         obj = TestObj()
         full_class_name = _get_full_class_name(obj)
         saved_fields = ['$.x', '$.name']
 
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=saved_fields):
+        with patch('z_object_visualizer.load_fields_config', return_value=saved_fields):
             model = init_model(obj)
 
         self.assertEqual(model['fields'], saved_fields)
 
-    def test_init_model_falls_back_when_type_not_in_dotfile(self):
-        """Dotfile exists but doesn't have this type → fall back to non-trivial names."""
+    def test_init_model_falls_back_when_type_not_in_config(self):
+        """Config exists but doesn't have this type → fall back to non-trivial names."""
         obj = TestObj()
 
-        # load_fields_from_dotfile returns None (type not in dotfile)
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+        # load_fields_config returns None (type not in config)
+        with patch('z_object_visualizer.load_fields_config', return_value=None):
             model = init_model(obj)
 
         # Should still have the non-trivial attributes
@@ -242,22 +247,22 @@ class TestInitModel(unittest.TestCase):
 class TestResolveFields(unittest.TestCase):
     """Test the shared field resolution helper."""
 
-    def test_resolve_fields_prefers_dotfile(self):
+    def test_resolve_fields_prefers_config(self):
         obj = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['$.name']):
+        with patch('z_object_visualizer.load_fields_config', return_value=['$.name']):
             self.assertEqual(_resolve_fields(obj), ['$.name'])
 
-    def test_resolve_fields_uses_defaults_when_dotfile_missing(self):
+    def test_resolve_fields_uses_defaults_when_config_missing(self):
         import re
         match = re.search(r'hello', 'hello world')
         self.assertIsNotNone(match)
 
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+        with patch('z_object_visualizer.load_fields_config', return_value=None):
             self.assertEqual(_resolve_fields(match), DEFAULT_FIELDS_FOR_TYPE['re.Match'])
 
     def test_resolve_fields_falls_back_to_non_trivial_names(self):
         obj = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+        with patch('z_object_visualizer.load_fields_config', return_value=None):
             resolved = _resolve_fields(obj)
         self.assertIn('$.x', resolved)
         self.assertIn('$.y', resolved)
@@ -550,7 +555,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '$.na'
 
         event = make_mouse_down_event(repr(FieldSelect(accessor='$.name')))
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn('$.name', new_model['fields'])
@@ -566,7 +571,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '$.na'
 
         event = make_mouse_down_event(repr(FieldSelect(accessor='$.name')))
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'][0], '$.name')
@@ -607,7 +612,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '$.name'
 
         event = make_key_down_event('Enter')
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn('$.name', new_model['fields'])
@@ -623,7 +628,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '$.name'
 
         event = make_key_down_event('Enter')
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'][0], '$.name')
@@ -672,23 +677,23 @@ class TestUpdate(unittest.TestCase):
         # Field should be unchanged
         self.assertEqual(new_model['fields'][0], '$.x')
 
-    def test_field_select_saves_dotfile(self):
-        """FieldSelect commit should call save_fields_to_dotfile."""
+    def test_field_select_saves_config(self):
+        """FieldSelect commit should call save_fields_config."""
         obj = TestObj()
         model = init_model(obj)
         model['fields'] = ['$.x']
         model['adding_field'] = True
 
         event = make_mouse_down_event(repr(FieldSelect(accessor='$.name')))
-        with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
+        with patch('z_object_visualizer.save_fields_config') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             # Should save with the updated fields list
             saved_fields = mock_save.call_args[0][2]
             self.assertIn('$.name', saved_fields)
 
-    def test_enter_saves_dotfile(self):
-        """Enter commit should call save_fields_to_dotfile."""
+    def test_enter_saves_config(self):
+        """Enter commit should call save_fields_config."""
         obj = TestObj()
         model = init_model(obj)
         model['fields'] = ['$.x']
@@ -696,7 +701,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '$.name'
 
         event = make_key_down_event('Enter')
-        with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
+        with patch('z_object_visualizer.save_fields_config') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
 
@@ -787,7 +792,7 @@ class TestUpdate(unittest.TestCase):
         expected_field = suggestions[0]
 
         event = make_key_down_event('Enter')
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn(expected_field, new_model['fields'])
@@ -844,7 +849,7 @@ class TestUpdate(unittest.TestCase):
         expected_field = suggestions[0]
 
         event = make_key_down_event('Tab')
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIn(expected_field, new_model['fields'])
@@ -868,19 +873,19 @@ class TestUpdate(unittest.TestCase):
         model['fields'] = ['$.x', '$.name', '$.y']
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=1)))
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['$.x', '$.y'])
 
-    def test_remove_field_saves_dotfile(self):
-        """RemoveFieldClick should persist the updated fields to dotfile."""
+    def test_remove_field_saves_config(self):
+        """RemoveFieldClick should persist the updated fields."""
         obj = TestObj()
         model = init_model(obj)
         model['fields'] = ['$.x', '$.name']
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=0)))
-        with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
+        with patch('z_object_visualizer.save_fields_config') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             saved_fields = mock_save.call_args[0][2]
@@ -906,7 +911,7 @@ class TestUpdate(unittest.TestCase):
         model['input_value'] = '$.x'
 
         event = make_mouse_down_event(repr(RemoveFieldClick(index=0)))
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertIsNone(new_model['editing_index'])
@@ -915,7 +920,7 @@ class TestUpdate(unittest.TestCase):
 
 
 # =============================================================================
-# TestDotfile
+# TestConfig
 # =============================================================================
 
 # =============================================================================
@@ -1004,7 +1009,7 @@ class TestDragReorder(unittest.TestCase):
         model['drag_over_index'] = 2
 
         event = make_mouse_up_event(repr(DragEnd(index=2)))
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['$.name', '$.y', '$.x'])
@@ -1020,7 +1025,7 @@ class TestDragReorder(unittest.TestCase):
         model['drag_over_index'] = 0
 
         event = make_mouse_up_event(repr(DragEnd(index=0)))
-        with patch('z_object_visualizer.save_fields_to_dotfile'):
+        with patch('z_object_visualizer.save_fields_config'):
             new_model, commands = update(event, ('x', 'x'), model, obj)
 
         self.assertEqual(new_model['fields'], ['$.y', '$.x', '$.name'])
@@ -1040,8 +1045,8 @@ class TestDragReorder(unittest.TestCase):
 
         self.assertEqual(new_model['fields'], ['$.x', '$.name', '$.y'])
 
-    def test_drag_end_saves_dotfile(self):
-        """DragEnd should save reordered fields to dotfile."""
+    def test_drag_end_saves_config(self):
+        """DragEnd should save reordered fields."""
         obj = TestObj()
         model = init_model(obj)
         model['fields'] = ['$.x', '$.name', '$.y']
@@ -1049,7 +1054,7 @@ class TestDragReorder(unittest.TestCase):
         model['drag_over_index'] = 2
 
         event = make_mouse_up_event(repr(DragEnd(index=2)))
-        with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
+        with patch('z_object_visualizer.save_fields_config') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
 
@@ -1085,80 +1090,59 @@ class TestDragReorder(unittest.TestCase):
         self.assertIn('DragEnd(index=0)', html_output)
 
 
-class TestDotfile(unittest.TestCase):
-    """Test dotfile load/save operations."""
+class TestConfig(unittest.TestCase):
+    """Test load/save of fields into the line's config."""
 
     def setUp(self):
-        """Create a temp directory for dotfile tests."""
-        self.orig_cwd = os.getcwd()
-        self.tmp_dir = tempfile.mkdtemp()
-        os.chdir(self.tmp_dir)
+        set_line_config(None)
 
     def tearDown(self):
-        """Restore original cwd and clean up temp dir."""
-        os.chdir(self.orig_cwd)
-        shutil.rmtree(self.tmp_dir)
+        set_line_config(None)
 
-    def test_load_fields_missing_file(self):
-        """No dotfile → returns None."""
-        result = load_fields_from_dotfile('some.Type')
+    def test_load_fields_nothing_saved(self):
+        """Nothing saved → returns None."""
+        result = load_fields_config('some.Type')
         self.assertIsNone(result)
 
-    def test_load_fields_from_dotfile(self):
-        """Valid dotfile with type key → returns fields list."""
-        data = {'some.Type': ['$.x', '$.y']}
-        with open(DOTFILE_NAME, 'w') as f:
-            json.dump(data, f)
-
-        result = load_fields_from_dotfile('some.Type')
+    def test_load_fields_config(self):
+        """Saved config with type key → returns fields list."""
+        set_line_config({CONFIG_NS: {'some.Type': ['$.x', '$.y']}})
+        result = load_fields_config('some.Type')
         self.assertEqual(result, ['$.x', '$.y'])
 
-    def test_load_fields_type_not_in_dotfile(self):
-        """Dotfile exists but doesn't have this type → returns None."""
-        data = {'other.Type': ['.a', '.b']}
-        with open(DOTFILE_NAME, 'w') as f:
-            json.dump(data, f)
-
-        result = load_fields_from_dotfile('some.Type')
+    def test_load_fields_type_not_saved(self):
+        """Config exists but doesn't have this type → returns None."""
+        set_line_config({CONFIG_NS: {'other.Type': ['.a', '.b']}})
+        result = load_fields_config('some.Type')
         self.assertIsNone(result)
 
-    def test_load_fields_corrupt_file(self):
-        """Bad JSON → returns None (doesn't crash)."""
-        with open(DOTFILE_NAME, 'w') as f:
-            f.write('this is not json{{{')
-
-        result = load_fields_from_dotfile('some.Type')
+    def test_load_fields_malformed_entry(self):
+        """A non-list entry → returns None (doesn't crash)."""
+        set_line_config({CONFIG_NS: {'some.Type': 'this is not a list'}})
+        result = load_fields_config('some.Type')
         self.assertIsNone(result)
 
-    def test_save_fields_to_dotfile(self):
-        """Saves correct JSON structure (nested slot format)."""
-        save_fields_to_dotfile('some.Type', [], ['$.x', '$.y'])
-
-        with open(DOTFILE_NAME, 'r') as f:
-            data = json.load(f)
-
-        self.assertEqual(data['some.Type'], [{'expr': '$.x'}, {'expr': '$.y'}])
+    def test_save_fields_config(self):
+        """Saves correct structure (nested slot format) and marks the line dirty."""
+        save_fields_config('some.Type', [], ['$.x', '$.y'])
+        self.assertEqual(take_line_config(), ({CONFIG_NS: {
+            'some.Type': [{'expr': '$.x'}, {'expr': '$.y'}]}}, True))
 
     def test_save_preserves_other_types(self):
         """Saving for type A doesn't clobber type B entries."""
-        save_fields_to_dotfile('type.A', [], ['$.a1', '$.a2'])
-        save_fields_to_dotfile('type.B', [], ['$.b1', '$.b2'])
-
-        with open(DOTFILE_NAME, 'r') as f:
-            data = json.load(f)
-
-        self.assertEqual(data['type.A'], [{'expr': '$.a1'}, {'expr': '$.a2'}])
-        self.assertEqual(data['type.B'], [{'expr': '$.b1'}, {'expr': '$.b2'}])
+        save_fields_config('type.A', [], ['$.a1', '$.a2'])
+        save_fields_config('type.B', [], ['$.b1', '$.b2'])
+        data, _ = take_line_config()
+        self.assertEqual(data[CONFIG_NS], {
+            'type.A': [{'expr': '$.a1'}, {'expr': '$.a2'}],
+            'type.B': [{'expr': '$.b1'}, {'expr': '$.b2'}]})
 
     def test_save_overwrites_same_type(self):
         """Saving the same type again overwrites the previous entry."""
-        save_fields_to_dotfile('some.Type', [], ['$.x'])
-        save_fields_to_dotfile('some.Type', [], ['$.x', '$.y'])
-
-        with open(DOTFILE_NAME, 'r') as f:
-            data = json.load(f)
-
-        self.assertEqual(data['some.Type'], [{'expr': '$.x'}, {'expr': '$.y'}])
+        save_fields_config('some.Type', [], ['$.x'])
+        save_fields_config('some.Type', [], ['$.x', '$.y'])
+        data, _ = take_line_config()
+        self.assertEqual(data[CONFIG_NS]['some.Type'], [{'expr': '$.x'}, {'expr': '$.y'}])
 
 
 # =============================================================================
@@ -1220,13 +1204,8 @@ class TestComposition(unittest.TestCase):
     """Test subvisualizer composition in z_object_visualizer."""
 
     def setUp(self):
-        self._orig_cwd = os.getcwd()
-        self._tmpdir = tempfile.mkdtemp()
-        os.chdir(self._tmpdir)
-
-    def tearDown(self):
-        os.chdir(self._orig_cwd)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        # What another test saved must not become this line's config.
+        set_line_config(None)
 
     def test_init_model_contains_children_dict(self):
         obj = CompositionTestObj()
@@ -1389,32 +1368,22 @@ class TestInputRowEvalInScope(unittest.TestCase):
         self.assertIn('1', html_output)
 
 
-class TestDotfileDollarHandling(unittest.TestCase):
-    """Test that load_fields_from_dotfile returns fields as stored."""
+class TestConfigDollarHandling(unittest.TestCase):
+    """Test that load_fields_config returns fields as stored."""
 
     def setUp(self):
-        self.orig_cwd = os.getcwd()
-        self.tmp_dir = tempfile.mkdtemp()
-        os.chdir(self.tmp_dir)
-
-    def tearDown(self):
-        os.chdir(self.orig_cwd)
-        shutil.rmtree(self.tmp_dir)
+        set_line_config(None)
 
     def test_load_preserves_embedded_dollar(self):
         """Fields with $ embedded (not leading) are returned as-is."""
-        data = {'re.Match': ['str3[$.start():]']}
-        with open(DOTFILE_NAME, 'w') as f:
-            json.dump(data, f)
-        result = load_fields_from_dotfile('re.Match')
+        set_line_config({CONFIG_NS: {'re.Match': ['str3[$.start():]']}})
+        result = load_fields_config('re.Match')
         self.assertEqual(result, ['str3[$.start():]'])
 
     def test_load_preserves_leading_dollar(self):
         """Fields with leading $ are returned as-is."""
-        data = {'re.Match': ['$[0]', '$.start()']}
-        with open(DOTFILE_NAME, 'w') as f:
-            json.dump(data, f)
-        result = load_fields_from_dotfile('re.Match')
+        set_line_config({CONFIG_NS: {'re.Match': ['$[0]', '$.start()']}})
+        result = load_fields_config('re.Match')
         self.assertEqual(result, ['$[0]', '$.start()'])
 
 
@@ -1933,10 +1902,10 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_root_model_stores_config_fields(self):
         o = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['$.x']):
+        with patch('z_object_visualizer.load_fields_config', return_value=['$.x']):
             model = init_model(o, _get_nesting_visualizer)
         self.assertEqual(model['_config_root_type'], _get_full_class_name(o))
-        self.assertEqual(model['_config_root_dotfile'], DOTFILE_NAME)
+        self.assertEqual(model['_config_root_ns'], CONFIG_NS)
         self.assertEqual(model['_config_path'], [])
         self.assertEqual(model['_slot_children'], {})
 
@@ -1953,7 +1922,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
         o = Outer()
         inner_type = _get_full_class_name(o.inner)
         slots = [{'expr': '$.inner', 'children': {inner_type: [{'expr': '$.a'}]}}]
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
+        with patch('z_object_visualizer.load_fields_config', return_value=slots):
             model = init_model(o, _get_nesting_visualizer)
         child = model['children']['$.inner']
         self.assertEqual(child['fields'], ['$.a'])
@@ -1966,7 +1935,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
         o = Holder()
         slots = [{'expr': '$.items',
                   'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=slots):
+        with patch('z_object_visualizer.load_fields_config', return_value=slots):
             model = init_model(o, _get_nesting_visualizer)
         child = model['children']['$.items']  # a list-visualizer model
         self.assertEqual(list(child['columns']), ['$.lower()'])
@@ -1978,7 +1947,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
         o = Node()
         o.me = o  # self-referential; would recurse forever via dir() fallback
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=None):
+        with patch('z_object_visualizer.load_fields_config', return_value=None):
             model = init_model(o, _get_nesting_visualizer)  # must not RecursionError
 
         def find_too_deep(m):
@@ -2000,11 +1969,11 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_field_add_saves_with_path_scoped_signature(self):
         o = TestObj()
-        with patch('z_object_visualizer.load_fields_from_dotfile', return_value=['$.x']):
+        with patch('z_object_visualizer.load_fields_config', return_value=['$.x']):
             model = init_model(o, _get_nesting_visualizer)
         model['adding_field'] = True
         event = make_mouse_down_event(repr(FieldSelect(accessor='$.y')))
-        with patch('z_object_visualizer.save_fields_to_dotfile') as mock_save:
+        with patch('z_object_visualizer.save_fields_config') as mock_save:
             update(event, None, model, o, _get_nesting_visualizer)
         mock_save.assert_called_once()
         args = mock_save.call_args.args

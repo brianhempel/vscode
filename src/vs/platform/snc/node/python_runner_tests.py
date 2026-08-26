@@ -38,7 +38,9 @@ from python_runner import (
     transform_code_to_ast,
 )
 # python_runner puts the built-in visualizers on the path.
-from visualizer_utils import py_exp_attrs, AddImports, UncaughtError
+from visualizer_utils import (py_exp_attrs, AddImports, UncaughtError,
+                              load_root_slots, save_slots_at_path,
+                              format_config_comment, config_sig)
 
 
 def exp_attr(*exprs):
@@ -905,6 +907,102 @@ class TestSourceSpanReachesTheVisualizer(unittest.TestCase):
     def test_one_that_does_not_ask_still_renders(self):
         self.assertIn('no span asked for',
                       self.html(self._DoesNot(), (1, 7, 1, 16)))
+
+
+class TestConfigComment(unittest.TestCase):
+    """A visualizer's saved config lives in a `#%click` comment above its line.
+    The runner reads it for the visualizer and, when the visualizer saves,
+    asks the editor to rewrite it."""
+
+    class _Vis:
+        """Reads its config at init; saves on any event."""
+
+        def can_visualize(self, value):
+            return True
+
+        def init_model(self, value, get_visualizer, eval_in_scope=None,
+                       var_and_exp=None):
+            return {'loaded': load_root_slots('t', 'K'), 'inits': 1}
+
+        def update(self, event, var_and_exp, model, value, get_visualizer=None,
+                   eval_in_scope=None):
+            save_slots_at_path('t', 'K', [], ['$.x'])
+            return model, []
+
+        def visualize(self, value, model, get_visualizer, eval_in_scope,
+                      max_width=None, max_height=None, small=False,
+                      var_and_exp=None):
+            return '<i>vis</i>'
+
+    def _log(self, source, line, models_and_events=None):
+        buf = io.StringIO()
+        saved = (python_runner._stream_out, python_runner.line_emit_counter,
+                 python_runner.models_and_events, python_runner._source_code,
+                 python_runner._visualizers)
+        try:
+            python_runner._stream_out = buf
+            python_runner.line_emit_counter = {}
+            python_runner.models_and_events = models_and_events or []
+            python_runner._source_code = source
+            python_runner._visualizers = lambda: [self._Vis()]
+            log_value(line, [1], var_and_exp=('xs', 'xs'))
+        finally:
+            (python_runner._stream_out, python_runner.line_emit_counter,
+             python_runner.models_and_events, python_runner._source_code,
+             python_runner._visualizers) = saved
+        msgs = [json.loads(l) for l in buf.getvalue().splitlines() if l.strip()]
+        item = next(m['item'] for m in msgs if m.get('type') == 'item')
+        cmds = [m['command'] for m in msgs if m.get('type') == 'command']
+        return item, cmds
+
+    SRC = '#%click {"t": {"K": ["$.a"]}}\nxs = [1]\n'
+
+    def test_the_comment_is_the_visualizers_config(self):
+        item, cmds = self._log(self.SRC, 2)
+        self.assertEqual(item['model']['loaded'], ['$.a'])
+        self.assertEqual(item['model']['_config_sig'],
+                         config_sig({'t': {'K': ['$.a']}}))
+        self.assertEqual(cmds, [])
+
+    def test_a_line_with_no_comment_has_no_config(self):
+        item, cmds = self._log('xs = [1]\n', 1)
+        self.assertIsNone(item['model']['loaded'])
+        self.assertEqual(item['model']['_config_sig'], config_sig({}))
+        self.assertEqual(cmds, [])
+
+    def test_a_save_asks_the_editor_to_rewrite_the_comment(self):
+        item, _ = self._log(self.SRC, 2)
+        cached = {'line': 2, 'visIndex': 0, 'model': item['model'],
+                  'events': [{'pythonEventStr': 'X', 'eventJSON': {}}]}
+        item, cmds = self._log(self.SRC, 2, [cached])
+        expected = {'t': {'K': [{'expr': '$.x'}]}}
+        self.assertEqual(cmds, [{
+            'type': 'SetConfigComment',
+            'comment': format_config_comment(expected),
+            'triggerLine': 2, 'triggerVisIndex': 0}])
+        # The model already reflects what the comment will say.
+        self.assertEqual(item['model']['_config_sig'], config_sig(expected))
+
+    def test_a_model_survives_a_rerun_while_the_comment_is_what_it_reflects(self):
+        item, _ = self._log(self.SRC, 2)
+        model = dict(item['model'], inits=2)
+        cached = {'line': 2, 'visIndex': 0, 'model': model}
+        item, _ = self._log(self.SRC, 2, [cached])
+        self.assertEqual(item['model']['inits'], 2)
+
+    def test_a_hand_edited_comment_rebuilds_the_model(self):
+        item, _ = self._log(self.SRC, 2)
+        model = dict(item['model'], inits=2)
+        cached = {'line': 2, 'visIndex': 0, 'model': model}
+        edited = '#%click {"t": {"K": ["$.b"]}}\nxs = [1]\n'
+        item, _ = self._log(edited, 2, [cached])
+        self.assertEqual(item['model']['inits'], 1)
+        self.assertEqual(item['model']['loaded'], ['$.b'])
+
+    def test_the_config_does_not_leak_to_the_next_line(self):
+        src = '#%click {"t": {"K": ["$.a"]}}\nxs = [1]\nys = [2]\n'
+        item, _ = self._log(src, 3)
+        self.assertIsNone(item['model']['loaded'])
 
 
 class TestProgramIO(unittest.TestCase):

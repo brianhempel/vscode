@@ -74,11 +74,49 @@ Visualizers that support interaction implement the Elm architecture:
 
 - **`init_model(value)`** — returns initial state for this visualization instance.
 - **`visualize(value, model)`** — renders HTML from the value and current model. HTML elements can carry `snc-mouse-down`, `snc-mouse-move`, `snc-mouse-up`, `snc-key-down`, and `snc-input` attributes whose values are Python expression strings. Nested visualizers can route events with `snc-child-key`.
-- **`update(event, source_code, source_line, model, value)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits) and `CopyToClipboard`.
+- **`update(event, source_code, source_line, model, value)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits), `CopyToClipboard`, and `SetConfigComment` (rewrite the line's saved-config comment; see below).
 
 Models are serialized to JSON and round-tripped through the TypeScript frontend so they survive across re-executions. The value itself is **not** stored in the model; it is always passed as a parameter.
 
 Static (non-interactive) visualizers only need `can_visualize(value)` and `visualize(value)`.
+
+### Per-line visualizer config: the `#%click` comment
+
+What a visualizer persists across sessions -- a table's columns, an object's
+fields -- is saved with the line of code that produced the value, in a comment
+directly above it:
+
+```python
+#%click {"table": {"builtins.dict": [{"expr": "$['name']"}, {"expr": "$['age']"}]}}
+people = [{'name': 'Alice', 'age': 30}, ...]
+```
+
+The comment binds to the **next non-comment, non-empty line**, so blank lines
+and ordinary comments may come between, and inserting either never re-binds
+it. Each line has its own; nothing is shared across lines or files (the old
+type-keyed `.snc_table_columns.json` / `.snc_object_fields.json` dotfiles are
+gone). The JSON is a namespace per persisting visualizer (`table`, `object`)
+of `type key -> [slot, ...]`; the type key stays so a config written for a
+list of dicts isn't applied once the line is edited into a list of strings.
+
+Visualizers never see the source. `python_runner.log_value` parses the
+comment for the line, installs it with `visualizer_utils.set_line_config`
+before the visualizer's `init_model`/`update` run (`load_root_slots` reads
+it), and afterwards `take_line_config` says whether anything was saved
+(`save_slots_at_path` writes to it). A save becomes a `SetConfigComment`
+command; the editor finds the existing comment by the same binding rule and
+replaces it in place, or inserts one above the line. Replacing rather than
+inserting keeps a replayed event harmless.
+
+The model round-trip is what carries state within a session; the comment is
+the cross-session store. A model is stamped with `_config_sig`, a canonical
+hash of the config it reflects, so a comment edited by hand (or swapped in by
+a checkout) rebuilds the model from the comment, while the visualizer's own
+save -- whose model already reflects the new comment -- does not.
+
+The editor folds each comment's JSON to a `…` token after the `#%click` prefix
+(`SNCController.updateConfigCommentFolding`, a decoration); the line the
+cursor is on is shown in full so it can be edited.
 
 ### Execution Optimization: Checkpointed Worker Pools (No `os.fork()`)
 

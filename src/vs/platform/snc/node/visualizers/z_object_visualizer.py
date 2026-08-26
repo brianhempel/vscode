@@ -14,12 +14,12 @@ This visualizer follows the Elm architecture with three core functions:
    - Shows autocomplete suggestions when adding/editing fields
 
 2. init_model(value) -> dict
-   - Returns the initial model state, loading saved fields from dotfile
+   - Returns the initial model state, loading the fields saved with the line
    - Falls back to DEFAULT_FIELDS_FOR_TYPE, then non-trivial dir() names
 
 3. update(event, var_and_exp, model, value) -> (new_model, commands)
    - Processes UI events (click, input, keyboard) and returns updated model
-   - Saves field configuration to dotfile on commit
+   - Saves field configuration with the line (its #%click comment) on commit
 
 ================================================================================
 FIELD CONFIGURATION
@@ -27,17 +27,17 @@ FIELD CONFIGURATION
 
 Fields shown for each type are configurable and persisted:
 
-1. DOTFILE (.snc_object_fields.json in working directory):
-   - JSON mapping {full_class_name: [accessor_code, ...]}
-   - Highest priority: user-customized fields
+1. THE LINE'S #%click COMMENT (see visualizer_utils, "Per-line config"):
+   - Under the 'object' namespace, JSON mapping {full_class_name: [slot, ...]}
+   - Highest priority: user-customized fields, for this line only
 
 2. DEFAULT_FIELDS_FOR_TYPE:
    - Hardcoded defaults for known types (e.g., re.Match)
-   - Used when type not in dotfile
+   - Used when the line saved nothing for the type
 
 3. Non-trivial dir() names:
    - Fallback: all attributes not in dir(object())
-   - Used when type not in dotfile or DEFAULT_FIELDS_FOR_TYPE
+   - Used when the line saved nothing for the type and it has no defaults
 
 ================================================================================
 """
@@ -114,7 +114,7 @@ DEFAULT_FIELDS_FOR_TYPE = {
     're.Match': ['$[0]', '$.start(0)', '$.end(0)'],
 }
 
-DOTFILE_NAME = '.snc_object_fields.json'
+CONFIG_NS = 'object'
 
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
@@ -128,7 +128,7 @@ def get_fields(value):
     return _resolve_fields(value)
 
 
-# === Dotfile operations ===
+# === Saved config (the line's #%click comment, 'object' namespace) ===
 
 def _ensure_dollar_prefix(f):
     # Field expressions only need a dollar if they don't already reference the
@@ -137,32 +137,32 @@ def _ensure_dollar_prefix(f):
     return f if '$' in f else f'${f}'
 
 
-def load_fields_from_dotfile(full_class_name: str):
-    """Load the raw slot list for a type from the dotfile (or None).
+def load_fields_config(full_class_name: str):
+    """Load the raw slot list for a type from the line's config (or None).
 
     Kept as the single root-read entry point so tests can patch it for
     isolation. The dollar-prefix normalization is applied later by parse_slots
     so it works uniformly with the nested slot format.
     """
-    return load_root_slots(DOTFILE_NAME, full_class_name)
+    return load_root_slots(CONFIG_NS, full_class_name)
 
 
-def save_fields_to_dotfile(root_type, path, exprs, dotfile=DOTFILE_NAME):
+def save_fields_config(root_type, path, exprs, namespace=CONFIG_NS):
     """Path-scoped writer: persist a (sub-)object's field exprs at its location.
 
     `path` is the list of (slot_expr, child_type) steps from the root type.
     """
-    save_slots_at_path(dotfile, root_type, path, exprs)
+    save_slots_at_path(namespace, root_type, path, exprs)
 
 
 def _save_slots(model: dict) -> None:
     """Persist an object model's fields at its config path (preserves nested
-    children of surviving fields and other types on disk)."""
-    save_fields_to_dotfile(
+    children of surviving fields and other types already saved)."""
+    save_fields_config(
         model.get('_config_root_type'),
         model.get('_config_path') or [],
         list(model.get('fields', [])),
-        model.get('_config_root_dotfile') or DOTFILE_NAME,
+        model.get('_config_root_ns') or CONFIG_NS,
     )
 
 
@@ -172,7 +172,7 @@ def _get_non_trivial_names(obj) -> list:
 
 
 def _resolve_fields(obj) -> list:
-    """Resolve fields using dotfile, defaults, then non-trivial names."""
+    """Resolve fields using the saved config, defaults, then non-trivial names."""
     fields, _ = _resolve_fields_and_children(obj, None, None)
     return list(fields)
 
@@ -180,7 +180,7 @@ def _resolve_fields(obj) -> list:
 def _resolve_fields_and_children(obj, slots_config, config_path):
     """Return (fields, slot_children) for an object at this nesting position.
 
-    At the root (config_path is None) the dotfile is read by class. When nested,
+    At the root (config_path is None) the line's config is read by class. When nested,
     only the parent-supplied slots_config is used -- the type config is NOT
     re-read, which is what breaks config-driven recursion. A missing config
     falls back to DEFAULT_FIELDS_FOR_TYPE, then non-trivial dir() names (value-
@@ -189,7 +189,7 @@ def _resolve_fields_and_children(obj, slots_config, config_path):
     full_class_name = get_full_class_name(obj)
 
     if config_path is None:
-        loaded = load_fields_from_dotfile(full_class_name)
+        loaded = load_fields_config(full_class_name)
     else:
         loaded = slots_config
 
@@ -260,14 +260,14 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None):
 # === Elm architecture functions ===
 
 def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
-               slots_config=None, config_root_type=None, config_root_dotfile=None,
+               slots_config=None, config_root_type=None, config_root_ns=None,
                config_path=None):
     """
     Initialize the model state for a new visualization.
 
-    Priority for fields: (nested config | dotfile) > DEFAULT_FIELDS_FOR_TYPE >
+    Priority for fields: (nested config | saved config) > DEFAULT_FIELDS_FOR_TYPE >
     non-trivial dir() names. Nested calls use the parent-supplied slots_config
-    and never re-read the type dotfile (breaks config-driven recursion).
+    and never re-read the type's config (breaks config-driven recursion).
     """
     source_expr = None
     if var_and_exp:
@@ -276,11 +276,11 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
 
     is_root = config_path is None
     root_type = config_key(value) if is_root else config_root_type
-    root_dotfile = DOTFILE_NAME if is_root else config_root_dotfile
+    root_ns = CONFIG_NS if is_root else config_root_ns
     path = [] if is_root else config_path
     config_fields = {
         "_config_root_type": root_type,
-        "_config_root_dotfile": root_dotfile,
+        "_config_root_ns": root_ns,
         "_config_path": path,
         "_slot_children": {},
     }

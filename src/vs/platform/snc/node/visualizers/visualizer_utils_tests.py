@@ -10,9 +10,6 @@ import json
 import re
 import unittest
 import html
-import os
-import shutil
-import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               aggregate_handled_keys, eval_dollar_expr,
@@ -23,7 +20,9 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               imports_for_code, CHILD_SOURCE_BINDER)
 from visualizer_utils import (
     config_key, parse_slots, parse_slot_cols, load_root_slots, save_slots_at_path,
-    _save_dotfile_dict,
+    set_line_config, take_line_config, config_sig,
+    config_comment_line, parse_config_comment, format_config_comment,
+    CONFIG_COMMENT_PREFIX,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
     opens_block, with_pass_body, without_pass_body,
     supported_kwargs, call_with_supported_kwargs, keyword_params, wants_kwarg,
@@ -683,18 +682,144 @@ class TestParseSlotCols(unittest.TestCase):
         # save_slots_at_path rewrites the expr list and keeps each surviving
         # slot's other keys, so an ancestor never clobbers a descendant's
         # sub-columns.
-        import tempfile, os, json
-        cwd = os.getcwd()
-        os.chdir(tempfile.mkdtemp())
-        try:
-            _save_dotfile_dict('.t.json', {'T': [
-                {'expr': '$.name'},
-                {'expr': '*$.m', 'cols': ['$.who']}]})
-            save_slots_at_path('.t.json', 'T', [], ['$.name', '*$.m'])
-            on_disk = json.load(open('.t.json'))['T']
-            self.assertEqual(on_disk[1], {'expr': '*$.m', 'cols': ['$.who']})
-        finally:
-            os.chdir(cwd)
+        set_line_config({'table': {'T': [
+            {'expr': '$.name'},
+            {'expr': '*$.m', 'cols': ['$.who']}]}})
+        save_slots_at_path('table', 'T', [], ['$.name', '*$.m'])
+        stored, _ = take_line_config()
+        self.assertEqual(stored['table']['T'][1], {'expr': '*$.m', 'cols': ['$.who']})
+
+
+class TestLineConfigStore(unittest.TestCase):
+    """The per-line config the runner installs before a visualizer runs and
+    collects after: what the line's `#%click` comment holds, in memory."""
+
+    def setUp(self):
+        set_line_config(None)
+
+    def test_starts_empty_and_clean(self):
+        self.assertEqual(take_line_config(), ({}, False))
+
+    def test_load_reads_the_installed_config(self):
+        set_line_config({'table': {'builtins.dict': ["$['a']"]}})
+        self.assertEqual(load_root_slots('table', 'builtins.dict'), ["$['a']"])
+        self.assertIsNone(load_root_slots('table', 'builtins.str'))
+        self.assertIsNone(load_root_slots('object', 'builtins.dict'))
+        self.assertIsNone(load_root_slots('table', None))
+
+    def test_load_ignores_a_malformed_entry(self):
+        set_line_config({'table': {'T': 'not a list'}, 'object': 'nope'})
+        self.assertIsNone(load_root_slots('table', 'T'))
+        self.assertIsNone(load_root_slots('object', 'T'))
+
+    def test_save_marks_dirty_and_is_read_back(self):
+        save_slots_at_path('table', 'T', [], ['$.x', '$.y'])
+        config, dirty = take_line_config()
+        self.assertTrue(dirty)
+        self.assertEqual(config, {'table': {'T': [{'expr': '$.x'}, {'expr': '$.y'}]}})
+
+    def test_save_with_no_root_type_is_a_no_op(self):
+        save_slots_at_path('table', None, [], ['$.x'])
+        self.assertEqual(take_line_config(), ({}, False))
+
+    def test_namespaces_and_types_keep_apart(self):
+        save_slots_at_path('table', 'T', [], ['$.x'])
+        save_slots_at_path('object', 'T', [], ['$.y'])
+        save_slots_at_path('table', 'U', [], ['$.z'])
+        config, _ = take_line_config()
+        self.assertEqual(config, {
+            'table': {'T': [{'expr': '$.x'}], 'U': [{'expr': '$.z'}]},
+            'object': {'T': [{'expr': '$.y'}]}})
+
+    def test_nested_save_lands_under_the_slot(self):
+        set_line_config({'table': {'T': ['$.a', '$.b']}})
+        save_slots_at_path('table', 'T', [('$.b', 'U')], ['$.q'])
+        config, dirty = take_line_config()
+        self.assertTrue(dirty)
+        self.assertEqual(config['table']['T'], [
+            {'expr': '$.a'},
+            {'expr': '$.b', 'children': {'U': [{'expr': '$.q'}]}}])
+
+    def test_take_hands_over_a_copy_and_resets(self):
+        save_slots_at_path('table', 'T', [], ['$.x'])
+        config, _ = take_line_config()
+        config['table']['T'].append('junk')
+        self.assertEqual(take_line_config(), ({}, False))
+
+    def test_set_does_not_alias_the_caller_dict(self):
+        given = {'table': {'T': ['$.x']}}
+        set_line_config(given)
+        save_slots_at_path('table', 'T', [], ['$.y'])
+        self.assertEqual(given, {'table': {'T': ['$.x']}})
+
+    def test_sig_is_canonical(self):
+        self.assertEqual(config_sig({'b': 1, 'a': [1, 2]}), config_sig({'a': [1, 2], 'b': 1}))
+        self.assertNotEqual(config_sig({'a': 1}), config_sig({'a': 2}))
+        self.assertEqual(config_sig({}), config_sig(None))
+
+
+class TestConfigComment(unittest.TestCase):
+    """A `#%click` comment binds to the next non-comment, non-empty line."""
+
+    def test_directly_above(self):
+        src = '#%click {"a": 1}\nx = 1\n'
+        self.assertEqual(config_comment_line(src, 2), 1)
+        self.assertEqual(parse_config_comment(src, 2), {'a': 1})
+
+    def test_blank_and_comment_lines_between_do_not_break_the_binding(self):
+        src = '#%click {"a": 1}\n\n# note\n   \nx = 1\n'
+        self.assertEqual(config_comment_line(src, 5), 1)
+        self.assertEqual(parse_config_comment(src, 5), {'a': 1})
+
+    def test_code_between_breaks_the_binding(self):
+        src = '#%click {"a": 1}\ny = 2\nx = 1\n'
+        self.assertIsNone(config_comment_line(src, 3))
+        self.assertEqual(parse_config_comment(src, 3), {})
+        self.assertEqual(parse_config_comment(src, 2), {'a': 1})
+
+    def test_nearest_comment_wins(self):
+        src = '#%click {"a": 1}\n#%click {"a": 2}\nx = 1\n'
+        self.assertEqual(config_comment_line(src, 3), 2)
+        self.assertEqual(parse_config_comment(src, 3), {'a': 2})
+
+    def test_indented(self):
+        src = 'if True:\n    #%click {"a": 1}\n    x = 1\n'
+        self.assertEqual(config_comment_line(src, 3), 2)
+        self.assertEqual(parse_config_comment(src, 3), {'a': 1})
+
+    def test_nothing_above(self):
+        src = 'x = 1\n#%click {"a": 1}\n'
+        self.assertIsNone(config_comment_line(src, 1))
+        self.assertEqual(parse_config_comment(src, 1), {})
+
+    def test_line_out_of_range(self):
+        src = '#%click {"a": 1}\nx = 1\n'
+        self.assertIsNone(config_comment_line(src, 0))
+        self.assertIsNone(config_comment_line(src, 99))
+        self.assertEqual(parse_config_comment(src, 99), {})
+
+    def test_a_trailing_comment_is_not_a_config(self):
+        src = 'y = 2  #%click {"a": 1}\nx = 1\n'
+        self.assertIsNone(config_comment_line(src, 2))
+
+    def test_malformed_json_is_no_config(self):
+        src = '#%click {not json\nx = 1\n'
+        self.assertEqual(config_comment_line(src, 2), 1)
+        self.assertEqual(parse_config_comment(src, 2), {})
+
+    def test_non_dict_json_is_no_config(self):
+        src = '#%click [1, 2]\nx = 1\n'
+        self.assertEqual(parse_config_comment(src, 2), {})
+
+    def test_format_round_trips(self):
+        config = {'table': {'builtins.dict': [{'expr': "$['name']"}]}}
+        text = format_config_comment(config)
+        self.assertTrue(text.startswith(CONFIG_COMMENT_PREFIX + ' '))
+        self.assertNotIn('\n', text)
+        self.assertEqual(parse_config_comment(text + '\nx = 1\n', 2), config)
+
+    def test_format_keeps_unicode(self):
+        self.assertIn('é', format_config_comment({'k': 'é'}))
 
 
 class TestConfigKey(unittest.TestCase):
@@ -787,14 +912,8 @@ class TestSaveSlotsAtPath(unittest.TestCase):
     siblings, other types, and descendants' nested children."""
 
     def setUp(self):
-        self.orig = os.getcwd()
-        self.tmp = tempfile.mkdtemp()
-        os.chdir(self.tmp)
-        self.dot = '.snc_test_slots.json'
-
-    def tearDown(self):
-        os.chdir(self.orig)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        set_line_config(None)
+        self.dot = 'test'
 
     def test_save_root(self):
         save_slots_at_path(self.dot, 'builtins.str', [], ['$', 'f'])
@@ -855,13 +974,13 @@ class TestChildNestingKwargs(unittest.TestCase):
         model = {
             '_slot_children': {'f': {'builtins.str': [{'expr': '$'}]}},
             '_config_root_type': 'builtins.str',
-            '_config_root_dotfile': '.snc_table_columns.json',
+            '_config_root_ns': '.snc_table_columns.json',
             '_config_path': [],
         }
         kw = child_nesting_kwargs(model, 'f', ['a', 'b'])
         self.assertEqual(kw['slots_config'], [{'expr': '$'}])
         self.assertEqual(kw['config_root_type'], 'builtins.str')
-        self.assertEqual(kw['config_root_dotfile'], '.snc_table_columns.json')
+        self.assertEqual(kw['config_root_ns'], '.snc_table_columns.json')
         self.assertEqual(kw['config_path'], [('f', 'builtins.str')])
 
     def test_no_children_returns_none_slots(self):
@@ -877,7 +996,7 @@ class TestChildNestingKwargs(unittest.TestCase):
 
     def test_child_that_names_the_params_gets_them_all(self):
         def init_model(value, get_visualizer=None, slots_config=None,
-                       config_root_type=None, config_root_dotfile=None,
+                       config_root_type=None, config_root_ns=None,
                        config_path=None):
             pass
         model = {'_slot_children': {'f': {'builtins.int': [{'expr': '$'}]}},
@@ -909,7 +1028,7 @@ class TestChildNestingKwargs(unittest.TestCase):
         model = {'_slot_children': {}, '_config_path': []}
         self.assertEqual(set(child_nesting_kwargs(model, 'f', 5, init_model)),
                          {'slots_config', 'config_root_type',
-                          'config_root_dotfile', 'config_path'})
+                          'config_root_ns', 'config_path'})
 
 
 class TestTooDeep(unittest.TestCase):
@@ -1299,7 +1418,7 @@ class TestSupportedKwargs(unittest.TestCase):
         self.assertEqual(
             call_with_supported_kwargs(init_model, [1], 'gv', slots_config=['s'],
                                        config_path=[], config_root_type='t',
-                                       config_root_dotfile='.f'),
+                                       config_root_ns='.f'),
             'ok')
 
     def test_signatures_are_inspected_once_per_function(self):

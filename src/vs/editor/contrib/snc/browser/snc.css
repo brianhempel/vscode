@@ -2211,3 +2211,18 @@
 	opacity: 0.85;
 	line-height: 16px;
 }
+
+/* The JSON of a `#%click` config comment, folded to a token that reads like a
+   fold placeholder (see SNCController.updateConfigCommentFolding). */
+.monaco-editor .snc-config-payload {
+	display: none;
+}
+.monaco-editor .snc-config-ellipsis {
+	color: var(--vscode-editor-foldPlaceholderForeground);
+	padding: 0 4px;
+	margin-left: 2px;
+	border: 1px solid var(--vscode-editor-foldPlaceholderForeground);
+	border-radius: 3px;
+	font-size: 0.8em;
+	cursor: text;
+}

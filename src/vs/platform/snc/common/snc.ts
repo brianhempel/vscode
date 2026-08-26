@@ -70,6 +70,13 @@ export type SNCCommand =
 	// the editor's to decide — see pythonImports.ts.
 	| { type: 'NewCode'; triggerLine: number; triggerVisIndex: number; edits: NewCodeEdit[]; imports?: string[] }
 	| { type: 'CopyToClipboard'; text: string }
+	// Rewrite the `#%click` comment that holds the trigger line's visualizer
+	// config (its columns, fields, ...). `comment` is the whole comment text
+	// without indentation; null removes it. The editor finds the existing
+	// comment by the rule the runner reads it with -- the nearest one above
+	// with only blank lines and comments between -- and replaces it, or
+	// inserts a new line above the trigger line.
+	| { type: 'SetConfigComment'; comment: string | null; triggerLine: number; triggerVisIndex: number }
 	// The backend supplies expression intent; the editor's linked range remains
 	// authoritative for the concrete assignment target. On semantic action
 	// changes, suggested_var_name requests a safe editor-side rename.

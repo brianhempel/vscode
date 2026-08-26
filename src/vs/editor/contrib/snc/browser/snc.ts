@@ -7,7 +7,7 @@ import { Range } from '../../../common/core/range.js';
 import { Selection, SelectionDirection } from '../../../common/core/selection.js';
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
-import { ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
+import { IModelDeltaDecoration, ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
 import { IProcessOptions, IVisualizationItem, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, UiEvent } from '../../../../platform/snc/common/snc.js';
 import { IPythonImportInsertion, pythonImportInsertion } from '../../../../platform/snc/common/pythonImports.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
@@ -2489,6 +2489,35 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
  * existing line, so the first line of editText starts on the line after
  * `insertedRange.startLineNumber`.
  */
+/**
+ * The comment a visualizer's saved config lives in -- see "Per-line config"
+ * in visualizer_utils.py. Matched as a whole line: a trailing `#%click` on a
+ * line of code is not one.
+ */
+const CONFIG_COMMENT_PREFIX = '#%click';
+const CONFIG_COMMENT_RE = new RegExp(`^\\s*${CONFIG_COMMENT_PREFIX}(?:\\s|$)`);
+
+/**
+ * The `#%click` comment bound to `line`: the nearest one above it with only
+ * blank lines and comments between (the rule the Python runner reads it by),
+ * or 0 when there is none.
+ */
+function configCommentLineAbove(model: ITextModel, line: number): number {
+	for (let ln = Math.min(line, model.getLineCount()) - 1; ln >= 1; ln--) {
+		const text = model.getLineContent(ln).trim();
+		if (text === '') {
+			continue;
+		}
+		if (!text.startsWith('#')) {
+			return 0;
+		}
+		if (CONFIG_COMMENT_RE.test(text)) {
+			return ln;
+		}
+	}
+	return 0;
+}
+
 /** How many lines an insert edit adds; several imports can share one edit. */
 function editLineCount(edit: NewCodeEdit): number {
 	return edit.text.split('\n').length;
@@ -2740,6 +2769,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private viewZoneHeights: Map<number, number> = new Map();
 	private debounceTimer: any = null;
+	/** The folded-away JSON of each `#%click` comment; see updateConfigCommentFolding. */
+	private readonly configCommentDecorations = this.editor.createDecorationsCollection();
 	private readonly debounceDelay = 100; // ms
 
 	// Streaming state
@@ -2876,11 +2907,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// folder. In multi-root workspaces the user may have a different
 			// interpreter selected per-folder.
 			this.resolveAndSetPythonExecutable();
+			this.updateConfigCommentFolding();
 			// Trigger initial visualization when a new model loads
 			this.triggerInitialVisualization();
 		}));
 		this._register(editor.onDidDispose(() => { this.clearVisualizationWidgets(); }));
 		this._register(editor.onDidChangeCursorPosition(() => {
+			this.updateConfigCommentFolding();
 			this.onCursorPositionChanged();
 		}));
 
@@ -2940,6 +2973,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.resolveAndSetPythonExecutable();
 			}
 		}));
+
+		this.updateConfigCommentFolding();
 
 		// Initial resolve. This races with the first run's pool spawn — if
 		// the resolve loses, the first run uses 'python3' and subsequent
@@ -3077,6 +3112,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (!this.isPythonModel()) {
 			return;
 		}
+		this.updateConfigCommentFolding();
 
 		// Immediately adjust visualization items for line changes (deletions/insertions)
 		// so stale visualizers don't linger on deleted or shifted lines.
@@ -3728,6 +3764,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private onLanguageChanged(): void {
+		this.updateConfigCommentFolding();
 		if (this.isPythonModel()) {
 			this.triggerInitialVisualization();
 		} else {
@@ -4409,6 +4446,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 			);
 		} else if (command.type === 'ChangeSourceExpr') {
 			this.handleChangeSourceExpr(command);
+		} else if (command.type === 'SetConfigComment') {
+			this.handleSetConfigComment(command);
 		} else if (command.type === 'CopyToClipboard') {
 			this.clipboardService.writeText(command.text);
 		}
@@ -4879,6 +4918,103 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.isApplyingLinkedEdit = true;
 		editorModel.pushEditOperations([], [{ range, text: newText }], () => null);
 		setTimeout(() => { this.isApplyingLinkedEdit = false; }, 0);
+	}
+
+	/**
+	 * Rewrite (or write, or remove) the `#%click` comment above the visualizer's
+	 * line. Replacing in place rather than inserting makes a repeated command
+	 * -- an event replayed across two runs -- harmless.
+	 */
+	private handleSetConfigComment(command: Extract<SNCCommand, { type: 'SetConfigComment' }>): void {
+		const model = this.editor.getModel();
+		if (!model) {
+			return;
+		}
+		const boundLine = command.triggerLine;
+		if (boundLine < 1 || boundLine > model.getLineCount()) {
+			// The file has moved on since the visualizer's line was reported.
+			return;
+		}
+		const existing = configCommentLineAbove(model, boundLine);
+		const text = command.comment === null ? null : this.getLineIndentText(boundLine) + command.comment;
+
+		let edit: { range: Range; text: string };
+		let linesDelta: number;
+		if (existing) {
+			if (text === null) {
+				// The bound line is below it, so there is always a next line to
+				// take the line break from.
+				edit = { range: new Range(existing, 1, existing + 1, 1), text: '' };
+				linesDelta = -1;
+			} else {
+				if (model.getLineContent(existing) === text) {
+					return;
+				}
+				edit = { range: new Range(existing, 1, existing, model.getLineMaxColumn(existing)), text };
+				linesDelta = 0;
+			}
+		} else {
+			if (text === null) {
+				return;
+			}
+			// Inserted the way NewCode inserts, so the visualizer items below
+			// shift the same way (see adjustVisualizationItemsForContentChange).
+			if (boundLine === 1) {
+				edit = { range: new Range(1, 1, 1, 1), text: text + '\n' };
+			} else {
+				const col = model.getLineMaxColumn(boundLine - 1);
+				edit = { range: new Range(boundLine - 1, col, boundLine - 1, col), text: '\n' + text };
+			}
+			linesDelta = 1;
+		}
+
+		// A line coming or going above the visualizer would shift it on screen;
+		// keep its line visually put. (While config comments are hidden the
+		// edit changes no layout and the correction is zero.)
+		const scrollTop = this.editor.getScrollTop();
+		const anchorTop = this.editor.getTopForLineNumber(boundLine);
+		const stabilize = linesDelta !== 0 && !this.editor.hasPendingScrollAnimation();
+		model.pushEditOperations([], [edit], () => null);
+		if (stabilize) {
+			const newAnchorTop = this.editor.getTopForLineNumber(boundLine + linesDelta);
+			this.editor.setScrollTop(scrollTop + (newAnchorTop - anchorTop), ScrollType.Immediate);
+		}
+	}
+
+	/**
+	 * Fold each `#%click` comment's JSON down to a `…` token, leaving the
+	 * `#%click` prefix to say what the line is. What the JSON holds is what the
+	 * visualizer shows, so the text is storage rather than something to read.
+	 * A line the cursor is on is shown in full so it can still be edited.
+	 */
+	private updateConfigCommentFolding(): void {
+		const model = this.editor.getModel();
+		if (!model || !this.isPythonModel()) {
+			this.configCommentDecorations.clear();
+			return;
+		}
+		const cursorLine = this.editor.getPosition()?.lineNumber;
+		const decorations: IModelDeltaDecoration[] = [];
+		for (const match of model.findMatches(CONFIG_COMMENT_RE.source, false, true, false, null, false)) {
+			const ln = match.range.startLineNumber;
+			if (ln === cursorLine) {
+				continue;
+			}
+			const content = model.getLineContent(ln);
+			const payloadStart = content.indexOf(CONFIG_COMMENT_PREFIX) + CONFIG_COMMENT_PREFIX.length + 1;
+			if (payloadStart >= content.length) {
+				continue;
+			}
+			decorations.push({
+				range: new Range(ln, payloadStart + 1, ln, model.getLineMaxColumn(ln)),
+				options: {
+					description: 'snc-config-comment-fold',
+					inlineClassName: 'snc-config-payload',
+					after: { content: '…', inlineClassName: 'snc-config-ellipsis' },
+				},
+			});
+		}
+		this.configCommentDecorations.set(decorations);
 	}
 
 	/**

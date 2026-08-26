@@ -17,6 +17,7 @@ import shutil
 import tempfile
 
 from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
+                              set_line_config, take_line_config,
                               replace_dollars_in_py_exp, py_exp_attrs, PyExp,
                               with_pass_body, AddImports, CHILD_SOURCE_BINDER,
                               truncate_repr)
@@ -43,30 +44,21 @@ def exps_in(html_str):
 
 
 
-# Isolate the entire test module from the user's cwd so that stray
-# .snc_table_columns.json files (or other dotfiles created by other tests)
-# don't influence column auto-detection.
-#
-# Strategy: chdir to a tempdir for the whole module, AND neutralise the
-# save/load helpers so that one test's save can't pollute the next. Tests
-# that genuinely exercise the dotfile (TestColumnDotfile) stop these
-# patches in their own setUp.
+# Isolate the tests from one another: what a table saves goes into the
+# per-line config store (visualizer_utils.set_line_config), which is process
+# global. Neutralise the save/load helpers so that one test's save can't
+# pollute the next. Tests that genuinely exercise persistence
+# (TestColumnConfig) stop these patches in their own setUp.
 import unittest.mock as _mock
 
-_module_orig_cwd: str | None = None
-_module_tmp_dir: str | None = None
 _module_patches: list = []
 
 
 def setUpModule():
-    global _module_orig_cwd, _module_tmp_dir
-    _module_orig_cwd = os.getcwd()
-    _module_tmp_dir = tempfile.mkdtemp()
-    os.chdir(_module_tmp_dir)
-
-    p_load = _mock.patch('table_visualizer.load_columns_from_dotfile',
+    set_line_config(None)
+    p_load = _mock.patch('table_visualizer.load_columns_config',
                          return_value=None)
-    p_save = _mock.patch('table_visualizer.save_columns_to_dotfile')
+    p_save = _mock.patch('table_visualizer.save_columns_config')
     p_load.start()
     p_save.start()
     _module_patches.extend([p_load, p_save])
@@ -76,18 +68,15 @@ def tearDownModule():
     for p in _module_patches:
         p.stop()
     _module_patches.clear()
-    if _module_orig_cwd is not None:
-        os.chdir(_module_orig_cwd)
-    if _module_tmp_dir is not None:
-        shutil.rmtree(_module_tmp_dir, ignore_errors=True)
+    set_line_config(None)
 from table_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
     ColumnKeyDown, ExpandToggle, PinFocus,
-    COLUMN_DOTFILE_NAME, CELL_KEY_SEP, SUBCOL_SEP,
+    COLUMN_CONFIG_NS, CELL_KEY_SEP, SUBCOL_SEP,
     CopyToClipboard, ChangeSelectedText,
-    load_columns_from_dotfile, save_columns_to_dotfile,
+    load_columns_config, save_columns_config,
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _leaf_for, _column_groups,
@@ -896,7 +885,7 @@ class TestSubColumnMenuEvents(unittest.TestCase):
     def test_removing_a_sub_column_leaves_the_splat_standing(self):
         d, model = self.model()
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, 1))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
         self.assertEqual(list(new_model['columns']), ['$k', '*$v'])
         self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
@@ -905,7 +894,7 @@ class TestSubColumnMenuEvents(unittest.TestCase):
     def test_removing_the_splat_takes_its_sub_columns_with_it(self):
         d, model = self.model()
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, 3))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
         self.assertEqual(list(new_model['columns']), ['$k'])
 
@@ -914,7 +903,7 @@ class TestSubColumnMenuEvents(unittest.TestCase):
         model['editing_column'] = col_at(model, 1)
         model['column_input_value'] = "$['name']"
         event = make_column_key_event('Enter')
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, d, mock_get_visualizer_dict_tables)
         self.assertEqual(list(_col_subs(new_model['columns'], '*$v')),
                          ["$['name']", "$['age']"])
@@ -983,7 +972,7 @@ class TestCrossParentDrag(unittest.TestCase):
         model['column_drag_from'] = col_at(model, frm)
         model['column_drag_over'] = col_at(model, to)
         event = make_column_mouse_event(repr(ColumnDragEnd(col=col_at(model, to))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, d,
                                   mock_get_visualizer_dict_tables)
         return new_model
@@ -1940,7 +1929,7 @@ class TestColumnAdd(unittest.TestCase):
         model['adding_column'] = True
         model['column_input_value'] = "$['ci"
         event = make_column_mouse_event(repr(ColumnSelect(name="$['city']")))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn("$['city']", new_model['columns'])
         self.assertFalse(new_model['adding_column'])
@@ -1952,7 +1941,7 @@ class TestColumnAdd(unittest.TestCase):
         model['adding_column'] = True
         model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, cmds = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn("$['age']", new_model['columns'])
         self.assertFalse(new_model['adding_column'])
@@ -1969,12 +1958,12 @@ class TestColumnAdd(unittest.TestCase):
         self.assertEqual(list(new_model['columns']), original_cols)
         self.assertFalse(new_model['adding_column'])
 
-    def test_add_column_saves_dotfile(self):
+    def test_add_column_saves_config(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         event = make_column_mouse_event(repr(ColumnSelect(name="$['extra']")))
-        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_config') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
 
@@ -2007,7 +1996,7 @@ class TestColumnEdit(unittest.TestCase):
         model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['zi"
         event = make_column_mouse_event(repr(ColumnSelect(name="$['zip']")))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], "$['zip']")
         self.assertIsNone(new_model['editing_column'])
@@ -2018,7 +2007,7 @@ class TestColumnEdit(unittest.TestCase):
         model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['nick']"
         event = make_column_key_event('Enter')
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], "$['nick']")
         self.assertIsNone(new_model['editing_column'])
@@ -2033,7 +2022,7 @@ class TestColumnEdit(unittest.TestCase):
         model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['age']"
         event = make_column_key_event('Enter')
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), before)
 
@@ -2059,15 +2048,15 @@ class TestColumnRemove(unittest.TestCase):
         self.assertIn("$['name']", model['columns'])
         name_idx = list(model['columns']).index("$['name']")
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, name_idx))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("$['name']", new_model['columns'])
 
-    def test_remove_column_saves_dotfile(self):
+    def test_remove_column_saves_config(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
-        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_config') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
 
@@ -2077,7 +2066,7 @@ class TestColumnRemove(unittest.TestCase):
         name_idx = list(model['columns']).index("$['name']")
         self.assertIn("0\x00$['name']", model['children'])
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, name_idx))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("0\x00$['name']", new_model['children'])
         self.assertNotIn("1\x00$['name']", new_model['children'])
@@ -2096,7 +2085,7 @@ class TestColumnRemove(unittest.TestCase):
         model['editing_column'] = col_at(model)
         model['column_input_value'] = "$['name']"
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIsNone(new_model['editing_column'])
         self.assertEqual(new_model['column_input_value'], '')
@@ -2110,7 +2099,7 @@ class TestColumnRemove(unittest.TestCase):
         model['editing_column'] = edited
         model['column_input_value'] = edited
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(new_model['editing_column'], edited)
 
@@ -2205,7 +2194,7 @@ class TestColumnMenu(unittest.TestCase):
         name_idx = list(model['columns']).index("$['name']")
         model['openDropdown'] = {'id': menu_id(model, index=name_idx)}
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model, name_idx))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertNotIn("$['name']", new_model['columns'])
         self.assertIsNone(new_model['openDropdown'])
@@ -2264,7 +2253,7 @@ class TestColumnReorder(unittest.TestCase):
         model['column_drag_from'] = col_at(model, 0)
         model['column_drag_over'] = col_at(model, 2)
         event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model, 2))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], original[1])
         self.assertEqual(list(new_model['columns'])[1], original[2])
@@ -2279,7 +2268,7 @@ class TestColumnReorder(unittest.TestCase):
         model['column_drag_from'] = col_at(model, 2)
         model['column_drag_over'] = col_at(model, 0)
         event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns'])[0], original[2])
         self.assertEqual(list(new_model['columns'])[1], original[0])
@@ -2295,13 +2284,13 @@ class TestColumnReorder(unittest.TestCase):
         new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), original)
 
-    def test_drag_end_saves_dotfile(self):
+    def test_drag_end_saves_config(self):
         lst = [{'a': 1, 'b': 2}]
         model = init_model(lst, mock_get_visualizer)
         model['column_drag_from'] = col_at(model, 0)
         model['column_drag_over'] = col_at(model, 1)
         event = make_column_mouse_up_event(repr(ColumnDragEnd(col=col_at(model, 1))))
-        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_config') as mock_save:
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
             mock_save.assert_called_once()
 
@@ -2373,7 +2362,7 @@ class TestColumnKeyboard(unittest.TestCase):
         model['selected_suggestion_index'] = 0
         expected_col = suggestions[0]
         event = make_column_key_event('Tab')
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertIn(expected_col, new_model['columns'])
         self.assertFalse(new_model['adding_column'])
@@ -2449,13 +2438,11 @@ class TestColumnAutocomplete(unittest.TestCase):
         self.assertIn('$.y', cols)
 
 
-class TestColumnDotfile(unittest.TestCase):
-    """Test dotfile persistence for column configurations."""
+class TestColumnConfig(unittest.TestCase):
+    """Test persistence of column configurations into the line's config."""
 
     def setUp(self):
-        self.orig_cwd = os.getcwd()
-        self.tmp_dir = tempfile.mkdtemp()
-        os.chdir(self.tmp_dir)
+        set_line_config(None)
         # The module-level setUp neuters load/save so they don't pollute other
         # tests; this class genuinely exercises them, so undo the patches for
         # the duration of each test.
@@ -2465,38 +2452,40 @@ class TestColumnDotfile(unittest.TestCase):
     def tearDown(self):
         for p in _module_patches:
             p.start()
-        os.chdir(self.orig_cwd)
-        shutil.rmtree(self.tmp_dir)
+        set_line_config(None)
 
-    def test_load_columns_missing_file(self):
-        result = load_columns_from_dotfile('builtins.dict')
+    def test_load_columns_nothing_saved(self):
+        result = load_columns_config('builtins.dict')
         self.assertIsNone(result)
 
     def test_save_and_load_columns(self):
-        save_columns_to_dotfile('builtins.dict', [], ["$['name']", "$['age']"])
-        result = load_columns_from_dotfile('builtins.dict')
+        save_columns_config('builtins.dict', [], ["$['name']", "$['age']"])
+        result = load_columns_config('builtins.dict')
         self.assertEqual(result, [{'expr': "$['name']"}, {'expr': "$['age']"}])
+        self.assertEqual(take_line_config(), ({COLUMN_CONFIG_NS: {
+            'builtins.dict': [{'expr': "$['name']"}, {'expr': "$['age']"}]}}, True))
 
     def test_save_preserves_other_types(self):
-        save_columns_to_dotfile('type.A', [], ['$.x'])
-        save_columns_to_dotfile('type.B', [], ['$.y'])
-        self.assertEqual(load_columns_from_dotfile('type.A'), [{'expr': '$.x'}])
-        self.assertEqual(load_columns_from_dotfile('type.B'), [{'expr': '$.y'}])
+        save_columns_config('type.A', [], ['$.x'])
+        save_columns_config('type.B', [], ['$.y'])
+        self.assertEqual(load_columns_config('type.A'), [{'expr': '$.x'}])
+        self.assertEqual(load_columns_config('type.B'), [{'expr': '$.y'}])
 
-    def test_load_corrupt_file(self):
-        with open(COLUMN_DOTFILE_NAME, 'w') as f:
-            f.write('not json{{{')
-        result = load_columns_from_dotfile('builtins.dict')
+    def test_load_malformed_entry(self):
+        set_line_config({COLUMN_CONFIG_NS: {'builtins.dict': 'not a list'}})
+        result = load_columns_config('builtins.dict')
         self.assertIsNone(result)
 
-    def test_init_model_loads_from_dotfile(self):
-        save_columns_to_dotfile('builtins.dict', [], ["$['age']", "$['name']"])
+    def test_init_model_loads_from_config(self):
+        set_line_config({COLUMN_CONFIG_NS: {'builtins.dict': ["$['age']", "$['name']"]}})
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
         self.assertEqual(list(model['columns']), ["$['age']", "$['name']"])
+        # Reading is not a change.
+        self.assertFalse(take_line_config()[1])
 
-    def test_init_model_falls_back_when_no_dotfile(self):
+    def test_init_model_falls_back_when_nothing_saved(self):
         lst = [{'name': 'Alice', 'age': 30}]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
@@ -2627,7 +2616,7 @@ class TestColumnManagementForStringLists(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(list(model['columns']), ['$'])
         event = make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model))))
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             new_model, _ = update(event, None, model, lst, mock_get_visualizer)
         self.assertEqual(list(new_model['columns']), [])
 
@@ -2803,7 +2792,7 @@ class TestNestedCollapsesToRepr(unittest.TestCase):
         says where under the root value it sits."""
         return init_model(value, gv, config_path=[("$['tags']", 'builtins.str')],
                           config_root_type='builtins.dict',
-                          config_root_dotfile=COLUMN_DOTFILE_NAME)
+                          config_root_ns=COLUMN_CONFIG_NS)
 
     def test_nested_list_cell_renders_truncated_repr(self):
         out = self.render(self.PEOPLE)
@@ -6220,7 +6209,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_list_of_str_with_list_column_does_not_recurse(self):
         slots = [{'expr': '$'}, {'expr': _FINDALL_COL}]
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_config', return_value=slots):
             # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
             model = init_model(['ABCdef'], mock_get_visualizer)
         self.assertEqual(list(model['columns']), ['$', _FINDALL_COL])
@@ -6235,25 +6224,25 @@ class TestNestedSlotsConfig(unittest.TestCase):
             {'expr': _FINDALL_COL,
              'children': {'builtins.str': [{'expr': '$.lower()'}]}},
         ]
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_config', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
         self.assertEqual(list(child['columns']), ['$.lower()'])
 
     def test_root_model_stores_config_fields(self):
         slots = [{'expr': '$'}]
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_config', return_value=slots):
             model = init_model(['x'], mock_get_visualizer)
         self.assertEqual(model['_config_root_type'], 'builtins.str')
-        self.assertEqual(model['_config_root_dotfile'],
-                         table_visualizer.COLUMN_DOTFILE_NAME)
+        self.assertEqual(model['_config_root_ns'],
+                         table_visualizer.COLUMN_CONFIG_NS)
         self.assertEqual(model['_config_path'], [])
         self.assertEqual(model['_slot_children'], {})
 
     def test_nested_child_carries_path_and_root(self):
         slots = [{'expr': _FINDALL_COL,
                   'children': {'builtins.str': [{'expr': '$'}]}}]
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_config', return_value=slots):
             model = init_model(['ABCdef'], mock_get_visualizer)
         child = model['children'][self._findall_key()]
         self.assertEqual(child['_config_root_type'], 'builtins.str')
@@ -6263,7 +6252,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
     def test_cyclic_list_is_depth_capped_not_recursion_error(self):
         a = []
         a.append(a)  # a == [a]; would recurse forever via auto-detected columns
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=None):
+        with patch('table_visualizer.load_columns_config', return_value=None):
             model = init_model(a, mock_get_visualizer)  # must not RecursionError
         # Walk down the single nested child chain; a leaf must be marked too deep.
         m, depth, hit_cap = model, 0, False
@@ -6292,10 +6281,10 @@ class TestNestedConfigIsOfferedBySignature(unittest.TestCase):
             return True
         def init_model(self, value, get_visualizer=None, eval_in_scope=None,
                        var_and_exp=None, slots_config=None, config_root_type=None,
-                       config_root_dotfile=None, config_path=None):
+                       config_root_ns=None, config_path=None):
             self.calls.append({'slots_config': slots_config,
                                'config_root_type': config_root_type,
-                               'config_root_dotfile': config_root_dotfile,
+                               'config_root_ns': config_root_ns,
                                'config_path': config_path})
             return {'handledKeys': []}
         def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
@@ -6322,20 +6311,20 @@ class TestNestedConfigIsOfferedBySignature(unittest.TestCase):
     def test_child_naming_the_params_receives_the_nested_config(self):
         cell_vis = self.RecordingNestedVis()
         slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_config', return_value=slots):
             init_model(['ABC'], self._get_visualizer_for(cell_vis))
         self.assertEqual(len(cell_vis.calls), 1)
         call = cell_vis.calls[0]
         self.assertEqual(call['slots_config'], [{'expr': '$.lower()'}])
         self.assertEqual(call['config_root_type'], 'builtins.str')
-        self.assertEqual(call['config_root_dotfile'],
-                         table_visualizer.COLUMN_DOTFILE_NAME)
+        self.assertEqual(call['config_root_ns'],
+                         table_visualizer.COLUMN_CONFIG_NS)
         self.assertEqual(call['config_path'], [('$', 'builtins.str')])
 
     def test_child_not_naming_the_params_is_not_handed_them(self):
         # Would TypeError if the nesting kwargs were passed regardless.
         slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=slots):
+        with patch('table_visualizer.load_columns_config', return_value=slots):
             model = init_model(['ABC'], self._get_visualizer_for(self.PlainVis()))
         self.assertEqual(model['children'][f'0\x00$'], {'handledKeys': []})
 
@@ -6348,11 +6337,11 @@ class TestNestedSlotsSave(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer)
         model['adding_column'] = True
         event = make_column_mouse_event(repr(ColumnSelect(name="$['x']")))
-        with patch('table_visualizer.save_columns_to_dotfile') as mock_save:
+        with patch('table_visualizer.save_columns_config') as mock_save:
             update(event, None, model, lst, mock_get_visualizer)
         mock_save.assert_called_once()
         args = mock_save.call_args.args
-        # New signature: (root_type, path, exprs, [dotfile])
+        # New signature: (root_type, path, exprs, [namespace])
         self.assertEqual(args[0], 'builtins.dict')
         self.assertEqual(args[1], [])
         self.assertIn("$['x']", args[2])
@@ -6376,7 +6365,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         eval_in_scope = lambda code: eval(code, {'re': re, 'rows': rows})
         get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
 
-        with patch('table_visualizer.load_columns_from_dotfile', return_value=[column]):
+        with patch('table_visualizer.load_columns_config', return_value=[column]):
             model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
                                var_and_exp=('rows', 'rows'))
         key = f'0{CELL_KEY_SEP}{column}'
@@ -10778,7 +10767,7 @@ class TestNestedColumnsRoundTrip(unittest.TestCase):
 
     def test_nesting_is_capped(self):
         # Bounded by the config rather than the data, but a hand-edited
-        # dotfile is a real input.
+        # comment is a real input.
         entry = {'expr': '*$.x', 'cols': ['$.leaf']}
         for _ in range(MAX_SPLAT_DEPTH + 3):
             entry = {'expr': '*$.x', 'cols': [entry]}
@@ -10895,7 +10884,7 @@ class TestPlainSubColumns(unittest.TestCase):
         self.assertEqual(_leaf_values_expr(self.leaves()[1], 'data'),
                          "[item.split(',')[0] for item in data]")
 
-    def test_it_round_trips_through_the_dotfile(self):
+    def test_it_round_trips_through_the_saved_config(self):
         slots = _slots_from_columns(self.COLS)
         self.assertEqual(slots,
                          ['$', {'expr': self.SPLIT, 'cols': ['$[0]', '$[1]']}])
@@ -12080,29 +12069,26 @@ class TestAggAnswerIsAKeptChild(unittest.TestCase):
 
 
 class TestAggAnswerSavesNothing(unittest.TestCase):
-    """The dotfile end of it: an answer's columns are its own and go nowhere.
+    """The persistence end of it: an answer's columns are its own and go nowhere.
 
     Left as it was, a column added inside `sorted($)` over a list of ints was
-    saved under `builtins.int` -- the key a plain list of ints reads its columns
-    back out of, so every one of them in the project opened with it.
+    saved under `builtins.int` -- the key a plain list of ints on this line
+    reads its columns back out of, so the list itself opened with it.
     """
 
     def setUp(self):
-        self.orig_cwd = os.getcwd()
-        self.tmp_dir = tempfile.mkdtemp()
-        os.chdir(self.tmp_dir)
-        # This class genuinely writes the dotfile; the module-level patches
-        # neuter that for everyone else.
+        set_line_config(None)
+        # This class genuinely saves; the module-level patches neuter that for
+        # everyone else.
         for p in _module_patches:
             p.stop()
 
     def tearDown(self):
         for p in _module_patches:
             p.start()
-        os.chdir(self.orig_cwd)
-        shutil.rmtree(self.tmp_dir)
+        set_line_config(None)
 
-    def test_a_column_inside_an_answer_writes_no_dotfile(self):
+    def test_a_column_inside_an_answer_saves_nothing(self):
         model = init_model(COMPUTE_LIST, mock_get_visualizer,
                            var_and_exp=('nums', 'nums'))
         model['column_computes'] = {'$': ['sorted($)']}
@@ -12110,8 +12096,8 @@ class TestAggAnswerSavesNothing(unittest.TestCase):
         child = model['children'][_agg_child_key('$', 'sorted($)', '$')]
         _col_add(child['columns'], 'len(str($))')
         _save_slots(child)
-        self.assertFalse(os.path.exists(COLUMN_DOTFILE_NAME))
-        self.assertIsNone(load_columns_from_dotfile('builtins.int'))
+        self.assertIsNone(load_columns_config('builtins.int'))
+        self.assertEqual(take_line_config(), ({}, False))
 
 
 class TestAggHoles(unittest.TestCase):
@@ -14822,7 +14808,7 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         event = {'pythonEventStr': repr(SubcolExprInput(col=col_at(model), expr='',
                                                         value='l')),
                  'eventJSON': {'type': 'input', 'value': 'l'}}
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             after, _ = update(event, None, model, self.LINES,
                               mock_get_visualizer)
         self.assertEqual(key(after), before)
@@ -14873,7 +14859,7 @@ class TestSubcolEvents(unittest.TestCase):
         return model
 
     def click(self, model, event):
-        with patch('table_visualizer.save_columns_to_dotfile') as saved:
+        with patch('table_visualizer.save_columns_config') as saved:
             out, _cmds = update(make_column_mouse_event(repr(event)), None,
                                 model, self.LINES, mock_get_visualizer)
         return out, saved
@@ -14927,7 +14913,7 @@ class TestSubcolEvents(unittest.TestCase):
         event = {'pythonEventStr': repr(SubcolExprInput(col=self.SPLIT, expr='',
                                                         value='len($)')),
                  'eventJSON': {'type': 'input', 'value': 'len($)'}}
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
         self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}),
                          ['len($)'])
@@ -14938,7 +14924,7 @@ class TestSubcolEvents(unittest.TestCase):
         event = {'pythonEventStr': repr(SubcolExprInput(col=self.SPLIT, expr='len($)',
                                                         value='len($) * 2')),
                  'eventJSON': {'type': 'input', 'value': 'len($) * 2'}}
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
         self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}),
                          ['len($) * 2', '$[1]'])
@@ -14958,7 +14944,7 @@ class TestSubcolEvents(unittest.TestCase):
         event = {'pythonEventStr': repr(SubcolExprInput(col=self.SPLIT, expr='len($)',
                                                         value='')),
                  'eventJSON': {'type': 'input', 'value': ''}}
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
         self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}), [])
 
@@ -15192,7 +15178,7 @@ class TestAddColumnMenuOverGroups(AddColumnMenuCase):
                          ['$', 'len($v)'])
 
     def test_ticking_it_adds_the_column(self):
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             model, _ = update(make_column_mouse_event(
                 repr(ColumnToggle(expr='len($v)'))), None, self.model(),
                 self.ROWS, self.gv)
@@ -15291,7 +15277,7 @@ class TestAddColumnMenuEvents(AddColumnMenuCase):
     table's own columns, so there is nothing else to keep in step."""
 
     def click(self, model, event, lst=None):
-        with patch('table_visualizer.save_columns_to_dotfile') as saved:
+        with patch('table_visualizer.save_columns_config') as saved:
             out, _cmds = update(make_column_mouse_event(repr(event)), None,
                                 model, self.ROWS if lst is None else lst,
                                 self.gv)
@@ -15340,7 +15326,7 @@ class TestAddColumnMenuEvents(AddColumnMenuCase):
         groups = {'eng': [1, 2], 'mkt': [3]}
         model = init_model(groups, mock_get_visualizer_dict_tables)
         model['columns'] = {'$k': {}, 'len($v)': {}}
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             out, _ = update(make_column_mouse_event(repr(ColumnHideAll())),
                             None, model, groups,
                             mock_get_visualizer_dict_tables)
@@ -15851,9 +15837,9 @@ class TestGroupBySeedsTheGroupedTable(unittest.TestCase):
     def seed(self, columns, index, lst=None, loaded=None, source='data'):
         lst = self.ROWS if lst is None else lst
         lst, model = group_by_model(lst, columns=columns, source=source)
-        with patch('table_visualizer.load_columns_from_dotfile',
+        with patch('table_visualizer.load_columns_config',
                    return_value=loaded), \
-             patch('table_visualizer.save_columns_to_dotfile') as saved:
+             patch('table_visualizer.save_columns_config') as saved:
             update(make_column_mouse_event(repr(GroupByClick(col=col_at(model, index)))),
                    ('data', 'data'), model, lst, mock_get_visualizer,
                    eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
@@ -18880,7 +18866,7 @@ class AddColumnBesideCase(unittest.TestCase):
         return model
 
     def click(self, model, event, lst=None):
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             out, _ = update(make_column_mouse_event(repr(event)), None, model,
                             self.LST if lst is None else lst,
                             mock_get_visualizer)
@@ -18889,7 +18875,7 @@ class AddColumnBesideCase(unittest.TestCase):
     def commit(self, model, text, lst=None):
         """Type an expression into the open box and press Enter."""
         model['column_input_value'] = text
-        with patch('table_visualizer.save_columns_to_dotfile'):
+        with patch('table_visualizer.save_columns_config'):
             out, _ = update(make_column_key_event('Enter'), None, model,
                             self.LST if lst is None else lst,
                             mock_get_visualizer)
