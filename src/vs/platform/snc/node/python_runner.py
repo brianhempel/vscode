@@ -38,7 +38,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -58,7 +58,21 @@ class Visualizer(Protocol):
 # Global state for logging - shared between the logging functions and main execution
 # These variables accumulate data as the transformed code executes
 execution_step = 0  # Incremental counter for each logged event
-line_emit_counter: Dict[int, int] = {}  # Per-line item index during a run
+# Dynamic context of the code currently executing: one [id_line, iteration]
+# frame per enclosing loop (id = the loop's header line) or function call
+# (id = the def line, iteration = call number). A frame's iteration is -1
+# before the first iteration begins. See `_current_path`.
+_ctx_stack: List[List[int]] = []
+# path key (see _path_key) -> {id_line: iterations so far}, so a loop or
+# function re-entered under the same path continues its count.
+_ctx_counts: Dict[str, Dict[int, int]] = {}
+# The iteration the editor has pinned each loop/function to, by id line. A
+# loop that isn't here renders every iteration (the editor keeps the last).
+_loop_selections: Dict[int, int] = {}
+# (line, site) -> (type fingerprint, model): a site logged more than once in a
+# run (inside a loop) replays its pending events on the first logging and
+# carries the resulting model through the rest.
+_run_models: Dict[Tuple[int, int], Tuple[str, Any]] = {}
 _current_run_id: str = ""  # Run ID for preload mode, included in item/command messages
 # 1-indexed line whose top-level visualizer should render full-size; everything
 # else gets small=True. None means render everything full (e.g. before the
@@ -240,11 +254,16 @@ def _detect_insertion_indent(lines: List[str], line: int) -> str:
     return current_indent_str
 
 
-def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str) -> List[Dict[str, Any]]:
+def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str,
+                          config: Optional[list] = None) -> List[Dict[str, Any]]:
     """Convert a (suggest_var_name, expr) tuple into a list of line-level edits.
 
     Each edit is {"type": "insert", "afterLine": N, "text": "..."} where afterLine
     is 1-indexed (0 means before the first line).
+
+    `config` is the slot list the new line opens with, if the visualizer sent
+    one: it goes in as a `#%click` comment above the statement, counted in
+    `leadingLines` so the editor knows the statement starts below it.
 
     Handles variable name collision avoidance and indentation matching. What
     the code needs imported travels separately, as the visualizer's own
@@ -272,11 +291,28 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
 
     # Apply base indentation to all lines (supports multi-line statements like for loops)
     assignment_lines = assignment.split('\n')
+    if config is not None:
+        assignment_lines.insert(0, format_config_comment(config))
     text = '\n'.join(indent_str + aline for aline in assignment_lines)
-    edits.append({"type": "insert", "afterLine": line, "text": text,
-                  "headerLines": header_lines})
+    edit = {"type": "insert", "afterLine": line, "text": text,
+            "headerLines": header_lines}
+    if config is not None:
+        edit["leadingLines"] = 1
+    edits.append(edit)
 
     return edits
+
+
+@dataclass
+class SetConfigComment:
+    """Ask the editor to rewrite the `#%click` comment bound to the trigger line.
+
+    `comment` is the whole comment text (no indentation); None removes it. The
+    editor finds the existing comment by the same binding rule the runner reads
+    it with -- the nearest config comment above, with only blank lines and
+    comments between -- and replaces it, or inserts a new line above.
+    """
+    comment: Optional[str]
 
 
 def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
@@ -313,9 +349,10 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
                     "edits": [],
                     "imports": list(cmd.imports),
                 }
-            elif isinstance(cmd, tuple) and len(cmd) in (2, 3):
+            elif is_new_code(cmd):
                 suggest_var_name, expr = cmd[0], cmd[1]
-                edits = _build_new_code_edits(source_code, line, suggest_var_name, expr)
+                edits = _build_new_code_edits(source_code, line, suggest_var_name, expr,
+                                              cmd[3] if len(cmd) > 3 else None)
                 cmd_dict = {
                     "type": "NewCode",
                     "triggerLine": line,
@@ -381,14 +418,16 @@ def _source_sig(vis, var_and_exp) -> 'list | None':
     return [var_and_exp[0], expr]
 
 
-def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None, source_span=None) -> None:
+def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_exp=None, source_span=None, path: Optional[List[List[int]]] = None) -> None:
     """
     Log any runtime value for visualization using the custom visualizer system.
 
     Args:
         line: The original line number from the source code
         value: The value to be logged (can be any type including error messages)
-        last_line_in_containing_loop: The last line of the loop containing this value (None if not in a loop)
+        site: Static index of this log site among those on the same line,
+            assigned by the transformer. An item is identified by (line, site)
+            across runs and across iterations of a loop.
         eval_in_scope: Optional callable to eval expressions in the user's code scope
         var_and_exp: (var_name | None, expression_text) tuple, passed from the AST
             transformer which knows the assignment target and expression for each
@@ -397,9 +436,19 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
             this value came from, for a visualizer that can rewrite it. Only the
             log sites where the visualized value IS an expression written on the
             line pass one -- see ASTTransformer._node_span.
+        path: Where the value was produced, when that isn't where it is being
+            logged from: an uncaught error is logged after the loops it was
+            raised in have unwound. Defaults to the current context.
     """
-    global execution_step, line_emit_counter
+    global execution_step
     execution_step += 1
+
+    # Which iteration of which loops this value was produced under. A loop the
+    # editor has pinned to some other iteration means this value isn't shown.
+    if path is None:
+        path = _current_path()
+    if not _path_selected(path):
+        return
 
     visualizers = _visualizers()
     def get_visualizer(value):
@@ -407,11 +456,16 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
     vis = get_visualizer(value)
     commands = []
 
-    # Compute this item's index among items on the same line for this run
-    idx_in_line = line_emit_counter.get(line, 0)
-    line_emit_counter[line] = idx_in_line + 1
+    idx_in_line = site
 
     model = None
+
+    # What the line's `#%click` comment holds is this visualizer's saved config
+    # (columns, fields, ...). It is installed for the visualizer to read while
+    # it runs, and collected afterwards to see whether it saved anything.
+    line_slots = parse_config_comment(_source_code, line)
+    line_config_sig = config_sig(line_slots)
+    set_line_config(line_slots)
 
     try:
         item_model_and_events = next((m_e for m_e in models_and_events if m_e.get('line') == line and m_e.get('visIndex') == idx_in_line), {})
@@ -426,22 +480,35 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         span = (_span_text(source_span)
                 if wants_kwarg(vis.visualize, 'source_span') else None)
         cached_model = item_model_and_events.get('model')
+        # A model is stamped with the config it reflects; a comment that says
+        # something else was edited by hand (or a checkout), and the model is
+        # rebuilt from it.
         fingerprint_matches = (
             cached_model is not None
             and isinstance(cached_model, dict)
             and cached_model.get('_type_fingerprint') == fingerprint
             and cached_model.get('_source_expr_sig') == source_sig
+            and cached_model.get('_config_sig', line_config_sig) == line_config_sig
         )
 
-        if fingerprint_matches:
+        carried = _run_models.get((line, site))
+        if carried is not None and carried[0] == fingerprint:
+            # Logged already this run (an earlier iteration): its events were
+            # replayed then, and the model they produced carries forward.
+            model = carried[1]
+            fingerprint_matches = False
+        elif fingerprint_matches:
             model = cached_model
             if isinstance(model, dict):
                 del model['_type_fingerprint']
                 del model['_source_expr_sig']
+                model.pop('_config_sig', None)
         else:
             model = call_with_supported_kwargs(vis.init_model, value, get_visualizer,
                                                eval_in_scope=eval_in_scope,
-                                               var_and_exp=var_and_exp)
+                                               var_and_exp=var_and_exp,
+                                               slots_config=line_slots,
+                                               config_path=[])
 
         # Only replay events when the cached model was reused; if the type
         # changed the old events belong to a different visualizer.
@@ -468,9 +535,20 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
             source_span=span)
 
         assert isinstance(html_content, str)
+        _run_models[(line, site)] = (fingerprint, model)
 
     except Exception as vis_err:
         html_content = f'<div style="white-space: pre-wrap;">{html.escape(type(vis_err).__name__)} during visualization. {html.escape(traceback.format_exc())}</div>'
+    finally:
+        line_slots, config_dirty = take_line_config()
+
+    # A save is a change to the file: the comment above the line is rewritten
+    # by the editor, and this model already reflects what it will say.
+    if config_dirty:
+        commands.append(SetConfigComment(
+            format_config_comment(line_slots) if line_slots is not None else None))
+    if isinstance(model, dict):
+        model['_config_sig'] = config_sig(line_slots)
 
     # Convert commands to wire dicts before streaming them.
     cmd_dicts = _commands_to_dicts(commands, line, idx_in_line, model, _source_code)
@@ -480,13 +558,11 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         "line": line,
         "visIndex": idx_in_line,
         "execution_step": execution_step,
+        "path": path,
         "html": html_content
     }
     if model is not None:
         item["model"] = model
-
-    if last_line_in_containing_loop is not None:
-        item["last_line_in_containing_loop"] = last_line_in_containing_loop
 
     # Stream this item immediately to stdout (bypassing redirected stdout)
     try:
@@ -510,22 +586,152 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         except Exception:
             pass
 
-def log_and_return(line: int, value: Any, last_line_in_containing_loop: int | None = None, eval_in_scope=None, var_and_exp=None) -> Any:
+def log_and_return(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_exp=None) -> Any:
     """
     Log a value for visualization and return it unchanged.
 
     Args:
         line: The original line number from the source code
         value: The value to be logged and returned
-        last_line_in_containing_loop: The last line of the loop containing this value (None if not in a loop)
+        site: Static index of this log site on the line (see log_value)
         eval_in_scope: Optional callable to eval expressions in the user's code scope
         var_and_exp: (var_name | None, expression_text) from the AST transformer
 
     Returns:
         The same value that was passed in, unchanged
     """
-    log_value(line, value, last_line_in_containing_loop, eval_in_scope, var_and_exp=var_and_exp)
+    log_value(line, value, site, eval_in_scope, var_and_exp=var_and_exp)
     return value
+
+def _path_key(path: List[List[int]]) -> str:
+    return json.dumps(path)
+
+
+def _current_path() -> List[List[int]]:
+    """The [id_line, iteration] of every loop/call the running code is inside,
+    outermost first. A loop whose first iteration hasn't begun (its iterable
+    is still being evaluated) isn't part of the path yet."""
+    return [[id_line, k] for id_line, k in _ctx_stack if k >= 0]
+
+
+def _path_selected(path: List[List[int]]) -> bool:
+    """Whether everything under `path` is what the editor asked to see: each
+    pinned loop on it is at its pinned iteration. A recursive function is on
+    the path once per activation; the innermost is the one the value belongs
+    to, and the one the pin is checked against."""
+    innermost: Dict[int, int] = {}
+    for id_line, k in path:
+        innermost[id_line] = k
+    return all(_loop_selections.get(id_line, k) == k for id_line, k in innermost.items())
+
+
+def _count_key(id_line: int) -> str:
+    """Where `id_line`'s count lives: its enclosing path, minus its own frames,
+    so a recursive function's activations are numbered in entry order (the
+    outermost is 0) rather than each being call 0 of its caller."""
+    return _path_key([f for f in _current_path() if f[0] != id_line])
+
+
+def loop_enter(id_line: int) -> None:
+    """Injected before a loop (`_snc_loop_enter`): push its frame. Counting
+    resumes where an earlier entry under the same path left off, so a function
+    body called twice from one place is call 0 and call 1."""
+    prev = _ctx_counts.get(_count_key(id_line), {}).get(id_line, 0)
+    _ctx_stack.append([id_line, prev - 1])
+
+
+def loop_iter(id_line: int) -> None:
+    """Injected at the top of a loop body (`_snc_loop_iter`): next iteration."""
+    if _ctx_stack and _ctx_stack[-1][0] == id_line:
+        _ctx_stack[-1][1] += 1
+        # Recorded as it begins, not only at exit: a recursive call entered
+        # before this one exits numbers itself after it.
+        counts = _ctx_counts.setdefault(_count_key(id_line), {})
+        counts[id_line] = max(counts.get(id_line, 0), _ctx_stack[-1][1] + 1)
+
+
+def call_enter(id_line: int) -> None:
+    """Injected at the top of a function body (`_snc_call_enter`): a function
+    is a loop over its calls, and each call is one iteration."""
+    loop_enter(id_line)
+    loop_iter(id_line)
+
+
+def call_exit(id_line: int) -> None:
+    ctx_exit(id_line, 'call')
+
+
+def ctx_error(err: BaseException) -> None:
+    """Injected in an `except` on every loop and function body
+    (`_snc_ctx_error`): an exception passing through takes with it where it
+    was raised, before the frame is popped. The innermost one writes it."""
+    if not hasattr(err, '_snc_path'):
+        try:
+            err._snc_path = _current_path()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def ctx_exit(id_line: int, kind: str = 'loop') -> None:
+    """Injected in a `finally` after a loop or around a function body
+    (`_snc_ctx_exit`): pop the frame, remember how many iterations it ran,
+    and tell the editor -- which is what sizes the slider -- when the path
+    it ran under is one the editor is looking at."""
+    while _ctx_stack:
+        frame = _ctx_stack.pop()
+        if frame[0] == id_line:
+            break
+    else:
+        return
+    counts = _ctx_counts.setdefault(_count_key(id_line), {})
+    # Recursive activations exit innermost first; the count is how many began.
+    count = max(frame[1] + 1, counts.get(id_line, 0))
+    counts[id_line] = count
+    path = _current_path()
+    if not _path_selected(path):
+        return
+    try:
+        msg: Dict[str, Any] = {"type": "loop", "loop": {"line": id_line, "path": path, "count": count, "kind": kind}}
+        if _current_run_id:
+            msg["run_id"] = _current_run_id
+        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        _stream_out.flush()
+    except Exception:
+        pass
+
+
+def _runtime_hooks() -> Dict[str, Any]:
+    """The names the transformed code calls into."""
+    return {
+        '_log_value': log_value,
+        '_log_and_return': log_and_return,
+        '_snc_loop_enter': loop_enter,
+        '_snc_loop_iter': loop_iter,
+        '_snc_call_enter': call_enter,
+        '_snc_ctx_exit': ctx_exit,
+        '_snc_call_exit': call_exit,
+        '_snc_ctx_error': ctx_error,
+    }
+
+
+def runtime_globals() -> Dict[str, Any]:
+    """A fresh globals dict for running the user's transformed code in."""
+    return {'__name__': '__main__', '__file__': '<string>', **_runtime_hooks()}
+
+
+def _reset_run_state(loop_selections: Optional[Dict[str, int]] = None) -> None:
+    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models
+    execution_step = 0
+    _ctx_stack = []
+    _ctx_counts = {}
+    _run_models = {}
+    _loop_selections = {}
+    for k, v in (loop_selections or {}).items():
+        try:
+            _loop_selections[int(k)] = int(v)
+        except (TypeError, ValueError):
+            pass
+
 
 def _emit_vis_load_warning(warning_msg: str) -> None:
     try:
@@ -700,7 +906,7 @@ class CodeTransformer(ast.NodeTransformer):
     def __init__(self, source_code: str = ''):
         """Initialize the transformer with a counter for generating unique temp variables."""
         self.temp_var_counter = 0  # Used to generate unique temporary variable names
-        self.loop_context_stack = []  # Stack of loop end lines
+        self.site_counter: Dict[int, int] = {}  # Log sites assigned so far, per line
         self.source_code = source_code
 
     def _get_temp_var(self) -> str:
@@ -718,14 +924,52 @@ class CodeTransformer(ast.NodeTransformer):
         self.temp_var_counter += 1
         return f"_snc_temp_{self.temp_var_counter}"
 
-    def _get_current_loop_end_line(self) -> Optional[int]:
-        """
-        Get the end line of the current loop context.
+    def _next_site(self, line: int) -> int:
+        """The static index of the next log site on `line`. (line, site) is
+        what identifies a visualizer across runs and across the iterations of
+        a loop, so it must not depend on how often the line runs."""
+        site = self.site_counter.get(line, 0)
+        self.site_counter[line] = site + 1
+        return site
 
-        Returns:
-            The end line of the innermost loop, or None if not in a loop
-        """
-        return self.loop_context_stack[-1] if self.loop_context_stack else None
+    def _site_keyword(self, line: int, lineno: int, col_offset: int) -> ast.keyword:
+        return ast.keyword(
+            arg='site',
+            value=ast.Constant(value=self._next_site(line), lineno=lineno, col_offset=col_offset,
+                               end_lineno=lineno, end_col_offset=col_offset),
+            lineno=lineno, col_offset=col_offset, end_lineno=lineno, end_col_offset=col_offset,
+        )
+
+    def _hook_call(self, name: str, id_line: int, at: ast.AST) -> ast.Expr:
+        """`name(id_line)` as a statement, located where `at` is."""
+        loc = dict(lineno=at.lineno, col_offset=at.col_offset,
+                   end_lineno=getattr(at, 'end_lineno', None) or at.lineno,
+                   end_col_offset=getattr(at, 'end_col_offset', None) or at.col_offset)
+        return ast.Expr(value=ast.Call(
+            func=ast.Name(id=name, ctx=ast.Load(), **loc),
+            args=[ast.Constant(value=id_line, **loc)], keywords=[], **loc), **loc)
+
+    def _wrap_context(self, id_line: int, enter: str, body: List[ast.stmt], at: ast.AST, exit: str = '_snc_ctx_exit') -> List[ast.stmt]:
+        """`enter(id_line); try: body except BaseException as e:
+        _snc_ctx_error(e); raise finally: exit(id_line)` -- the frame is popped
+        however the body leaves (fall-through, break, return, or an exception),
+        and an exception is told where it came from before that."""
+        loc = dict(lineno=at.lineno, col_offset=at.col_offset,
+                   end_lineno=getattr(at, 'end_lineno', None) or at.lineno,
+                   end_col_offset=getattr(at, 'end_col_offset', None) or at.col_offset)
+        handler = ast.ExceptHandler(
+            type=ast.Name(id='BaseException', ctx=ast.Load(), **loc), name='_snc_err',
+            body=[
+                ast.Expr(value=ast.Call(
+                    func=ast.Name(id='_snc_ctx_error', ctx=ast.Load(), **loc),
+                    args=[ast.Name(id='_snc_err', ctx=ast.Load(), **loc)], keywords=[], **loc), **loc),
+                ast.Raise(exc=None, cause=None, **loc),
+            ], **loc)
+        return [
+            self._hook_call(enter, id_line, at),
+            ast.Try(body=body, handlers=[handler], orelse=[],
+                    finalbody=[self._hook_call(exit, id_line, at)], **loc),
+        ]
 
     def _source_segment(self, node: ast.AST) -> str:
         """Get the original source text for an AST node, falling back to ast.unparse."""
@@ -736,27 +980,6 @@ class CodeTransformer(ast.NodeTransformer):
             return ast.unparse(node)
         except Exception:
             return "result"
-
-    def _calculate_loop_end_line(self, body_statements: List[ast.stmt]) -> int:
-        """
-        Calculate the end line of a loop by finding the maximum line number in its body.
-
-        Args:
-            body_statements: List of statements in the loop body
-
-        Returns:
-            The line number of the last statement in the loop body
-        """
-        if not body_statements:
-            return 0
-
-        max_line = 0
-        for stmt in body_statements:
-            if hasattr(stmt, 'lineno'):
-                max_line = max(max_line, stmt.lineno)
-            if hasattr(stmt, 'end_lineno') and stmt.end_lineno:
-                max_line = max(max_line, stmt.end_lineno)
-        return max_line
 
     def _create_assignment(self, target_id: str, value: ast.expr, lineno: int, col_offset: int) -> ast.Assign:
         """
@@ -866,24 +1089,10 @@ class CodeTransformer(ast.NodeTransformer):
         # Build the arguments list
         args = [line_const, var_node]
 
-        # Add loop context if we're in a loop
-        current_loop_end = self._get_current_loop_end_line()
-        if current_loop_end is not None:
-            loop_end_const = ast.Constant(
-                value=current_loop_end,
-                lineno=lineno,
-                col_offset=var_arg_col + len(var_name) + 2,  # After "var_name, "
-                end_lineno=lineno,
-                end_col_offset=var_arg_col + len(var_name) + 2 + len(str(current_loop_end))
-            )
-            args.append(loop_end_const)
-
         # Create the call node
         call_end_col = var_arg_col + len(var_name) + 1  # After closing paren
-        if current_loop_end is not None:
-            call_end_col += 2 + len(str(current_loop_end))  # Account for third argument
 
-        keywords = [_eval_in_scope_keyword(lineno, col_offset)]
+        keywords = [self._site_keyword(line, lineno, col_offset), _eval_in_scope_keyword(lineno, col_offset)]
         if var_and_exp is not None:
             vn, ex = var_and_exp
             tuple_node = ast.Tuple(
@@ -1172,17 +1381,13 @@ class CodeTransformer(ast.NodeTransformer):
             # Other cases (lists, etc.) - not common in for loops
             return []
 
-    def visit_For(self, node: ast.For) -> ast.For:
-        """Transform for loops to log iteration variables, including tuple unpacking."""
-        # Calculate the end line of this loop
-        loop_end_line = self._calculate_loop_end_line(node.body)
-
-        # Push this loop context onto the stack
-        self.loop_context_stack.append(loop_end_line)
-
-        try:
-            # Transform the body recursively first
-            new_body = []
+    def visit_For(self, node: ast.For) -> List[ast.stmt]:
+        """Transform for loops to log iteration variables, including tuple
+        unpacking, and to track which iteration is running (see loop_enter)."""
+        if True:
+            # Each iteration begins by advancing the loop's frame, before any
+            # of its values are logged.
+            new_body = [self._hook_call('_snc_loop_iter', node.lineno, node)]
 
             target_names = self._extract_target_names(node.target)
             for i, var_name in enumerate(target_names):
@@ -1197,7 +1402,7 @@ class CodeTransformer(ast.NodeTransformer):
             # Transform orelse if present using helper
             new_orelse = self._transform_statement_list(node.orelse)
 
-            return ast.For(
+            new_for = ast.For(
                 target=node.target,
                 iter=self.visit(node.iter),
                 body=new_body,
@@ -1207,35 +1412,64 @@ class CodeTransformer(ast.NodeTransformer):
                 end_lineno=node.end_lineno if hasattr(node, 'end_lineno') else node.lineno,
                 end_col_offset=node.end_col_offset if hasattr(node, 'end_col_offset') else node.col_offset + 10
             )
-        finally:
-            # Pop the loop context when we're done
-            self.loop_context_stack.pop()
+            return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node)
 
-    def visit_While(self, node: ast.While) -> ast.While:
-        """Transform while loops to log condition results and track loop context."""
-        # Calculate the end line of this loop
-        loop_end_line = self._calculate_loop_end_line(node.body)
+    def visit_While(self, node: ast.While) -> List[ast.stmt]:
+        """Transform while loops: their bodies, and which iteration is running."""
+        new_body = [self._hook_call('_snc_loop_iter', node.lineno, node)]
+        new_body.extend(self._transform_statement_list(node.body))
+        new_orelse = self._transform_statement_list(node.orelse)
 
-        # Push this loop context onto the stack
-        self.loop_context_stack.append(loop_end_line)
+        new_while = ast.While(
+            test=self.visit(node.test),
+            body=new_body,
+            orelse=new_orelse,
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+            end_lineno=node.end_lineno if hasattr(node, 'end_lineno') else node.lineno,
+            end_col_offset=node.end_col_offset if hasattr(node, 'end_col_offset') else node.col_offset + 10
+        )
+        return self._wrap_context(node.lineno, '_snc_loop_enter', [new_while], node)
 
-        try:
-            # Transform body and orelse using helper functions
-            new_body = self._transform_statement_list(node.body)
-            new_orelse = self._transform_statement_list(node.orelse)
+    @staticmethod
+    def _suspends(node: ast.FunctionDef) -> bool:
+        """Whether the function is a generator: its body can be left and
+        re-entered mid-way, which a call frame pushed on entry and popped on
+        exit couldn't follow."""
+        stack: List[ast.AST] = list(node.body)
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (ast.Yield, ast.YieldFrom, ast.Await)):
+                return True
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue
+            stack.extend(ast.iter_child_nodes(n))
+        return False
 
-            return ast.While(
-                test=self.visit(node.test),
-                body=new_body,
-                orelse=new_orelse,
-                lineno=node.lineno,
-                col_offset=node.col_offset,
-                end_lineno=node.end_lineno if hasattr(node, 'end_lineno') else node.lineno,
-                end_col_offset=node.end_col_offset if hasattr(node, 'end_col_offset') else node.col_offset + 10
-            )
-        finally:
-            # Pop the loop context when we're done
-            self.loop_context_stack.pop()
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        """A function is a loop over its calls: each call runs its body under
+        a [def_line, call_number] frame, so a slider on the def line picks a
+        call the way one on a loop picks an iteration."""
+        suspends = self._suspends(node)
+        node = cast(ast.FunctionDef, self.generic_visit(node))
+        if suspends:
+            return node
+        # The parameters are the call's inputs: logged on the def line, the
+        # way a `for` target is logged on its line, one site each.
+        a = node.args
+        params = [p.arg for p in a.posonlyargs + a.args]
+        if a.vararg:
+            params.append(a.vararg.arg)
+        params.extend(p.arg for p in a.kwonlyargs)
+        if a.kwarg:
+            params.append(a.kwarg.arg)
+        param_logs = [
+            self._create_log_call('_log_value', node.lineno, name, node.lineno,
+                                  node.col_offset + i * 50, var_and_exp=(name, name))
+            for i, name in enumerate(params)
+        ]
+        node.body = self._wrap_context(node.lineno, '_snc_call_enter', param_logs + node.body, node, exit='_snc_call_exit')
+        return node
 
     def visit_Expr(self, node: ast.Expr) -> List[ast.stmt]:
         """
@@ -1337,18 +1571,6 @@ class CodeTransformer(ast.NodeTransformer):
                     arg  # The original argument
                 ]
 
-                # Add loop context if we're in a loop
-                current_loop_end = self._get_current_loop_end_line()
-                if current_loop_end is not None:
-                    loop_end_const = ast.Constant(
-                        value=current_loop_end,
-                        lineno=node.lineno,
-                        col_offset=node.col_offset + (i * 20) + 60,
-                        end_lineno=node.lineno,
-                        end_col_offset=node.col_offset + (i * 20) + 60 + len(str(current_loop_end))
-                    )
-                    log_args.append(loop_end_const)
-
                 arg_seg = self._source_segment(arg)
                 vn, ex = (None, arg_seg)
                 vae_tuple = ast.Tuple(
@@ -1369,6 +1591,7 @@ class CodeTransformer(ast.NodeTransformer):
                     ),
                     args=log_args,
                     keywords=[
+                        self._site_keyword(node.lineno, node.lineno, node.col_offset),
                         _eval_in_scope_keyword(node.lineno, node.col_offset),
                         ast.keyword(arg='var_and_exp', value=vae_tuple,
                                     lineno=node.lineno, col_offset=0,
@@ -1452,6 +1675,7 @@ class CodeTransformer(ast.NodeTransformer):
                         none_constant
                     ],
                     keywords=[
+                        self._site_keyword(node.lineno, node.lineno, 2000),
                         _eval_in_scope_keyword(node.lineno, 2000),
                         ast.keyword(
                             arg='var_and_exp',
@@ -1786,10 +2010,8 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
             "syntaxError": False
         }
 
-    global execution_step, line_emit_counter, _source_code
-    # Reset global state for each run to ensure clean slate
-    execution_step = 0       # Reset execution counter
-    line_emit_counter = {}   # Reset per-line item counters
+    global _source_code
+    _reset_run_state()
     _source_code = code      # Store source code for visualizers to access
 
     # Transform and compile. Split like the pool worker paths do, so this path
@@ -1813,13 +2035,7 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
             except Exception as unparse_error:
                 print(f"Warning: Could not unparse transformed AST: {unparse_error}", file=f)
 
-    # Prepare globals for execution - include our logging functions
-    globals_dict = {
-        '__name__': '__main__',
-        '__file__': '<string>',
-        '_log_value': log_value,
-        '_log_and_return': log_and_return
-    }
+    globals_dict = runtime_globals()
 
     sys.argv = []  # Prevent infinite recursion when we run this on itself
 
@@ -1862,6 +2078,11 @@ def execute_code(
     for chunk in (replay_output or []):
         emit_output(*chunk)
 
+    # The transformed code calls into these; a caller that built its own
+    # globals (the tests do) still gets them.
+    for name, hook in _runtime_hooks().items():
+        globals_dict.setdefault(name, hook)
+
     streams = std_streams.StdStreams(stdin_text, stdin_eof, emit_output)
     with streams.installed():
         emit_meta('exec-start')
@@ -1884,7 +2105,7 @@ def execute_code(
             # string visualizer and read as a value the program produced. The
             # wrapper is also what keeps this red while an exception the
             # program caught stays an ordinary value.
-            log_value(error_line, UncaughtError(e))
+            log_value(error_line, UncaughtError(e), path=getattr(e, '_snc_path', None))
             print(tb_str, file=sys.stderr)
             exit_code = 1
 
@@ -1901,7 +2122,7 @@ def execute_code(
     return result
 
 
-def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None) -> None:
+def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None, loop_selections: Optional[Dict[str, int]] = None) -> None:
     """Execute a run with the given code object and models/events.
 
     If globals_dict is provided (e.g. pre-populated with imports for checkpoint 2),
@@ -1913,11 +2134,13 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
     `stdin_eof` defaults to False here because a pool run with no console
     document yet should *starve* on a read rather than see EOF — starving is
     what opens the console and lets the user type.
-    """
-    global models_and_events, execution_step, line_emit_counter, _current_run_id, _focused_line
 
-    execution_step = 0
-    line_emit_counter = {}
+    `loop_selections` is `{loop_line: iteration}` from the editor's sliders;
+    see `_loop_selections`.
+    """
+    global models_and_events, _current_run_id, _focused_line
+
+    _reset_run_state(loop_selections)
     _current_run_id = run_id
     _focused_line = focused_line
 
@@ -1930,12 +2153,7 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
         models_and_events = []
 
     if globals_dict is None:
-        globals_dict = {
-            '__name__': '__main__',
-            '__file__': '<string>',
-            '_log_value': log_value,
-            '_log_and_return': log_and_return
-        }
+        globals_dict = runtime_globals()
     sys.argv = []
 
     result = execute_code(code_object, globals_dict, import_code=import_code,
@@ -1976,7 +2194,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         pre-loaded import globals, emit results, and exit.  (Checkpoint 2 path —
         used when code is unchanged and imports are already loaded.)
     """
-    global models_and_events, _source_code, _file_path, execution_step, line_emit_counter, _current_run_id
+    global models_and_events, _source_code, _file_path, _current_run_id
 
     emit_meta('pool-worker-start')
 
@@ -2020,12 +2238,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         try:
             import_code, body_code = split_leading_imports(code)
 
-            import_globals: Dict[str, Any] = {
-                '__name__': '__main__',
-                '__file__': '<string>',
-                '_log_value': log_value,
-                '_log_and_return': log_and_return
-            }
+            import_globals: Dict[str, Any] = runtime_globals()
             # No console document exists at import time, so an import that reads
             # stdin sees EOF — what it would get from any non-interactive run.
             # (Checkpoint 1 would starve it instead; imports that read stdin are
@@ -2066,11 +2279,10 @@ def run_pool_worker_mode(working_directory: str) -> None:
         emit_meta(f'checkpoint2-run-{run_id}')
 
         globals_dict: Dict[str, Any] = dict(import_globals)
-        globals_dict['_log_value'] = log_value
-        globals_dict['_log_and_return'] = log_and_return
+        globals_dict.update(_runtime_hooks())
         _execute_run(body_code, m_and_e_json, run_id, focused_line=focused_line, globals_dict=globals_dict,
                      stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
-                     replay_output=import_output)
+                     replay_output=import_output, loop_selections=cmd.get('loop_selections'))
         sys.exit(0)
 
     elif cmd.get('type') == 'run':
@@ -2106,7 +2318,8 @@ def run_pool_worker_mode(working_directory: str) -> None:
 
         emit_meta('compile-done')  # split_leading_imports transforms and compiles in one step
         _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line, import_code=import_code,
-                     stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)))
+                     stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
+                     loop_selections=cmd.get('loop_selections'))
         sys.exit(0)
 
     else:

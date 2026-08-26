@@ -5,7 +5,7 @@
 When a Python file is open in the editor, SNC:
 
 1. **Parses** the user's code into a Python AST.
-2. **Transforms** the AST by injecting `_log_value()` calls after every assignment, expression, conditional, loop iteration, and return statement.
+2. **Transforms** the AST by injecting `_log_value()` calls after every assignment, expression, conditional, loop iteration, and return statement, and loop/call context hooks around loops and function bodies.
 3. **Executes** the transformed code in a pooled Python worker subprocess.
 4. **Streams** JSON-encoded visualization items (one per logged value) back to the editor over stdout.
 5. **Renders** each item as an HTML overlay widget positioned at the end of the corresponding source line.
@@ -62,6 +62,7 @@ Node.js and Python communicate over stdio using **newline-delimited JSON (NDJSON
 | `checkpoint_ready` | Python → Node | Worker reached checkpoint 1 or 2 and is ready |
 | `item` | Python → Node → Renderer | A single visualization item (line, visIndex, html, model) |
 | `command` | Python → Node → Renderer | An Elm-style command for VS Code (e.g. `NewCode`) |
+| `loop` | Python → Node → Renderer | A loop/function finished: `{line, path, count}`; sizes its slider (see Loops below) |
 | `output` | Python → Node → Renderer | A chunk of the program's stdout/stderr, tagged with how much stdin had been consumed |
 | `end` | Python → Node → Renderer | Run completed; includes exitCode and, when the program is waiting on input, `awaitingInput` |
 | `warning` | Python → Node → Renderer | Visualizer load/runtime warning |
@@ -74,11 +75,60 @@ Visualizers that support interaction implement the Elm architecture:
 
 - **`init_model(value)`** — returns initial state for this visualization instance.
 - **`visualize(value, model)`** — renders HTML from the value and current model. HTML elements can carry `snc-mouse-down`, `snc-mouse-move`, `snc-mouse-up`, `snc-key-down`, and `snc-input` attributes whose values are Python expression strings. Nested visualizers can route events with `snc-child-key`.
-- **`update(event, source_code, source_line, model, value)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits) and `CopyToClipboard`.
+- **`update(event, source_code, source_line, model, value)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits), `CopyToClipboard`, and `SetConfigComment` (rewrite the line's saved-config comment; see below).
 
 Models are serialized to JSON and round-tripped through the TypeScript frontend so they survive across re-executions. The value itself is **not** stored in the model; it is always passed as a parameter.
 
 Static (non-interactive) visualizers only need `can_visualize(value)` and `visualize(value)`.
+
+### Per-line visualizer config: the `#%click` comment
+
+What a visualizer persists across sessions -- a table's columns, an object's
+fields -- is saved with the line of code that produced the value, in a comment
+directly above it:
+
+```python
+#%click [{"expr": "$['name']"}, {"expr": "$['orders']", "children": [{"expr": "$.total"}]}]
+people = [{'name': 'Alice', 'orders': [...]}, ...]
+```
+
+The comment binds to the **next non-comment, non-empty line**, so blank lines
+and ordinary comments may come between, and inserting either never re-binds
+it. Each line has its own; nothing is shared across lines or files (the old
+type-keyed `.snc_table_columns.json` / `.snc_object_fields.json` dotfiles are
+gone).
+
+The JSON is a **slot list**: a slot is a column (of a table) or a field (of an
+object), written as a bare expression or `{"expr": ..., "children": [slot,
+...]}`. Columns are assumed homogeneous, so a slot's `children` is the one
+config of whatever visualizer its cells get, and a nested config's location is
+just the exprs leading down to it (`config_path`). There are no type keys: a
+config written for one shape of value applies to whatever the line holds now,
+and an expr that no longer fits shows an error cell rather than the config
+being silently dropped.
+
+Visualizers never see the source. `python_runner.log_value` parses the
+comment for the line, hands the slots to the root visualizer's `init_model`
+as `slots_config` (nested visualizers get their slot's `children` the same
+way, via `child_nesting_kwargs`), and installs them in
+`visualizer_utils.set_line_config`. A save (`save_slots_at_path`) rewrites
+that store; afterwards `take_line_config` says whether anything changed, and
+if so a `SetConfigComment` command goes out. The editor finds the existing
+comment by the same binding rule and replaces it in place, or inserts one
+above the line. Replacing rather than inserting keeps a replayed event
+harmless. A visualizer that must not save -- an aggregation answer the table
+worked out, which is nowhere in the value's shape -- is initialised with
+`persist=False`.
+
+The model round-trip is what carries state within a session; the comment is
+the cross-session store. A model is stamped with `_config_sig`, a canonical
+hash of the slots it reflects, so a comment edited by hand (or swapped in by
+a checkout) rebuilds the model from the comment, while the visualizer's own
+save -- whose model already reflects the new comment -- does not.
+
+The editor folds each comment's JSON to a `…` token after the `#%click` prefix
+(`SNCController.updateConfigCommentFolding`, a decoration); the line the
+cursor is on is shown in full so it can be edited.
 
 ### Execution Optimization: Checkpointed Worker Pools (No `os.fork()`)
 
@@ -99,9 +149,58 @@ Visualizers are loaded from three directories, checked in priority order:
 
 Any Python file matching `*_visualizer.py` that exports `can_visualize()` and `visualize()` is loaded. The first visualizer whose `can_visualize(value)` returns `True` wins.
 
-## Cursor Position Awareness
+## Loops: which iteration a line shows
 
-When a value is inside a loop, the visualizer displays either the **first** or **last** iteration's value depending on where the cursor is. If the cursor is positioned within the loop body (at or before the loop's last line, or on the line right after the loop), the first iteration is shown; otherwise, the last iteration is shown. This is tracked via the `last_line_in_containing_loop` field injected by the `CodeTransformer`.
+A line inside a loop runs once per iteration, so "the value of this line" is
+really "the value of this line *in some iteration*". Every item carries the
+iteration it came from, and a slider on the loop's header line picks which one
+the body shows.
+
+**Identity.** An item is identified by `(line, visIndex)`, where `visIndex` is
+the *static* index of the log site on that line, assigned by the
+`CodeTransformer` (`for a, b in ...` has sites 0 and 1). It does not change
+with how many times the line runs, so a visualizer's model and pending events
+stay attached to it across iterations and across runs.
+
+**Dynamic context.** The transformer wraps each `for`/`while` as
+`_snc_loop_enter(L); try: <loop, with _snc_loop_iter(L) first in its body>
+finally: _snc_ctx_exit(L)`, where `L` is the header line, and each function
+body (except generators/async, which suspend) as `_snc_call_enter(D); try:
+<body> finally: _snc_ctx_exit(D)` -- a function is a loop over its calls, and
+its parameters are logged on the `def` line at the top of each call the way a
+`for` target is logged on its line, one site per parameter. The
+runner keeps a stack of `[id_line, iteration]` frames, and every item carries
+its **`path`**: that stack at the moment it was logged, outermost first, e.g.
+`[[1, 2], [2, 0]]` for the first inner iteration of the third outer one.
+Counts are kept per enclosing path (minus the frames of the thing being
+counted), so an inner loop's count is "under this outer iteration", a
+function called from a loop is call 0 in each iteration, and a recursive
+function's activations are numbered in entry order -- `fact(4)` is
+activation 0 and `fact(0)` is 4 -- with a pin matching the *innermost*
+activation a value was logged in.
+
+**Selection happens in Python, and a slider move is a rerun.** The editor
+sends `loop_selections` (`{header_line: iteration}`) with every run, exactly
+as it sends the focused line. `log_value` drops any value whose path
+disagrees with a pinned loop before choosing a visualizer, so only the pinned
+iteration is rendered or transmitted, and a branch the pinned iteration didn't
+take simply has no item. Rendering at the moment of logging is also what makes
+this correct for values that are mutated across iterations; recording every
+iteration and scrubbing locally would need deep copies. A loop with no pin
+renders every iteration, each item replacing the last on the front end, so
+the last iteration is what stays on screen. When a loop ends, `_snc_ctx_exit`
+emits a **`loop` message** (`{line, path, count}`, only under a selected path)
+which sizes the slider; on it, the editor also drops items of an unpinned loop
+that came from an iteration other than the last (a branch the last iteration
+didn't take), and moves a pin that now points past the end of a shortened
+loop. A site logged repeatedly in one run replays its pending events on the
+first logging and carries the resulting model through the rest
+(`_run_models`), so a command a visualizer emits in response goes out once.
+
+**Front end.** `SNCController.loopSelections` keys each pin by a decoration on
+the header line, so edits above the loop don't re-key it. `LoopSliderWidget`
+(one per loop/def line that ran at least twice) sits at the end of the header
+line ahead of the line's own visualizer, which moves over by its width.
 
 ## Network read cache
 

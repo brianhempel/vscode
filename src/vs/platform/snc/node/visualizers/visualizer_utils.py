@@ -187,39 +187,104 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 
 
 # =============================================================================
-# Dotfile persistence (generic JSON key→list storage)
+# Per-line config: the `#%click` comment
 # =============================================================================
+#
+# What a visualizer persists -- a table's columns, an object's fields -- is
+# saved with the line of code that produced the value, in a comment above it:
+#
+#     #%click [{"expr": "$['name']"}, {"expr": "$['age']"}]
+#     people = [{'name': 'Alice'}, ...]
+#
+# The comment binds to the next non-comment, non-empty line, so blank lines and
+# ordinary comments may come between. Nothing is shared across lines: two lists
+# of dicts on two lines each have their own comment (or none).
+#
+# The comment's JSON is a slot list; a slot is one column (for a list,
+# evaluated per item) or one field (for an object, evaluated on the object),
+# written as a bare expr string or {"expr": ..., "children": [slot, ...]}. A
+# column is assumed homogeneous, so a slot's `children` is the one config of
+# whatever visualizer its cells get. A cell's visualizer is handed those slots
+# by its parent and never reads the line's comment itself -- which is what
+# keeps a value nested inside a value of its own type from recursing.
+#
+# Visualizers never see the source. The runner parses the comment for a line,
+# hands the slots to the root visualizer's init_model, and installs them here
+# with `set_line_config`; a save (`save_slots_at_path`) rewrites this store,
+# and afterwards `take_line_config` tells the runner whether anything changed
+# -- if so, it asks the editor to rewrite the comment.
 
-def load_dotfile_list(dotfile_name: str, key: str, transform=None):
-    """Load a list for a key from a JSON dotfile in the cwd.
+CONFIG_COMMENT_PREFIX = '#%click'
 
-    Returns the list (optionally transformed), or None if not found.
+_line_slots: 'list | None' = None
+_line_slots_dirty: bool = False
+
+
+def set_line_config(slots: 'list | None') -> None:
+    """Install the slots the current line's comment holds (a deep copy, so
+    saving never writes into the caller's list); None for no comment."""
+    global _line_slots, _line_slots_dirty
+    _line_slots = json.loads(json.dumps(slots)) if isinstance(slots, list) else None
+    _line_slots_dirty = False
+
+
+def take_line_config() -> 'tuple[list | None, bool]':
+    """Hand back (slots, dirty) for the current line and reset to none."""
+    global _line_slots, _line_slots_dirty
+    result = (_line_slots, _line_slots_dirty)
+    _line_slots = None
+    _line_slots_dirty = False
+    return result
+
+
+def config_sig(slots: 'list | None') -> str:
+    """A canonical rendering, for telling whether a comment changed."""
+    return json.dumps(slots, sort_keys=True, separators=(',', ':'))
+
+
+def format_config_comment(slots: list) -> str:
+    """The comment text (no indentation) that holds `slots`."""
+    return f'{CONFIG_COMMENT_PREFIX} {json.dumps(slots, ensure_ascii=False)}'
+
+
+def _is_config_comment(line_text: str) -> bool:
+    stripped = line_text.lstrip()
+    return (stripped.startswith(CONFIG_COMMENT_PREFIX)
+            and stripped[len(CONFIG_COMMENT_PREFIX):len(CONFIG_COMMENT_PREFIX) + 1] in ('', ' ', '\t'))
+
+
+def config_comment_line(source_code: str, line: int) -> 'int | None':
+    """The 1-indexed line of the `#%click` comment bound to `line`, or None.
+
+    Scans upward over blank lines and comments; the nearest config comment
+    wins. Any code in between means the comment is somebody else's.
     """
-    try:
-        path = os.path.join(os.getcwd(), dotfile_name)
-        with open(path, 'r') as f:
-            data = json.load(f)
-        items = data.get(key)
-        if isinstance(items, list):
-            return [transform(item) for item in items] if transform else items
+    lines = source_code.split('\n')
+    if line < 1 or line > len(lines):
         return None
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        return None
+    for n in range(line - 1, 0, -1):
+        text = lines[n - 1].strip()
+        if not text:
+            continue
+        if not text.startswith('#'):
+            return None
+        if _is_config_comment(text):
+            return n
+    return None
 
 
-def save_dotfile_list(dotfile_name: str, key: str, items: list):
-    """Save a list for a key to a JSON dotfile in the cwd, preserving other keys."""
-    path = os.path.join(os.getcwd(), dotfile_name)
+def parse_config_comment(source_code: str, line: int) -> 'list | None':
+    """The slots bound to `line`, or None when there is no comment or it is
+    unreadable."""
+    n = config_comment_line(source_code, line)
+    if n is None:
+        return None
+    text = source_code.split('\n')[n - 1].strip()[len(CONFIG_COMMENT_PREFIX):]
     try:
-        with open(path, 'r') as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            data = {}
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        data = {}
-    data[key] = items
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+        slots = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return slots if isinstance(slots, list) else None
 
 
 # =============================================================================
@@ -235,49 +300,18 @@ def get_full_class_name(obj) -> str:
 # Nested "slots" config (shared by the list + object visualizers)
 # =============================================================================
 #
-# A "slot" is one column (for a list, evaluated per item) or one field (for an
-# object, evaluated on the object); in both cases `$` denotes "a value of type
-# T". The on-disk config maps a type key T -> [slot, ...]; a slot is a bare
-# expr string or {"expr": ..., "children": {T2: [slot, ...]}}. When descending
-# into a slot's cell, `children` is consulted by the cell's own type key, so a
-# type T only applies where it appears in the tree. This is what stops the
-# infinite recursion: a list/object whose cell is the same type does NOT re-read
-# the global type config; it uses the explicitly-nested config or a default.
+# Nested config: see "Per-line config" above for the slot format. A visualizer
+# drawn inside a cell is handed the cell's slot `children` as its own slots
+# and a `config_path` -- the exprs leading down to it -- to save at.
 
 MAX_NEST_DEPTH = 5
-
-
-def config_key(value) -> 'str | None':
-    """The type key that selects a value's slots.
-
-    For a list it's the element type (so a list-of-T and a single T share one
-    config); for a dict it's the pair of types its entries hold, written
-    `K->V`; for everything else the value's own class. An empty list or dict
-    has no key.
-
-    The dict branch is a deliberate exception to `config_key(x) ==
-    config_key([x])`. A list of dicts keys on `builtins.dict` -- its ELEMENT
-    class -- while a bare dict keys on `str->int`, because otherwise every dict
-    in a program would share one saved column config no matter what it held.
-    Different axes, deliberately not shared.
-    """
-    if isinstance(value, list):
-        if not value:
-            return None
-        return get_full_class_name(value[0])
-    if isinstance(value, dict):
-        if not value:
-            return None
-        k, v = next(iter(value.items()))
-        return f'{get_full_class_name(k)}->{get_full_class_name(v)}'
-    return get_full_class_name(value)
 
 
 def parse_slots(slots_config, expr_transform=None):
     """Split a slot list into (exprs, slot_children).
 
-    slot_children maps a slot's expr -> its {T2: [slot, ...]} children map
-    (only for slots that actually carry children). Bare-string entries are
+    slot_children maps a slot's expr -> its [slot, ...] children list (only
+    for slots that actually carry children). Bare-string entries are
     treated as childless slots. `expr_transform` is applied to each expr (used
     by the object visualizer to ensure a leading dollar).
     """
@@ -293,7 +327,7 @@ def parse_slots(slots_config, expr_transform=None):
         if expr_transform is not None:
             expr = expr_transform(expr)
         exprs.append(expr)
-        if isinstance(children, dict) and children:
+        if isinstance(children, list) and children:
             slot_children[expr] = children
     return exprs, slot_children
 
@@ -304,7 +338,7 @@ def parse_slot_cols(slots_config) -> dict:
     Only splat slots carry these: `{'expr': '*$.members', 'cols': [...]}`, the
     columns written against ONE splatted element. Read apart from parse_slots
     because `children` and `cols` are different axes -- `children` is a nested
-    visualizer's own config keyed by TYPE, `cols` is this table's sub-columns --
+    visualizer's own config, `cols` is this table's sub-columns --
     and conflating them would let one overwrite the other.
 
     Slots without sub-columns are absent rather than present-and-empty, so a
@@ -390,13 +424,14 @@ def call_with_supported_kwargs(fn: Callable, *args, **kwargs):
     return fn(*args, **supported_kwargs(fn, **kwargs))
 
 
-def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value,
+def child_nesting_kwargs(parent_model: dict, slot_expr: str,
                          child_init_model: Optional[Callable] = None) -> dict:
     """Compute the nesting kwargs to hand a child (sub-)visualizer.
 
-    The child receives the slot's nested config for the cell's type (or None ->
-    default), the inherited root type/dotfile, and the path extended by this
-    (slot_expr, cell_type) step (so it can persist edits at its own location).
+    The child receives the slot's nested config (or None -> default), the path
+    extended by this slot's expr (so it can persist edits at its own location),
+    and whether edits persist at all (an answer the table worked out, rather
+    than a cell of the value, has no place to be saved).
 
     A visualizer opts into all this by naming the parameters in its init_model;
     pass that function as `child_init_model` and a child that doesn't ask for
@@ -404,43 +439,14 @@ def child_nesting_kwargs(parent_model: dict, slot_expr: str, cell_value,
     """
     if child_init_model is not None and not wants_kwarg(child_init_model, 'slots_config'):
         return {}
-    children_map = (parent_model.get('_slot_children') or {}).get(slot_expr) or {}
-    t2 = config_key(cell_value)
-    slots_config = children_map.get(t2) if t2 is not None else None
     kwargs = {
-        'slots_config': slots_config,
-        'config_root_type': parent_model.get('_config_root_type'),
-        'config_root_dotfile': parent_model.get('_config_root_dotfile'),
-        'config_path': (parent_model.get('_config_path') or []) + [(slot_expr, t2)],
+        'slots_config': (parent_model.get('_slot_children') or {}).get(slot_expr),
+        'config_path': (parent_model.get('_config_path') or []) + [slot_expr],
+        'persist': parent_model.get('_config_persist', True),
     }
     if child_init_model is None:
         return kwargs
     return supported_kwargs(child_init_model, **kwargs)
-
-
-def load_root_slots(dotfile_name: str, root_type: 'str | None'):
-    """Load the raw slot list for a type from a dotfile (or None)."""
-    if not root_type:
-        return None
-    return load_dotfile_list(dotfile_name, root_type)
-
-
-def _load_dotfile_dict(dotfile_name: str) -> dict:
-    try:
-        path = os.path.join(os.getcwd(), dotfile_name)
-        with open(path, 'r') as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    return {}
-
-
-def _save_dotfile_dict(dotfile_name: str, data: dict) -> None:
-    path = os.path.join(os.getcwd(), dotfile_name)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
 
 
 def _normalize_slot_list(slot_list: list) -> None:
@@ -457,40 +463,30 @@ def _find_slot(slot_list: list, expr: str):
     return None
 
 
-def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
-                       path, exprs: list) -> None:
-    """Persist a (sub-)level's slot exprs at its path in the dotfile.
+def save_slots_at_path(path, exprs: list) -> None:
+    """Persist a (sub-)level's slot exprs at its path in the line's config.
 
-    `path` is a list of (slot_expr, child_type) steps from the root type. Only
-    this level's expr list is rewritten; each surviving slot keeps its existing
-    `children` (matched by expr), and other types/branches on disk are left
+    `path` is the list of slot exprs leading down from the root. Only this
+    level's expr list is rewritten; each surviving slot keeps its existing
+    `children` (matched by expr), and other branches already saved are left
     untouched. So an ancestor never clobbers a descendant's nested config.
     """
-    if not root_type:
-        return
-    data = _load_dotfile_dict(dotfile_name)
+    global _line_slots, _line_slots_dirty
+    if _line_slots is None:
+        _line_slots = []
+    target = _line_slots
 
-    target = data.get(root_type)
-    if not isinstance(target, list):
-        target = []
-        data[root_type] = target
-
-    for step in (path or []):
-        step_expr, step_type = step[0], step[1]
+    for step_expr in (path or []):
         _normalize_slot_list(target)
         obj = _find_slot(target, step_expr)
         if obj is None:
             obj = {'expr': step_expr}
             target.append(obj)
         children = obj.get('children')
-        if not isinstance(children, dict):
-            children = {}
+        if not isinstance(children, list):
+            children = []
             obj['children'] = children
-        child_list = children.get(step_type)
-        if not isinstance(child_list, list):
-            child_list = []
-            children[step_type] = child_list
-        target = child_list
+        target = children
 
     _normalize_slot_list(target)
     old = list(target)
@@ -509,8 +505,7 @@ def save_slots_at_path(dotfile_name: str, root_type: 'str | None',
                     slot[key] = value
         rebuilt.append(slot)
     target[:] = rebuilt
-
-    _save_dotfile_dict(dotfile_name, data)
+    _line_slots_dirty = True
 
 
 # =============================================================================
@@ -806,7 +801,7 @@ def nest_generated_expr(expr: str, parent_expr: str) -> str:
     return expr.replace(CHILD_SOURCE_BINDER, f'({parent_expr})')
 
 
-def new_code_command(result, code_imports=None) -> tuple:
+def new_code_command(result, code_imports=None, config=None) -> tuple:
     """A generated ``(suggest_name, code)`` pair as a NewCode command.
 
     An optional third slot says what the code can't run without: the visualizer
@@ -816,11 +811,23 @@ def new_code_command(result, code_imports=None) -> tuple:
     editor's to answer -- it is the only side that knows the file as it stands
     now.
 
+    An optional fourth slot is the config (a slot list -- see "Per-line
+    config") the new line should open with: it lands as a `#%click` comment
+    above the line, so what the visualizer knows about the value it is making
+    is not lost to detection.
+
     Code that needs nothing stays the pair it has always been, so "no third
     slot" reads as "nothing to add" everywhere the command travels.
     """
     imports = tuple(code_imports(result[1])) if code_imports else ()
+    if config is not None:
+        return (result[0], result[1], imports, config)
     return (result[0], result[1], imports) if imports else (result[0], result[1])
+
+
+def is_new_code(cmd) -> bool:
+    """Whether a command is a NewCode tuple -- see new_code_command."""
+    return isinstance(cmd, tuple) and 2 <= len(cmd) <= 4
 
 
 def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
@@ -833,7 +840,7 @@ def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
     value concretely; a parent whose code_expr is already concrete passes the
     same expression twice.
     """
-    if isinstance(cmd, tuple) and len(cmd) in (2, 3):
+    if is_new_code(cmd):
         # Rebinding the scope doesn't change what the code needs imported, so
         # any declaration travels up with it untouched.
         return (cmd[0], nest_generated_expr(cmd[1], code_expr), *cmd[2:])

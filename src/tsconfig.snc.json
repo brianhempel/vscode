@@ -1,0 +1,24 @@
+{
+	// Type-checks just the Sculpt-n-Code corner of the tree: these entry
+	// points and whatever they import (`npm run typecheck-snc`). The full
+	// `typecheck-client` walks all of src/ and needs ~5GB; this needs ~300MB.
+	//
+	// Node's types arrive through electron.d.ts, as they do in the full
+	// build; listing "node" under `types` instead loads them first and its
+	// setTimeout then shadows the one in typings/base-common.d.ts.
+	"extends": "./tsconfig.json",
+	"include": [
+		"./typings",
+		"./vscode-dts/vscode.proposed.*.d.ts",
+		"./vscode-dts/vscode.d.ts"
+	],
+	"files": [
+		"../node_modules/electron/electron.d.ts",
+		"vs/editor/contrib/snc/browser/snc.ts",
+		"vs/platform/snc/common/snc.ts",
+		"vs/platform/snc/common/pythonImports.ts",
+		"vs/platform/snc/node/sncProcessService.ts",
+		"vs/workbench/contrib/snc/browser/sncBrowserDrop.contribution.ts",
+		"vs/workbench/contrib/snc/browser/sncConsole.contribution.ts"
+	]
+}

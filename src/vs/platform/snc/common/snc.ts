@@ -8,13 +8,32 @@ import { Event } from '../../../base/common/event.js';
 
 export interface IVisualizationItem {
 	line: number;
-	visIndex: number; // within line
+	visIndex: number; // static index of the log site within the line
 	runId: string;
 	execution_step: number;
 	html: string;
 	model?: unknown;
 	unhandledEvents?: UiEvent[];
-	last_line_in_containing_loop?: number;
+	/**
+	 * Which iteration of which loops the value was produced under: one
+	 * `[headerLine, iteration]` per enclosing loop, outermost first. A function
+	 * body counts as a loop over its calls (`[defLine, callNumber]`).
+	 */
+	path: LoopPath;
+}
+
+export type LoopPath = [number, number][];
+
+/**
+ * A loop (or function) finished running under `path`, having run `count`
+ * iterations (calls). Sizes the slider on its header line.
+ */
+export interface ILoopReport {
+	line: number;
+	path: LoopPath;
+	count: number;
+	/** A real loop, or a function body (`count` is then its activations, numbered in entry order). */
+	kind: 'loop' | 'call';
 }
 
 export type UiEvent = { line: number; visIndex: number, pythonEventStr: string, eventJSON: any };
@@ -42,6 +61,7 @@ export interface IProcessOptions {
 	filePath?: string; // Path of the file being run; sites the .snc_url_cache dir beside it
 	modelsAndEventsJson?: string; // visualizers state, and events to apply
 	focusedLine?: number; // 1-indexed line whose top-level visualizer should render full-size; others render with small=True
+	loopSelections?: Record<string, number>; // header line -> iteration (0-based) the loop is pinned to; unpinned loops render every iteration
 	stdin?: string; // The console document, replayed through the program's stdin
 	stdinEof?: boolean; // Whether the document ends the stream; false makes a read past its end starve rather than see EOF
 }
@@ -62,6 +82,10 @@ export interface NewCodeEdit {
 	// links only its header; the body below belongs to the user. Absent on
 	// incidental edits (e.g. an auto-added import).
 	headerLines?: number;
+	// How many lines of the inserted text come BEFORE the statement -- a
+	// `#%click` config comment the new line opens with. The statement (what
+	// gets linked, and whose name is offered for renaming) starts below them.
+	leadingLines?: number;
 }
 
 export type SNCCommand =
@@ -70,6 +94,13 @@ export type SNCCommand =
 	// the editor's to decide — see pythonImports.ts.
 	| { type: 'NewCode'; triggerLine: number; triggerVisIndex: number; edits: NewCodeEdit[]; imports?: string[] }
 	| { type: 'CopyToClipboard'; text: string }
+	// Rewrite the `#%click` comment that holds the trigger line's visualizer
+	// config (its columns, fields, ...). `comment` is the whole comment text
+	// without indentation; null removes it. The editor finds the existing
+	// comment by the rule the runner reads it with -- the nearest one above
+	// with only blank lines and comments between -- and replaces it, or
+	// inserts a new line above the trigger line.
+	| { type: 'SetConfigComment'; comment: string | null; triggerLine: number; triggerVisIndex: number }
 	// The backend supplies expression intent; the editor's linked range remains
 	// authoritative for the concrete assignment target. On semantic action
 	// changes, suggested_var_name requests a safe editor-side rename.
@@ -124,6 +155,7 @@ export interface SNCTimingData {
 export type SNCStreamMessage =
 	| { runId: string; type: 'item'; item: IVisualizationItem }
 	| { runId: string; type: 'command'; command: SNCCommand }
+	| { runId: string; type: 'loop'; loop: ILoopReport }
 	| { runId: string; type: 'end'; result: IProcessResult; timing?: SNCTimingData }
 	| { runId: string; type: 'spawn'; timing: SNCTimingData }
 	| { runId: string; type: 'error'; error: string }

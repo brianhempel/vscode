@@ -26,6 +26,7 @@
     "build-fast": "npm-run-all2 -lp transpile-client build-fast-extensions compile-copilot",
     "build-fast-extensions": "npm run gulp copy-codicons compile-extensions compile-extension-media",
     "typecheck-client": "tsc --project ./src/tsconfig.json --noEmit --skipLibCheck",
+    "typecheck-snc": "tsc --project ./src/tsconfig.snc.json --noEmit --skipLibCheck",
     "codex:gen-protocol": "node build/codex/generate-protocol.mjs",
     "codex:check-protocol": "node build/codex/check-protocol-sync.ts",
     "watch": "npm-run-all2 -lp watch-client-transpile watch-client watch-extensions watch-copilot",
