@@ -87,30 +87,41 @@ fields -- is saved with the line of code that produced the value, in a comment
 directly above it:
 
 ```python
-#%click {"table": {"builtins.dict": [{"expr": "$['name']"}, {"expr": "$['age']"}]}}
-people = [{'name': 'Alice', 'age': 30}, ...]
+#%click [{"expr": "$['name']"}, {"expr": "$['orders']", "children": [{"expr": "$.total"}]}]
+people = [{'name': 'Alice', 'orders': [...]}, ...]
 ```
 
 The comment binds to the **next non-comment, non-empty line**, so blank lines
 and ordinary comments may come between, and inserting either never re-binds
 it. Each line has its own; nothing is shared across lines or files (the old
 type-keyed `.snc_table_columns.json` / `.snc_object_fields.json` dotfiles are
-gone). The JSON is a namespace per persisting visualizer (`table`, `object`)
-of `type key -> [slot, ...]`; the type key stays so a config written for a
-list of dicts isn't applied once the line is edited into a list of strings.
+gone).
+
+The JSON is a **slot list**: a slot is a column (of a table) or a field (of an
+object), written as a bare expression or `{"expr": ..., "children": [slot,
+...]}`. Columns are assumed homogeneous, so a slot's `children` is the one
+config of whatever visualizer its cells get, and a nested config's location is
+just the exprs leading down to it (`config_path`). There are no type keys: a
+config written for one shape of value applies to whatever the line holds now,
+and an expr that no longer fits shows an error cell rather than the config
+being silently dropped.
 
 Visualizers never see the source. `python_runner.log_value` parses the
-comment for the line, installs it with `visualizer_utils.set_line_config`
-before the visualizer's `init_model`/`update` run (`load_root_slots` reads
-it), and afterwards `take_line_config` says whether anything was saved
-(`save_slots_at_path` writes to it). A save becomes a `SetConfigComment`
-command; the editor finds the existing comment by the same binding rule and
-replaces it in place, or inserts one above the line. Replacing rather than
-inserting keeps a replayed event harmless.
+comment for the line, hands the slots to the root visualizer's `init_model`
+as `slots_config` (nested visualizers get their slot's `children` the same
+way, via `child_nesting_kwargs`), and installs them in
+`visualizer_utils.set_line_config`. A save (`save_slots_at_path`) rewrites
+that store; afterwards `take_line_config` says whether anything changed, and
+if so a `SetConfigComment` command goes out. The editor finds the existing
+comment by the same binding rule and replaces it in place, or inserts one
+above the line. Replacing rather than inserting keeps a replayed event
+harmless. A visualizer that must not save -- an aggregation answer the table
+worked out, which is nowhere in the value's shape -- is initialised with
+`persist=False`.
 
 The model round-trip is what carries state within a session; the comment is
 the cross-session store. A model is stamped with `_config_sig`, a canonical
-hash of the config it reflects, so a comment edited by hand (or swapped in by
+hash of the slots it reflects, so a comment edited by hand (or swapped in by
 a checkout) rebuilds the model from the comment, while the visualizer's own
 save -- whose model already reflects the new comment -- does not.
 

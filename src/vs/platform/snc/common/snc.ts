@@ -62,6 +62,10 @@ export interface NewCodeEdit {
 	// links only its header; the body below belongs to the user. Absent on
 	// incidental edits (e.g. an auto-added import).
 	headerLines?: number;
+	// How many lines of the inserted text come BEFORE the statement -- a
+	// `#%click` config comment the new line opens with. The statement (what
+	// gets linked, and whose name is offered for renaming) starts below them.
+	leadingLines?: number;
 }
 
 export type SNCCommand =

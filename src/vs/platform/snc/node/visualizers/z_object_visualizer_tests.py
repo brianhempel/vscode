@@ -17,10 +17,10 @@ import html as html_module
 
 from z_object_visualizer import (
     visualize, init_model, update, can_visualize,
-    TRIVIAL_NAMES, DEFAULT_FIELDS_FOR_TYPE, CONFIG_NS,
+    TRIVIAL_NAMES, DEFAULT_FIELDS_FOR_TYPE,
     AddFieldClick, FieldInput, FieldSelect, FieldClick, KeyDown,
     RemoveFieldClick, DragStart, DragOver, DragEnd,
-    load_fields_config, save_fields_config,
+    save_fields_config, _resolve_fields_and_children,
     _get_autocomplete_suggestions, _resolve_fields,
 )
 from visualizer_utils import (ChildEvent, get_full_class_name as _get_full_class_name,
@@ -213,30 +213,21 @@ class TestInitModel(unittest.TestCase):
         match = re.search(r'hello', 'hello world')
         self.assertIsNotNone(match)
 
-        # Ensure no saved config interferes
-        with patch('z_object_visualizer.load_fields_config', return_value=None):
-            model = init_model(match)
+        model = init_model(match)
 
         self.assertEqual(model['fields'], DEFAULT_FIELDS_FOR_TYPE['re.Match'])
 
     def test_init_model_loads_from_config(self):
-        """When the line's config has fields for this type, use those."""
+        """When the line's config has fields, use those."""
         obj = TestObj()
-        full_class_name = _get_full_class_name(obj)
         saved_fields = ['$.x', '$.name']
-
-        with patch('z_object_visualizer.load_fields_config', return_value=saved_fields):
-            model = init_model(obj)
-
+        model = init_model(obj, slots_config=saved_fields)
         self.assertEqual(model['fields'], saved_fields)
 
-    def test_init_model_falls_back_when_type_not_in_config(self):
-        """Config exists but doesn't have this type → fall back to non-trivial names."""
+    def test_init_model_falls_back_when_nothing_saved(self):
+        """No config → fall back to non-trivial names."""
         obj = TestObj()
-
-        # load_fields_config returns None (type not in config)
-        with patch('z_object_visualizer.load_fields_config', return_value=None):
-            model = init_model(obj)
+        model = init_model(obj)
 
         # Should still have the non-trivial attributes
         self.assertIn('$.x', model['fields'])
@@ -249,21 +240,18 @@ class TestResolveFields(unittest.TestCase):
 
     def test_resolve_fields_prefers_config(self):
         obj = TestObj()
-        with patch('z_object_visualizer.load_fields_config', return_value=['$.name']):
-            self.assertEqual(_resolve_fields(obj), ['$.name'])
+        fields, _ = _resolve_fields_and_children(obj, ['$.name'])
+        self.assertEqual(fields, ['$.name'])
 
     def test_resolve_fields_uses_defaults_when_config_missing(self):
         import re
         match = re.search(r'hello', 'hello world')
         self.assertIsNotNone(match)
-
-        with patch('z_object_visualizer.load_fields_config', return_value=None):
-            self.assertEqual(_resolve_fields(match), DEFAULT_FIELDS_FOR_TYPE['re.Match'])
+        self.assertEqual(_resolve_fields(match), DEFAULT_FIELDS_FOR_TYPE['re.Match'])
 
     def test_resolve_fields_falls_back_to_non_trivial_names(self):
         obj = TestObj()
-        with patch('z_object_visualizer.load_fields_config', return_value=None):
-            resolved = _resolve_fields(obj)
+        resolved = _resolve_fields(obj)
         self.assertIn('$.x', resolved)
         self.assertIn('$.y', resolved)
         self.assertIn('$.name', resolved)
@@ -689,7 +677,7 @@ class TestUpdate(unittest.TestCase):
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
             # Should save with the updated fields list
-            saved_fields = mock_save.call_args[0][2]
+            saved_fields = mock_save.call_args[0][1]
             self.assertIn('$.name', saved_fields)
 
     def test_enter_saves_config(self):
@@ -888,7 +876,7 @@ class TestUpdate(unittest.TestCase):
         with patch('z_object_visualizer.save_fields_config') as mock_save:
             new_model, commands = update(event, ('x', 'x'), model, obj)
             mock_save.assert_called_once()
-            saved_fields = mock_save.call_args[0][2]
+            saved_fields = mock_save.call_args[0][1]
             self.assertEqual(saved_fields, ['$.name'])
 
     def test_remove_field_out_of_range_is_noop(self):
@@ -1091,7 +1079,7 @@ class TestDragReorder(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    """Test load/save of fields into the line's config."""
+    """Test saving fields into the line's config."""
 
     def setUp(self):
         set_line_config(None)
@@ -1099,50 +1087,24 @@ class TestConfig(unittest.TestCase):
     def tearDown(self):
         set_line_config(None)
 
-    def test_load_fields_nothing_saved(self):
-        """Nothing saved → returns None."""
-        result = load_fields_config('some.Type')
-        self.assertIsNone(result)
-
-    def test_load_fields_config(self):
-        """Saved config with type key → returns fields list."""
-        set_line_config({CONFIG_NS: {'some.Type': ['$.x', '$.y']}})
-        result = load_fields_config('some.Type')
-        self.assertEqual(result, ['$.x', '$.y'])
-
-    def test_load_fields_type_not_saved(self):
-        """Config exists but doesn't have this type → returns None."""
-        set_line_config({CONFIG_NS: {'other.Type': ['.a', '.b']}})
-        result = load_fields_config('some.Type')
-        self.assertIsNone(result)
-
-    def test_load_fields_malformed_entry(self):
-        """A non-list entry → returns None (doesn't crash)."""
-        set_line_config({CONFIG_NS: {'some.Type': 'this is not a list'}})
-        result = load_fields_config('some.Type')
-        self.assertIsNone(result)
-
     def test_save_fields_config(self):
-        """Saves correct structure (nested slot format) and marks the line dirty."""
-        save_fields_config('some.Type', [], ['$.x', '$.y'])
-        self.assertEqual(take_line_config(), ({CONFIG_NS: {
-            'some.Type': [{'expr': '$.x'}, {'expr': '$.y'}]}}, True))
+        """Saves the nested slot format and marks the line dirty."""
+        save_fields_config([], ['$.x', '$.y'])
+        self.assertEqual(take_line_config(),
+                         ([{'expr': '$.x'}, {'expr': '$.y'}], True))
 
-    def test_save_preserves_other_types(self):
-        """Saving for type A doesn't clobber type B entries."""
-        save_fields_config('type.A', [], ['$.a1', '$.a2'])
-        save_fields_config('type.B', [], ['$.b1', '$.b2'])
-        data, _ = take_line_config()
-        self.assertEqual(data[CONFIG_NS], {
-            'type.A': [{'expr': '$.a1'}, {'expr': '$.a2'}],
-            'type.B': [{'expr': '$.b1'}, {'expr': '$.b2'}]})
+    def test_save_overwrites(self):
+        """Saving again overwrites the previous fields."""
+        save_fields_config([], ['$.x'])
+        save_fields_config([], ['$.x', '$.y'])
+        self.assertEqual(take_line_config()[0], [{'expr': '$.x'}, {'expr': '$.y'}])
 
-    def test_save_overwrites_same_type(self):
-        """Saving the same type again overwrites the previous entry."""
-        save_fields_config('some.Type', [], ['$.x'])
-        save_fields_config('some.Type', [], ['$.x', '$.y'])
-        data, _ = take_line_config()
-        self.assertEqual(data[CONFIG_NS]['some.Type'], [{'expr': '$.x'}, {'expr': '$.y'}])
+    def test_a_field_edit_saves_the_lines_config(self):
+        obj = TestObj()
+        model = init_model(obj, slots_config=['$.x'])
+        model['adding_field'] = True
+        update(make_mouse_down_event(repr(FieldSelect(accessor='$.y'))), None, model, obj)
+        self.assertEqual(take_line_config(), ([{'expr': '$.x'}, {'expr': '$.y'}], True))
 
 
 # =============================================================================
@@ -1369,22 +1331,21 @@ class TestInputRowEvalInScope(unittest.TestCase):
 
 
 class TestConfigDollarHandling(unittest.TestCase):
-    """Test that load_fields_config returns fields as stored."""
-
-    def setUp(self):
-        set_line_config(None)
+    """Saved fields are used as stored: a $ anywhere in one is enough."""
 
     def test_load_preserves_embedded_dollar(self):
-        """Fields with $ embedded (not leading) are returned as-is."""
-        set_line_config({CONFIG_NS: {'re.Match': ['str3[$.start():]']}})
-        result = load_fields_config('re.Match')
-        self.assertEqual(result, ['str3[$.start():]'])
+        """Fields with $ embedded (not leading) are used as-is."""
+        model = init_model(TestObj(), slots_config=['str3[$.start():]'])
+        self.assertEqual(model['fields'], ['str3[$.start():]'])
 
     def test_load_preserves_leading_dollar(self):
-        """Fields with leading $ are returned as-is."""
-        set_line_config({CONFIG_NS: {'re.Match': ['$[0]', '$.start()']}})
-        result = load_fields_config('re.Match')
-        self.assertEqual(result, ['$[0]', '$.start()'])
+        """Fields with leading $ are used as-is."""
+        model = init_model(TestObj(), slots_config=['$[0]', '$.start()'])
+        self.assertEqual(model['fields'], ['$[0]', '$.start()'])
+
+    def test_a_field_without_a_dollar_gets_one(self):
+        model = init_model(TestObj(), slots_config=['.x'])
+        self.assertEqual(model['fields'], ['$.x'])
 
 
 # =============================================================================
@@ -1897,16 +1858,14 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
 
 class TestNestedSlotsConfig(unittest.TestCase):
     """The object config is nested: a field whose value is the same type does
-    NOT re-apply the type config (which would recurse); nesting uses the field's
-    explicit children config or a depth-capped default."""
+    NOT re-apply the line's config (which would recurse); nesting uses the
+    field's explicit children config or a depth-capped default."""
 
     def test_root_model_stores_config_fields(self):
         o = TestObj()
-        with patch('z_object_visualizer.load_fields_config', return_value=['$.x']):
-            model = init_model(o, _get_nesting_visualizer)
-        self.assertEqual(model['_config_root_type'], _get_full_class_name(o))
-        self.assertEqual(model['_config_root_ns'], CONFIG_NS)
+        model = init_model(o, _get_nesting_visualizer, slots_config=['$.x'])
         self.assertEqual(model['_config_path'], [])
+        self.assertTrue(model['_config_persist'])
         self.assertEqual(model['_slot_children'], {})
 
     def test_nested_fields_config_applies(self):
@@ -1920,12 +1879,11 @@ class TestNestedSlotsConfig(unittest.TestCase):
                 self.inner = Inner()
 
         o = Outer()
-        inner_type = _get_full_class_name(o.inner)
-        slots = [{'expr': '$.inner', 'children': {inner_type: [{'expr': '$.a'}]}}]
-        with patch('z_object_visualizer.load_fields_config', return_value=slots):
-            model = init_model(o, _get_nesting_visualizer)
+        slots = [{'expr': '$.inner', 'children': [{'expr': '$.a'}]}]
+        model = init_model(o, _get_nesting_visualizer, slots_config=slots)
         child = model['children']['$.inner']
         self.assertEqual(child['fields'], ['$.a'])
+        self.assertEqual(child['_config_path'], ['$.inner'])
 
     def test_cross_type_object_field_list_uses_nested_columns(self):
         class Holder:
@@ -1933,10 +1891,8 @@ class TestNestedSlotsConfig(unittest.TestCase):
                 self.items = ['ABCdef', 'GHIjkl']
 
         o = Holder()
-        slots = [{'expr': '$.items',
-                  'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('z_object_visualizer.load_fields_config', return_value=slots):
-            model = init_model(o, _get_nesting_visualizer)
+        slots = [{'expr': '$.items', 'children': [{'expr': '$.lower()'}]}]
+        model = init_model(o, _get_nesting_visualizer, slots_config=slots)
         child = model['children']['$.items']  # a list-visualizer model
         self.assertEqual(list(child['columns']), ['$.lower()'])
 
@@ -1947,8 +1903,7 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
         o = Node()
         o.me = o  # self-referential; would recurse forever via dir() fallback
-        with patch('z_object_visualizer.load_fields_config', return_value=None):
-            model = init_model(o, _get_nesting_visualizer)  # must not RecursionError
+        model = init_model(o, _get_nesting_visualizer)  # must not RecursionError
 
         def find_too_deep(m):
             if not isinstance(m, dict):
@@ -1969,17 +1924,15 @@ class TestNestedSlotsConfig(unittest.TestCase):
 
     def test_field_add_saves_with_path_scoped_signature(self):
         o = TestObj()
-        with patch('z_object_visualizer.load_fields_config', return_value=['$.x']):
-            model = init_model(o, _get_nesting_visualizer)
+        model = init_model(o, _get_nesting_visualizer, slots_config=['$.x'])
         model['adding_field'] = True
         event = make_mouse_down_event(repr(FieldSelect(accessor='$.y')))
         with patch('z_object_visualizer.save_fields_config') as mock_save:
             update(event, None, model, o, _get_nesting_visualizer)
         mock_save.assert_called_once()
         args = mock_save.call_args.args
-        self.assertEqual(args[0], _get_full_class_name(o))
-        self.assertEqual(args[1], [])
-        self.assertIn('$.y', args[2])
+        self.assertEqual(args[0], [])
+        self.assertIn('$.y', args[1])
 
 
 class TestNestedStringFieldGeneratesAgainstTheField(unittest.TestCase):

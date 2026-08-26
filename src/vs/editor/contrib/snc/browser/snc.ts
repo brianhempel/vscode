@@ -2613,16 +2613,18 @@ function importEdits(model: ITextModel, imports: readonly string[] | undefined):
 	return edits;
 }
 
-function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine: boolean, insertedRange: Range): Selection | null {
-	const firstLine = editText.split('\n')[0];
+function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine: boolean, insertedRange: Range, leadingLines: number = 0): Selection | null {
+	// The statement is what carries a name; a config comment ahead of it
+	// (`leadingLines`) is skipped over.
+	const firstLine = editText.split('\n')[leadingLines] ?? '';
 
 	let baseLine: number;
 	let baseCol: number;
 	if (isPrependedToFirstLine) {
-		baseLine = insertedRange.startLineNumber;
-		baseCol = insertedRange.startColumn;
+		baseLine = insertedRange.startLineNumber + leadingLines;
+		baseCol = leadingLines === 0 ? insertedRange.startColumn : 1;
 	} else {
-		baseLine = insertedRange.startLineNumber + 1;
+		baseLine = insertedRange.startLineNumber + 1 + leadingLines;
 		baseCol = 1;
 	}
 
@@ -4382,7 +4384,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 						mainInverseRange = inv.range;
 					}
 					if (!renameSel) {
-						renameSel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range);
+						renameSel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range, edit.leadingLines ?? 0);
 					}
 				}
 				return renameSel ? [renameSel] : null;
@@ -4401,13 +4403,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const actualTriggerLine = command.triggerLine + linesInsertedAbove;
 
 				// The assignment is always inserted immediately after the (shifted)
-				// trigger line. Derive the linked range directly from that line
-				// rather than from inverse-range arithmetic, which is unreliable
-				// across the multi-region edit when an import is also inserted.
-				const insertedLine = actualTriggerLine + 1;
+				// trigger line -- below any config comment it opens with. Derive
+				// the linked range directly from that line rather than from
+				// inverse-range arithmetic, which is unreliable across the
+				// multi-region edit when an import is also inserted.
+				const mainEdit = edits.find(e => e.afterLine === command.triggerLine);
+				const insertedLine = actualTriggerLine + 1 + (mainEdit?.leadingLines ?? 0);
 				// A statement's body is the user's, so the link covers only the
 				// header lines Python reported.
-				const mainEdit = edits.find(e => e.afterLine === command.triggerLine);
 				const lastHeaderLine = insertedLine + Math.max(1, mainEdit?.headerLines ?? 1) - 1;
 				const linkedRange = new Range(
 					insertedLine, model.getLineFirstNonWhitespaceColumn(insertedLine) || 1,

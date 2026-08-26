@@ -16,7 +16,7 @@ import re
 import shutil
 import tempfile
 
-from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH,
+from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH, is_new_code,
                               set_line_config, take_line_config,
                               replace_dollars_in_py_exp, py_exp_attrs, PyExp,
                               with_pass_body, AddImports, CHILD_SOURCE_BINDER,
@@ -46,9 +46,9 @@ def exps_in(html_str):
 
 # Isolate the tests from one another: what a table saves goes into the
 # per-line config store (visualizer_utils.set_line_config), which is process
-# global. Neutralise the save/load helpers so that one test's save can't
-# pollute the next. Tests that genuinely exercise persistence
-# (TestColumnConfig) stop these patches in their own setUp.
+# global. Neutralise the save helper so that one test's save can't pollute the
+# next. Tests that genuinely exercise persistence (TestColumnConfig) stop the
+# patch in their own setUp.
 import unittest.mock as _mock
 
 _module_patches: list = []
@@ -56,12 +56,9 @@ _module_patches: list = []
 
 def setUpModule():
     set_line_config(None)
-    p_load = _mock.patch('table_visualizer.load_columns_config',
-                         return_value=None)
     p_save = _mock.patch('table_visualizer.save_columns_config')
-    p_load.start()
     p_save.start()
-    _module_patches.extend([p_load, p_save])
+    _module_patches.append(p_save)
 
 
 def tearDownModule():
@@ -74,9 +71,9 @@ from table_visualizer import (
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
     ColumnKeyDown, ExpandToggle, PinFocus,
-    COLUMN_CONFIG_NS, CELL_KEY_SEP, SUBCOL_SEP,
+    CELL_KEY_SEP, SUBCOL_SEP,
     CopyToClipboard, ChangeSelectedText,
-    load_columns_config, save_columns_config,
+    save_columns_config,
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _leaf_for, _column_groups,
@@ -2443,9 +2440,9 @@ class TestColumnConfig(unittest.TestCase):
 
     def setUp(self):
         set_line_config(None)
-        # The module-level setUp neuters load/save so they don't pollute other
-        # tests; this class genuinely exercises them, so undo the patches for
-        # the duration of each test.
+        # The module-level setUp neuters saving so it doesn't pollute other
+        # tests; this class genuinely exercises it, so undo the patch for the
+        # duration of each test.
         for p in _module_patches:
             p.stop()
 
@@ -2454,32 +2451,15 @@ class TestColumnConfig(unittest.TestCase):
             p.start()
         set_line_config(None)
 
-    def test_load_columns_nothing_saved(self):
-        result = load_columns_config('builtins.dict')
-        self.assertIsNone(result)
-
-    def test_save_and_load_columns(self):
-        save_columns_config('builtins.dict', [], ["$['name']", "$['age']"])
-        result = load_columns_config('builtins.dict')
-        self.assertEqual(result, [{'expr': "$['name']"}, {'expr': "$['age']"}])
-        self.assertEqual(take_line_config(), ({COLUMN_CONFIG_NS: {
-            'builtins.dict': [{'expr': "$['name']"}, {'expr': "$['age']"}]}}, True))
-
-    def test_save_preserves_other_types(self):
-        save_columns_config('type.A', [], ['$.x'])
-        save_columns_config('type.B', [], ['$.y'])
-        self.assertEqual(load_columns_config('type.A'), [{'expr': '$.x'}])
-        self.assertEqual(load_columns_config('type.B'), [{'expr': '$.y'}])
-
-    def test_load_malformed_entry(self):
-        set_line_config({COLUMN_CONFIG_NS: {'builtins.dict': 'not a list'}})
-        result = load_columns_config('builtins.dict')
-        self.assertIsNone(result)
+    def test_save_columns(self):
+        save_columns_config([], ["$['name']", "$['age']"])
+        self.assertEqual(take_line_config(),
+                         ([{'expr': "$['name']"}, {'expr': "$['age']"}], True))
 
     def test_init_model_loads_from_config(self):
-        set_line_config({COLUMN_CONFIG_NS: {'builtins.dict': ["$['age']", "$['name']"]}})
         lst = [{'name': 'Alice', 'age': 30}]
-        model = init_model(lst, mock_get_visualizer)
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=["$['age']", "$['name']"])
         self.assertEqual(model['display_mode'], 'table')
         self.assertEqual(list(model['columns']), ["$['age']", "$['name']"])
         # Reading is not a change.
@@ -2491,6 +2471,20 @@ class TestColumnConfig(unittest.TestCase):
         self.assertEqual(model['display_mode'], 'table')
         self.assertIn("$['name']", model['columns'])
         self.assertIn("$['age']", model['columns'])
+
+    def test_no_columns_saved_means_no_columns(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, slots_config=[])
+        self.assertEqual(list(model['columns']), [])
+
+    def test_a_column_edit_saves_the_lines_config(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['adding_column'] = True
+        update(make_column_mouse_event(repr(ColumnSelect(name="$['x']"))),
+               None, model, lst, mock_get_visualizer)
+        self.assertEqual(take_line_config(),
+                         ([{'expr': "$['name']"}, {'expr': "$['x']"}], True))
 
 
 class TestColumnVisualize(unittest.TestCase):
@@ -2790,9 +2784,7 @@ class TestNestedCollapsesToRepr(unittest.TestCase):
     def nested_model(self, value, gv=mock_get_visualizer):
         """A child model as a parent builds one: carrying the config path that
         says where under the root value it sits."""
-        return init_model(value, gv, config_path=[("$['tags']", 'builtins.str')],
-                          config_root_type='builtins.dict',
-                          config_root_ns=COLUMN_CONFIG_NS)
+        return init_model(value, gv, config_path=["$['tags']"])
 
     def test_nested_list_cell_renders_truncated_repr(self):
         out = self.render(self.PEOPLE)
@@ -6201,59 +6193,49 @@ _FINDALL_COL = "re.findall(r'[A-Z]{3}', ($), flags=re.M)"
 
 class TestNestedSlotsConfig(unittest.TestCase):
     """The list config is nested: a list-producing column does not re-apply the
-    type config to its cell sub-list (which would recurse forever); the sub-list
-    uses the column's explicitly-nested config or a non-recursive default."""
+    line's config to its cell sub-list (which would recurse forever); the
+    sub-list uses the column's explicitly-nested config or a non-recursive
+    default."""
 
     def _findall_key(self, row=0):
         return f"{row}\x00{_FINDALL_COL}"
 
     def test_list_of_str_with_list_column_does_not_recurse(self):
         slots = [{'expr': '$'}, {'expr': _FINDALL_COL}]
-        with patch('table_visualizer.load_columns_config', return_value=slots):
-            # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
-            model = init_model(['ABCdef'], mock_get_visualizer)
+        # 'ABCdef' -> re.findall -> ['ABC'] -> ['ABC'] -> ... pre-fix recursion
+        model = init_model(['ABCdef'], mock_get_visualizer, slots_config=slots)
         self.assertEqual(list(model['columns']), ['$', _FINDALL_COL])
         # The re.findall cell is a list[str]; with no nested config it must fall
-        # back to the default single column, NOT re-read builtins.str's config.
+        # back to the default single column, NOT re-read the line's config.
         child = model['children'][self._findall_key()]
         self.assertEqual(list(child['columns']), ['$'])
 
     def test_explicit_nested_children_applies(self):
         slots = [
             {'expr': '$'},
-            {'expr': _FINDALL_COL,
-             'children': {'builtins.str': [{'expr': '$.lower()'}]}},
+            {'expr': _FINDALL_COL, 'children': [{'expr': '$.lower()'}]},
         ]
-        with patch('table_visualizer.load_columns_config', return_value=slots):
-            model = init_model(['ABCdef'], mock_get_visualizer)
+        model = init_model(['ABCdef'], mock_get_visualizer, slots_config=slots)
         child = model['children'][self._findall_key()]
         self.assertEqual(list(child['columns']), ['$.lower()'])
 
     def test_root_model_stores_config_fields(self):
-        slots = [{'expr': '$'}]
-        with patch('table_visualizer.load_columns_config', return_value=slots):
-            model = init_model(['x'], mock_get_visualizer)
-        self.assertEqual(model['_config_root_type'], 'builtins.str')
-        self.assertEqual(model['_config_root_ns'],
-                         table_visualizer.COLUMN_CONFIG_NS)
+        model = init_model(['x'], mock_get_visualizer, slots_config=[{'expr': '$'}])
         self.assertEqual(model['_config_path'], [])
+        self.assertTrue(model['_config_persist'])
         self.assertEqual(model['_slot_children'], {})
 
-    def test_nested_child_carries_path_and_root(self):
-        slots = [{'expr': _FINDALL_COL,
-                  'children': {'builtins.str': [{'expr': '$'}]}}]
-        with patch('table_visualizer.load_columns_config', return_value=slots):
-            model = init_model(['ABCdef'], mock_get_visualizer)
+    def test_nested_child_carries_path(self):
+        slots = [{'expr': _FINDALL_COL, 'children': [{'expr': '$'}]}]
+        model = init_model(['ABCdef'], mock_get_visualizer, slots_config=slots)
         child = model['children'][self._findall_key()]
-        self.assertEqual(child['_config_root_type'], 'builtins.str')
-        self.assertEqual(child['_config_path'],
-                         [(_FINDALL_COL, 'builtins.str')])
+        self.assertEqual(child['_config_path'], [_FINDALL_COL])
+        self.assertTrue(child['_config_persist'])
 
     def test_cyclic_list_is_depth_capped_not_recursion_error(self):
         a = []
         a.append(a)  # a == [a]; would recurse forever via auto-detected columns
-        with patch('table_visualizer.load_columns_config', return_value=None):
-            model = init_model(a, mock_get_visualizer)  # must not RecursionError
+        model = init_model(a, mock_get_visualizer)  # must not RecursionError
         # Walk down the single nested child chain; a leaf must be marked too deep.
         m, depth, hit_cap = model, 0, False
         while m.get('children'):
@@ -6280,12 +6262,11 @@ class TestNestedConfigIsOfferedBySignature(unittest.TestCase):
         def can_visualize(self, value):
             return True
         def init_model(self, value, get_visualizer=None, eval_in_scope=None,
-                       var_and_exp=None, slots_config=None, config_root_type=None,
-                       config_root_ns=None, config_path=None):
+                       var_and_exp=None, slots_config=None, config_path=None,
+                       persist=True):
             self.calls.append({'slots_config': slots_config,
-                               'config_root_type': config_root_type,
-                               'config_root_ns': config_root_ns,
-                               'config_path': config_path})
+                               'config_path': config_path,
+                               'persist': persist})
             return {'handledKeys': []}
         def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
             return f'<span>{html.escape(repr(value))}</span>'
@@ -6310,22 +6291,17 @@ class TestNestedConfigIsOfferedBySignature(unittest.TestCase):
 
     def test_child_naming_the_params_receives_the_nested_config(self):
         cell_vis = self.RecordingNestedVis()
-        slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('table_visualizer.load_columns_config', return_value=slots):
-            init_model(['ABC'], self._get_visualizer_for(cell_vis))
-        self.assertEqual(len(cell_vis.calls), 1)
-        call = cell_vis.calls[0]
-        self.assertEqual(call['slots_config'], [{'expr': '$.lower()'}])
-        self.assertEqual(call['config_root_type'], 'builtins.str')
-        self.assertEqual(call['config_root_ns'],
-                         table_visualizer.COLUMN_CONFIG_NS)
-        self.assertEqual(call['config_path'], [('$', 'builtins.str')])
+        slots = [{'expr': '$', 'children': [{'expr': '$.lower()'}]}]
+        init_model(['ABC'], self._get_visualizer_for(cell_vis), slots_config=slots)
+        self.assertEqual(cell_vis.calls, [{'slots_config': [{'expr': '$.lower()'}],
+                                           'config_path': ['$'],
+                                           'persist': True}])
 
     def test_child_not_naming_the_params_is_not_handed_them(self):
         # Would TypeError if the nesting kwargs were passed regardless.
-        slots = [{'expr': '$', 'children': {'builtins.str': [{'expr': '$.lower()'}]}}]
-        with patch('table_visualizer.load_columns_config', return_value=slots):
-            model = init_model(['ABC'], self._get_visualizer_for(self.PlainVis()))
+        slots = [{'expr': '$', 'children': [{'expr': '$.lower()'}]}]
+        model = init_model(['ABC'], self._get_visualizer_for(self.PlainVis()),
+                           slots_config=slots)
         self.assertEqual(model['children'][f'0\x00$'], {'handledKeys': []})
 
 
@@ -6341,10 +6317,9 @@ class TestNestedSlotsSave(unittest.TestCase):
             update(event, None, model, lst, mock_get_visualizer)
         mock_save.assert_called_once()
         args = mock_save.call_args.args
-        # New signature: (root_type, path, exprs, [namespace])
-        self.assertEqual(args[0], 'builtins.dict')
-        self.assertEqual(args[1], [])
-        self.assertIn("$['x']", args[2])
+        # Signature: (path, exprs)
+        self.assertEqual(args[0], [])
+        self.assertIn("$['x']", args[1])
 
 
 class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
@@ -6365,9 +6340,8 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         eval_in_scope = lambda code: eval(code, {'re': re, 'rows': rows})
         get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
 
-        with patch('table_visualizer.load_columns_config', return_value=[column]):
-            model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
-                               var_and_exp=('rows', 'rows'))
+        model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
+                           var_and_exp=('rows', 'rows'), slots_config=[column])
         key = f'0{CELL_KEY_SEP}{column}'
         model['focused_child'] = key
         cell = model['children'][key]
@@ -12007,11 +11981,10 @@ class TestAggAnswerIsAKeptChild(unittest.TestCase):
     def test_the_answer_is_a_nested_visualizer(self):
         self.assertTrue(self.answer_model()['_config_path'])
 
-    def test_the_answer_has_no_root_type_to_save_against(self):
+    def test_the_answer_is_not_saved(self):
         """An answer is not a place in the value's shape, so a column written
-        inside one has nowhere to be saved -- see save_slots_at_path, which
-        reads a missing root type as "don't"."""
-        self.assertIsNone(self.answer_model()['_config_root_type'])
+        inside one has nowhere to be saved -- see _answer_nesting_kwargs."""
+        self.assertFalse(self.answer_model()['_config_persist'])
 
     def test_an_event_does_not_swap_in_a_root_model(self):
         """The kept model is what route_child_event finds, so its fallback --
@@ -12024,7 +11997,7 @@ class TestAggAnswerIsAKeptChild(unittest.TestCase):
         model, _ = update(ev, ('nums', 'nums'), model, COMPUTE_LIST,
                           mock_get_visualizer)  # and this one is dispatched
         child = model['children'][self.key()]
-        self.assertIsNone(child['_config_root_type'])
+        self.assertFalse(child['_config_persist'])
         self.assertTrue(child['_config_path'])
 
     def test_a_list_answer_draws_its_repr_until_it_is_focused(self):
@@ -12071,9 +12044,8 @@ class TestAggAnswerIsAKeptChild(unittest.TestCase):
 class TestAggAnswerSavesNothing(unittest.TestCase):
     """The persistence end of it: an answer's columns are its own and go nowhere.
 
-    Left as it was, a column added inside `sorted($)` over a list of ints was
-    saved under `builtins.int` -- the key a plain list of ints on this line
-    reads its columns back out of, so the list itself opened with it.
+    Left as it was, a column added inside `sorted($)` would be saved as if it
+    were the list's own, and the list itself would open with it.
     """
 
     def setUp(self):
@@ -12096,8 +12068,7 @@ class TestAggAnswerSavesNothing(unittest.TestCase):
         child = model['children'][_agg_child_key('$', 'sorted($)', '$')]
         _col_add(child['columns'], 'len(str($))')
         _save_slots(child)
-        self.assertIsNone(load_columns_config('builtins.int'))
-        self.assertEqual(take_line_config(), ({}, False))
+        self.assertEqual(take_line_config(), (None, False))
 
 
 class TestAggHoles(unittest.TestCase):
@@ -15797,7 +15768,7 @@ class TestGroupByClick(unittest.TestCase):
 
     def test_setdefault_is_a_builtin_so_it_needs_no_import(self):
         _, commands = self.click(GroupByClick(col="$['b']"))
-        self.assertEqual(len(commands[0]), 2)
+        self.assertEqual(commands[0][2], ())  # no imports; the config rides fourth
 
     def test_it_groups_the_whole_list_rather_than_the_lines_expression(self):
         span = ("sorted(json.load(f), key=lambda item: item['b'])", 4, 7, 4, 56)
@@ -15823,73 +15794,61 @@ class TestGroupByClick(unittest.TestCase):
         self.assertEqual(commands, [])
 
 
-class TestGroupBySeedsTheGroupedTable(unittest.TestCase):
-    """The grouped dict lands on a line of its own, as a type nothing has ever
-    configured -- and what it wants is not what detection would say, which
-    reads a group's own length as its fields.
+class TestGroupByLeavesTheGroupedTableItsColumns(unittest.TestCase):
+    """The grouped dict lands on a line of its own, and what it wants is not
+    what detection would say, which reads a group's own length as its fields.
 
-    So the click leaves the columns behind it. A group holds whole ROWS of the
-    table being grouped, so inside `*$v` the element is a row and the columns
-    that read one read the other: they come along as they are written."""
+    So the click sends the columns along with the line, as the config the new
+    line opens with. A group holds whole ROWS of the table being grouped, so
+    inside `*$v` the element is a row and the columns that read one read the
+    other: they come along as they are written."""
 
     ROWS = [['1', 'Alice', 'eng'], ['2', 'Bob', 'mkt'], ['5', 'Eva', 'eng']]
 
-    def seed(self, columns, index, lst=None, loaded=None, source='data'):
+    def config(self, columns, index, lst=None, source='data'):
+        """The config the Group By click's NewCode carries (None for none)."""
         lst = self.ROWS if lst is None else lst
         lst, model = group_by_model(lst, columns=columns, source=source)
-        with patch('table_visualizer.load_columns_config',
-                   return_value=loaded), \
-             patch('table_visualizer.save_columns_config') as saved:
-            update(make_column_mouse_event(repr(GroupByClick(col=col_at(model, index)))),
-                   ('data', 'data'), model, lst, mock_get_visualizer,
-                   eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
-        return saved
+        _, commands = update(
+            make_column_mouse_event(repr(GroupByClick(col=col_at(model, index)))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+        new_code = [c for c in commands if is_new_code(c)]
+        if not new_code:
+            return None
+        self.assertEqual(len(new_code), 1)
+        return new_code[0][3] if len(new_code[0]) > 3 else None
 
-    def test_it_seeds_the_key_the_size_and_the_group_spread(self):
-        saved = self.seed(['$[0]', '$[1]', '$[2]'], index=2)
+    def test_it_sends_the_key_the_size_and_the_group_spread(self):
         self.assertEqual(
-            saved.call_args[0][:3],
-            ('builtins.str->builtins.list', [],
-             ['$k', 'len($v)', {'expr': '*$v', 'cols': ['$[0]', '$[1]']}]))
+            self.config(['$[0]', '$[1]', '$[2]'], index=2),
+            ['$k', 'len($v)', {'expr': '*$v', 'cols': ['$[0]', '$[1]']}])
 
     def test_the_column_grouped_on_is_the_key_rather_than_a_column_again(self):
         # It has one value per group by construction, and $k already says it.
-        saved = self.seed(['$[0]', '$[2]'], index=1)
-        self.assertEqual(saved.call_args[0][2][2]['cols'], ['$[0]'])
-
-    def test_the_key_type_is_the_columns_own_rather_than_the_rows(self):
-        # The keys are what the column answers, and the value is always a list.
-        saved = self.seed(['int($[0])'], index=0)
-        self.assertEqual(saved.call_args[0][0], 'builtins.int->builtins.list')
-
-    def test_a_type_someone_has_already_configured_is_left_alone(self):
-        # A seed is a default for a type nobody has said anything about.
-        saved = self.seed(['$[0]', '$[2]'], index=1, loaded=['$k'])
-        saved.assert_not_called()
+        self.assertEqual(self.config(['$[0]', '$[2]'], index=1)[2]['cols'], ['$[0]'])
 
     def test_a_column_that_names_the_row_number_stays_behind(self):
         # `$i` is the row's number in the list it was read from, and an element
         # of a group has no such number; `$$` named that list itself.
-        saved = self.seed(['$i', 'len($$)', '$[0]', '$[2]'], index=3)
-        self.assertEqual(saved.call_args[0][2][2]['cols'], ['$[0]'])
+        self.assertEqual(self.config(['$i', 'len($$)', '$[0]', '$[2]'], index=3)[2]['cols'],
+                         ['$[0]'])
 
     def test_a_splat_brings_its_own_sub_columns_along(self):
         # The leaves come first in the menu-target space, so `$[2]` is 1 here:
         # the splat carrying a sub-column is not itself a leaf.
-        saved = self.seed({'*$[1]': {'cols': {'$[0]': {}}}, '$[2]': {}},
-                          index=1)
-        self.assertEqual(saved.call_args[0][2][2]['cols'],
-                         [{'expr': '*$[1]', 'cols': ['$[0]']}])
+        self.assertEqual(
+            self.config({'*$[1]': {'cols': {'$[0]': {}}}, '$[2]': {}}, index=1)[2]['cols'],
+            [{'expr': '*$[1]', 'cols': ['$[0]']}])
 
     def test_a_dicts_rows_are_pairs_so_its_columns_stay_behind(self):
         # Grouping a dict answers with lists of the pairs `.items()` gives, and
         # a sigil binds to the row it was written for rather than to a pair.
-        saved = self.seed(['$k', '$v'], index=1, lst={'a': 1, 'b': 2})
-        self.assertEqual(saved.call_args[0][2],
+        self.assertEqual(self.config(['$k', '$v'], index=1, lst={'a': 1, 'b': 2}),
                          ['$k', 'len($v)', '*$v'])
 
-    def test_a_click_that_writes_no_line_seeds_nothing(self):
-        self.seed(['$[0]'], index=0, source=None).assert_not_called()
+    def test_a_click_that_writes_no_line_sends_nothing(self):
+        self.assertIsNone(self.config(['$[0]'], index=0, source=None))
 
 
 # === Convert Type ===

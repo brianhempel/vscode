@@ -27,10 +27,10 @@ COLUMN CONFIGURATION
 Columns shown in the table are configurable and persisted:
 
 1. THE LINE'S #%click COMMENT (see visualizer_utils, "Per-line config"):
-   - Under the 'table' namespace, JSON mapping {item_type_key: [slot, ...]}
+   - A slot list; the runner hands it to init_model as `slots_config`
    - Highest priority: user-customized columns, for this line only
-   - The runner installs it before init_model runs (load_root_slots reads it)
-     and turns a save into a rewrite of the comment
+   - A save goes into the line's config store; the runner turns it into a
+     rewrite of the comment
 
 2. Auto-detection via _detect_table_columns:
    - Samples items and returns union of fields if all support get_fields
@@ -65,11 +65,11 @@ from visualizer_utils import (
     eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs, PyExp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
-    new_code_command, imports_for_code, AddImports,
+    new_code_command, is_new_code, imports_for_code, AddImports,
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
     parse_slot_cols,
     get_full_class_name, truncate_str, truncate_repr, wrap_drag_grab,
-    config_key, parse_slots, load_root_slots, save_slots_at_path,
+    parse_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
     nerd_font_icon, render_tool_toolbar,
     render_expand_toggle, EXPANDED_PANE_MAX_HEIGHT,
@@ -518,37 +518,28 @@ class ChangeSourceExpr:
     end_col: int
 
 
-# === Saved config (the line's #%click comment, 'table' namespace) ===
+# === Saved config (the line's #%click comment) ===
 
-COLUMN_CONFIG_NS = 'table'
-
-
-def load_columns_config(type_key: str):
-    """Load the saved slot list for an item type from the line's config (or None).
-
-    Kept as the single root-read entry point so tests can patch it for isolation.
-    Returns the raw slot list (bare strings and/or {"expr", "children"} dicts).
-    """
-    return load_root_slots(COLUMN_CONFIG_NS, type_key)
-
-
-def save_columns_config(root_type, path, exprs, namespace=COLUMN_CONFIG_NS):
+def save_columns_config(path, exprs):
     """Path-scoped writer: persist a (sub-)table's column exprs at its location.
 
-    `path` is the list of (slot_expr, child_type) steps from the root type.
+    `path` is the list of slot exprs from the root. Kept as the single write
+    entry point so tests can patch it for isolation.
     """
-    save_slots_at_path(namespace, root_type, path, exprs)
+    save_slots_at_path(path, exprs)
 
 
 def _save_slots(model: dict) -> None:
     """Persist a table model's columns at its config path (preserves nested
-    children of surviving columns and other types already saved)."""
-    save_columns_config(
-        model.get('_config_root_type'),
-        model.get('_config_path') or [],
-        _slots_from_columns(model.get('columns') or {}),
-        model.get('_config_root_ns') or COLUMN_CONFIG_NS,
-    )
+    children of surviving columns and other branches already saved).
+
+    Not for a table that has nowhere to be saved -- an answer the table worked
+    out (see _answer_nesting_kwargs).
+    """
+    if not model.get('_config_persist', True):
+        return
+    save_columns_config(model.get('_config_path') or [],
+                        _slots_from_columns(model.get('columns') or {}))
 
 
 # A default that is not None, since None is a real element: a splat padded
@@ -2314,13 +2305,8 @@ def _drop_subcolumn(model, col: str, expr: str, eval_in_scope=None) -> None:
 
 
 def _save_columns(model) -> None:
-    """Persist a change to which columns the table has.
-
-    Only where there is a type to file them under: a nested table renders from
-    the slots its parent handed down and has nothing of its own to write.
-    """
-    if model.get('_config_root_type'):
-        _save_slots(model)
+    """Persist a change to which columns the table has."""
+    _save_slots(model)
 
 
 def _save_subcolumns(model, col: str) -> None:
@@ -3994,10 +3980,10 @@ def _group_by_expr(col: str, source_expr: str,
             f'])[0]')
 
 
-# The grouped dict lands on a line of its own as a type nothing has ever
-# configured, and what detection would say about one is not what it wants: it
-# asks a dict's VALUES for their fields, and a group answers with a position per
-# element it happens to hold. So the click leaves the columns behind it instead.
+# The grouped dict lands on a line of its own, and what detection would say
+# about one is not what it wants: it asks a dict's VALUES for their fields, and
+# a group answers with a position per element it happens to hold. So the click
+# sends the columns along with the line, as the `#%click` comment it opens with.
 _GROUPED_COLUMNS = ['$k', 'len($v)']
 
 
@@ -4029,39 +4015,6 @@ def _grouped_slots(col: str, columns) -> list:
     splat = f'{SPLAT}$v'
     return _GROUPED_COLUMNS + [{'expr': splat, 'cols': _slots_from_columns(subs)}
                                if subs else splat]
-
-
-def _grouped_type_key(col: str, lst, eval_in_scope) -> 'str | None':
-    """The type key the grouped dict will be drawn under: the column's own
-    values are its keys, and a group is always a list.
-
-    Read off the first row, which is the entry `config_key` will read when the
-    dict is drawn -- and spelled the way it spells it, so a seed cannot land
-    under a key nothing goes looking for.
-    """
-    if not lst:
-        return None
-    row = _row_at(lst, 0)
-    try:
-        key = eval_dollar_expr(col, row.item, eval_in_scope, outer=(lst,),
-                               bindings=row.bindings)
-    except Exception:
-        return None
-    return f'{get_full_class_name(key)}->{get_full_class_name([])}'
-
-
-def _seed_grouped_columns(col: str, lst, model, eval_in_scope) -> None:
-    """Leave the grouped dict the columns it wants, for the line just written.
-
-    A seed rather than a save: it is written only where nothing is configured
-    for that type, so it can never overwrite what the user has already said
-    about some other dict of lists.
-    """
-    type_key = _grouped_type_key(col, lst, eval_in_scope)
-    if type_key is None or load_columns_config(type_key) is not None:
-        return
-    save_columns_config(type_key, [],
-                            _grouped_slots(col, model.get('columns')))
 
 
 # =============================================================================
@@ -7048,23 +7001,16 @@ _SEARCH_DEFAULTS = {
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
-def _resolve_columns(lst, get_visualizer, slots_config, config_path):
-    """Return (columns, slot_children) for a list at this nesting position.
+def _resolve_columns(lst, get_visualizer, slots_config):
+    """Return (columns, slot_children) for a list.
 
-    At the root (config_path is None) the line's config is read by item type. When
-    nested, only the parent-supplied slots_config is used -- the type config is
-    NOT re-read, which is what breaks the infinite recursion. A missing config
-    falls back to auto-detected columns (or ['$']).
+    `slots_config` is what was saved for it: the line's comment at the root,
+    the parent's slot `children` when nested. A missing config falls back to
+    auto-detected columns (or ['$']).
     """
-    if config_path is None:
-        type_key = config_key(lst)
-        loaded = load_columns_config(type_key) if type_key else None
-    else:
-        loaded = slots_config
-
-    if loaded is not None:
-        exprs, slot_children = parse_slots(loaded)
-        return _columns_from_slots(exprs, parse_slot_cols(loaded)), slot_children
+    if slots_config is not None:
+        exprs, slot_children = parse_slots(slots_config)
+        return _columns_from_slots(exprs, parse_slot_cols(slots_config)), slot_children
 
     exprs = _detect_table_columns(lst, get_visualizer)
     if exprs is None:
@@ -7074,16 +7020,13 @@ def _resolve_columns(lst, get_visualizer, slots_config, config_path):
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
-               slots_config=None, config_root_type=None, config_root_ns=None,
-               config_path=None):
-    is_root = config_path is None
-    root_type = config_key(lst) if is_root else config_root_type
-    root_ns = COLUMN_CONFIG_NS if is_root else config_root_ns
-    path = [] if is_root else config_path
+               slots_config=None, config_path=None, persist=True):
+    """`slots_config`, `config_path` and `persist` are the nesting parameters
+    -- see child_nesting_kwargs. At the root the runner passes the line's
+    saved slots and an empty path."""
     config_fields = {
-        '_config_root_type': root_type,
-        '_config_root_ns': root_ns,
-        '_config_path': path,
+        '_config_path': list(config_path or []),
+        '_config_persist': persist,
     }
 
     if get_visualizer is None:
@@ -7097,15 +7040,14 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
-    columns, slot_children = _resolve_columns(
-        lst, get_visualizer, slots_config, config_path)
+    columns, slot_children = _resolve_columns(lst, get_visualizer, slots_config)
     config_fields['_slot_children'] = slot_children
     # A fact about the value, not display state -- see _model_binds.
     config_fields['_is_dict'] = isinstance(lst, dict)
 
     # Depth backstop: beyond the cap, stop building nested children entirely
     # (renders as a truncated repr) so cyclic values can't RecursionError.
-    if too_deep(path):
+    if too_deep(config_fields['_config_path']):
         return {
             'children': {}, 'handledKeys': list(_OWN_KEYS), 'display_mode': 'table',
             'columns': columns, '_source_expr': source_expr, '_too_deep': True,
@@ -7134,7 +7076,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                 cell_vis = get_visualizer(cell_value)
                 # A cell visualizer that doesn't name the nesting params in its
                 # init_model gets {} back and isn't handed them.
-                extra = child_nesting_kwargs(config_fields, col, cell_value,
+                extra = child_nesting_kwargs(config_fields, col,
                                              cell_vis.init_model)
                 children[f"{row.key}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
                     cell_value, get_visualizer, eval_in_scope=eval_in_scope, **extra)
@@ -9257,19 +9199,17 @@ def _agg_child_nesting(model, key: str, value, child_init_model) -> dict:
     Nested, like a cell's: it is drawn inside somebody else's table and so it
     draws small until it is focused, whatever it holds.
 
-    But with no root type, which is the one place it parts from a cell. A cell
-    holds a value the config can describe the way to -- this column of this
-    type -- and saves its own columns at that path. An answer holds something
-    the table WORKED OUT, which is nowhere in the shape of the value and so has
-    no path to be saved at; a missing root type is what save_slots_at_path reads
-    as "don't". Left inheriting the root's, an answer would read and rewrite the
-    columns every list of its element type opens with.
+    But unsaved, which is the one place it parts from a cell. A cell holds a
+    value the config can describe the way to -- this column -- and saves its
+    own columns at that path. An answer holds something the table WORKED OUT,
+    which is nowhere in the shape of the value and so has no path to be saved
+    at. Left saving, an answer would write its columns over the column's own.
     """
-    extra = child_nesting_kwargs(model, key, value, child_init_model)
+    extra = child_nesting_kwargs(model, key, child_init_model)
     # Only if the child asked for it -- an older visualizer that names none of
     # these gets {} back and must keep getting it.
-    if 'config_root_type' in extra:
-        extra['config_root_type'] = None
+    if 'persist' in extra:
+        extra['persist'] = False
     return extra
 
 
@@ -9979,7 +9919,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 cell_vis = get_visualizer(cell_value)
                 cell_model = children.get(composite_key)
                 if cell_model is None:
-                    extra = child_nesting_kwargs(model, col, cell_value,
+                    extra = child_nesting_kwargs(model, col,
                                                  cell_vis.init_model)
                     cell_model = cell_vis.init_model(cell_value, get_visualizer,
                                                      eval_in_scope=eval_in_scope, **extra)
@@ -10156,8 +10096,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     if model is None:
         model = {'children': {}, 'handledKeys': [], 'display_mode': 'table',
                  'columns': {'$': {}},
-                 '_slot_children': {}, '_config_root_type': None,
-                 '_config_root_ns': None, '_config_path': [],
+                 '_slot_children': {}, '_config_path': [],
+                 '_config_persist': True,
                  **_COLUMN_MGMT_DEFAULTS, **_SEARCH_DEFAULTS}
 
     # The span only, and only when this run brought one: see _adopt_source.
@@ -10236,7 +10176,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         for cmd in commands]
 
         filtered_commands: List[Any] = []
-        type_key = config_key(value) if value else None
+        has_rows = bool(value)
         for cmd in commands:
             # Code out of a cell becomes a column of this table, since a cell's
             # expression is one every row answers. An answer's isn't, so its
@@ -10251,11 +10191,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # The declaration is still asked for now, though: the column is
             # evaluated in the user's scope on every run, so until the file has
             # the import there is nothing for the column to show.
-            if isinstance(cmd, tuple) and len(cmd) in (2, 3) and not is_agg:
+            if is_new_code(cmd) and not is_agg:
                 _add_derived_column(new_model, cell_col, cmd[1])
                 if len(cmd) > 2 and cmd[2]:
                     filtered_commands.append(AddImports(imports=tuple(cmd[2])))
-                if type_key:
+                if has_rows:
                     _save_slots(new_model)
             else:
                 filtered_commands.append(cmd)
@@ -10263,7 +10203,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         return (new_model, filtered_commands)
 
     commands: List[Any] = []
-    type_key = config_key(value) if value else None
+    has_rows = bool(value)
     model['_scroll_to_match'] = False
     # A one-shot request, cleared here so it can't pull focus into a column
     # search box on some later, unrelated render.
@@ -10330,7 +10270,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _add_beside(model, name)
                 model['adding_column'] = False
                 model['column_input_value'] = ''
-                if type_key:
+                if has_rows:
                     _save_slots(model)
             elif model.get('editing_column') is not None:
                 old_name = _named_column(model, model['editing_column'])
@@ -10338,7 +10278,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _rename_column(model, old_name, name, eval_in_scope)
                 model['editing_column'] = None
                 model['column_input_value'] = ''
-                if type_key:
+                if has_rows:
                     _save_slots(model)
 
         case ColumnClick(col=named):
@@ -10365,7 +10305,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 if model.get('editing_column') == removed_col:
                     model['editing_column'] = None
                     model['column_input_value'] = ''
-                if type_key:
+                if has_rows:
                     _save_slots(model)
 
         case ColumnDragStart(col=named):
@@ -10396,7 +10336,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 if _move_target(model['columns'], from_target, to_target):
                     # Column order is term order in the composed search.
                     _recompose_search(model, eval_in_scope)
-                    if type_key:
+                    if has_rows:
                         _save_slots(model)
             model['column_drag_from'] = None
             model['column_drag_over'] = None
@@ -10439,7 +10379,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 if model.get('adding_column'):
                     if commit_val:
                         _add_beside(model, commit_val)
-                        if type_key:
+                        if has_rows:
                             _save_slots(model)
                     model['adding_column'] = False
                     model['column_input_value'] = ''
@@ -10448,7 +10388,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     old_name = _named_column(model, model['editing_column'])
                     if commit_val and old_name is not None and _rename_column(
                             model, old_name, commit_val, eval_in_scope):
-                        if type_key:
+                        if has_rows:
                             _save_slots(model)
                     model['editing_column'] = None
                     model['column_input_value'] = ''
@@ -10592,13 +10532,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _has_var, base = _name_context_for_source(source_expr)
                 # setdefault and the walrus are the language's own, so the line
                 # asks for nothing the column it groups by hasn't already.
+                # The dict the line makes has no columns of its own yet, and
+                # the ones to want are the ones in hand.
                 commands.append(new_code_command(
                     (f'{base}_grouped',
                      _group_by_expr(col, source_expr, _model_binds(model))),
-                    code_imports))
-                # The dict the line makes has no columns of its own yet, and
-                # the ones to want are the ones in hand.
-                _seed_grouped_columns(col, value, model, eval_in_scope)
+                    code_imports,
+                    config=_grouped_slots(col, model.get('columns'))))
 
         # One line written, like Group By, so the menu closes behind it. The
         # code comes back out of the catalog the menu drew itself from rather
@@ -10629,7 +10569,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _seg, converted = _convert_target(col, wanted)
                 if _convert_column(model, col, wanted, eval_in_scope):
                     _repoint_column_menus(model, col, converted)
-                    if type_key:
+                    if has_rows:
                         _save_slots(model)
 
         # One column written, unlike checking a box, which invites the next --
@@ -10646,7 +10586,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     siblings = _siblings_of(model['columns'], col)
                     _col_insert(siblings, seg,
                                 list(siblings).index(col.split(SUBCOL_SEP)[-1]) + 1)
-                    if type_key:
+                    if has_rows:
                         _save_slots(model)
 
         # Compute leaves the menu open for the same reason the tally does:
@@ -10688,7 +10628,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     needs = imports_for_code(written) if written else ()
                     if needs:
                         commands.append(AddImports(imports=needs))
-                if changed and type_key:
+                if changed and has_rows:
                     _save_slots(model)
 
         case ComputeHoleInput(col=named, expr=expr, hole=hole, value=text):
@@ -10708,7 +10648,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     # level belongs to the column that box wrote.
                     exprs.append(edited)
                 _set_column_computes(model, col, exprs)
-                if type_key:
+                if has_rows:
                     _save_slots(model)
 
         case ComputeExprKeyDown():

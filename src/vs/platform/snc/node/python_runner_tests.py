@@ -39,7 +39,7 @@ from python_runner import (
 )
 # python_runner puts the built-in visualizers on the path.
 from visualizer_utils import (py_exp_attrs, AddImports, UncaughtError,
-                              load_root_slots, save_slots_at_path,
+                              save_slots_at_path,
                               format_config_comment, config_sig)
 
 
@@ -437,6 +437,36 @@ class TestBuildNewCodeEditsReportsHeaderLines(unittest.TestCase):
         edits = _build_new_code_edits("xs = [1, 2]\n", 1, "found",
                                       "re.findall(r'a', s)")
         self.assertEqual(len(edits), 1)
+
+
+class TestNewCodeConfig(unittest.TestCase):
+    """A visualizer can send the columns a new line opens with: they land as
+    a `#%click` comment above the statement."""
+
+    def test_the_comment_goes_in_above_the_statement(self):
+        edits = _build_new_code_edits("xs = [1, 2]\n", 1, "grouped", "group(xs)",
+                                      config=['$k', 'len($v)'])
+        self.assertEqual(edits, [{
+            'type': 'insert', 'afterLine': 1,
+            'text': format_config_comment(['$k', 'len($v)']) + '\ngrouped = group(xs)',
+            'headerLines': 1, 'leadingLines': 1}])
+
+    def test_the_comment_takes_the_statements_indentation(self):
+        edits = _build_new_code_edits("if True:\n    xs = [1]\n", 2, "g", "f(xs)",
+                                      config=['$'])
+        self.assertEqual(edits[0]['text'].split('\n')[0],
+                         '    ' + format_config_comment(['$']))
+
+    def test_no_config_means_no_comment(self):
+        edits = _build_new_code_edits("xs = [1]\n", 1, "g", "f(xs)")
+        self.assertNotIn('leadingLines', edits[0])
+        self.assertEqual(edits[0]['text'], 'g = f(xs)')
+
+    def test_the_command_carries_it_out(self):
+        dicts = _commands_to_dicts([('g', 'f(xs)', (), ['$'])], line=1,
+                                   idx_in_line=0, model=None, source_code="xs = [1]\n")
+        self.assertEqual(dicts[0]['edits'][0]['leadingLines'], 1)
+        self.assertEqual(dicts[0]['imports'], [])
 
 
 class TestNewCodeImports(unittest.TestCase):
@@ -915,18 +945,18 @@ class TestConfigComment(unittest.TestCase):
     asks the editor to rewrite it."""
 
     class _Vis:
-        """Reads its config at init; saves on any event."""
+        """Is handed its config at init; saves on any event."""
 
         def can_visualize(self, value):
             return True
 
         def init_model(self, value, get_visualizer, eval_in_scope=None,
-                       var_and_exp=None):
-            return {'loaded': load_root_slots('t', 'K'), 'inits': 1}
+                       var_and_exp=None, slots_config=None, config_path=None):
+            return {'loaded': slots_config, 'path': config_path, 'inits': 1}
 
         def update(self, event, var_and_exp, model, value, get_visualizer=None,
                    eval_in_scope=None):
-            save_slots_at_path('t', 'K', [], ['$.x'])
+            save_slots_at_path([], ['$.x'])
             return model, []
 
         def visualize(self, value, model, get_visualizer, eval_in_scope,
@@ -955,19 +985,19 @@ class TestConfigComment(unittest.TestCase):
         cmds = [m['command'] for m in msgs if m.get('type') == 'command']
         return item, cmds
 
-    SRC = '#%click {"t": {"K": ["$.a"]}}\nxs = [1]\n'
+    SRC = '#%click ["$.a"]\nxs = [1]\n'
 
     def test_the_comment_is_the_visualizers_config(self):
         item, cmds = self._log(self.SRC, 2)
         self.assertEqual(item['model']['loaded'], ['$.a'])
-        self.assertEqual(item['model']['_config_sig'],
-                         config_sig({'t': {'K': ['$.a']}}))
+        self.assertEqual(item['model']['path'], [])
+        self.assertEqual(item['model']['_config_sig'], config_sig(['$.a']))
         self.assertEqual(cmds, [])
 
     def test_a_line_with_no_comment_has_no_config(self):
         item, cmds = self._log('xs = [1]\n', 1)
         self.assertIsNone(item['model']['loaded'])
-        self.assertEqual(item['model']['_config_sig'], config_sig({}))
+        self.assertEqual(item['model']['_config_sig'], config_sig(None))
         self.assertEqual(cmds, [])
 
     def test_a_save_asks_the_editor_to_rewrite_the_comment(self):
@@ -975,7 +1005,7 @@ class TestConfigComment(unittest.TestCase):
         cached = {'line': 2, 'visIndex': 0, 'model': item['model'],
                   'events': [{'pythonEventStr': 'X', 'eventJSON': {}}]}
         item, cmds = self._log(self.SRC, 2, [cached])
-        expected = {'t': {'K': [{'expr': '$.x'}]}}
+        expected = [{'expr': '$.x'}]
         self.assertEqual(cmds, [{
             'type': 'SetConfigComment',
             'comment': format_config_comment(expected),
@@ -994,13 +1024,13 @@ class TestConfigComment(unittest.TestCase):
         item, _ = self._log(self.SRC, 2)
         model = dict(item['model'], inits=2)
         cached = {'line': 2, 'visIndex': 0, 'model': model}
-        edited = '#%click {"t": {"K": ["$.b"]}}\nxs = [1]\n'
+        edited = '#%click ["$.b"]\nxs = [1]\n'
         item, _ = self._log(edited, 2, [cached])
         self.assertEqual(item['model']['inits'], 1)
         self.assertEqual(item['model']['loaded'], ['$.b'])
 
     def test_the_config_does_not_leak_to_the_next_line(self):
-        src = '#%click {"t": {"K": ["$.a"]}}\nxs = [1]\nys = [2]\n'
+        src = '#%click ["$.a"]\nxs = [1]\nys = [2]\n'
         item, _ = self._log(src, 3)
         self.assertIsNone(item['model']['loaded'])
 

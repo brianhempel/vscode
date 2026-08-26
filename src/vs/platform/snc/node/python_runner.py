@@ -38,7 +38,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -240,11 +240,16 @@ def _detect_insertion_indent(lines: List[str], line: int) -> str:
     return current_indent_str
 
 
-def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str) -> List[Dict[str, Any]]:
+def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optional[str], expr: str,
+                          config: Optional[list] = None) -> List[Dict[str, Any]]:
     """Convert a (suggest_var_name, expr) tuple into a list of line-level edits.
 
     Each edit is {"type": "insert", "afterLine": N, "text": "..."} where afterLine
     is 1-indexed (0 means before the first line).
+
+    `config` is the slot list the new line opens with, if the visualizer sent
+    one: it goes in as a `#%click` comment above the statement, counted in
+    `leadingLines` so the editor knows the statement starts below it.
 
     Handles variable name collision avoidance and indentation matching. What
     the code needs imported travels separately, as the visualizer's own
@@ -272,9 +277,14 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
 
     # Apply base indentation to all lines (supports multi-line statements like for loops)
     assignment_lines = assignment.split('\n')
+    if config is not None:
+        assignment_lines.insert(0, format_config_comment(config))
     text = '\n'.join(indent_str + aline for aline in assignment_lines)
-    edits.append({"type": "insert", "afterLine": line, "text": text,
-                  "headerLines": header_lines})
+    edit = {"type": "insert", "afterLine": line, "text": text,
+            "headerLines": header_lines}
+    if config is not None:
+        edit["leadingLines"] = 1
+    edits.append(edit)
 
     return edits
 
@@ -325,9 +335,10 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
                     "edits": [],
                     "imports": list(cmd.imports),
                 }
-            elif isinstance(cmd, tuple) and len(cmd) in (2, 3):
+            elif is_new_code(cmd):
                 suggest_var_name, expr = cmd[0], cmd[1]
-                edits = _build_new_code_edits(source_code, line, suggest_var_name, expr)
+                edits = _build_new_code_edits(source_code, line, suggest_var_name, expr,
+                                              cmd[3] if len(cmd) > 3 else None)
                 cmd_dict = {
                     "type": "NewCode",
                     "triggerLine": line,
@@ -428,9 +439,9 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
     # What the line's `#%click` comment holds is this visualizer's saved config
     # (columns, fields, ...). It is installed for the visualizer to read while
     # it runs, and collected afterwards to see whether it saved anything.
-    line_config = parse_config_comment(_source_code, line)
-    line_config_sig = config_sig(line_config)
-    set_line_config(line_config)
+    line_slots = parse_config_comment(_source_code, line)
+    line_config_sig = config_sig(line_slots)
+    set_line_config(line_slots)
 
     try:
         item_model_and_events = next((m_e for m_e in models_and_events if m_e.get('line') == line and m_e.get('visIndex') == idx_in_line), {})
@@ -465,7 +476,9 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
         else:
             model = call_with_supported_kwargs(vis.init_model, value, get_visualizer,
                                                eval_in_scope=eval_in_scope,
-                                               var_and_exp=var_and_exp)
+                                               var_and_exp=var_and_exp,
+                                               slots_config=line_slots,
+                                               config_path=[])
 
         # Only replay events when the cached model was reused; if the type
         # changed the old events belong to a different visualizer.
@@ -496,15 +509,15 @@ def log_value(line: int, value: Any, last_line_in_containing_loop: int | None = 
     except Exception as vis_err:
         html_content = f'<div style="white-space: pre-wrap;">{html.escape(type(vis_err).__name__)} during visualization. {html.escape(traceback.format_exc())}</div>'
     finally:
-        line_config, config_dirty = take_line_config()
+        line_slots, config_dirty = take_line_config()
 
     # A save is a change to the file: the comment above the line is rewritten
     # by the editor, and this model already reflects what it will say.
     if config_dirty:
         commands.append(SetConfigComment(
-            format_config_comment(line_config) if line_config else None))
+            format_config_comment(line_slots) if line_slots is not None else None))
     if isinstance(model, dict):
-        model['_config_sig'] = config_sig(line_config)
+        model['_config_sig'] = config_sig(line_slots)
 
     # Convert commands to wire dicts before streaming them.
     cmd_dicts = _commands_to_dicts(commands, line, idx_in_line, model, _source_code)

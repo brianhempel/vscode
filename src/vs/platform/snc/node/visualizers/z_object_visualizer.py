@@ -28,16 +28,16 @@ FIELD CONFIGURATION
 Fields shown for each type are configurable and persisted:
 
 1. THE LINE'S #%click COMMENT (see visualizer_utils, "Per-line config"):
-   - Under the 'object' namespace, JSON mapping {full_class_name: [slot, ...]}
+   - A slot list; the runner hands it to init_model as `slots_config`
    - Highest priority: user-customized fields, for this line only
 
 2. DEFAULT_FIELDS_FOR_TYPE:
    - Hardcoded defaults for known types (e.g., re.Match)
-   - Used when the line saved nothing for the type
+   - Used when the line saved nothing
 
 3. Non-trivial dir() names:
    - Fallback: all attributes not in dir(object())
-   - Used when the line saved nothing for the type and it has no defaults
+   - Used when the line saved nothing and the type has no defaults
 
 ================================================================================
 """
@@ -54,7 +54,7 @@ from visualizer_utils import (
     Dollar, DollarScope,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command, link_source_expr,
     get_full_class_name, truncate_str, py_exp_attrs,
-    config_key, parse_slots, load_root_slots, save_slots_at_path,
+    parse_slots, save_slots_at_path,
     child_nesting_kwargs, too_deep,
 )
 
@@ -114,7 +114,6 @@ DEFAULT_FIELDS_FOR_TYPE = {
     're.Match': ['$[0]', '$.start(0)', '$.end(0)'],
 }
 
-CONFIG_NS = 'object'
 
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
@@ -128,7 +127,7 @@ def get_fields(value):
     return _resolve_fields(value)
 
 
-# === Saved config (the line's #%click comment, 'object' namespace) ===
+# === Saved config (the line's #%click comment) ===
 
 def _ensure_dollar_prefix(f):
     # Field expressions only need a dollar if they don't already reference the
@@ -137,33 +136,21 @@ def _ensure_dollar_prefix(f):
     return f if '$' in f else f'${f}'
 
 
-def load_fields_config(full_class_name: str):
-    """Load the raw slot list for a type from the line's config (or None).
-
-    Kept as the single root-read entry point so tests can patch it for
-    isolation. The dollar-prefix normalization is applied later by parse_slots
-    so it works uniformly with the nested slot format.
-    """
-    return load_root_slots(CONFIG_NS, full_class_name)
-
-
-def save_fields_config(root_type, path, exprs, namespace=CONFIG_NS):
+def save_fields_config(path, exprs):
     """Path-scoped writer: persist a (sub-)object's field exprs at its location.
 
-    `path` is the list of (slot_expr, child_type) steps from the root type.
+    `path` is the list of slot exprs from the root. Kept as the single write
+    entry point so tests can patch it for isolation.
     """
-    save_slots_at_path(namespace, root_type, path, exprs)
+    save_slots_at_path(path, exprs)
 
 
 def _save_slots(model: dict) -> None:
     """Persist an object model's fields at its config path (preserves nested
-    children of surviving fields and other types already saved)."""
-    save_fields_config(
-        model.get('_config_root_type'),
-        model.get('_config_path') or [],
-        list(model.get('fields', [])),
-        model.get('_config_root_ns') or CONFIG_NS,
-    )
+    children of surviving fields and other branches already saved)."""
+    if not model.get('_config_persist', True):
+        return
+    save_fields_config(model.get('_config_path') or [], list(model.get('fields', [])))
 
 
 def _get_non_trivial_names(obj) -> list:
@@ -173,28 +160,22 @@ def _get_non_trivial_names(obj) -> list:
 
 def _resolve_fields(obj) -> list:
     """Resolve fields using the saved config, defaults, then non-trivial names."""
-    fields, _ = _resolve_fields_and_children(obj, None, None)
+    fields, _ = _resolve_fields_and_children(obj, None)
     return list(fields)
 
 
-def _resolve_fields_and_children(obj, slots_config, config_path):
-    """Return (fields, slot_children) for an object at this nesting position.
+def _resolve_fields_and_children(obj, slots_config):
+    """Return (fields, slot_children) for an object.
 
-    At the root (config_path is None) the line's config is read by class. When nested,
-    only the parent-supplied slots_config is used -- the type config is NOT
-    re-read, which is what breaks config-driven recursion. A missing config
-    falls back to DEFAULT_FIELDS_FOR_TYPE, then non-trivial dir() names (value-
-    driven recursion there is bounded by the depth cap).
+    `slots_config` is what was saved for it: the line's comment at the root,
+    the parent's slot `children` when nested. A missing config falls back to
+    DEFAULT_FIELDS_FOR_TYPE, then non-trivial dir() names (value-driven
+    recursion there is bounded by the depth cap).
     """
     full_class_name = get_full_class_name(obj)
 
-    if config_path is None:
-        loaded = load_fields_config(full_class_name)
-    else:
-        loaded = slots_config
-
-    if loaded is not None:
-        return parse_slots(loaded, expr_transform=_ensure_dollar_prefix)
+    if slots_config is not None:
+        return parse_slots(slots_config, expr_transform=_ensure_dollar_prefix)
 
     default = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
     if default is not None:
@@ -260,28 +241,22 @@ def _eval_field(obj, accessor_code: str, eval_in_scope=None):
 # === Elm architecture functions ===
 
 def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
-               slots_config=None, config_root_type=None, config_root_ns=None,
-               config_path=None):
+               slots_config=None, config_path=None, persist=True):
     """
     Initialize the model state for a new visualization.
 
-    Priority for fields: (nested config | saved config) > DEFAULT_FIELDS_FOR_TYPE >
-    non-trivial dir() names. Nested calls use the parent-supplied slots_config
-    and never re-read the type's config (breaks config-driven recursion).
+    Priority for fields: saved config (`slots_config`: the line's comment at
+    the root, the parent's slot children when nested -- see
+    child_nesting_kwargs) > DEFAULT_FIELDS_FOR_TYPE > non-trivial dir() names.
     """
     source_expr = None
     if var_and_exp:
         var_name, expr = var_and_exp
         source_expr = var_name if var_name else expr
 
-    is_root = config_path is None
-    root_type = config_key(value) if is_root else config_root_type
-    root_ns = CONFIG_NS if is_root else config_root_ns
-    path = [] if is_root else config_path
     config_fields = {
-        "_config_root_type": root_type,
-        "_config_root_ns": root_ns,
-        "_config_path": path,
+        "_config_path": list(config_path or []),
+        "_config_persist": persist,
         "_slot_children": {},
     }
 
@@ -300,12 +275,12 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
             **config_fields,
         }
 
-    fields, slot_children = _resolve_fields_and_children(value, slots_config, config_path)
+    fields, slot_children = _resolve_fields_and_children(value, slots_config)
     config_fields["_slot_children"] = slot_children
 
     # Depth backstop: beyond the cap, stop building nested children entirely
     # (renders as a truncated repr) so cyclic objects can't RecursionError.
-    if too_deep(path):
+    if too_deep(config_fields['_config_path']):
         return {
             "fields": fields,
             "editing_index": None,
@@ -329,7 +304,7 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                 child_vis = get_visualizer(raw_value)
                 # A child visualizer that doesn't name the nesting params in
                 # its init_model gets {} back and isn't handed them.
-                extra = child_nesting_kwargs(config_fields, accessor_code, raw_value,
+                extra = child_nesting_kwargs(config_fields, accessor_code,
                                              child_vis.init_model)
                 children[accessor_code] = child_vis.init_model(raw_value, get_visualizer,
                                                                eval_in_scope=eval_in_scope, **extra)
@@ -696,7 +671,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 child_vis = get_visualizer(raw_value)
                 child_model = children.get(accessor_code)
                 if child_model is None:
-                    extra = child_nesting_kwargs(model, accessor_code, raw_value,
+                    extra = child_nesting_kwargs(model, accessor_code,
                                                  child_vis.init_model)
                     child_model = child_vis.init_model(raw_value, get_visualizer,
                                                        eval_in_scope=eval_in_scope, **extra)
