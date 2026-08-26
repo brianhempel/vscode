@@ -100,6 +100,7 @@ interface IHoistedDropdown {
  */
 class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private static readonly BLOCK_LAYOUT_THRESHOLD_PX = 150;
+	private static readonly MIN_AVAILABLE_WIDTH_PX = 200;
 	private readonly editor: ICodeEditor;
 	private readonly domNode: HTMLElement;
 	private position: Position | null = null;
@@ -1616,6 +1617,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 			// 8px of padding for visualizers on the same line
 			pixelPosition.left += this.useBlockLayout ? 0 : 8 + this.leftInset;
+
+			// Cap the widget width so that it scrolls if too large
+			const layoutInfo = this.editor.getLayoutInfo();
+			const available = layoutInfo.contentLeft + layoutInfo.contentWidth - pixelPosition.left - 8;
+			this.domNode.style.maxWidth = `${Math.max(VisualizationWidget.MIN_AVAILABLE_WIDTH_PX, available)}px`;
 
 			if (pixelPosition.top < 0 && this.lastOnscreenPixelPosition) {
 				// x coordinate is not reliable when lines are offscreen, use last known coordinate
