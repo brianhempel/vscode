@@ -2203,5 +2203,51 @@ class TestFieldBoxLegend(unittest.TestCase):
         self.assertNotIn('$i', field_scope().legend)
 
 
+
+class TestReadOnly(unittest.TestCase):
+    """Under clickacode.readOnlyVisualizers the object shows its fields and values,
+    with none of the controls that edit which fields it shows or hand out
+    code."""
+
+    FORBIDDEN = ('snc-py-exps', 'snc-mouse-down', 'snc-add-at-cursor',
+                 'draggable="true"', 'py-exp-grab', 'class="handle', 'class="remove',
+                 'add-icon', 'snc-input', 'snc-key-down', 'snc-hover-hidden')
+
+    def setUp(self):
+        from visualizer_utils import set_read_only
+        set_read_only(True)
+
+    def tearDown(self):
+        from visualizer_utils import set_read_only
+        set_read_only(False)
+
+    def render(self, small=False, **overrides):
+        obj = TestObj()
+        model = init_model(obj, var_and_exp=('obj', 'obj'))
+        model['fields'] = ['$.x', '$.name']
+        model.update(overrides)
+        return visualize(obj, model, _get_visualizer, lambda c: eval(c, {}, {'obj': obj}),
+                         small=small, var_and_exp=('obj', 'obj'))
+
+    def test_focused_render_shows_fields_without_controls(self):
+        out = self.render()
+        self.assertIn('$.x', out)
+        self.assertIn('10', out)
+        self.assertIn('$.name', out)
+        for marker in self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
+    def test_an_open_field_box_is_not_drawn(self):
+        out = self.render(adding_field=True, editing_index=0)
+        self.assertIn('$.x', out)
+        for marker in self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
+    def test_small_render_has_no_drag_or_add_at_cursor(self):
+        out = self.render(small=True, _add_target='.col-input')
+        self.assertIn('$.x', out)
+        for marker in self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
 if __name__ == '__main__':
     unittest.main()

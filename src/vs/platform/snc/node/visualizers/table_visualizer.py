@@ -55,6 +55,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, List, Tuple, Optional
 
 from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
+from visualizer_utils import is_read_only
 from visualizer_utils import (
     ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
@@ -8193,8 +8194,12 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
 
 def _render_column_header(col, model, lst, eval_in_scope=None,
                           span_attrs='', extra_classes='', label=None,
-                          get_visualizer=None):
+                          get_visualizer=None, read_only=False):
     """Render a normal column header with drag handle, column name, and ▾ menu.
+
+    *read_only* (clickacode.readOnlyVisualizers) draws the name alone: no handle to
+    reorder by, no click to edit, no ▾ -- every one of those writes config or
+    code. The filtered styling stays, since the filter still narrows the rows.
 
     The header shows the expression as written, dollar and all: it is the same
     text double-clicking it puts in the box, so there is nothing to translate
@@ -8233,6 +8238,18 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     is_filtered = _column_search_active(model, col)
     if is_filtered:
         th_classes.append('col-filtered')
+
+    if read_only:
+        if extra_classes:
+            th_classes.append(extra_classes)
+        return (
+            f'<th class="{" ".join(th_classes)}"{span_attrs}>'
+            f'<span class="col-header-inner">'
+            f'<span class="col-name">'
+            f'{html.escape(col if label is None else label)}</span>'
+            f'</span>'
+            f'</th>'
+        )
 
     source_expr = model.get('_source_expr')
     py_exp_attr = ('' if source_expr is None
@@ -9696,7 +9713,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     reads = [_column_values(leaf.expr, lst, model, eval_in_scope) if asked[ci]
              else None
              for ci, leaf in enumerate(leaves)]
-    add_box = _add_box_leaf(model, columns)
+    add_box = None if is_read_only() else _add_box_leaf(model, columns)
 
     rows = []
     for level, spec in enumerate(levels):
@@ -9735,9 +9752,15 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     search = model.get('search')
     has_search = search is not None and search != ''
+    # Read-only visualizers (clickacode.readOnlyVisualizers): the rows are drawn and
+    # nothing that writes code or config is -- no toolbar, no column menus or
+    # (+), no row handles or menus, no search or action bar, no pick regions.
+    # The drag handles go quiet on their own (see py_exp_attrs). A search left
+    # in the model from before still narrows the rows: that is a view.
+    read_only = is_read_only()
     # Pick mode is first-match-only, and there is nothing to pick out of a small
     # (unfocused) preview or a table with no search.
-    pick_mode = (model.get('tool') == 'pick') and has_search and not small
+    pick_mode = (model.get('tool') == 'pick') and has_search and not small and not read_only
     first = bool(model.get('first_match', False)) or pick_mode
 
     matched_indices = set()
@@ -9777,18 +9800,20 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     table_div_style = f'min-height: {actual_min_height}px; max-height: {actual_max_height}px;{actual_max_width}'
 
-    key_handler = repr(ColumnKeyDown())
+    # The keys commit and cancel the column box, which read-only never opens.
+    key_handler = ('' if read_only else
+                   f'snc-key-down="{html.escape(repr(ColumnKeyDown()))}" ')
     small_class = ' small' if small else ''
     # Driven by pick_mode, not the raw model value: the pick styling strips the
     # cell borders, so it must only apply when regions are actually drawn.
     tool_class = f' {"pick" if pick_mode else "normal"}-tool-selected' if not small else ''
     strs = [
-        f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" '
+        f'<div tabindex="0" {key_handler}'
         f'class="visualizer-container list-visualizer{small_class}{tool_class}">'
     ]
     # The tool toolbar only makes sense on the focused visualizer; in small mode
     # there is no room for it and it would compete with the real focus.
-    if not small:
+    if not small and not read_only:
         strs.append(_render_tool_toolbar(model))
     strs.append(f'<div class="list-table-scroll" style="{table_div_style}">')
     leaves = _leaf_columns(columns)
@@ -9807,7 +9832,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # Where Add Column Before / After put the box: beside the column it was
     # asked for, in that column's own header row, so the new column is written
     # where it is going to be drawn.
-    beside = _add_beside_target(model)
+    beside = None if read_only else _add_beside_target(model)
     for level, cells in enumerate(header_rows):
         if level:
             strs.append('<tr>')
@@ -9831,7 +9856,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                    if n_header - level > 1 else '')))
             if box and not beside[1]:
                 strs.append(box)
-            if model.get('editing_column') == cell.expr:
+            if model.get('editing_column') == cell.expr and not read_only:
                 strs.append(_render_column_input(
                     lst, model, get_visualizer, is_editing=True,
                     span_attrs=span_attrs))
@@ -9845,7 +9870,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     span_attrs=span_attrs,
                     extra_classes='col-subheader' if level else None,
                     label=cell.label if level else None,
-                    get_visualizer=get_visualizer))
+                    get_visualizer=get_visualizer,
+                    read_only=read_only))
             if box and beside[1]:
                 strs.append(box)
 
@@ -9858,11 +9884,11 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             # Unless it is already drawn beside the column it was asked for --
             # an anchor the table no longer has falls back to here, so the box
             # is drawn exactly once wherever it ends up.
-            if model.get('adding_column') and beside is None:
+            if model.get('adding_column') and beside is None and not read_only:
                 strs.append(_render_column_input(lst, model, get_visualizer,
                                                  is_editing=False,
                                                  span_attrs=full_span))
-            if not small:
+            if not small and not read_only:
                 strs.append(_render_add_column_header(
                     lst, model, get_visualizer, span_attrs=full_span))
         strs.append('</tr>')
@@ -9871,7 +9897,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # Which drawn column the open box takes the place of, and how deep it hangs
     # -- the cells below have to leave it a column's worth of room, or every
     # column to its right slides off the values it names.
-    add_box = _add_box_leaf(model, columns)
+    add_box = None if read_only else _add_box_leaf(model, columns)
 
     if len(lst) == 0:
 
@@ -9977,7 +10003,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             strs.append(_render_row_index_cell(
                 model, lst, i, span_attrs=span_attr,
                 overlay=pick_overlay(i, PICK_IDX_COLUMN), parts=row_exprs,
-                widgets=not small and not pick_here))
+                widgets=not small and not pick_here and not read_only))
 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
@@ -10103,7 +10129,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             strs.append('items' if len_n != 1 else 'item')
         strs.append(f'</div></div>')
 
-    if not small:
+    if not small and not read_only:
         strs.append(_render_search_box(model, lst, eval_in_scope, small=False))
 
     strs.append('</div>')

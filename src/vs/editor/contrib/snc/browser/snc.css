@@ -255,7 +255,6 @@
 }
 
 .tiny-len {
-	cursor: grab;
 	font-size: 8px;
 	padding: 0 5px;
 	border-left: 1px solid var(--snc-border-color);
@@ -267,8 +266,15 @@
 	flex-shrink: 0;
 }
 
+/* The counts are drag handles only while they carry an expression: under
+   clickacode.readOnlyVisualizers Python omits the attribute, and the cursor and
+   hover highlight follow. */
+.tiny-len[snc-py-exps] {
+	cursor: grab;
+}
+
 .expand-toggle:hover,
-.tiny-len:hover {
+.tiny-len[snc-py-exps]:hover {
 	background: var(--snc-hover-bg);
 	color: black;
 }

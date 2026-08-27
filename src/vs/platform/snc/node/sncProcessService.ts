@@ -576,6 +576,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				models_and_events: options.modelsAndEventsJson || '',
 				focused_line: options.focusedLine ?? null,
 				loop_selections: options.loopSelections ?? {},
+				read_only: options.readOnly ?? false,
 				stdin: options.stdin ?? '',
 				// Default false so a read past the end starves — which is what
 				// opens the console — rather than seeing a spurious EOF.

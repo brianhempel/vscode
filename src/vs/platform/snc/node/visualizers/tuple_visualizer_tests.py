@@ -798,5 +798,27 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(slots[0].get('children'))
 
 
+
+class TestReadOnly(unittest.TestCase):
+    """Under clickacode.readOnlyVisualizers a tuple's parens and elements carry no
+    drag handles."""
+
+    def setUp(self):
+        from visualizer_utils import set_read_only
+        set_read_only(True)
+
+    def tearDown(self):
+        from visualizer_utils import set_read_only
+        set_read_only(False)
+
+    def test_no_handles(self):
+        value = (1, 'a')
+        model = init_model(value, var_and_exp=('t', 't'))
+        out = visualize(value, model, lambda v: _GenericVis(), None,
+                        var_and_exp=('t', 't'))
+        self.assertIn('snc-tuple-visualizer', out)
+        self.assertNotIn('snc-py-exps', out)
+        self.assertNotIn('py-exp-grab', out)
+
 if __name__ == '__main__':
     unittest.main()

@@ -20275,5 +20275,64 @@ class TestRowMenuToggle(unittest.TestCase):
         self.assertIsNone(model['openDropdown'])
 
 
+
+class TestReadOnly(unittest.TestCase):
+    """Under clickacode.readOnlyVisualizers the table shows its rows and nothing that
+    writes code or config: no column menus, no (+), no row handles or menus,
+    no search or action bar, no tool toolbar, no drag handles."""
+
+    FORBIDDEN = ('snc-py-exps', 'data-action-expr', 'col-menu', 'col-add',
+                 'col-handle', 'row-handle', 'row-menu', 'search-div',
+                 'tool-toolbar', 'action-button', 'draggable="true"', 'py-exp-grab',
+                 'snc-add-at-cursor', 'col-input', 'snc-dropdown-trigger',
+                 'snc-key-down')
+
+    def setUp(self):
+        from visualizer_utils import set_read_only
+        set_read_only(True)
+
+    def tearDown(self):
+        from visualizer_utils import set_read_only
+        set_read_only(False)
+
+    def render(self, lst, small=False, **model_overrides):
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        model.update(model_overrides)
+        return visualize(lst, model, mock_get_visualizer,
+                         lambda c: eval(c, {}, {'data': lst}), small=small,
+                         var_and_exp=('data', 'data'))
+
+    def test_focused_render_shows_rows_and_no_code_affordances(self):
+        lst = [{'a': 1, 'b': 'x'}, {'a': 2, 'b': 'y'}]
+        out = self.render(lst)
+        self.assertIn('col-header', out)
+        self.assertIn('row-index', out)
+        self.assertIn('snc-child-key=', out)
+        for marker in self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
+    def test_focused_render_keeps_the_expand_bar(self):
+        out = self.render([1, 2, 3])
+        self.assertIn('expand-and-len', out)
+        self.assertIn('3 items', out)
+
+    def test_an_open_column_box_or_menu_is_not_drawn(self):
+        lst = [{'a': 1}]
+        out = self.render(lst, adding_column=True, column_input_value='$.a',
+                          openDropdown={'id': 'col-menu:$.a'})
+        for marker in self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
+    def test_pick_tool_is_not_drawn(self):
+        lst = [1, 2, 3]
+        out = self.render(lst, tool='pick', search='2')
+        self.assertNotIn('pick-tool-selected', out)
+        self.assertNotIn('pick-region', out)
+
+    def test_small_render_has_no_affordances(self):
+        out = self.render([1, 2], small=True)
+        for marker in self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
 if __name__ == '__main__':
     unittest.main()

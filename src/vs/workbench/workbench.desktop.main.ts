@@ -172,6 +172,7 @@ import './contrib/browserView/electron-browser/browserView.contribution.js';
 // Sculpt-n-Code
 import './contrib/snc/browser/sncBrowserDrop.contribution.js';
 import './contrib/snc/browser/sncConsole.contribution.js';
+import './contrib/snc/browser/sncSettings.contribution.js';
 
 // Splash
 import './contrib/splash/electron-browser/splash.contribution.js';

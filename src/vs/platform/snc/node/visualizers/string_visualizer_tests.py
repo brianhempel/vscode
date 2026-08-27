@@ -14193,5 +14193,44 @@ class TestActionsReadDownEveryRow(unittest.TestCase):
             self.assertEqual(len(exps), 1)
 
 
+
+class TestReadOnly(unittest.TestCase):
+    """Under clickacode.readOnlyVisualizers the focused string is a plain preview:
+    the text and the expand bar, none of the machinery that builds code."""
+
+    def setUp(self):
+        from visualizer_utils import set_read_only
+        set_read_only(True)
+
+    def tearDown(self):
+        from visualizer_utils import set_read_only
+        set_read_only(False)
+
+    def render(self, value, small=False):
+        model = init_model(value)
+        return visualize(value, model, None, lambda c: eval(c), small=small,
+                         var_and_exp=('str1', 'str1'))
+
+    def test_focused_render_has_no_code_affordances(self):
+        out = self.render("hello world")
+        self.assertIn('hello world', out)
+        for marker in ('snc-py-exps', 'data-action-expr', 'snc-mouse-down',
+                       'snc-input', 'snc-add-at-cursor', 'action-button',
+                       'tool-toolbar', 'search-box', 'draggable="true"', 'py-exp-grab',
+                       'snc-key-down'):
+            self.assertNotIn(marker, out, marker)
+
+    def test_focused_render_keeps_the_expand_bar_for_a_tall_string(self):
+        out = self.render("a\nb\nc\nd\ne\nf")
+        self.assertIn('expand-and-len', out)
+        self.assertIn('6 lines', out)
+        self.assertNotIn('snc-py-exps', out)
+
+    def test_small_render_has_no_drag_handle(self):
+        out = self.render("hello", small=True)
+        self.assertIn('hello', out)
+        self.assertNotIn('snc-py-exps', out)
+        self.assertNotIn('py-exp-grab', out)
+
 if __name__ == '__main__':
     unittest.main()

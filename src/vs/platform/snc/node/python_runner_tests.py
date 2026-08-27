@@ -1441,3 +1441,52 @@ class TestLoopIterations(unittest.TestCase):
             python_runner._visualizers = saved
         htmls = [m['item']['html'] for m in msgs.all() if m.get('type') == 'item' and m['item']['line'] == 2]
         self.assertEqual(htmls, ['<b>6</b>'] * 3)
+
+
+class TestReadOnly(unittest.TestCase):
+    """A run asked for with `read_only` (clickacode.readOnlyVisualizers) renders no
+    handles and sends the editor no command that would change the file."""
+
+    SRC = "x = 5\n"
+
+    def _run(self, read_only, visualizers=None):
+        import_code, body_code = split_leading_imports(self.SRC)
+        saved = python_runner._visualizers
+        if visualizers is not None:
+            python_runner._visualizers = lambda: visualizers
+        try:
+            with capture_stream_messages() as msgs:
+                python_runner._execute_run(body_code, '', 'run-1', import_code=import_code,
+                                           read_only=read_only)
+        finally:
+            python_runner._visualizers = saved
+        return msgs.all()
+
+    def test_flag_is_reset_between_runs(self):
+        from visualizer_utils import is_read_only
+        self._run(True)
+        self.assertTrue(is_read_only())
+        self._run(False)
+        self.assertFalse(is_read_only())
+
+    def test_generic_visualizer_has_no_handle(self):
+        html_with = [m['item']['html'] for m in self._run(False) if m.get('type') == 'item'][0]
+        html_without = [m['item']['html'] for m in self._run(True) if m.get('type') == 'item'][0]
+        self.assertIn('snc-py-exps', html_with)
+        self.assertNotIn('snc-py-exps', html_without)
+        self.assertIn('snc-generic-visualizer', html_without)
+
+    def test_commands_that_change_code_are_dropped(self):
+        class SavingVis:
+            def can_visualize(value): return isinstance(value, int)
+            def init_model(value, get_visualizer): return {}
+            def visualize(value, model, get_visualizer, eval_in_scope):
+                from visualizer_utils import save_slots_at_path
+                save_slots_at_path([], ['$.a'])
+                return 'v'
+            def update(event, var_and_exp, model, value, get_visualizer):
+                return (model, [])
+        def commands(msgs):
+            return [m['command']['type'] for m in msgs if m.get('type') == 'command']
+        self.assertEqual(commands(self._run(False, [SavingVis])), ['SetConfigComment'])
+        self.assertEqual(commands(self._run(True, [SavingVis])), [])

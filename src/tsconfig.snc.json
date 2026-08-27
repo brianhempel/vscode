@@ -19,6 +19,7 @@
 		"vs/platform/snc/common/pythonImports.ts",
 		"vs/platform/snc/node/sncProcessService.ts",
 		"vs/workbench/contrib/snc/browser/sncBrowserDrop.contribution.ts",
-		"vs/workbench/contrib/snc/browser/sncConsole.contribution.ts"
+		"vs/workbench/contrib/snc/browser/sncConsole.contribution.ts",
+		"vs/workbench/contrib/snc/browser/sncSettings.contribution.ts"
 	]
 }

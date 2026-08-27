@@ -1512,5 +1512,39 @@ class TestDollarScope(unittest.TestCase):
         self.assertEqual(self.SCOPE, DollarScope(*self.SCOPE.dollars))
 
 
+
+class TestReadOnly(unittest.TestCase):
+    """The read-only switch (clickacode.readOnlyVisualizers): nothing a visualizer
+    renders may hand code to the editor. The shared helpers that write drag
+    handles and action-button expressions are where most of them come from, so
+    they go quiet under the flag and every visualizer built on them follows."""
+
+    def setUp(self):
+        from visualizer_utils import set_read_only
+        set_read_only(True)
+
+    def tearDown(self):
+        from visualizer_utils import set_read_only
+        set_read_only(False)
+
+    def test_flag_is_off_by_default_and_toggles(self):
+        from visualizer_utils import set_read_only, is_read_only
+        self.assertTrue(is_read_only())
+        set_read_only(False)
+        self.assertFalse(is_read_only())
+
+    def test_py_exp_attrs_writes_nothing(self):
+        self.assertEqual(py_exp_attrs('x[0]'), '')
+        self.assertEqual(py_exp_attrs([PyExp('x', ('import re',))], attr='data-action-expr'), '')
+
+    def test_wrap_drag_grab_leaves_the_html_bare(self):
+        self.assertEqual(wrap_drag_grab('<b>1</b>', ('x', 'x')), '<b>1</b>')
+
+    def test_readings_are_not_added_to_a_bare_child(self):
+        from visualizer_utils import add_drag_readings
+        child = wrap_drag_grab('<b>1</b>', (None, 'x[0]'))
+        self.assertEqual(add_drag_readings(child, 'x[0]', ['[item for item in x]']), '<b>1</b>')
+        self.assertEqual(defer_drag_grab(child, 'x[0]'), '<b>1</b>')
+
 if __name__ == '__main__':
     unittest.main()

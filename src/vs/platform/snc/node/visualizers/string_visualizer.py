@@ -133,6 +133,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
+from visualizer_utils import is_read_only
 from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
                               opens_block, with_pass_body,
                               Dollar, DollarScope,
@@ -3545,7 +3546,14 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # from, and without one the string would be the one value on the screen that
     # can't be dragged out. Same wrapper the generic visualizers use, for the
     # same reason -- no content of its own to hover.
-    if small:
+    #
+    # Read-only visualizers (clickacode.readOnlyVisualizers) draw the same preview
+    # even when focused: everything the focused render adds -- the selection
+    # anchors, the search box, the action buttons -- exists to build code, and
+    # under read-only none of it may be offered. What is left is the text, the
+    # expand bar, and the counts (which py_exp_attrs leaves bare).
+    read_only = is_read_only()
+    if small or read_only:
         # Non-focused preview: wrap the string in leading/trailing ' quotes so
         # it reads as a string literal. Each newline after the first gets a
         # leading space so subsequent lines align vertically under the first
@@ -3580,8 +3588,13 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # it, and that is all this has to carry. The expand toggle sits inside
         # the handle but opts out of it (see render_expand_toggle), so a slipped
         # click on the chevron isn't read as a drag of the string.
+        # A read-only focused string is already focused: nothing to pin, and
+        # no keys to handle.
+        handlers = ('' if not small else
+                    f'snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" ')
+        small_class = ' small' if small else ''
         small_html = (
-            f'<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" class="visualizer-container literal-tool-selected small{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'<div tabindex="0" {handlers}class="visualizer-container literal-tool-selected{small_class}{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
             f'{display_html}'
             f'</div></div>{expand_toggle_html}</div>'
         )

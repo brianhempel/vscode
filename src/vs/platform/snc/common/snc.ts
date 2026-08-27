@@ -55,6 +55,15 @@ export interface IProcessResult {
 	stdinConsumed?: number;
 }
 
+/**
+ * The setting behind read-only visualizers. When on, a visualizer is a view
+ * and nothing more: every affordance that would write to the file -- action
+ * buttons, drag handles, column and field menus, the link chain -- is left out
+ * of the render (Python's side, see visualizer_utils.set_read_only) and
+ * refused if it somehow arrives (the editor's side, see SNCController).
+ */
+export const SNC_READ_ONLY_VISUALIZERS_SETTING = 'clickacode.readOnlyVisualizers';
+
 export interface IProcessOptions {
 	timeout?: number; // Optional timeout in milliseconds
 	workingDirectory: string; // Required working directory for code execution
@@ -64,6 +73,7 @@ export interface IProcessOptions {
 	loopSelections?: Record<string, number>; // header line -> iteration (0-based) the loop is pinned to; unpinned loops render every iteration
 	stdin?: string; // The console document, replayed through the program's stdin
 	stdinEof?: boolean; // Whether the document ends the stream; false makes a read past its end starve rather than see EOF
+	readOnly?: boolean; // Render visualizers without any code-writing affordance and send no code-changing command; see SNC_READ_ONLY_VISUALIZERS_SETTING
 }
 
 /**

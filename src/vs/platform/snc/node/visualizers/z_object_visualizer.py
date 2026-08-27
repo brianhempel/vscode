@@ -48,6 +48,7 @@ import html
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
+from visualizer_utils import is_read_only
 from visualizer_utils import (
     ChildEvent, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
@@ -578,6 +579,14 @@ def render_small_field(display_key: str, val_repr: str, expr: str, add_target: s
     """
     exp_attr = py_exp_attrs(label_readings(expr, also) if also else expr)
     add_attr = ''
+    # Read-only visualizers offer neither the handle nor the shortcut into a
+    # column box (which read-only never opens).
+    if is_read_only():
+        return (
+            f'<span class="field">{html.escape(display_key)}</span>'
+            f'<span class="punct">=</span>'
+            f'{html.escape(val_repr)}'
+        )
     if add_target:
         add_attr = (f' snc-add-at-cursor="{html.escape(expr)}"'
                     f' snc-add-target="{html.escape(add_target)}"')
@@ -706,10 +715,16 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     full_class_name = get_full_class_name(obj)
     source_expr = model.get('_source_expr')
 
+    # Read-only visualizers (clickacode.readOnlyVisualizers): the fields and their
+    # values, with none of the controls that change which fields are shown
+    # (handle, ×, click-to-edit, +) -- each of those writes the line's config
+    # comment. The value handles go quiet on their own (see py_exp_attrs).
+    read_only = is_read_only()
+
     field_trs = []
 
     for i, accessor_code in enumerate(model.get('fields', [])):
-        if model.get('editing_index') == i:
+        if model.get('editing_index') == i and not read_only:
             field_trs.append(_render_input_row(obj, model, is_editing=True, editing_index=i, eval_in_scope=eval_in_scope))
         else:
             placeholder_args, val_str, raw_value, is_error = _eval_field(obj, accessor_code, eval_in_scope)
@@ -772,6 +787,16 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
             if is_drag_target:
                 drag_cls += ' drag-above' if drag_from > drag_over else ' drag-below'
 
+            if read_only:
+                field_trs.append(
+                    f'<tr>'
+                    f'<td class="field-name">'
+                    f'{html.escape(accessor_code)}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
+                    f'{value_td}'
+                    f'</tr>'
+                )
+                continue
+
             field_trs.append(
                 f'<tr class="snc-hover-hidden-parent{drag_cls}" '
                 f'snc-mouse-move="{html.escape(drag_over_event)}" '
@@ -790,10 +815,21 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 f'</tr>'
             )
 
-    if model.get('adding_field'):
+    if model.get('adding_field') and not read_only:
         field_trs.append(_render_input_row(obj, model, is_editing=False, eval_in_scope=eval_in_scope))
 
     field_trs_str = '\n'.join(field_trs)
+
+    if read_only:
+        return (
+            f'<div class="visualizer-container">'
+            f'<div class="obj-visualizer">'
+            f'<h4>{html.escape(full_class_name)} {html.escape(repr(obj))}</h4>'
+            f'<table>'
+            f'{field_trs_str}'
+            f'</table>'
+            f'</div></div>'
+        )
 
     add_event = repr(AddFieldClick())
     add_button = (
