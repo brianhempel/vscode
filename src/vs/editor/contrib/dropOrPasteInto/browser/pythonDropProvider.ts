@@ -19,6 +19,7 @@ import { Range } from '../../../common/core/range.js';
 import { DocumentDropEditProvider, DocumentDropEditsSession } from '../../../common/languages.js';
 import { ITextModel } from '../../../common/model.js';
 import { ILanguageFeaturesService } from '../../../common/services/languageFeatures.js';
+import { studyLog } from '../../../../platform/snc/common/sncStudyLog.js';
 
 const urllibImport = 'import urllib.request';
 
@@ -207,6 +208,7 @@ export class SncPyExpDropProvider implements DocumentDropEditProvider {
 		if (!expr) {
 			return;
 		}
+		studyLog.log('editor.pyExpDrop', { expr, imports: payload.imports, position: [position.lineNumber, position.column] }, model.uri.toString());
 
 		// Every import that isn't there yet, in declaration order. Two of them
 		// stacking at the same anchor is fine: each rides in the same edit, so

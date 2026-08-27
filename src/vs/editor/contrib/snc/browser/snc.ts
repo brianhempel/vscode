@@ -28,6 +28,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common
 import { INotificationService, INotificationHandle, Severity } from '../../../../platform/notification/common/notification.js';
 import { ISNCConsoleService } from '../../../../workbench/contrib/snc/common/sncConsole.js';
 import * as dom from '../../../../base/browser/dom.js';
+import { studyLog, StudyLogCoalescer, truncateForLog, visualizerTypeOf } from '../../../../platform/snc/common/sncStudyLog.js';
 import './snc.css';
 
 // 'sncVisualization' is a trusted name defined in src/vs/code/electron-browser/workbench/workbench(-dev).html
@@ -104,6 +105,38 @@ interface IHoistedDropdown {
 /**
  * Widget that displays visualization data for a specific line of code.
  */
+/**
+ * A compact, log-friendly description of the DOM element a pointer event
+ * landed on: tag, a few classes, and the SNC attributes that give it meaning
+ * (its action expression, the py-exps it offers, its Python event strings).
+ */
+function describeEventTarget(node: Node | null, root: Element): unknown {
+	try {
+		const el = node instanceof Element ? node : node?.parentElement;
+		if (!el) { return undefined; }
+		const attrs: Record<string, string> = {};
+		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-mouse', 'snc-mouse-down', 'snc-mouse-up', 'snc-mouse-move', 'snc-key-down', 'snc-input', 'snc-text-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
+			const v = el.getAttribute(name);
+			if (v !== null) { attrs[name] = v.length > 300 ? v.slice(0, 300) + '…' : v; }
+		}
+		const actionEl = el.closest('[data-action-expr]');
+		const pyExpEl = el.closest('[snc-py-exps]');
+		let depth = 0;
+		for (let n: Element | null = el; n && n !== root; n = n.parentElement) { depth++; }
+		return {
+			tag: el.tagName.toLowerCase(),
+			classes: typeof el.className === 'string' ? el.className.split(/\s+/).filter(Boolean).slice(0, 6) : [],
+			text: (el.textContent ?? '').slice(0, 60),
+			depth,
+			attrs,
+			actionExpr: actionEl && actionEl !== el ? actionEl.getAttribute('data-action-expr')?.slice(0, 300) : undefined,
+			pyExps: pyExpEl && pyExpEl !== el ? pyExpEl.getAttribute('snc-py-exps')?.slice(0, 300) : undefined,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
 class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private static readonly BLOCK_LAYOUT_THRESHOLD_PX = 150;
 	private static readonly MIN_AVAILABLE_WIDTH_PX = 200;
@@ -298,6 +331,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		this._register(dom.addDisposableListener(this.domNode, 'mousedown', (ev: MouseEvent) => {
 			this.lastMouseDownTarget = ev.target as Node;
+			studyLog.log('widget.mousedown', { line: this.lineNumber, visIndex: this.visIndex, focused: this.isFocused(), button: ev.button, detail: ev.detail, x: ev.clientX, y: ev.clientY, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey, target: describeEventTarget(ev.target as Node, this.domNode) }, this.editor.getModel()?.uri.toString());
 			// A new press, so any held one is spent -- its own mouseup landed
 			// somewhere the widget never saw.
 			this.unfocusedDragPress = null;
@@ -406,6 +440,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				const text = ev.dataTransfer.getData('text/plain');
 				const inputEl = input as HTMLInputElement;
 				const pos = inputEl.selectionStart ?? inputEl.value.length;
+				studyLog.log('widget.drop', { line: this.lineNumber, visIndex: this.visIndex, text, insertAt: pos, previousValue: inputEl.value, target: describeEventTarget(input, this.domNode) }, this.editor.getModel()?.uri.toString());
 				inputEl.value = inputEl.value.slice(0, pos) + text + inputEl.value.slice(pos);
 				inputEl.selectionStart = inputEl.selectionEnd = pos + text.length;
 				input.classList.remove('snc-drop-target');
@@ -546,6 +581,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					if (!primary) { return; }
 					const expression = primary.expr;
 					setPyExpDragData(ev.dataTransfer, expression, primary.imports);
+					studyLog.log('widget.dragStart', { line: this.lineNumber, visIndex: this.visIndex, expr: expression, imports: primary.imports, alternatives: pyExpsOf(pyExpEl, 'snc-py-exps').length, target: describeEventTarget(pyExpEl, this.domNode) }, this.editor.getModel()?.uri.toString());
 					this.hidePyExpTooltip();
 
 					const dragGhost = document.createElement('div');
@@ -782,6 +818,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			e.preventDefault();
 			e.stopPropagation();
 			this.clipboardService.writeText(exp.expr);
+			studyLog.log('widget.copyExpr', { line: this.lineNumber, visIndex: this.visIndex, expr: exp.expr, imports: exp.imports }, this.editor.getModel()?.uri.toString());
 			copyBtn.textContent = '\u2713';
 			setTimeout(() => { copyBtn.textContent = '\u{29C9}'; }, 1000);
 		});
@@ -890,6 +927,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		const exps = pyExpsOf(target, 'snc-py-exps');
 		if (!exps.length) { return; }
+		studyLog.log('widget.tooltip', { kind: 'pyExp', line: this.lineNumber, visIndex: this.visIndex, exprs: exps.map(e => e.expr), target: describeEventTarget(target, this.domNode) }, this.editor.getModel()?.uri.toString());
 
 		const rect = target.getBoundingClientRect();
 		const tooltip = document.createElement('div');
@@ -1004,6 +1042,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		const exps = pyExpsOf(target, 'data-action-expr');
 		if (!exps.length) { return; }
+		studyLog.log('widget.tooltip', { kind: 'action', line: this.lineNumber, visIndex: this.visIndex, exprs: exps.map(e => e.expr), target: describeEventTarget(target, this.domNode) }, this.editor.getModel()?.uri.toString());
 
 		const rect = target.getBoundingClientRect();
 		const tooltip = document.createElement('div');
@@ -1140,6 +1179,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private showHoverMenu(trigger: Element): void {
 		const panel = trigger.querySelector('.snc-dropdown-panel[data-hover-menu]') as HTMLElement;
 		if (!panel) { return; }
+		studyLog.log('widget.hoverMenu', { line: this.lineNumber, visIndex: this.visIndex, trigger: describeEventTarget(trigger, this.domNode), items: panel.textContent?.slice(0, 200) }, this.editor.getModel()?.uri.toString());
 
 		const triggerRect = trigger.getBoundingClientRect();
 		const align = panel.getAttribute('snc-dropdown-align') || 'left';
@@ -2567,6 +2607,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this._register(dom.addDisposableListener(chain, 'mousedown', (ev: MouseEvent) => {
 				ev.preventDefault();
 				ev.stopPropagation();
+				studyLog.log('widget.chainClick', { line: this.lineNumber, visIndex: this.visIndex, state: this.linkChainEl?.classList.contains('linked') ? 'linked' : 'unlinked' }, this.editor.getModel()?.uri.toString());
 				this.onLinkChainClick();
 			}));
 			this.linkChainEl = chain;
@@ -2643,6 +2684,7 @@ class LoopSliderWidget extends Disposable implements IOverlayWidget {
 
 		this._register(dom.addDisposableListener(this.input, 'input', () => {
 			const iteration = Number(this.input.value);
+			studyLog.log('widget.loopSlider', { line: this.lineNumber, iteration, max: Number(this.input.max), dragging: this.dragging }, this.editor.getModel()?.uri.toString());
 			this.setLabel(iteration);
 			this.onChange(iteration);
 		}));
@@ -3230,6 +3272,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private runEventTargetRenderMsById: Map<string, number> = new Map();
 	private runEventTargetRenderFrameMsById: Map<string, number> = new Map();
 
+	// ---- Study logging ----
+	/**
+	 * Mouse move/out events that go to Python are logged in abbreviated form:
+	 * one record when the Python event string (i.e. the hovered target) changes,
+	 * otherwise at most one per 250ms, with the count of suppressed events on
+	 * the next record and a trailing record after the pointer settles.
+	 */
+	private readonly moveLogCoalescer = new StudyLogCoalescer('widget.mouseMove', 250);
+	/** What each run was started for, keyed by run id, so run.end can say. */
+	private runTriggerById: Map<string, string> = new Map();
+	private runStartWallById: Map<string, number> = new Map();
 
 	constructor(
 		private readonly editor: ICodeEditor,
@@ -3260,7 +3313,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// is, so editing it reruns on the same debounce.
 		this._register(this.consoleService.onDidChangeStdin(filePath => {
 			if (filePath === this.currentFilePath()) {
-				this.scheduleRun();
+				this.scheduleRun('stdin');
 			}
 		}));
 
@@ -3563,7 +3616,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		this.debounceTimer = setTimeout(() => {
 			this.debounceTimer = null;
-			this.runProgram(this.getProgram());
+			this.runProgram(this.getProgram(), undefined, 'edit');
 		}, this.debounceDelay);
 	}
 
@@ -3704,7 +3757,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				if (this.focusRerunTimer) { clearTimeout(this.focusRerunTimer); }
 				this.focusRerunTimer = setTimeout(() => {
 					this.focusRerunTimer = null;
-					this.runProgram(this.getProgram());
+					this.runProgram(this.getProgram(), undefined, 'cursor-line');
 				}, this.focusRerunDelay);
 			}
 		}
@@ -3752,6 +3805,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private requestExpand(line: number): void {
 		if (this.effectiveFocusedLine() === line) { return; }
+		studyLog.log('widget.expand', { line, previousFocusedLine: this.effectiveFocusedLine() }, this.editor.getModel()?.uri.toString());
 		this.explicitFocusedLine = line;
 		// Cancel any pending cursor-driven re-run; this click supersedes it.
 		if (this.focusRerunTimer) {
@@ -3759,7 +3813,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.focusRerunTimer = null;
 		}
 		if (this.isPythonModel()) {
-			this.runProgram(this.getProgram());
+			this.runProgram(this.getProgram(), undefined, 'expand');
 		}
 	}
 
@@ -3849,6 +3903,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 		const editorModel = this.editor.getModel();
 		const link = this.findLink(line, visIndex);
+		studyLog.log('snc.chainClick', { ...this.visInfo(line, visIndex), wasLinked: !!link, linkedRange: link && editorModel ? editorModel.getDecorationRange(link.decorationId)?.toString() : undefined }, editorModel?.uri.toString());
 		if (editorModel && link) {
 			const range = editorModel.getDecorationRange(link.decorationId);
 			if (range && !range.isEmpty()) {
@@ -4236,6 +4291,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const runId = this.currentRunId;
 		this.currentRunId = null;
 		this.eventsBeingHandledCurrentRun = [];
+		this.logRunCancelled(runId, 'cancelCurrentRun');
 		try {
 			channel.call('cancel', [runId]).catch(() => { /* ignore */ });
 		} catch { /* ignore */ }
@@ -4257,7 +4313,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 			this.debounceTimer = setTimeout(() => {
 				this.debounceTimer = null;
-				this.runProgram(this.getProgram());
+				this.runProgram(this.getProgram(), undefined, 'editor-visible');
 			}, this.debounceDelay);
 		}
 	}
@@ -4279,7 +4335,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		this.debounceTimer = setTimeout(() => {
 			this.debounceTimer = null;
-			this.runProgram(content);
+			this.runProgram(content, undefined, 'initial');
 		}, 1);
 	}
 
@@ -4694,6 +4750,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const event: UiEvent = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		// console.log('SNC viz_pointer event', JSON.stringify(event));
+		if (ev.type === 'mousemove' || ev.type === 'mouseout' || ev.type === 'mouseleave') {
+			this.moveLogCoalescer.note(`${lineNumber}:${visIndex}:${pythonEventStr}`, { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON }, this.editor.getModel()?.uri.toString());
+		} else {
+			this.moveLogCoalescer.flush();
+			studyLog.log('widget.mouse', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON }, this.editor.getModel()?.uri.toString());
+		}
 
 		// Rerun on every pointer event to keep backend authoritative for selections
 		this.sendEventToPython(event);
@@ -4741,6 +4803,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const event: UiEvent = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		// console.log('SNC keyboard event', JSON.stringify(event));
+		studyLog.log('widget.key', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, keyString, handled: isHandled, event: eventJSON }, this.editor.getModel()?.uri.toString());
 
 		this.sendEventToPython(event);
 	}
@@ -4751,11 +4814,35 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private onInputEvent(lineNumber: number, visIndex: number, pythonEventStr: string, value: string): void {
 		const eventJSON = { type: 'input', value };
 		const event: UiEvent = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
+		studyLog.log('widget.input', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, value }, this.editor.getModel()?.uri.toString());
 		this.sendEventToPython(event);
 	}
 
 	private sendEventToPython(event: UiEvent) {
-		this.runProgram(this.getProgram(), event);
+		this.runProgram(this.getProgram(), event, `widget:${event.eventJSON?.type ?? 'event'}`);
+	}
+
+	/** Line, visIndex and (best-effort) visualizer type of a widget, for the study log. */
+	private visInfo(line: number, visIndex: number): { line: number; visIndex: number; visType?: string; focused: boolean } {
+		const item = this.visualizationItems.find(i => i.line === line && i.visIndex === visIndex);
+		return { line, visIndex, visType: item ? visualizerTypeOf(item.html) : undefined, focused: this.effectiveFocusedLine() === line };
+	}
+
+	private logRunCancelled(runId: string, by: string): void {
+		const started = this.runStartWallById.get(runId);
+		studyLog.log('run.cancelled', { runId, by, trigger: this.runTriggerById.get(runId), elapsedMs: started ? Date.now() - started : undefined }, this.editor.getModel()?.uri.toString());
+		this.runTriggerById.delete(runId);
+		this.runStartWallById.delete(runId);
+	}
+
+	/** The rendered visualizers as the study log records them: where, what kind, how big. */
+	private describeItemsForLog(): unknown[] {
+		const full = this.configurationService.getValue<boolean>('clickacode.studyLogging.logFullHtml') === true;
+		return this.visualizationItems.map(item => ({
+			line: item.line, visIndex: item.visIndex, executionStep: item.execution_step, path: item.path,
+			visType: visualizerTypeOf(item.html), htmlLength: item.html.length, hasModel: !!item.model,
+			...(full ? { html: item.html, model: item.model } : {}),
+		}));
 	}
 
 	/**
@@ -4769,6 +4856,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			console.log('SNC: read-only visualizers, ignoring command', command.type);
 			return;
 		}
+		studyLog.log('snc.command', { runId: this.currentRunId, trigger: this.currentRunId ? this.runTriggerById.get(this.currentRunId) : undefined, command: command.type === 'CopyToClipboard' ? { ...command, text: truncateForLog(command.text) } : command }, this.editor.getModel()?.uri.toString());
 		if (command.type === 'NewCode') {
 			const model = this.editor.getModel();
 			if (!model || (command.edits.length === 0 && !command.imports?.length)) {
@@ -4835,7 +4923,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// line so we can link it for live updates, and (b) a rename selection
 			// if a new variable name was introduced.
 			let mainInverseRange: Range | null = null;
-			const newSelections = model.pushEditOperations([], editOperations, (inverseEdits) => {
+			const newSelections = studyLog.withEditOrigin('NewCode', () => model.pushEditOperations([], editOperations, (inverseEdits) => {
 				let renameSel: Selection | null = null;
 				for (let i = 0; i < sortedEdits.length; i++) {
 					const edit = sortedEdits[i];
@@ -4852,7 +4940,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 					}
 				}
 				return renameSel ? [renameSel] : null;
-			});
+			}));
 
 			// Link the freshly inserted line so subsequent visualizer interactions
 			// update it in place (via ChangeSelectedText) instead of stacking new
@@ -4976,6 +5064,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (!model || this.isReadOnly()) {
 			return;
 		}
+		studyLog.log('widget.insertNewVar', { line: lineNumber, expression, imports }, model.uri.toString());
 		const expr = expression.trim();
 		if (!expr) {
 			return;
@@ -5022,14 +5111,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const linesInsertedAbove = imported.reduce(
 			(n, edit) => n + (edit.afterLine < lineNumber ? editLineCount(edit) : 0), 0);
 
-		const newSelections = model.pushEditOperations([], [editOperation, ...importOperations], (inverseEdits) => {
+		const newSelections = studyLog.withEditOrigin('InsertNewVar', () => model.pushEditOperations([], [editOperation, ...importOperations], (inverseEdits) => {
 			const inv = inverseEdits[0];
 			if (!inv) {
 				return null;
 			}
 			const sel = computeRenameSelectionForEdit(editText, false, inv.range);
 			return sel ? [sel] : null;
-		});
+		}));
 
 		if (newSelections && newSelections.length > 0) {
 			this.editor.setSelection(newSelections[0]);
@@ -5287,13 +5376,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const absorbedBody = editRange !== trackedRange;
 
 		this.isApplyingLinkedEdit = true;
-		editorModel.pushEditOperations([], [
+		studyLog.withEditOrigin('ChangeSelectedText', () => editorModel.pushEditOperations([], [
 			{ range: editRange, text: editText },
 			// A deeper or shallower header has to take its body with it; done in
 			// the same operation so it is a single undo step. Nothing to reindent
 			// when the body just came away with the header.
 			...(absorbedBody ? [] : this.bodyReindentEdits(trackedRange, expression, baseIndent)),
-		], () => null);
+		], () => null));
 
 		// Update the tracked decoration to cover the newly inserted text
 		const startOffset = editorModel.getOffsetAt(trackedRange.getStartPosition());
@@ -5383,7 +5472,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 
 		this.isApplyingLinkedEdit = true;
-		editorModel.pushEditOperations([], [{ range, text: newText }], () => null);
+		studyLog.withEditOrigin('ChangeSourceExpr', () => editorModel.pushEditOperations([], [{ range, text: newText }], () => null));
 		setTimeout(() => { this.isApplyingLinkedEdit = false; }, 0);
 	}
 
@@ -5441,7 +5530,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const scrollTop = this.editor.getScrollTop();
 		const anchorTop = this.editor.getTopForLineNumber(boundLine);
 		const stabilize = linesDelta !== 0 && !this.editor.hasPendingScrollAnimation();
-		model.pushEditOperations([], [edit], () => null);
+		studyLog.withEditOrigin('SetConfigComment', () => model.pushEditOperations([], [edit], () => null));
 		if (stabilize) {
 			const newAnchorTop = this.editor.getTopForLineNumber(boundLine + linesDelta);
 			this.editor.setScrollTop(scrollTop + (newAnchorTop - anchorTop), ScrollType.Immediate);
@@ -5779,7 +5868,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			if (!slider) {
 				slider = new LoopSliderWidget(this.editor, line, iteration => {
 					this.setLoopSelection(line, iteration);
-					this.scheduleRun();
+					this.scheduleRun('loop-slider');
 				});
 				this.loopSliders.set(line, slider);
 			}
@@ -5807,20 +5896,25 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/** Rerun after the usual debounce, as a source edit would. */
-	private scheduleRun(): void {
+	/** Why the next scheduleRun() fires, for the study log; reset after each run. */
+	private scheduledRunTrigger = 'scheduled';
+
+	private scheduleRun(trigger: string = 'scheduled'): void {
 		if (!this.isPythonModel()) {
 			return;
 		}
+		this.scheduledRunTrigger = trigger;
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
 		}
 		this.debounceTimer = setTimeout(() => {
 			this.debounceTimer = null;
-			this.runProgram(this.getProgram());
+			this.runProgram(this.getProgram(), undefined, this.scheduledRunTrigger);
+			this.scheduledRunTrigger = 'scheduled';
 		}, this.debounceDelay);
 	}
 
-	private async runProgram(content: string, uiEvent?: UiEvent): Promise<void> {
+	private async runProgram(content: string, uiEvent?: UiEvent, trigger: string = 'unknown'): Promise<void> {
 		// Defensive guard: every caller should already gate on isPythonModel(),
 		// but make sure we never spawn a Python worker for a non-Python buffer.
 		if (!this.isPythonModel()) {
@@ -5860,7 +5954,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// streams during the await is applied: its models predate the events
 		// queued above.
 		const previousRunId = this.currentRunId;
+		let cancelledPrevious: string | null = null;
 		if (previousRunId) {
+			cancelledPrevious = previousRunId;
+			this.logRunCancelled(previousRunId, `superseded:${trigger}`);
 			this.currentRunId = null;
 			this.eventsBeingHandledCurrentRun = [];
 			try { await channel.call('cancel', [previousRunId]); } catch { /* ignore */ }
@@ -5868,6 +5965,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// event snapshot is older than the one taken below, so it gives way.
 			if (this.currentRunId) {
 				const overtakenRunId = this.currentRunId;
+				this.logRunCancelled(overtakenRunId, `overtaken:${trigger}`);
 				this.currentRunId = null;
 				this.eventsBeingHandledCurrentRun = [];
 				try { await channel.call('cancel', [overtakenRunId]); } catch { /* ignore */ }
@@ -5973,6 +6071,24 @@ export class SNCController extends Disposable implements IEditorContribution {
 				} else if (msg.type === 'end') {
 					// console.log('program end');
 					const tEnd = now();
+					{
+						const started = this.runStartWallById.get(msg.runId);
+						const triggerMs = this.runTriggerMsById.get(msg.runId);
+						studyLog.log('run.end', {
+							runId: msg.runId, trigger: this.runTriggerById.get(msg.runId),
+							durationMs: started ? Date.now() - started : undefined,
+							toFirstItemMs: triggerMs !== undefined && this.runFirstItemReceivedMsById.has(msg.runId) ? Math.round(this.runFirstItemReceivedMsById.get(msg.runId)! - triggerMs) : undefined,
+							toFirstRenderMs: triggerMs !== undefined && this.runFirstRenderMsById.has(msg.runId) ? Math.round(this.runFirstRenderMsById.get(msg.runId)! - triggerMs) : undefined,
+							exitCode: msg.result.exitCode, syntaxError: !!msg.result.syntaxError, awaitingInput: !!msg.result.awaitingInput, awaitingKind: msg.result.awaitingKind,
+							stderr: msg.result.stderr ? truncateForLog(msg.result.stderr) : undefined,
+							backendTiming: this.runSpawnTimingById.get(msg.runId) ?? msg.timing,
+							loopCounts: Object.fromEntries(this.loopCountsThisRun),
+							itemCount: this.visualizationItems.filter(i => i.runId === msg.runId).length,
+							items: this.describeItemsForLog(),
+						}, this.editor.getModel()?.uri.toString());
+						this.runTriggerById.delete(msg.runId);
+						this.runStartWallById.delete(msg.runId);
+					}
 
 					// Comprehensive timing logging
 					this.logVisualizerTiming(msg.runId, msg.timing, tEnd);
@@ -6033,8 +6149,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 					sncRunsSettled++;
 				} else if (msg.type === 'warning') {
 					console.warn('SNC warning:', msg.warning);
+					studyLog.log('run.warning', { runId: msg.runId, warning: truncateForLog(msg.warning) }, this.editor.getModel()?.uri.toString());
 				} else if (msg.type === 'error') {
 					console.error('SNC streaming error:', msg.error);
+					{
+						const started = this.runStartWallById.get(msg.runId);
+						studyLog.log('run.error', { runId: msg.runId, trigger: this.runTriggerById.get(msg.runId), durationMs: started ? Date.now() - started : undefined, error: truncateForLog(msg.error) }, this.editor.getModel()?.uri.toString());
+						this.runTriggerById.delete(msg.runId);
+						this.runStartWallById.delete(msg.runId);
+					}
 					// Surface python-spawn-failure errors as a sticky toast so
 					// the user understands why visualizers stopped working.
 					// Other errors (timeouts, etc.) still just log to console.
@@ -6093,6 +6216,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (uiEvent) {
 			this.runEventTargetById.set(runId, { line: uiEvent.line, visIndex: uiEvent.visIndex });
 		}
+		this.runTriggerById.set(runId, trigger);
+		this.runStartWallById.set(runId, Date.now());
+		studyLog.log('run.start', {
+			runId, trigger, cancelledPrevious, filePath,
+			contentLength: content.length, contentLines: content.split('\n').length,
+			focusedLine: this.effectiveFocusedLine(), loopSelections: this.loopSelectionsByLine(),
+			event: uiEvent ? { line: uiEvent.line, visIndex: uiEvent.visIndex, pythonEventStr: uiEvent.pythonEventStr, type: uiEvent.eventJSON?.type } : undefined,
+			queuedEvents: models_and_events.reduce((n, m) => n + (m['events']?.length ?? 0), 0),
+			modelsSent: models_and_events.length,
+		}, this.editor.getModel()?.uri.toString());
 
 		this.eventsBeingHandledCurrentRun = models_and_events.map(m_e => ({
 			line: m_e.line,
@@ -6121,6 +6254,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 			await channel.call('startProgram', [content, options, runId]);
 		} catch (error) {
 			console.error('Failed to start streaming run:', error);
+			studyLog.log('run.startFailed', { runId, trigger, error: String(error) }, this.editor.getModel()?.uri.toString());
+			this.runTriggerById.delete(runId);
+			this.runStartWallById.delete(runId);
 			if (this.consoleFilePath) {
 				// The run never happened, so it has no transcript to publish, but
 				// its collection state has to be released either way.

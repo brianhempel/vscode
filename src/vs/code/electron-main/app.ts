@@ -148,6 +148,8 @@ import { ITerminalSandboxService, NullTerminalSandboxService } from '../../platf
 import ErrorTelemetry from '../../platform/telemetry/electron-main/errorTelemetry.js';
 import { ISNCProcessService } from '../../platform/snc/common/snc.js';
 import { SNCProcessService } from '../../platform/snc/node/sncProcessService.js';
+import { ISNCStudyLogWriter, SNC_STUDY_LOG_CHANNEL } from '../../platform/snc/common/sncStudyLog.js';
+import { SNCStudyLogWriter } from '../../platform/snc/electron-main/sncStudyLogWriter.js';
 
 type OSProxyConfigEvent = {
 	readonly success: boolean;
@@ -1300,6 +1302,7 @@ export class CodeApplication extends Disposable {
 
 		// SNC Process Service
 		services.set(ISNCProcessService, new SyncDescriptor(SNCProcessService, undefined, true));
+		services.set(ISNCStudyLogWriter, new SyncDescriptor(SNCStudyLogWriter, undefined, true));
 
 		// Init services that require it
 		await Promises.settled([
@@ -1460,6 +1463,10 @@ export class CodeApplication extends Disposable {
 		// SNC Process Service
 		const sncProcessChannel = ProxyChannel.fromService(accessor.get(ISNCProcessService), disposables);
 		mainProcessElectronServer.registerChannel('sncProcess', sncProcessChannel);
+
+		// SNC Study Log Writer
+		const sncStudyLogChannel = ProxyChannel.fromService(accessor.get(ISNCStudyLogWriter), disposables);
+		mainProcessElectronServer.registerChannel(SNC_STUDY_LOG_CHANNEL, sncStudyLogChannel);
 	}
 
 	private async openFirstWindow(accessor: ServicesAccessor, initialProtocolUrls: IInitialProtocolUrls | undefined): Promise<ICodeWindow[]> {

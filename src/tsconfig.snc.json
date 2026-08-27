@@ -18,6 +18,9 @@
 		"vs/platform/snc/common/snc.ts",
 		"vs/platform/snc/common/pythonImports.ts",
 		"vs/platform/snc/node/sncProcessService.ts",
+		"vs/platform/snc/common/sncStudyLog.ts",
+		"vs/platform/snc/electron-main/sncStudyLogWriter.ts",
+		"vs/workbench/contrib/snc/browser/sncStudyLog.contribution.ts",
 		"vs/workbench/contrib/snc/browser/sncBrowserDrop.contribution.ts",
 		"vs/workbench/contrib/snc/browser/sncConsole.contribution.ts",
 		"vs/workbench/contrib/snc/browser/sncSettings.contribution.ts"
