@@ -86,6 +86,15 @@ CELL_KEY_SEP = '\x00'
 # sub-columns.
 AGG_KEY_SEP = '\x02'
 
+# How many rows a table draws before it stops and offers to draw the next lot,
+# and how many it always keeps at the end. The tail is kept because a list is as
+# much its end as its beginning -- a short final record or a stray value tends
+# to be down there -- and because the aggregations are drawn directly under the
+# last row: a foot reporting on the whole list belongs under the list's own last
+# row rather than under whichever row the paging happened to stop at.
+ROWS_PER_PAGE = 50
+TAIL_ROWS = 3
+
 # === Event types ===
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +467,11 @@ class DropdownToggle:
 @dataclass(frozen=True, slots=True)
 class ExpandToggle:
     """Expand/collapse the table pane (only offered when the pane clips it)."""
+    pass
+
+@dataclass(frozen=True, slots=True)
+class LoadMoreRows:
+    """User clicked the Load more row, which draws another page of rows."""
     pass
 
 @dataclass(frozen=True, slots=True)
@@ -1529,6 +1543,32 @@ def _rows(value, columns=None) -> list:
         group = _expand_row(root, value, levels, 0)
         out.extend(_stamp_span(group, 0))
     return out
+
+
+def _shown_rows(model: dict) -> int:
+    """How many leading root rows this table is drawing.
+
+    Undeclared in the model defaults, the way `expanded` is: it is one page
+    until the Load more row has been clicked, and every reader asks for it the
+    same way rather than the model carrying a number nobody has chosen yet.
+    """
+    return model.get('shown_rows', ROWS_PER_PAGE)
+
+
+def _hidden_rows(n_rows: int, shown: int) -> 'tuple | None':
+    """The root rows a table leaves out, as `[start, stop)`, or None when it
+    draws all of them.
+
+    The window is over ROOT rows rather than rendered ones: a root row that
+    splatted a list is drawn whole or not at all, or the rowspans of the columns
+    that did NOT splat would reach past the rows still there.
+
+    None whenever the gap would be empty -- a table a row or two over the page
+    size has nothing between its head and its tail worth hiding, so it draws
+    itself rather than offering to load two rows it is already holding back.
+    """
+    stop = n_rows - TAIL_ROWS
+    return (shown, stop) if stop > shown else None
 
 
 def _stamp_span(group: list, depth: int) -> list:
@@ -7297,7 +7337,15 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     # False when the source can't be re-evaluated for free, and then the rows in
     # hand are what the cells are read from -- see _is_pure_ref.
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
+    # Only the rows a fresh model can draw. A row loaded later has no child
+    # waiting for it and builds one where it is drawn, which is what a cell does
+    # for any child it doesn't find -- so this is a cost skipped, not a cell
+    # lost. Worth skipping: this is one nested visualizer per cell, and a long
+    # list is exactly where the count runs away.
+    hidden = _hidden_rows(len(lst), ROWS_PER_PAGE)
     for row in _rows(lst, columns):
+        if hidden is not None and hidden[0] <= row.index < hidden[1]:
+            continue
         for leaf in _leaf_columns(columns):
             col = leaf.expr
             is_splat = leaf.splat is not None
@@ -9384,6 +9432,35 @@ def _render_pick_region(row: int, col_id: str, model: dict, first_idx: int,
     )
 
 
+def _render_load_more_row(n_hidden: int, colspan: int, small: bool) -> str:
+    """The row that stands in for the rows a table isn't drawing.
+
+    It says both what a click will do and how much is behind it, so how far the
+    table reaches is readable without opening anything.
+
+    In the unfocused preview it acts on the press instead of pinning focus to
+    the line -- the same opt-out the expand bar takes (see render_expand_toggle)
+    and for the same reason: a long value is worth reading further down without
+    going to it.
+
+    Under the pick tool it carries no band of its own. A band's outline is drawn
+    a cell at a time and capped at the band's own ends (_pick_edge_class), so
+    what a gap in the middle of one costs is a cap it never had: the outline
+    runs into the gap and out the other side, which is what the band does.
+    """
+    next_n = min(ROWS_PER_PAGE, n_hidden)
+    label = f'Load {next_n} more'
+    if n_hidden > next_n:
+        label += f' ({n_hidden} hidden)'
+    preview_attrs = ' draggable="false" snc-unfocused-clickable' if small else ''
+    return (
+        f'<tr class="row-load-more">'
+        f'<td class="load-more" colspan="{colspan}"{preview_attrs} '
+        f'snc-mouse-down="{html.escape(repr(LoadMoreRows()))}">'
+        f'{label}</td></tr>'
+    )
+
+
 def _render_pick_preview(model: dict, eval_in_scope) -> str:
     """Live preview line: what the picked expression produces.
 
@@ -10103,6 +10180,22 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                    len(lst), pick_exprs)
 
     rendered = _rows(lst, columns)
+
+    # The window over the root rows: the page in hand, then the tail. A search
+    # that found a row below the page opens the window down to it -- that row is
+    # what the search was for, and what `_scroll_to_match` is aimed at, so it has
+    # to be there to scroll to. Opened contiguously rather than by punching a
+    # hole for the match alone: the rows in between are the ones the user is
+    # scrolling past to reach it, and one gap in a table reads as one gap.
+    # Cleared again the moment the search is, since nothing here is remembered.
+    shown = _shown_rows(model)
+    if first_match_row is not None:
+        shown = max(shown, first_match_row + 1)
+    hidden = _hidden_rows(len(lst), shown)
+    # The same reach the empty-list row takes: every drawn column and the row
+    # numbers beside them.
+    load_more_colspan = len(leaves) + 1 + (add_box is not None)
+
     # Set on every root row below, and read only by the leaves whose cells are
     # drawn on one -- but declared here so they can never be read before a root
     # row has said what they are.
@@ -10110,6 +10203,13 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     cell_exprs = None
     for rn, row in enumerate(rendered):
         i = row.index
+        if hidden is not None and hidden[0] <= i < hidden[1]:
+            # Drawn once, on the first rendered row of the first root row left
+            # out, so it lands exactly where the gap opens.
+            if i == hidden[0] and row.span_start:
+                strs.append(_render_load_more_row(
+                    hidden[1] - hidden[0], load_more_colspan, small))
+            continue
         # The last row of a list is handed `[-1]` rather than its number, all
         # the way down: the cells of that row, the code a child of one of them
         # makes, and the two readings the row's own handle leads with. It is
@@ -11235,6 +11335,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # false until the bar is there to be clicked, and the render reads
             # it back the same way.
             model['expanded'] = not model.get('expanded', False)
+
+        case LoadMoreRows():
+            # Undeclared until clicked, for the reason `expanded` is -- and it
+            # only ever grows, so a page loaded stays loaded until the model is
+            # rebuilt.
+            model['shown_rows'] = _shown_rows(model) + ROWS_PER_PAGE
 
         case DropdownToggle(dropdown_id=did):
             current = model.get('openDropdown')

@@ -1684,6 +1684,24 @@
 	border: none;
 }
 
+/* --- The row standing in for the rows a long table isn't drawing ---
+   Reads as a control rather than as data: the UI font the empty-list row uses,
+   centred across the whole table, and dimmed until it is reached for. */
+.list-visualizer td.load-more {
+	font-family: var(--snc-ui-widget-font-family);
+	letter-spacing: -0.025em;
+	font-size: var(--snc-menu-font-size);
+	color: var(--snc-text-muted);
+	text-align: center;
+	cursor: pointer;
+	user-select: none;
+}
+
+.list-visualizer td.load-more:hover {
+	color: var(--snc-text-color);
+	background-color: var(--snc-hover-bg);
+}
+
 /* --- The aggregation answers, under the columns they are about ---
    Ordinary table cells, so each stays the width of its column and reads like
    the rows above it -- but pinned to the bottom of the scrollport the way the

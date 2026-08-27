@@ -17316,6 +17316,174 @@ class TestTinyLen(unittest.TestCase):
         self.assertEqual(exps_in(_tiny_len(output)), [['len(xs)']])
 
 
+# === Paging: the first page, the last few rows, and the row between ==========
+
+from table_visualizer import LoadMoreRows, ROWS_PER_PAGE, TAIL_ROWS
+
+
+def make_load_more_event() -> dict:
+    """A click on the Load more row."""
+    return {'pythonEventStr': repr(LoadMoreRows()), 'eventJSON': {}}
+
+
+def drawn_row_numbers(output: str) -> list:
+    """The row numbers the table actually drew, in order.
+
+    Read off the row-index cells, with the two widgets that ride on the number
+    (the drag handle and the ▾) stripped back out."""
+    return [int(re.search(r'\d+', re.sub(r'<[^>]*>', '', cell))[0])
+            for cell in re.findall(r'<td class="row-index".*?</td>', output,
+                                   re.S)]
+
+
+def _load_more_row(output: str) -> str:
+    """The Load more row, tag and all, or '' when the table drew everything."""
+    match = re.search(r'<tr class="[^"]*row-load-more[^"]*">.*?</tr>', output,
+                      re.S)
+    return match[0] if match else ''
+
+
+class TestRowPaging(unittest.TestCase):
+    """A long table draws its first page, then a row that loads the next, then
+    the last few rows -- which are always drawn, so the end of the data is
+    never out of reach."""
+
+    def table(self, lst, model=None, **kwargs):
+        if model is None:
+            model = init_model(lst, mock_get_visualizer)
+        return visualize(lst, model, mock_get_visualizer, None, **kwargs)
+
+    def test_a_short_table_draws_every_row_and_offers_no_load_more(self):
+        output = self.table(list(range(10)))
+        self.assertEqual(drawn_row_numbers(output), list(range(10)))
+        self.assertEqual(_load_more_row(output), '')
+
+    def test_a_table_with_nothing_left_over_to_hide_draws_it_all(self):
+        # A page plus the tail is exactly what a full table draws anyway, so
+        # there is nothing for the row to load and it isn't drawn.
+        lst = list(range(ROWS_PER_PAGE + TAIL_ROWS))
+        output = self.table(lst)
+        self.assertEqual(drawn_row_numbers(output), list(range(len(lst))))
+        self.assertEqual(_load_more_row(output), '')
+
+    def test_one_row_over_is_one_row_hidden(self):
+        lst = list(range(ROWS_PER_PAGE + TAIL_ROWS + 1))
+        output = self.table(lst)
+        self.assertEqual(drawn_row_numbers(output),
+                         list(range(ROWS_PER_PAGE)) + [51, 52, 53])
+        self.assertIn('Load 1 more', _load_more_row(output))
+
+    def test_a_long_table_draws_the_first_page_and_the_last_rows(self):
+        output = self.table(list(range(200)))
+        self.assertEqual(drawn_row_numbers(output),
+                         list(range(50)) + [197, 198, 199])
+
+    def test_the_row_sits_between_the_head_and_the_tail(self):
+        output = self.table([f'r{i}' for i in range(200)])
+        self.assertLess(output.index('>r49</span>'),
+                        output.index('row-load-more'))
+        self.assertLess(output.index('row-load-more'),
+                        output.index('>r197</span>'))
+
+    def test_the_row_says_how_many_it_loads_and_how_many_are_hidden(self):
+        row = _load_more_row(self.table(list(range(200))))
+        self.assertIn('Load 50 more', row)
+        self.assertIn('147 hidden', row)
+
+    def test_the_last_page_doesnt_claim_a_hidden_count_it_hasnt_got(self):
+        # Fewer left than a page: "Load 7 more" already says all of it.
+        row = _load_more_row(self.table(list(range(60))))
+        self.assertIn('Load 7 more', row)
+        self.assertNotIn('hidden', row)
+
+    def test_clicking_it_draws_the_next_page(self):
+        lst = list(range(200))
+        model = init_model(lst, mock_get_visualizer)
+        model, _ = update(make_load_more_event(), None, model, lst,
+                          mock_get_visualizer)
+        self.assertEqual(drawn_row_numbers(self.table(lst, model)),
+                         list(range(100)) + [197, 198, 199])
+
+    def test_a_row_loaded_later_draws_its_cells(self):
+        # Its child model was never built, because the row it belongs to
+        # couldn't be drawn; the cell builds one rather than coming up blank.
+        lst = [f'r{i}' for i in range(200)]
+        model = init_model(lst, mock_get_visualizer)
+        model, _ = update(make_load_more_event(), None, model, lst,
+                          mock_get_visualizer)
+        self.assertIn('>r75</span>', self.table(lst, model))
+
+    def test_loading_past_the_end_draws_everything_and_drops_the_row(self):
+        lst = list(range(120))
+        model = init_model(lst, mock_get_visualizer)
+        for _ in range(2):
+            model, _ = update(make_load_more_event(), None, model, lst,
+                              mock_get_visualizer)
+        output = self.table(lst, model)
+        self.assertEqual(drawn_row_numbers(output), list(range(120)))
+        self.assertEqual(_load_more_row(output), '')
+
+    def test_the_row_spans_the_whole_table(self):
+        lst = [{'a': i, 'b': i} for i in range(200)]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ["$['a']", "$['b']"]
+        row = _load_more_row(visualize(lst, model, mock_get_visualizer, None))
+        # Two columns and the row numbers beside them.
+        self.assertIn('colspan="3"', row)
+
+    def test_a_splat_group_is_never_cut_in_half(self):
+        # The window is over ROOT rows: a root row is drawn whole or not at
+        # all, or the rowspans would reach past the rows still there.
+        lst = [{'m': ['a', 'b', 'c']} for _ in range(200)]
+        model = init_model(lst, mock_get_visualizer)
+        model['columns'] = ['*$["m"]']
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertEqual(drawn_row_numbers(output),
+                         list(range(50)) + [197, 198, 199])
+        # Every drawn root row spread into all three of its rendered rows.
+        self.assertEqual(output.count('>b</span>'), 53)
+
+    def test_a_match_below_the_window_is_drawn(self):
+        # A search that found row 150 has to show row 150 -- that is what the
+        # search was for, and what the scroll-to-match is aimed at.
+        lst = list(range(200))
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ == 150'
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertIn(150, drawn_row_numbers(output))
+        self.assertIn('row-match', output)
+
+    def test_the_window_snaps_back_when_the_search_is_cleared(self):
+        lst = list(range(200))
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ == 150'
+        visualize(lst, model, mock_get_visualizer, eval)
+        model['search'] = None
+        self.assertEqual(drawn_row_numbers(
+            visualize(lst, model, mock_get_visualizer, eval)),
+            list(range(50)) + [197, 198, 199])
+
+    def test_the_preview_pages_too(self):
+        # And its row acts on the press instead of pinning focus to the line,
+        # the way the expand bar does.
+        output = self.table(list(range(200)), small=True)
+        self.assertEqual(drawn_row_numbers(output),
+                         list(range(50)) + [197, 198, 199])
+        self.assertIn('snc-unfocused-clickable', _load_more_row(output))
+
+    def test_a_dict_pages_by_its_entries(self):
+        d = {f'k{i}': i for i in range(200)}
+        output = self.table(d)
+        self.assertEqual(drawn_row_numbers(output),
+                         list(range(50)) + [197, 198, 199])
+
+    def test_init_model_leaves_out_the_children_of_rows_it_cant_draw(self):
+        lst = list(range(200))
+        model = init_model(lst, mock_get_visualizer)
+        rows = {int(k.split(CELL_KEY_SEP)[0]) for k in model['children']}
+        self.assertEqual(rows, set(range(50)) | {197, 198, 199})
+
+
 # === snc-py-exps under dicts, sub-columns, splats and grouping ================
 
 from table_visualizer import (
