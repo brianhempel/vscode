@@ -131,6 +131,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly moveThrottleDelay = 16;
 	private lastRenderedHtml: string | null = null;
 	private focusRestoreVersion = 0;
+	// Values the user has typed into an snc-input box that Python hasn't
+	// echoed back yet, oldest first, keyed by the box's snc-input attribute
+	// (stable across renders, unlike the element). Typing is local and
+	// instant; Python's answer is a whole program run later. A render whose
+	// value= is one of these *older* values is Python catching up, not
+	// Python changing its mind, and must not overwrite what's in the DOM --
+	// see keepNewerTypedValue.
+	private pendingTypedValues: { key: string; values: string[] } | null = null;
 	// Dropdown panels reparented to the editor container so they escape the
 	// widget's overflow. More than one can be open at once (e.g. a column's ▾
 	// menu alongside the column-name input's suggestion list).
@@ -1511,6 +1519,62 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 	}
 
+	/** Remember a value just sent to Python from an snc-input box. */
+	private noteTypedValue(inputEl: Element, value: string): void {
+		const key = inputEl.getAttribute('snc-input') ?? '';
+		if (this.pendingTypedValues && this.pendingTypedValues.key === key) {
+			this.pendingTypedValues.values.push(value);
+		} else {
+			// Typing moved to another box: whatever the old one had in flight
+			// will be echoed into an unfocused box, which is harmless.
+			this.pendingTypedValues = { key, values: [value] };
+		}
+	}
+
+	/**
+	 * Reconcile a freshly rendered snc-input box with what the user has typed
+	 * into its predecessor since. `domValue` is the predecessor's value at the
+	 * moment of the render; `el` is the new element (its value is what Python
+	 * rendered).
+	 *
+	 * Invariant: while typed values are still in flight, the DOM is the source
+	 * of truth for the focused box. Every input event carries the box's whole
+	 * value, so the values we've sent form a history, oldest first:
+	 *   - Python rendered the newest one: it has caught up; nothing in flight.
+	 *   - Python rendered an older one (an event still queued, or a run
+	 *     cancelled mid-stream): stale. Put the DOM value back; the newer
+	 *     event is still on its way and Python will catch up.
+	 *   - Python rendered something we never sent: it deliberately changed the
+	 *     box (cleared it on Escape, normalized it, ...). Take Python's value
+	 *     and forget the history, so the change isn't fought.
+	 * Returns true when the DOM value was kept (so the caller restores the
+	 * selection as it was, not clamped to the stale value).
+	 */
+	private keepNewerTypedValue(el: HTMLInputElement | HTMLTextAreaElement, domValue: string): boolean {
+		const pending = this.pendingTypedValues;
+		const key = el.getAttribute('snc-input');
+		if (!pending || key === null || pending.key !== key) {
+			return false;
+		}
+		const rendered = el.value;
+		const newest = pending.values[pending.values.length - 1];
+		if (rendered === newest) {
+			this.pendingTypedValues = null;
+			return false;
+		}
+		const staleIndex = pending.values.indexOf(rendered);
+		if (staleIndex < 0) {
+			this.pendingTypedValues = null;
+			return false;
+		}
+		// Values up to and including the echoed one are acknowledged.
+		pending.values.splice(0, staleIndex + 1);
+		if (el.value !== domValue) {
+			el.value = domValue;
+		}
+		return true;
+	}
+
 	private dispatch_input_event(attr_name: string, ev: Event): void {
 		if (!this.isFocused()) { return; }
 		const target = ev.target as HTMLElement;
@@ -1522,6 +1586,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				let pythonEventStr: string = el.getAttribute(attr_name) ?? '';
 				pythonEventStr = this.wrapWithChildKeys(pythonEventStr, el.parentElement, this.domNode);
 				const value = (target as HTMLInputElement).value ?? '';
+				this.noteTypedValue(el, value);
 				this.onInputEvent(pythonEventStr, value);
 				return;
 			}
@@ -1685,6 +1750,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		let savedFocusKey: string | null = null;
 		let savedSelectionStart: number | null = null;
 		let savedSelectionEnd: number | null = null;
+		let savedValue: string | null = null;
 		const savedWidgetScrollTop = this.domNode.scrollTop;
 		const savedWidgetScrollLeft = this.domNode.scrollLeft;
 		const oldScrollableElements = Array.from(this.domNode.querySelectorAll('*'))
@@ -1719,7 +1785,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement) {
 				savedSelectionStart = activeElement.selectionStart;
 				savedSelectionEnd = activeElement.selectionEnd;
+				savedValue = activeElement.value;
 			}
+		} else {
+			// Nothing focused in here: no typing can be in flight that matters.
+			this.pendingTypedValues = null;
 		}
 
 		// Now safe to clean up the old hoisted dropdowns
@@ -1763,6 +1833,27 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			|| this.queryHoistedDropdowns('[autofocus]')
 		) as HTMLElement | null;
 		const hasScrollToMatch = this.domNode.querySelector('[snc-scroll-to-match]') !== null;
+
+		// Find the box that will get focus back (same lookup as in the rAF
+		// below) and reconcile its value right away, synchronously: the focus
+		// restore is a frame away and the user may type into the box before
+		// then, so the value it holds must already be the newer one.
+		const keySelector = savedFocusKey ? `[snc-focus-key="${CSS.escape(savedFocusKey)}"]` : null;
+		const findFocusTarget = (): HTMLElement | null => {
+			const keyed = keySelector
+				? (this.domNode.querySelector(keySelector) || this.queryHoistedDropdowns(keySelector))
+				: null;
+			const widgetFocusable = Array.from(this.domNode.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR));
+			const allFocusable = [...widgetFocusable, ...this.hoistedFocusable()];
+			return (keyed ?? (focusedIndex < allFocusable.length ? allFocusable[focusedIndex] : null)) as HTMLElement | null;
+		};
+		if (focusedIndex >= 0 && savedValue !== null) {
+			const target = findFocusTarget();
+			if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+				this.keepNewerTypedValue(target, savedValue);
+			}
+		}
+
 		if (shouldRestoreScroll || focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
 			// Defer to next frame so layout/DOM updates settle, and ensure only the
 			// latest update in a burst is allowed to restore scroll/focus.
@@ -1822,22 +1913,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					// The element that named itself, wherever it has ended up;
 					// failing that, the same nth focusable element.
 					// Look in both the widget and any hoisted dropdowns
-					const keySelector = savedFocusKey
-						? `[snc-focus-key="${CSS.escape(savedFocusKey)}"]`
-						: null;
-					const keyed = keySelector
-						? (this.domNode.querySelector(keySelector)
-							|| this.queryHoistedDropdowns(keySelector))
-						: null;
-					const widgetFocusable = Array.from(this.domNode.querySelectorAll(VisualizationWidget.FOCUSABLE_SELECTOR));
-					const allFocusable = [...widgetFocusable, ...this.hoistedFocusable()];
-					const el = (keyed
-						?? (focusedIndex < allFocusable.length ? allFocusable[focusedIndex] : null)
-					) as HTMLElement | null;
+					const el = findFocusTarget();
 					if (el) {
+						const wasFocused = document.activeElement === el;
 						el.focus({ preventScroll: true });
-						// Restore cursor position for input/textarea elements
-						if (savedSelectionStart !== null && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+						// Restore cursor position for input/textarea elements.
+						// Not if the user already has this box: they may have typed
+						// into it since the render (its value was reconciled above),
+						// and their caret is newer than the saved one.
+						if (!wasFocused && savedSelectionStart !== null && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
 							el.selectionStart = savedSelectionStart;
 							el.selectionEnd = savedSelectionEnd;
 						}
@@ -2137,6 +2221,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					if (el.hasAttribute('snc-input')) {
 						const pythonEventStr = wrapHoistedEvent(el.getAttribute('snc-input') ?? '', el);
 						const value = (target as HTMLInputElement).value ?? '';
+						this.noteTypedValue(el, value);
 						this.onInputEvent(pythonEventStr, value);
 						return;
 					}
@@ -5500,16 +5585,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const filePath = this.currentFilePath();
 		const channel = this.mainProcessService.getChannel('sncProcess');
 
-		// Cancel any previous streaming run
-		if (this.currentRunId) {
-			try { await channel.call('cancel', [this.currentRunId]); } catch { /* ignore */ }
-			this.currentRunId = null;
-			this.eventsBeingHandledCurrentRun = [];
-		}
-
-		this.streamUpdateTimer = null;
-
-		// Add event to appropriate visualizer
+		// Add event to appropriate visualizer. This happens synchronously,
+		// before the cancel below is awaited: an item from the run being
+		// cancelled could otherwise still arrive in that gap and be taken as
+		// current, having handled nothing of this event.
 		if (uiEvent) {
 			let found = false;
 			this.visualizationItems = this.visualizationItems.map(visItem => {
@@ -5526,6 +5605,26 @@ export class SNCController extends Disposable implements IEditorContribution {
 				console.error(`SNC: No vis at ${uiEvent.line}:${uiEvent.visIndex} to queue event on!`)
 			}
 		}
+
+		// Cancel any previous streaming run. Disown it first so nothing more it
+		// streams during the await is applied: its models predate the events
+		// queued above.
+		const previousRunId = this.currentRunId;
+		if (previousRunId) {
+			this.currentRunId = null;
+			this.eventsBeingHandledCurrentRun = [];
+			try { await channel.call('cancel', [previousRunId]); } catch { /* ignore */ }
+			// Another call may have started a run while this one waited. Its
+			// event snapshot is older than the one taken below, so it gives way.
+			if (this.currentRunId) {
+				const overtakenRunId = this.currentRunId;
+				this.currentRunId = null;
+				this.eventsBeingHandledCurrentRun = [];
+				try { await channel.call('cancel', [overtakenRunId]); } catch { /* ignore */ }
+			}
+		}
+
+		this.streamUpdateTimer = null;
 
 		// Ensure we are subscribed to the streaming event once
 		if (!this.streamSubscription) {
