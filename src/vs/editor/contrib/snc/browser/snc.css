@@ -2301,3 +2301,47 @@
 	font-size: 0.8em;
 	cursor: text;
 }
+
+/* ---- Toggle-widgets button (editor top-right corner) ---- */
+
+/* Sits in the overlay-widget corner beside where the find widget appears.
+   Faded until hovered so it does not compete with the code beneath it;
+   opaque while the widgets are hidden so it is easy to find them again. */
+.monaco-editor .snc-toggle-widgets-button {
+	/* The editor sets top/right inline (clear of the minimap and scrollbar);
+	   the margin insets the button from that corner. */
+	position: absolute;
+	margin: 4px 4px 0 0;
+	width: 22px;
+	height: 22px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 5px;
+	cursor: pointer;
+	opacity: 0.45;
+	color: var(--vscode-icon-foreground);
+	background-color: var(--vscode-editorWidget-background);
+	border: 1px solid var(--vscode-editorWidget-border, transparent);
+	transition: opacity 0.1s ease-in-out;
+	z-index: 10;
+}
+
+.monaco-editor .snc-toggle-widgets-button.snc-widgets-hidden,
+.monaco-editor .snc-toggle-widgets-button:hover,
+.monaco-editor .snc-toggle-widgets-button:focus-visible {
+	opacity: 1;
+}
+
+.monaco-editor .snc-toggle-widgets-button:hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-editor .snc-toggle-widgets-button:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.monaco-editor .snc-toggle-widgets-button .codicon {
+	font-size: 14px;
+}

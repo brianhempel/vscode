@@ -1,7 +1,13 @@
-import { registerEditorContribution, EditorContributionInstantiation } from '../../../browser/editorExtensions.js';
-import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
+import { registerEditorContribution, EditorContributionInstantiation, EditorAction, registerEditorAction, ServicesAccessor } from '../../../browser/editorExtensions.js';
+import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js';
-import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates } from '../../../browser/editorBrowser.js';
+import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference } from '../../../browser/editorBrowser.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { localize } from '../../../../nls.js';
+import { IHoverService } from '../../../../platform/hover/browser/hover.js';
+import { HoverStyle } from '../../../../base/browser/ui/hover/hover.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { Position } from '../../../common/core/position.js';
 import { Range } from '../../../common/core/range.js';
 import { Selection, SelectionDirection } from '../../../common/core/selection.js';
@@ -2942,10 +2948,108 @@ export function suggestVarNameForExpression(expr: string): string {
  * nothing, so the union across all of them is the honest answer.
  */
 const sncControllers = new Set<SNCController>();
+
+/**
+ * Storage key for the "are SNC widgets shown" flag. One boolean for the whole
+ * profile, not per editor: hiding the visualizers is a mode the user is in
+ * ("let me just read the code for a while"), not a property of any one file,
+ * and a per-file flag would mean re-hiding in every tab. Profile scope so it
+ * follows the user across workspaces, and USER target so it syncs with the
+ * rest of their preferences.
+ */
+const SNC_WIDGETS_VISIBLE_KEY = 'snc.widgetsVisible';
+
+/**
+ * The small eye button in the editor's top-right corner that toggles all SNC
+ * widgets. It is the one piece of SNC chrome that stays when the widgets are
+ * hidden, so it is what brings them back. Sits next to the find widget's
+ * corner as an overlay widget, so it never occupies a line of code; it is
+ * faded until hovered so it does not compete with the text under it.
+ */
+class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
+	private static nextId = 0;
+	private readonly id = `snc.toggleWidgetsButton.${ToggleWidgetsButton.nextId++}`;
+	private readonly domNode: HTMLElement;
+	private readonly icon: HTMLElement;
+	private readonly hover = this._register(new DisposableStore());
+
+	constructor(
+		private readonly editor: ICodeEditor,
+		private readonly hoverService: IHoverService,
+		onToggle: () => void,
+	) {
+		super();
+		this.domNode = document.createElement('div');
+		this.domNode.className = 'snc-toggle-widgets-button';
+		this.domNode.setAttribute('role', 'button');
+		this.domNode.tabIndex = 0;
+		this.icon = document.createElement('span');
+		this.domNode.appendChild(this.icon);
+		this._register(dom.addDisposableListener(this.domNode, 'click', e => {
+			e.preventDefault();
+			e.stopPropagation();
+			onToggle();
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'keydown', (e: KeyboardEvent) => {
+			if (e.key === 'Enter' || e.key === ' ') {
+				e.preventDefault();
+				onToggle();
+			}
+		}));
+		this.editor.addOverlayWidget(this);
+	}
+
+	/** Reflect the global flag: the icon shows what clicking will do. */
+	setVisible(widgetsVisible: boolean): void {
+		const label = widgetsVisible
+			? localize('sncHideWidgets', "Hide Clickacode Visualizers")
+			: localize('sncShowWidgets', "Show Clickacode Visualizers");
+		this.icon.className = ThemeIcon.asClassName(widgetsVisible ? Codicon.eye : Codicon.eyeClosed);
+		this.domNode.classList.toggle('snc-widgets-hidden', !widgetsVisible);
+		this.domNode.setAttribute('aria-label', label);
+		this.domNode.setAttribute('aria-pressed', String(!widgetsVisible));
+		this.hover.clear();
+		this.hover.add(this.hoverService.setupDelayedHover(this.domNode, {
+			content: label,
+			style: HoverStyle.Pointer,
+		}));
+	}
+
+	getId(): string {
+		return this.id;
+	}
+
+	getDomNode(): HTMLElement {
+		return this.domNode;
+	}
+
+	getPosition(): IOverlayWidgetPosition | null {
+		return { preference: OverlayWidgetPositionPreference.TOP_RIGHT_CORNER };
+	}
+
+	override dispose(): void {
+		this.editor.removeOverlayWidget(this);
+		super.dispose();
+	}
+}
 let sncRunsSettled = 0;
 
 export class SNCController extends Disposable implements IEditorContribution {
 	public static readonly ID = 'editor.contrib.snc';
+
+	static get(editor: ICodeEditor): SNCController | null {
+		return editor.getContribution<SNCController>(SNCController.ID);
+	}
+
+	/**
+	 * Whether SNC's widgets are on screen. Global across every editor (see
+	 * SNC_WIDGETS_VISIBLE_KEY); this is the storage value as of the last
+	 * change event. Python keeps running while hidden and `visualizationItems`
+	 * keeps filling, so showing again is a redraw, not a rerun -- but nothing
+	 * is rendered into the DOM until then.
+	 */
+	private widgetsVisible = true;
+	private toggleWidgetsButton: ToggleWidgetsButton | null = null;
 
 	private visualizationWidgets: Map<number, VisualizationWidget[]> = new Map();
 	private viewZones: Map<number, string> = new Map(); // line number -> view zone id
@@ -3100,8 +3204,19 @@ export class SNCController extends Disposable implements IEditorContribution {
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@ISNCConsoleService private readonly consoleService: ISNCConsoleService,
+		@IStorageService private readonly storageService: IStorageService,
+		@IHoverService private readonly hoverService: IHoverService,
 	) {
 		super();
+
+		this.widgetsVisible = this.storageService.getBoolean(SNC_WIDGETS_VISIBLE_KEY, StorageScope.PROFILE, true);
+		// Every controller listens to storage rather than to the one that was
+		// clicked, so a toggle in any editor reaches every editor (and any
+		// other window sharing the profile).
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, SNC_WIDGETS_VISIBLE_KEY, this._store)(() => {
+			this.applyWidgetsVisible(this.storageService.getBoolean(SNC_WIDGETS_VISIBLE_KEY, StorageScope.PROFILE, true));
+		}));
+		this.updateToggleWidgetsButton();
 
 		// The stdin document is an input to the program exactly like the source
 		// is, so editing it reruns on the same debounce.
@@ -3124,6 +3239,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.visualizationItems = [];
 			this.clearVisualizationWidgets();
 			this.loopSelections = [];
+			this.updateToggleWidgetsButton();
 			// Set up language change listener for the new model
 			this.setupLanguageChangeListener();
 			// Re-resolve the Python interpreter for the new model's workspace
@@ -3134,7 +3250,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// Trigger initial visualization when a new model loads
 			this.triggerInitialVisualization();
 		}));
-		this._register(editor.onDidDispose(() => { this.clearVisualizationWidgets(); }));
+		this._register(editor.onDidDispose(() => {
+			this.clearVisualizationWidgets();
+			this.toggleWidgetsButton?.dispose();
+			this.toggleWidgetsButton = null;
+		}));
 		this._register(editor.onDidChangeCursorPosition(() => {
 			this.updateConfigCommentFolding();
 			this.onCursorPositionChanged();
@@ -3322,6 +3442,49 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * runProgram, which short-circuits for non-Python models, but most callers
 	 * also gate themselves to avoid scheduling no-op timers.
 	 */
+	/** Flip the global flag; storage's change event does the actual work. */
+	toggleWidgetsVisible(): void {
+		const visible = !this.storageService.getBoolean(SNC_WIDGETS_VISIBLE_KEY, StorageScope.PROFILE, true);
+		this.storageService.store(SNC_WIDGETS_VISIBLE_KEY, visible, StorageScope.PROFILE, StorageTarget.USER);
+	}
+
+	/**
+	 * Hide: tear down every widget, slider, arrow and view zone so the code
+	 * reflows as if SNC were not there, keeping the items and loop counts.
+	 * Show: draw what those hold. Either way the button stays.
+	 */
+	private applyWidgetsVisible(visible: boolean): void {
+		if (visible === this.widgetsVisible) {
+			return;
+		}
+		this.widgetsVisible = visible;
+		this.toggleWidgetsButton?.setVisible(visible);
+		if (!this.isPythonModel()) {
+			return;
+		}
+		if (visible) {
+			this.updateConfigCommentFolding();
+			this.updateLoopSliders();
+			this.updateVisualizationWidgets(this.visualizationItems);
+		} else {
+			this.removeWidgetDom();
+			this.updateConfigCommentFolding();
+		}
+	}
+
+	/** The button exists exactly while the editor shows a Python model. */
+	private updateToggleWidgetsButton(): void {
+		if (this.isPythonModel()) {
+			if (!this.toggleWidgetsButton) {
+				this.toggleWidgetsButton = new ToggleWidgetsButton(this.editor, this.hoverService, () => this.toggleWidgetsVisible());
+			}
+			this.toggleWidgetsButton.setVisible(this.widgetsVisible);
+		} else if (this.toggleWidgetsButton) {
+			this.toggleWidgetsButton.dispose();
+			this.toggleWidgetsButton = null;
+		}
+	}
+
 	private isPythonModel(): boolean {
 		const model = this.editor.getModel();
 		if (!model) {
@@ -3987,6 +4150,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private onLanguageChanged(): void {
+		this.updateToggleWidgetsButton();
 		this.updateConfigCommentFolding();
 		if (this.isPythonModel()) {
 			this.triggerInitialVisualization();
@@ -4061,8 +4225,25 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	private clearVisualizationWidgets(): void {
 		this.syntaxErrorActive = false;
+		this.loopCounts.clear();
+		this.removeWidgetDom();
 
-		// Remove all existing widgets
+		// Tearing the widgets down is a render too. Its callers drop the items
+		// first, so the empty DOM is the truth; the one that does not (a run
+		// that failed to launch) is an error path where the next run redraws
+		// everything anyway, and leaving the version behind there would hang
+		// every waiting tool rather than let it read a screen that is not going
+		// to change.
+		this.renderedVersion = this.itemsVersion;
+	}
+
+	/**
+	 * Everything SNC has put in the editor's DOM comes out: widgets (and with
+	 * them their hoisted dropdowns and tooltips), loop sliders, link arrows and
+	 * view zones. The state that produced it (items, loop counts, pins, links)
+	 * is left alone, so this is what hiding the widgets does.
+	 */
+	private removeWidgetDom(): void {
 		for (const widgets of this.visualizationWidgets.values()) {
 			for (const widget of widgets) {
 				widget.dispose();
@@ -4074,7 +4255,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 			slider.dispose();
 		}
 		this.loopSliders.clear();
-		this.loopCounts.clear();
 
 		// Remove all view zones (including the top spacer)
 		this.editor.changeViewZones((accessor) => {
@@ -4089,14 +4269,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.viewZones.clear();
 		this.viewZoneHeights.clear();
 		this.topSpacerHeight = 0;
-
-		// Tearing the widgets down is a render too. Its callers drop the items
-		// first, so the empty DOM is the truth; the one that does not (a run
-		// that failed to launch) is an error path where the next run redraws
-		// everything anyway, and leaving the version behind there would hang
-		// every waiting tool rather than let it read a screen that is not going
-		// to change.
-		this.renderedVersion = this.itemsVersion;
 	}
 
 	private setSyntaxErrorState(active: boolean): void {
@@ -4186,6 +4358,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// }
 
 	private updateVisualizationWidgets(visualizationData: IVisualizationItem[]): void {
+		if (!this.widgetsVisible) {
+			// Nothing to draw into; the items are kept for when the widgets are
+			// shown again. As far as anything waiting on the DOM is concerned,
+			// hidden is rendered.
+			this.renderedVersion = this.itemsVersion;
+			return;
+		}
 
 		// console.log("visualizationData", visualizationData);
 
@@ -5209,7 +5388,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private updateConfigCommentFolding(): void {
 		const model = this.editor.getModel();
-		if (!model || !this.isPythonModel()) {
+		if (!model || !this.isPythonModel() || !this.widgetsVisible) {
 			this.configCommentDecorations.clear();
 			return;
 		}
@@ -5517,6 +5696,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	/** One slider per loop/def line that ran more than once; none elsewhere. */
 	private updateLoopSliders(): void {
+		if (!this.widgetsVisible) {
+			return;
+		}
 		for (const [line, count] of this.loopCounts) {
 			let slider = this.loopSliders.get(line);
 			if (count < 2) {
@@ -5884,6 +6066,31 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 	}
 
+	override dispose(): void {
+		this.toggleWidgetsButton?.dispose();
+		this.toggleWidgetsButton = null;
+		super.dispose();
+	}
+
 }
 
 registerEditorContribution(SNCController.ID, SNCController, EditorContributionInstantiation.AfterFirstRender);
+
+/**
+ * The same toggle as the corner button, as a command so it can be keybound.
+ * No precondition: the flag is global, so flipping it from a non-Python
+ * editor is as meaningful as from a Python one.
+ */
+registerEditorAction(class extends EditorAction {
+	constructor() {
+		super({
+			id: 'snc.toggleWidgets',
+			label: localize('sncToggleWidgets', "Clickacode: Toggle Visualizer Widgets"),
+			alias: 'Clickacode: Toggle Visualizer Widgets',
+			precondition: undefined,
+		});
+	}
+	run(_accessor: ServicesAccessor, editor: ICodeEditor): void {
+		SNCController.get(editor)?.toggleWidgetsVisible();
+	}
+});
