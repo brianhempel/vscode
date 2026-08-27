@@ -36,6 +36,7 @@ returned lists instead, but yield should be more memory-efficient and
 potentially faster).
 """
 
+from __future__ import annotations # prevent `Alt`'s circular definition from causing errors in Python <=3.13
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, cast
 import re

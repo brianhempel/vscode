@@ -472,6 +472,7 @@ TABLE_VIZ_GRAMMAR = make_grammar(BASE_RULES + [
 _SUGGEST_SUFFIXES = {
     'any': 'any', 'all': 'all', 'count': 'count',
     'filter': 'filtered', 'find_indices': 'indices',
+    'join': 'joined',
 }
 _STATEMENT_ACTIONS = frozenset({'loop_no_idx', 'loop_orig_idx', 'loop_new_idx', 'if_any', 'if_all'})
 
@@ -482,7 +483,10 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
     base = ctx.get('suggest_base') or 'result'
     has_var = bool(ctx.get('has_var'))
     if action == 'filter':
-        if ctx.get('is_first'):
+        if ctx.get('is_pick_only'):
+            # Nothing was filtered: the whole table is there, one column of it.
+            suffix = 'picked'
+        elif ctx.get('is_first'):
             suffix = 'match'
         else:
             suffix = 'filtered'
@@ -521,7 +525,27 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     if result is not None:
         return (_suggest_name_for_action(action, gen_ctx), result[0])
 
-    # Bare-expression fallbacks not in the grammar (too greedy for parsing)
+    # Bare-expression fallbacks not in the grammar (too greedy for parsing).
+    # A pick made with no search is one of them: what it writes is an ordinary
+    # comprehension over the list, which no template can tell from any other.
+    if ctx.get('is_pick_only'):
+        pick = ctx.get('pick_expr')
+        if not pick:
+            return None
+        pick_array = bool(ctx.get('pick_is_array'))
+        if action == 'filter':
+            return (_suggest_name_for_action(action, ctx), pick)
+        if pick_array and action == 'loop_no_idx':
+            return (_suggest_name_for_action(action, ctx), f'for item in {pick}:')
+        if pick_array and action == 'loop_new_idx':
+            return (_suggest_name_for_action(action, ctx),
+                    f'for i, item in enumerate({pick}):')
+        if pick_array and action == 'join':
+            sep = ctx.get('join_separator', "''")
+            return (_suggest_name_for_action(action, ctx),
+                    f'{sep}.join(str(item) for item in {pick})')
+        return None
+
     if action == 'find_indices':
         if ctx.get('is_index'):
             return (_suggest_name_for_action(action, ctx), ctx['index_expr'])

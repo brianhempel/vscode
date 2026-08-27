@@ -5688,7 +5688,7 @@ def _search_context_for(model: dict, var_and_exp=None,
     Returns None if no valid search or source info.
     """
     search = model.get('search')
-    if not search:
+    if not search and model.get('tool') != 'pick':
         return None
 
     if source_expr:
@@ -5700,6 +5700,9 @@ def _search_context_for(model: dict, var_and_exp=None,
         source_expr = var_name if var_name else f"({expr})"
         suggest_base = var_name if var_name else "result"
         has_var = bool(var_name)
+
+    if not search:
+        return _pick_only_context(model, source_expr, has_var, suggest_base)
 
     first = bool(model.get('first_match', False))
     parsed = parse_search_term(search)
@@ -5824,6 +5827,29 @@ def _search_context_for(model: dict, var_and_exp=None,
         ctx['is_first'] = True
 
     return ctx
+
+
+def _pick_only_context(model: dict, source_expr: str, has_var: bool,
+                       suggest_base: str) -> dict:
+    """The context for a pick made with an empty search box.
+
+    With no predicate there is no first match to bind, so the regions the table
+    offers span every row and what they assemble is already self-contained --
+    there is nothing for a next(...) to wrap, and no other action to write.
+    """
+    binds = _model_binds(model)
+    pick_expr = model.get('pick_expr')
+    return {
+        'source_expr': source_expr, 'has_var': has_var,
+        'suggest_base': suggest_base,
+        'is_pick_only': True,
+        'is_predicate': False, 'is_index': False, 'is_slice': False,
+        'is_multi_index': False, 'is_first': False,
+        'pick_expr': (replace_dollars_in_py_exp(
+            pick_expr, _column_dollars(source_expr, _default_item_expr(binds)),
+            index_exp='i', bindings=binds) if pick_expr else None),
+        'pick_is_array': _pick_is_array(model),
+    }
 
 
 def _get_whole_list_context(model: dict, var_and_exp=None,
@@ -5966,7 +5992,10 @@ def _suggest_name_for_action(action: str, ctx: dict) -> str | None:
     base = ctx.get('suggest_base') or 'result'
     has_var = bool(ctx.get('has_var'))
     if action == 'filter':
-        if ctx.get('is_first'):
+        if ctx.get('is_pick_only'):
+            # Nothing was filtered: the whole table is there, one column of it.
+            suffix = 'picked'
+        elif ctx.get('is_first'):
             suffix = 'match'
         else:
             suffix = 'filtered'
@@ -6032,6 +6061,30 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
     src = ctx['source_expr']
     first = ctx.get('is_first', False)
+
+    # No search, so no match to bind: the picked expression already stands on
+    # its own, and every action that would have needed the predicate is
+    # unwritten. Loop and Join still run over a pick that is one array.
+    if ctx.get('is_pick_only'):
+        pick = ctx.get('pick_expr')
+        if not pick:
+            return None
+        pick_array = bool(ctx.get('pick_is_array'))
+        match action:
+            case 'filter':
+                code = pick
+            case 'loop_no_idx' if pick_array:
+                code = f'for item in {pick}:'
+            case 'loop_new_idx' if pick_array:
+                code = f'for i, item in enumerate({pick}):'
+            case 'join' if pick_array:
+                sep = ctx.get('join_separator', "''")
+                code = f'{sep}.join(str(item) for item in {pick})'
+            case _:
+                # Including loop_orig_idx: a column is a projection of the rows,
+                # so its elements have no original index of their own.
+                return None
+        return (_suggest_name_for_action(action, ctx), code)
 
     if ctx.get('is_dict') and ctx.get('is_index'):
         idx = ctx['index_expr']
@@ -6664,15 +6717,22 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
 # cell of that grid is one pickable region, so a table with N columns offers
 # 3 * (1 + N) regions, minus any band that has no rows.
 #
-# Region ids are '{band}_{column}': band is 'pre' / 'match' / 'post' and column
-# is 'idx' (the row-index column) or 'col_<n>' (an index into model['columns']).
+# With an empty search box there is no match, so there are no bands relative to
+# one: the table is a single 'all' band per column, spanning every row. That is
+# the whole difference -- a region is still one column over a run of rows, and
+# `first_idx is None` is what says which reading applies.
+#
+# Region ids are '{band}_{column}': band is 'pre' / 'match' / 'post' / 'all' and
+# column is 'idx' (the row-index column) or 'col_<n>' (an index into
+# model['columns']).
 #
 # Region expressions are written in the table's own scope, where $ is the row
 # item and `i` is the matched row's index. generate_action binds $ to `item` and
 # wraps the whole assembled expression in a single next(...) over the first
-# match, which is what makes `i` available.
+# match, which is what makes `i` available. An 'all' band names no match and so
+# needs no wrapper: what it picks out already stands on its own.
 
-PICK_BANDS = ('pre', 'match', 'post')
+PICK_BANDS = ('pre', 'match', 'post', 'all')
 PICK_IDX_COLUMN = 'idx'
 
 # The pre/post bands map a column over a sublist, so their comprehensions need a
@@ -6685,6 +6745,7 @@ _PICK_INNER_VAR = 'x'
 _PICK_BAND_RANGES = {
     'pre': (None, 'i'),
     'post': ('i + 1', None),
+    'all': (None, None),
 }
 
 # Bands of one column that sit next to each other collapse into a single range.
@@ -6737,8 +6798,14 @@ def _parse_pick_region_id(region_id: str) -> tuple | None:
     return None
 
 
-def _pick_bands_present(first_idx: int, n_rows: int) -> tuple:
-    """Which bands actually hold rows, for a first match at first_idx."""
+def _pick_bands_present(first_idx: 'int | None', n_rows: int) -> tuple:
+    """Which bands actually hold rows, for a first match at first_idx.
+
+    No first match (first_idx None) means no band is relative to one, so the
+    table offers the single whole-height band instead.
+    """
+    if first_idx is None:
+        return ('all',)
     bands = []
     if first_idx > 0:
         bands.append('pre')
@@ -6765,16 +6832,63 @@ _PICK_INNER_DICT_TARGET = 'k2, v2'
 _PICK_INNER_DICT_ITEM = '(k2, v2)'
 
 
+def _pick_band_rows(source_expr: str, start: str | None, stop: str | None,
+                    is_dict: bool) -> str:
+    """The run of rows a band covers.
+
+    A dict's rows are its pairs, so a band of them is a run of list(d.items())
+    -- the same route every positional dict action takes.
+    """
+    if is_dict:
+        rows = f'list({_atomize(source_expr)}.items())'
+        return (rows if start is None and stop is None
+                else f'{rows}[{start or ""}:{stop or ""}]')
+    if start is None and stop is None:
+        return source_expr
+    return f'{source_expr}[{start or ""}:{stop or ""}]'
+
+
+def _pick_element_expr(col_id: str, columns, source_expr: str, item_expr: str,
+                       binds: 'dict | None') -> tuple | None:
+    """(what one row of this column contributes, whether it names the row's
+    number), written against the loop target a band's comprehension binds.
+
+    One row rather than the whole band, which is what lets several columns
+    share a single pass over the rows.
+    """
+    if col_id == PICK_IDX_COLUMN:
+        return ('i', True)
+    col = _pick_column_expr(col_id, columns)
+    if col is None:
+        return None
+    # `$$` is the whole list, not the sublist this region is a band of.
+    inner = replace_dollars_in_py_exp(
+        col, _column_dollars(source_expr, item_expr), index_exp='i',
+        bindings=_PICK_INNER_DICT_BINDS if _is_dict_binds(binds) else None)
+    return (inner, dollar_expr_names_index(col))
+
+
+def _pick_comprehension(elt: str, rows: str, start: str | None,
+                        names_index: bool, is_dict: bool) -> str:
+    """`elt` read off every row of `rows`."""
+    target = _PICK_INNER_DICT_TARGET if is_dict else _PICK_INNER_VAR
+    if not names_index:
+        return f'[{elt} for {target} in {rows}]'
+    # `$i` is the row's number in the whole list, not its place in this band, so
+    # the count starts where the band does.
+    from_row = '' if not start or start == '0' else f', {start}'
+    # A tuple target needs its own parens inside the enumerate pair.
+    unpacked = f'({target})' if ',' in target else target
+    return f'[{elt} for i, {unpacked} in enumerate({rows}{from_row})]'
+
+
 def _pick_range_expr(col_id: str, columns, source_expr: str,
                      start: str | None, stop: str | None,
                      binds: 'dict | None' = None) -> str | None:
     """Expression for one column over the row range [start, stop).
 
     start/stop are Python source snippets, or None for the ends of the list.
-
-    A dict's rows are its pairs, so a band of them is a run of list(d.items())
-    -- the same route every positional dict action takes -- while the row
-    NUMBERS the index column reports are positions either way.
+    The row NUMBERS the index column reports are positions for either container.
     """
     if col_id == PICK_IDX_COLUMN:
         lo = start or '0'
@@ -6784,34 +6898,42 @@ def _pick_range_expr(col_id: str, columns, source_expr: str,
     if col is None:
         return None
     is_dict = _is_dict_binds(binds)
-    if start is None and stop is None:
+    if is_dict and start is None and stop is None:
         # A whole column has a short spelling, and it is the one the header
         # hands over -- so a full-height pick and a header drag agree.
-        if is_dict:
-            return _column_values_expr(col, source_expr, binds)
-        sub = source_expr
-    elif is_dict:
-        sub = f'list({_atomize(source_expr)}.items())[{start or ""}:{stop or ""}]'
-    else:
-        sub = f'{source_expr}[{start or ""}:{stop or ""}]'
+        return _column_values_expr(col, source_expr, binds)
     item_expr = _PICK_INNER_DICT_ITEM if is_dict else _PICK_INNER_VAR
-    target = _PICK_INNER_DICT_TARGET if is_dict else _PICK_INNER_VAR
-    # `$$` is the whole list, not the sublist this region is a band of.
-    inner = replace_dollars_in_py_exp(
-        col, _column_dollars(source_expr, item_expr), index_exp='i',
-        bindings=_PICK_INNER_DICT_BINDS if is_dict else None)
+    rows = _pick_band_rows(source_expr, start, stop, is_dict)
+    inner, names_index = _pick_element_expr(col_id, columns, source_expr,
+                                            item_expr, binds)
     if inner == item_expr:
         # The identity column (a bare $, which is the default) maps each row to
         # itself, so the sublist is already the answer -- no comprehension.
-        return sub
-    if not dollar_expr_names_index(col):
-        return f'[{inner} for {target} in {sub}]'
-    # `$i` is the row's number in the whole list, not its place in this band, so
-    # the count starts where the band does.
-    from_row = '' if not start or start == '0' else f', {start}'
-    # A tuple target needs its own parens inside the enumerate pair.
-    unpacked = f'({target})' if ',' in target else target
-    return f'[{inner} for i, {unpacked} in enumerate({sub}{from_row})]'
+        return rows
+    return _pick_comprehension(inner, rows, start, names_index, is_dict)
+
+
+def _pick_zip_expr(col_ids, columns, source_expr: str,
+                   start: str | None, stop: str | None,
+                   binds: 'dict | None' = None) -> str | None:
+    """Several columns over the SAME run of rows, as one list of tuples.
+
+    Picking two columns asks what their cells say about each other, and that is
+    a question about the rows they share: one pass over those rows, one tuple
+    per row. Written as a comprehension rather than a zip(...) so it is the same
+    shape the one-column form already has, and so a `$i` anywhere in it counts
+    the rows off the one enumerate.
+    """
+    is_dict = _is_dict_binds(binds)
+    item_expr = _PICK_INNER_DICT_ITEM if is_dict else _PICK_INNER_VAR
+    parts = [_pick_element_expr(col_id, columns, source_expr, item_expr, binds)
+             for col_id in col_ids]
+    if any(part is None for part in parts):
+        return None
+    elt = '(' + ', '.join(inner for inner, _ in parts) + ')'
+    names_index = any(names for _, names in parts)
+    rows = _pick_band_rows(source_expr, start, stop, is_dict)
+    return _pick_comprehension(elt, rows, start, names_index, is_dict)
 
 
 def _pick_match_expr(col_id: str, columns) -> str | None:
@@ -6846,6 +6968,7 @@ def _pick_region_expr(region_id: str, columns, source_expr: str,
 # (Loop, Join) meaningful. {'match'} on its own is a single row -- a scalar --
 # and {'pre', 'post'} has a hole in it, so neither qualifies.
 _PICK_ARRAY_BAND_SETS = frozenset({
+    frozenset(('all',)),
     frozenset(('pre',)),
     frozenset(('post',)),
     frozenset(('pre', 'match')),
@@ -6868,20 +6991,35 @@ def _pick_bands_by_column(model: dict) -> dict:
     return out
 
 
+def _pick_shared_range(bands_by_column: dict) -> tuple | None:
+    """The one row range every picked column covers, or None if they differ.
+
+    A range, so the lone match band does not qualify: that is a single row, and
+    several columns of it are that row's cells rather than a run to read down.
+    """
+    band_sets = {frozenset(bands) for bands in bands_by_column.values()}
+    if len(band_sets) != 1:
+        return None
+    bands = next(iter(band_sets))
+    if bands in _PICK_COLLAPSE_RANGES:
+        return _PICK_COLLAPSE_RANGES[bands]
+    if bands in _PICK_ARRAY_BAND_SETS:
+        return _PICK_BAND_RANGES[next(iter(bands))]
+    return None
+
+
 def _pick_is_array(model: dict) -> bool:
-    """True when the pick is one contiguous run of rows from a single column.
+    """True when the pick is one contiguous run of rows -- of one column, or of
+    several read down together.
 
     That is exactly when the picked expression evaluates to a list, so Loop and
-    Join apply to it. A lone match row is a scalar, pre+post is two lists, and
-    two columns make a tuple -- none of those are a single array.
+    Join apply to it. A lone match row is a scalar, {'pre', 'post'} has a hole
+    in it, and columns over different runs are lists side by side -- none of
+    those are a single array.
     """
     if model.get('tool') != 'pick':
         return False
-    bands_by_column = _pick_bands_by_column(model)
-    if len(bands_by_column) != 1:
-        return False
-    bands = next(iter(bands_by_column.values()))
-    return frozenset(bands) in _PICK_ARRAY_BAND_SETS
+    return _pick_shared_range(_pick_bands_by_column(model)) is not None
 
 
 def _build_pick_expr(model: dict, source_expr: str) -> str | None:
@@ -6891,6 +7029,11 @@ def _build_pick_expr(model: dict, source_expr: str) -> str | None:
     is that column over the whole list, pre+match is everything up to and
     including the match, match+post is the match onwards. pre+post has a hole in
     it, so it does not collapse.
+
+    Columns covering the SAME run of rows are read down together, as one list of
+    tuples rather than a tuple of lists -- a row of the answer is then a row of
+    the table. Columns over different runs have no rows in common to pair up, so
+    they stay side by side.
 
     Whatever survives is emitted in canonical order -- bare when there is one
     item, a tuple when there is more than one. The match band of a column is a
@@ -6904,6 +7047,16 @@ def _build_pick_expr(model: dict, source_expr: str) -> str | None:
     columns = model.get('columns', [])
     bands_by_column = _pick_bands_by_column(model)
     binds = _model_binds(model)
+
+    if len(bands_by_column) > 1:
+        shared = _pick_shared_range(bands_by_column)
+        if shared is not None:
+            zipped = _pick_zip_expr(
+                [col_id for col_id in _pick_column_ids(columns)
+                 if col_id in bands_by_column],
+                columns, source_expr, *shared, binds)
+            if zipped:
+                return zipped
 
     parts = []
     for col_id in _pick_column_ids(columns):
@@ -8827,13 +8980,17 @@ def _render_search_box_input(model, eval_in_scope=None):
 
     first_match, _ = _resolve_first_and_index(model, eval_in_scope)
 
-    # Pick composes an expression out of the first match's parts, so it pins
-    # first-match mode on: the toggle shows active but is inert until the user
-    # leaves pick.
+    # With a search, pick composes an expression out of the first match's parts
+    # and so pins first-match mode on; without one it spans every row and there
+    # is no match to be first. Inert either way until the user leaves pick.
     if model.get('tool') == 'pick':
+        pick_has_search = bool(model.get('search'))
+        state = 'active' if pick_has_search else 'inactive'
+        tooltip = ('Pick uses the first match only' if pick_has_search
+                   else 'Pick covers every row')
         first_match_toggle_html = (
-            f'<span class="search-button active dimmed"'
-            f' data-tooltip="Pick uses the first match only">'
+            f'<span class="search-button {state} dimmed"'
+            f' data-tooltip="{tooltip}">'
             f'{ICONS["match-first"]}'
             f'</span>'
         )
@@ -8952,7 +9109,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     parts = []
 
     # 1. Count (matches the string visualizer's action-button order)
-    count_enabled = not (has_search and first)
+    # Pick is about what an expression extracts, not about how many rows there
+    # are, so counting is off for as long as it is active.
+    count_enabled = not (has_search and first) and not pick_mode
     count_label = f'<span class="text">Count: {match_count}</span>'
     parts.append(action_btn(count_label, 'count', count_enabled, 'Count of matches'))
 
@@ -8962,10 +9121,14 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         if first
         else f'{ICONS["filter"]}<span class="text">Filter<span class="shortcut">⏎</span></span>'
     )
-    parts.append(action_btn(filter_lbl, 'filter', has_search, 'Filter matches (Enter)'))
+    # Filter is the action that consumes a picked expression, so it is live for
+    # a pick made with no search too.
+    parts.append(action_btn(filter_lbl, 'filter',
+                            has_search or bool(model.get('pick_expr')),
+                            'Filter matches (Enter)'))
 
     # 3. Loop dropdown (hover-menu, panel always rendered with data-hover-menu)
-    loop_enabled = not (has_search and first) or pick_array
+    loop_enabled = pick_array if pick_mode else not (has_search and first)
     loop_trigger_cls = 'snc-dropdown-trigger' + ('' if loop_enabled else ' dimmed')
     # An array pick is a projection of a row range, so its elements have no
     # meaningful "original index": for a column like len($) they aren't the rows
@@ -9034,9 +9197,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     open_dropdown = model.get('openDropdown')
     # A plain slice targets a contiguous, multi-item region, so Join applies
     # even though `first` is forced True for slices.
-    join_enabled = (not (has_search and first)
-                    or _is_plain_slice_search(model, eval_in_scope)
-                    or pick_array)
+    join_enabled = (pick_array if pick_mode else
+                    (not (has_search and first)
+                     or _is_plain_slice_search(model, eval_in_scope)))
     join_trigger_cls = 'snc-dropdown-trigger' + ('' if join_enabled else ' dimmed')
     join_btn_cls = 'action-button'
     if linked_action == 'join':
@@ -9113,25 +9276,25 @@ _TOOL_TOOLBAR_TOOLS = [
 def _render_tool_toolbar(model: dict) -> str:
     """Render the Normal/Pick toolbar for the upper-right corner.
 
-    Pick is DIMMED (click-inert) without a search: it composes an expression out
-    of the first match's parts, so there is nothing for it to work on.
+    Pick needs no search: without one it composes an expression out of whole
+    columns rather than out of the first match's parts.
     """
     current = model.get('tool', 'normal')
     if current not in ('normal', 'pick'):
         current = 'normal'
-    search = model.get('search')
-    has_search = search is not None and search != ''
     # Pick builds src[a:b] band slices, which a dict cannot take; bands over
     # list(d.items()) are the natural translation, and land with splat.
-    disabled = ('pick',) if (not has_search or model.get('_is_dict')) else ()
+    disabled = ('pick',) if model.get('_is_dict') else ()
     return render_tool_toolbar(
         _TOOL_TOOLBAR_TOOLS, current,
         lambda tool: repr(ToolSelect(tool=tool)),
         disabled=disabled)
 
 
-def _pick_band_for_row(row: int, first_idx: int) -> str:
+def _pick_band_for_row(row: int, first_idx: 'int | None') -> str:
     """Which band a row falls in, relative to the first match."""
+    if first_idx is None:
+        return 'all'
     if row < first_idx:
         return 'pre'
     if row == first_idx:
@@ -9139,7 +9302,7 @@ def _pick_band_for_row(row: int, first_idx: int) -> str:
     return 'post'
 
 
-def _pick_edge_class(row: int, first_idx: int, n_rows: int) -> str:
+def _pick_edge_class(row: int, first_idx: 'int | None', n_rows: int) -> str:
     """Where a row sits within its band, for the rounded-rect CSS.
 
     A region spans every row of its band in one column, which is several <td>s
@@ -9148,7 +9311,9 @@ def _pick_edge_class(row: int, first_idx: int, n_rows: int) -> str:
     side borders, and the stack reads as a single rounded rect.
     """
     band = _pick_band_for_row(row, first_idx)
-    if band == 'pre':
+    if band == 'all':
+        lo, hi = 0, n_rows - 1
+    elif band == 'pre':
         lo, hi = 0, first_idx - 1
     elif band == 'match':
         lo, hi = first_idx, first_idx
@@ -9758,9 +9923,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # The drag handles go quiet on their own (see py_exp_attrs). A search left
     # in the model from before still narrows the rows: that is a view.
     read_only = is_read_only()
-    # Pick mode is first-match-only, and there is nothing to pick out of a small
-    # (unfocused) preview or a table with no search.
-    pick_mode = (model.get('tool') == 'pick') and has_search and not small and not read_only
+    # There is nothing to pick out of a small (unfocused) preview. With a search
+    # pick is first-match-only; without one the whole table is one band.
+    pick_mode = (model.get('tool') == 'pick') and not small and not read_only
     first = bool(model.get('first_match', False)) or pick_mode
 
     matched_indices = set()
@@ -9916,8 +10081,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     # Pick mode replaces the row-match / row-dim striping with a grid of
     # pickable regions: three row bands (before the match, the match, after)
-    # crossed with the row-index column and every configured column.
-    pick_here = pick_mode and first_match_row is not None
+    # crossed with the row-index column and every configured column -- or, with
+    # no search, one full-height band per column. A search that matches nothing
+    # is neither: there is no match to band the rows around.
+    pick_here = pick_mode and (first_match_row is not None or not has_search)
     pick_exprs = {}
     if pick_here and source_expr is not None:
         pick_exprs = _pick_standalone_exprs(
@@ -10580,7 +10747,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             if result:
                                 commands.append(new_code_command(result, code_imports))
                         model['openDropdown'] = None
-                    elif model.get('search'):
+                    elif model.get('search') or model.get('pick_expr'):
                         if model.get('linked_action'):
                             model['linked_action'] = 'filter'
                         else:
@@ -11015,16 +11182,17 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             _close_column_menus(model)
 
         case SearchBoxInput(value=val):
+            had_search = bool(model.get('search'))
             model['search'] = val if val else None
             model['_scroll_to_match'] = True
             # Every keystroke, so the column menus and the tally checkmarks are
             # never describing a search that has moved on. Text that is still
             # half typed simply reads back as one leftover.
             _apply_search_to_columns(model, eval_in_scope)
-            if not model['search'] and model.get('tool') == 'pick':
-                # Pick builds an expression out of the first match's parts, so
-                # clearing the search leaves it nothing to stand on.
-                model['tool'] = 'normal'
+            if had_search != bool(model['search']):
+                # The bands the region ids name are the ones a first match
+                # divides the rows into, and whether there IS a first match just
+                # changed -- so the ids in hand no longer name anything.
                 model['picked'] = None
                 model['pick_expr'] = None
 

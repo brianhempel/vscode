@@ -2152,7 +2152,8 @@
 }
 
 .pick-band-pre,
-.pick-band-post {
+.pick-band-post,
+.pick-band-all {
 	background: var(--snc-hl-fuzzy-soft);
 }
 
@@ -2164,7 +2165,8 @@
 }
 
 .pick-band-pre:hover,
-.pick-band-post:hover {
+.pick-band-post:hover,
+.pick-band-all:hover {
 	background: var(--snc-hl-fuzzy-soft-hover);
 }
 
