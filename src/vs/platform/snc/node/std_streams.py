@@ -63,7 +63,7 @@ class NeedsInput(BaseException):
     """
 
     def __init__(self, kind: str = 'line') -> None:
-        super().__init__('Sculpt-n-Code: waiting for input')
+        super().__init__('Clickacode: waiting for input')
         self.kind = kind
 
 

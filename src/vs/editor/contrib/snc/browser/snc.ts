@@ -5689,7 +5689,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 					// Surface python-spawn-failure errors as a sticky toast so
 					// the user understands why visualizers stopped working.
 					// Other errors (timeouts, etc.) still just log to console.
-					if (msg.error && msg.error.startsWith('Sculpt-n-Code: failed to launch Python')) {
+					if (msg.error && msg.error.startsWith('Clickacode: failed to launch Python')) {
 						this.showPythonSpawnFailureNotification(msg.error);
 					}
 					// Cleanup timing tracking on error

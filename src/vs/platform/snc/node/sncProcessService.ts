@@ -179,8 +179,8 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 		const code = (err as NodeJS.ErrnoException).code;
 		const message = code === 'ENOENT'
-			? `Sculpt-n-Code: failed to launch Python ('${this.pythonExecutable}'). Configure your interpreter via the Python extension or 'python.defaultInterpreterPath'.`
-			: `Sculpt-n-Code: failed to launch Python ('${this.pythonExecutable}'): ${err.message}`;
+			? `Clickacode: failed to launch Python ('${this.pythonExecutable}'). Configure your interpreter via the Python extension or 'python.defaultInterpreterPath'.`
+			: `Clickacode: failed to launch Python ('${this.pythonExecutable}'): ${err.message}`;
 
 		this.pythonSpawnError = message;
 		this.drainAllPools();
