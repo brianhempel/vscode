@@ -105,6 +105,14 @@
 	}
 }
 
+/* SVG inside a widget is decoration; clicks belong to the element around it.
+   Also keeps SVG out of the editor's mouse target: core reads
+   `target.element.className.indexOf(...)`, and on an SVG element className is
+   an SVGAnimatedString, not a string (crashes commentsController). */
+.monaco-editor .snc-visualization-widget svg {
+	pointer-events: none;
+}
+
 /* hide .snc-hover-hidden until .snc-hover-hidden-parent is hovered */
 /* used to show/hide property rows on the generic object visualizer */
 .editor-instance .snc-hover-hidden-parent .snc-hover-hidden {
