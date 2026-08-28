@@ -4965,8 +4965,19 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		// console.log('SNC viz_pointer event', JSON.stringify(event));
+		// An empty event string is a no-op in Python that still costs a run
+		// (and supersedes the one in flight). The dispatchers never send one
+		// now; if one turns up it is a bug, and the log should say so.
+		if (pythonEventStr === '') {
+			studyLog.log('widget.emptyEventStr', { ...this.visInfo(lineNumber, visIndex), event: eventJSON, target: describeEventTarget(ev.target as Node, ev.currentTarget as Element) }, this.editor.getModel()?.uri.toString());
+			return;
+		}
 		if (ev.type === 'mousemove' || ev.type === 'mouseout' || ev.type === 'mouseleave') {
-			this.moveLogCoalescer.note(`${lineNumber}:${visIndex}:${pythonEventStr}`, { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON }, this.editor.getModel()?.uri.toString());
+			// A mouseout's offsetY is measured against the element being LEFT,
+			// from wherever the pointer is now, so it reads as nonsense on its
+			// own; where the pointer went is what makes sense of it.
+			const to = ev.type === 'mousemove' ? undefined : describeEventTarget(ev.relatedTarget as Node | null, ev.currentTarget as Element);
+			this.moveLogCoalescer.note(`${lineNumber}:${visIndex}:${pythonEventStr}`, { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON, ...(to ? { to } : {}) }, this.editor.getModel()?.uri.toString());
 		} else {
 			this.moveLogCoalescer.flush();
 			studyLog.log('widget.mouse', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON }, this.editor.getModel()?.uri.toString());
@@ -6334,13 +6345,31 @@ export class SNCController extends Disposable implements IEditorContribution {
 					this.itemsThisRun.add(widgetKey(msg.item.line, msg.item.visIndex));
 					const isThisItem = (v: IVisualizationItem) =>
 						v.line === msg.item.line && v.visIndex === msg.item.visIndex;
-					if (this.visualizationItems.find(isThisItem)?.unhandledEvents?.length) {
+					const leftover = this.visualizationItems.find(isThisItem)?.unhandledEvents ?? [];
+					let droppedEvents: UiEvent[] = [];
+					if (leftover.length) {
 						if (this.runTriggerById.get(msg.runId) === 'queued-events') {
+							droppedEvents = leftover;
 							this.visualizationItems = this.visualizationItems.map(v =>
 								isThisItem(v) ? { ...v, unhandledEvents: [] } : v);
 						} else {
 							this.scheduleQueuedEventRun();
 						}
+					}
+					// The item is the unit the cancel/requeue logic reasons about,
+					// and it used to be invisible in the log: which events a run
+					// answered, and what it asked for, could only be inferred from
+					// the next run's queue count. Plain items -- most of them, in a
+					// loop-heavy program -- are counted at run.end instead.
+					if (item.handledEventIds?.length || itemCommands?.length || leftover.length) {
+						studyLog.log('run.item', {
+							runId: msg.runId, trigger: this.runTriggerById.get(msg.runId),
+							line: item.line, visIndex: item.visIndex, step: item.execution_step,
+							handledEventIds: item.handledEventIds ?? [],
+							commands: (itemCommands ?? []).map(c => c.type),
+							stillQueued: leftover.map(e => ({ id: e.id, type: e.eventJSON?.type, pythonEventStr: e.pythonEventStr })),
+							dropped: droppedEvents.length ? 'declined-twice' : undefined,
+						}, this.editor.getModel()?.uri.toString());
 					}
 
 					// Throttle UI updates
@@ -6474,6 +6503,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 					// the DOM was already caught up; when it was not, a real
 					// render is still owed and the status should keep saying so.
 					const wasRendered = this.renderedVersion === this.itemsVersion;
+					const swept = this.visualizationItems.filter(v =>
+						v.unhandledEvents?.length && !this.itemsThisRun.has(widgetKey(v.line, v.visIndex)));
+					if (swept.length) {
+						// Silent before: if this ever eats a real gesture, nothing
+						// would have said so.
+						studyLog.log('run.eventsDropped', {
+							runId: msg.runId, trigger: this.runTriggerById.get(msg.runId), reason: 'widget-not-reached',
+							widgets: swept.map(v => ({ line: v.line, visIndex: v.visIndex, events: (v.unhandledEvents ?? []).map(e => ({ id: e.id, type: e.eventJSON?.type, pythonEventStr: e.pythonEventStr })) })),
+						}, this.editor.getModel()?.uri.toString());
+					}
 					this.visualizationItems = this.visualizationItems.map(v =>
 						v.unhandledEvents?.length && !this.itemsThisRun.has(widgetKey(v.line, v.visIndex))
 							? { ...v, unhandledEvents: [] }
