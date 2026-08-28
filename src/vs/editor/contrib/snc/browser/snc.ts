@@ -201,6 +201,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		baseTop: number;
 		baseScrollLeft: number;
 		baseScrollTop: number;
+		// What decides whether the anchor has scrolled away, when the anchor's own
+		// position doesn't. A segment label sits on its character, so it answers
+		// for itself; a hoisted toolbar hangs BELOW the thing it belongs to, off
+		// the bottom of the scroller by design, so the visualizer it was lifted out
+		// of answers instead. Left unset, the anchor answers.
+		clipTarget?: HTMLElement;
 	}[] = [];
 	private hoistedSegmentLabelListeners: IDisposable[] = [];
 	private useBlockLayout = false;
@@ -2517,6 +2523,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			const baseLeft = anchorRect.left - widgetRect.left;
 			const baseTop = anchorRect.top - widgetRect.top - 10;
 
+			// The toolbar hangs below its visualizer, and for the last row of a
+			// list that is below the scroller's bottom edge -- so the toolbar can't
+			// answer for itself whether it has scrolled out of view. The container
+			// it came out of stays in flow and does.
+			const clipTarget = anchor.parentElement ?? undefined;
+
 			anchor.remove();
 			anchor.style.left = `${baseLeft}px`;
 			anchor.style.top = `${baseTop}px`;
@@ -2530,6 +2542,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				baseTop,
 				baseScrollLeft: scroller.scrollLeft,
 				baseScrollTop: scroller.scrollTop,
+				clipTarget,
 			});
 			scrollers.add(scroller);
 		}
@@ -2554,7 +2567,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		if (this.hoistedSegmentLabels.length === 0) { return; }
 		const widgetRect = this.domNode.getBoundingClientRect();
 		for (const entry of this.hoistedSegmentLabels) {
-			const { anchor, scroller, baseLeft, baseTop, baseScrollLeft, baseScrollTop } = entry;
+			const { anchor, scroller, baseLeft, baseTop, baseScrollLeft, baseScrollTop, clipTarget } = entry;
 			// Re-glue to the character: shift the anchor by the scroll delta since
 			// it was hoisted (content scrolls left/up => label follows).
 			const left = baseLeft - (scroller.scrollLeft - baseScrollLeft);
@@ -2567,12 +2580,24 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// anchor's viewport position against the scroller's. The small top
 			// slack accounts for labels rendered just above the line.
 			const scrollerRect = scroller.getBoundingClientRect();
-			const anchorViewportLeft = widgetRect.left + left;
-			const anchorViewportTop = widgetRect.top + top;
-			const outOfView = anchorViewportLeft < scrollerRect.left - 1
-				|| anchorViewportLeft > scrollerRect.right + 1
-				|| anchorViewportTop < scrollerRect.top - 12
-				|| anchorViewportTop > scrollerRect.bottom + 1;
+			let outOfView: boolean;
+			if (clipTarget) {
+				// Whatever the anchor belongs to is still in flow inside the
+				// scroller, so its rect already carries the scroll. It counts as in
+				// view while any of it is, the anchor being allowed to hang outside.
+				const targetRect = clipTarget.getBoundingClientRect();
+				outOfView = targetRect.right < scrollerRect.left - 1
+					|| targetRect.left > scrollerRect.right + 1
+					|| targetRect.bottom < scrollerRect.top - 1
+					|| targetRect.top > scrollerRect.bottom + 1;
+			} else {
+				const anchorViewportLeft = widgetRect.left + left;
+				const anchorViewportTop = widgetRect.top + top;
+				outOfView = anchorViewportLeft < scrollerRect.left - 1
+					|| anchorViewportLeft > scrollerRect.right + 1
+					|| anchorViewportTop < scrollerRect.top - 12
+					|| anchorViewportTop > scrollerRect.bottom + 1;
+			}
 			anchor.style.visibility = outOfView ? 'hidden' : '';
 		}
 

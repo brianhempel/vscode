@@ -3724,8 +3724,19 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
 
 def _render_expand_bar(expanded: bool, value: str, model, *,
                        small: bool = False) -> str:
-    """The bar under a clipped string: the expand toggle, and at its right end
-    how tall the string is and how long, coarse measure before fine.
+    """The bar under a clipped string: just the expand toggle. How tall and how
+    long the string is rides on the search box instead (see
+    _render_auxiliary_attributes) -- it is a tab about the search, and shows
+    only while the search box does."""
+    return (
+        f'<div class="expand-and-len">'
+        f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
+        f'</div>'
+    )
+
+def _render_auxiliary_attributes(value: str, model, *, small: bool = False):
+    """The tab on top of the search box: how tall the string is and how long,
+    coarse measure before fine.
 
     Each count is a handle of its own -- the number on screen and the code that
     reads it are the same reading, so hovering one offers the other. The lines
@@ -3733,17 +3744,7 @@ def _render_expand_bar(expanded: bool, value: str, model, *,
     line), so the expression offered counts them that way too rather than
     reaching for splitlines(), which would disagree with the screen. They render
     bare where there is no access path, the numbers still being worth having.
-    The list visualizer draws the same bar (see _visualize_table); the two
-    share the CSS but not the wording, one counting items and one characters.
     """
-    return (
-        f'<div class="expand-and-len">'
-        f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
-        f'{_render_auxiliary_attributes(value, model, small=small)}'
-        f'</div>'
-    )
-
-def _render_auxiliary_attributes(value: str, model, *, small: bool = False):
     source_expr = model.get('_source_expr') if model else None
     if source_expr:
         len_exp = f'len({source_expr})'
@@ -4067,6 +4068,8 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
                                                     max_width, every_row_exps)
         )
 
+        auxiliary_html = _render_auxiliary_attributes(value, model, small=small)
+
         search_box_html = (
             f'<div class="search-div toolbar-anchor {"expanded" if replace_visible else ""}">'
             f'<div class="search-div-row">'
@@ -4081,6 +4084,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f'<div class="disclosure-button-spacer"></div>'
             f'{action_buttons_html}'
             f"</div>"
+            f'{auxiliary_html}'
             f"</div>"
             f"</div>"
         )

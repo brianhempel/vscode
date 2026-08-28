@@ -17674,13 +17674,13 @@ class TestExpandToggle(unittest.TestCase):
 
 
 def _tiny_len(output: str) -> str:
-    """The length readout on the expand bar, tag and all."""
+    """The length readout on the search box, tag and all."""
     match = re.search(r'<div class="tiny-len".*?</div>', output)
     return match[0] if match else ''
 
 
 class TestTinyLen(unittest.TestCase):
-    """How many items the list has, at the right end of the expand bar."""
+    """How many items the list has, on the tab above the search box."""
 
     TALL = list(range(30))
     SHORT = [1, 2, 3]
@@ -17690,11 +17690,11 @@ class TestTinyLen(unittest.TestCase):
             model = init_model(lst, mock_get_visualizer)
         return visualize(lst, model, mock_get_visualizer, None, **kwargs)
 
-    def test_the_bar_says_how_many_items_there_are(self):
+    def test_the_tab_says_how_many_items_there_are(self):
         self.assertIn('30 items', _tiny_len(self.table(self.TALL)))
 
     def test_a_short_table_counts_itself_too(self):
-        # It rides the bar, and the bar is offered on every table.
+        # It rides the search box, and every focused table has one.
         self.assertIn('3 items', _tiny_len(self.table(self.SHORT)))
 
     def test_the_count_hands_over_the_len_of_the_source(self):
@@ -17718,15 +17718,9 @@ class TestTinyLen(unittest.TestCase):
         self.assertIn('30 entries', _tiny_len(output))
         self.assertEqual(exps_in(_tiny_len(output)), [['len(d)']])
 
-    def test_the_count_sits_after_the_toggle_it_shares_the_bar_with(self):
+    def test_the_count_rides_the_search_box(self):
         output = self.table(self.TALL)
-        self.assertIn('class="expand-and-len"', output)
-        self.assertLess(output.index('expand-toggle'), output.index('tiny-len'))
-
-    def test_the_preview_counts_too(self):
-        output = self.table(self.TALL, var_and_exp=('xs', 'xs'), small=True)
-        self.assertIn('30 items', _tiny_len(output))
-        self.assertEqual(exps_in(_tiny_len(output)), [['len(xs)']])
+        self.assertLess(output.index('search-div'), output.index('tiny-len'))
 
 
 # === Paging: the first page, the last few rows, and the row between ==========
@@ -21174,9 +21168,11 @@ class TestReadOnly(unittest.TestCase):
             self.assertNotIn(marker, out, marker)
 
     def test_focused_render_keeps_the_expand_bar(self):
+        # The count doesn't come with it: it rides the search box, which a
+        # read-only render doesn't draw.
         out = self.render([1, 2, 3])
         self.assertIn('expand-and-len', out)
-        self.assertIn('3 items', out)
+        self.assertNotIn('tiny-len', out)
 
     def test_an_open_column_box_or_menu_is_not_drawn(self):
         lst = [{'a': 1}]

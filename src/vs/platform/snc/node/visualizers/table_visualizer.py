@@ -9750,6 +9750,8 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
     preview_row = (f'<div class="search-div-row">{preview_html}</div>'
                    if preview_html else '')
 
+    auxiliary_html = _render_auxiliary_attributes(model, lst)
+
     return (
         f'<div class="search-div toolbar-anchor{has_focused_child_class}">'
         f'<div class="search-div-row">'
@@ -9759,6 +9761,7 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
         f'<div class="search-div-row">'
         f'{action_buttons_html}'
         f'</div>'
+        f'{auxiliary_html}'
         f'</div>'
     )
 
@@ -10637,13 +10640,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # puts its own. Nothing marks the container: the pane's ceiling is written
     # inline above, and a class here would reach the cells' panes too.
     if can_expand:
-        # The count is a handle of its own: the number on screen and len() of
-        # the source are the same reading, so hovering it offers the code. It
-        # renders bare where there is no access path -- the number still says
-        # how much is being clipped.
         strs.append(f'<div class="expand-and-len">')
         strs.append(render_expand_toggle(expanded, repr(ExpandToggle()), small=small))
-        strs.append(_render_auxiliary_attributes(model, lst))
         strs.append(f'</div>')
 
 

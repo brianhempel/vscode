@@ -7438,18 +7438,18 @@ def make_expand_toggle_event() -> dict:
 
 
 def _tiny_lens(html_str: str) -> list:
-    """The readouts on the expand bar, tags and all, left to right."""
+    """The readouts on the search box, tags and all, left to right."""
     return re.findall(r'<div class="tiny-len".*?</div>', html_str)
 
 
 def _tiny_len(html_str: str) -> str:
-    """Every readout on the expand bar as one string, for asking what the bar
-    says without caring which chip says it."""
+    """Every readout as one string, for asking what the tab says without
+    caring which chip says it."""
     return ''.join(_tiny_lens(html_str))
 
 
 class TestTinyLen(unittest.TestCase):
-    """How long the string is, at the right end of the expand bar."""
+    """How long the string is, on the tab above the search box."""
 
     # The line count is one number with two readings, so its handle offers
     # both and labels them apart: how many, and the lines themselves.
@@ -7457,19 +7457,20 @@ class TestTinyLen(unittest.TestCase):
                  PyExp('x.splitlines()', label='As list'))
 
     def setUp(self):
-        self.tall_value = "l1\nl2\nl3\nl4\nl5"   # 5 lines -> bar offered
-        self.short_value = "l1\nl2\nl3\nl4"     # exactly 4 -> no bar
+        self.tall_value = "l1\nl2\nl3\nl4\nl5"   # 5 lines -> clipped
+        self.short_value = "l1\nl2\nl3\nl4"     # exactly 4 -> not clipped
         self.var_and_exp = ('x', 'x')
 
     def render(self, value, small=False, var_and_exp=None):
         return visualize(value, init_model(value), None, None, small=small,
                          var_and_exp=var_and_exp)
 
-    def test_the_bar_says_how_long_the_string_is(self):
+    def test_the_tab_says_how_long_the_string_is(self):
         self.assertIn('14 chars', _tiny_len(self.render(self.tall_value)))
 
-    def test_a_string_that_fits_has_no_bar_to_count_on(self):
-        self.assertEqual('', _tiny_len(self.render(self.short_value)))
+    def test_a_string_that_fits_counts_itself_too(self):
+        # It rides the search box, and every focused string has one.
+        self.assertIn('11 chars', _tiny_len(self.render(self.short_value)))
 
     def test_the_count_hands_over_the_len_of_the_source(self):
         out = self.render(self.tall_value, var_and_exp=self.var_and_exp)
@@ -7483,18 +7484,11 @@ class TestTinyLen(unittest.TestCase):
         self.assertIn('14 chars', out)
         self.assertNotIn('snc-py-exps', out)
 
-    def test_the_count_shares_the_bar_with_the_toggle_it_follows(self):
+    def test_the_count_rides_the_search_box(self):
         out = self.render(self.tall_value)
-        self.assertIn('class="expand-and-len"', out)
-        self.assertLess(out.index('expand-toggle'), out.index('tiny-len'))
+        self.assertLess(out.index('search-div'), out.index('tiny-len'))
 
-    def test_the_preview_counts_too(self):
-        out = self.render(self.tall_value, small=True,
-                          var_and_exp=self.var_and_exp)
-        self.assertIn('14 chars', _tiny_len(out))
-        self.assertIn(exp_attr('len(x)'), _tiny_len(out))
-
-    def test_the_bar_says_how_many_lines_the_string_has(self):
+    def test_the_tab_says_how_many_lines_the_string_has(self):
         self.assertIn('5 lines', _tiny_len(self.render(self.tall_value)))
 
     def test_the_lines_are_counted_the_way_they_are_drawn(self):
@@ -7518,12 +7512,6 @@ class TestTinyLen(unittest.TestCase):
         lines, chars = _tiny_lens(self.render(self.tall_value))
         self.assertIn('5 lines', lines)
         self.assertIn('14 chars', chars)
-
-    def test_the_preview_counts_lines_too(self):
-        out = self.render(self.tall_value, small=True,
-                          var_and_exp=self.var_and_exp)
-        self.assertIn('5 lines', _tiny_len(out))
-        self.assertIn(exp_attr(*self.LINE_EXPS), _tiny_len(out))
 
 
 class TestExpandToggle(unittest.TestCase):
@@ -10044,10 +10032,13 @@ class TestSourceExpr(unittest.TestCase):
         model = init_model("hello", var_and_exp=(None, 'my_func()'))
         self.assertEqual(model['_source_expr'], 'my_func()')
 
-    def test_a_short_string_hands_over_nothing_of_its_own(self):
-        """No bar to carry the length, and the characters are not handles."""
+    def test_a_short_string_hands_over_only_its_counts(self):
+        """The characters are not handles; the counts on the search box's tab
+        are the only code a string offers of its own."""
         model = init_model("hello", var_and_exp=('str1', 'str1'))
-        self.assertNotIn('snc-py-exps', visualize("hello", model, None, None))
+        out = visualize("hello", model, None, None)
+        self.assertEqual(len(re.findall(r'snc-py-exps=', out)), 2)
+        self.assertNotIn('snc-py-exps', out.replace(_tiny_len(out), ''))
 
 # =============================================================================
 # DSL Grammar Tests via Action Rule
@@ -14221,9 +14212,11 @@ class TestReadOnly(unittest.TestCase):
             self.assertNotIn(marker, out, marker)
 
     def test_focused_render_keeps_the_expand_bar_for_a_tall_string(self):
+        # The counts don't come with it: they ride the search box, which a
+        # read-only render doesn't draw.
         out = self.render("a\nb\nc\nd\ne\nf")
         self.assertIn('expand-and-len', out)
-        self.assertIn('6 lines', out)
+        self.assertNotIn('tiny-len', out)
         self.assertNotIn('snc-py-exps', out)
 
     def test_small_render_has_no_drag_handle(self):
