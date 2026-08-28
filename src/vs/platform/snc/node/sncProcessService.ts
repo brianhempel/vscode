@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
+import { statSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Disposable } from '../../../base/common/lifecycle.js';
@@ -262,6 +263,44 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 	private get runnerPath(): string {
 		return path.join(__dirname, 'python_runner.py');
+	}
+
+	/**
+	 * The mtime of `python_runner.py` the pools were spawned under. A pooled
+	 * worker *is* that file loaded, so an edit to it leaves up to fifteen
+	 * workers running the old code -- and they sit at the top of the
+	 * checkpoint ladder, chosen ahead of any fresh spawn, so an edit could go
+	 * unseen for a dozen runs. Visualizer files are hot-reloaded by mtime
+	 * inside the worker; the runner cannot reload itself, so the pools are
+	 * drained instead. See `drainPoolsIfRunnerChanged`.
+	 */
+	private runnerMtime: number | undefined;
+
+	/**
+	 * Kill every pooled worker if `python_runner.py` changed since they were
+	 * spawned, so the next run spawns fresh ones. One stat per run; a
+	 * development concern only, since a shipped runner never changes.
+	 */
+	private drainPoolsIfRunnerChanged(): void {
+		let mtime: number;
+		try {
+			mtime = statSync(this.runnerPath).mtimeMs;
+		} catch {
+			return;
+		}
+		if (this.runnerMtime === undefined) {
+			this.runnerMtime = mtime;
+			return;
+		}
+		if (mtime !== this.runnerMtime) {
+			this.runnerMtime = mtime;
+			this.drainAllPools();
+			// Refill at once: a run that finds every pool empty waits for a
+			// worker, and nothing else would spawn one.
+			if (this.poolWorkingDirectory && !this._disposed) {
+				this.ensurePoolFilled(this.poolWorkingDirectory);
+			}
+		}
 	}
 
 	// -------------------------------------------------------------------
@@ -830,6 +869,10 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.runs.delete(runId);
 			return;
 		}
+
+		// Before a worker is taken below: a pool spawned under an older runner
+		// is emptied here, and the take falls through to a fresh spawn.
+		this.drainPoolsIfRunnerChanged();
 
 		if (options?.timeout) {
 			state.timeoutId = setTimeout(() => {
