@@ -2661,7 +2661,6 @@ class TestColumnVisualize(unittest.TestCase):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer)
         output = visualize(lst, model, mock_get_visualizer, None)
-        self.assertIn('col-add', output)
         self.assertIn(
             f'DropdownToggle(dropdown_id={html.escape(repr(ADD_MENU_ID))})',
             output)
@@ -15878,7 +15877,6 @@ class TestAddColumnMenuRendering(AddColumnMenuCase):
 
     def test_the_plus_opens_a_menu(self):
         head = self.head(self.model(open_menu=False))
-        self.assertIn('col-add', head)
         self.assertIn(
             f'DropdownToggle(dropdown_id={html.escape(repr(ADD_MENU_ID))})',
             head)

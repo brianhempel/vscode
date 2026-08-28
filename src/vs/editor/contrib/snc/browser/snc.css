@@ -2199,12 +2199,6 @@
 	margin-left: 4px;
 }
 
-.list-visualizer .col-add {
-	cursor: pointer;
-	vertical-align: middle;
-	cursor: pointer;
-}
-
 .list-visualizer .col-add-icon {
 	color: var(--snc-text-muted);
   opacity: 0.5;
@@ -2216,6 +2210,7 @@
   user-select: none;
   display: flex;
   align-items: center;
+	cursor: pointer;
 }
 
 /* The (+)'s menu is hoisted out of the <th>, so the header stops being hovered
