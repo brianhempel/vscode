@@ -725,7 +725,9 @@ class TestUrlCacheAcrossRuns(unittest.TestCase):
         self.assertEqual(self._run(source)['str1'], 'weather report')
         self.assertEqual(len(self.fetches), 1)
 
-    def test_editing_the_line_refetches(self):
+    def test_editing_the_line_does_not_refetch(self):
+        # The entry is keyed on the URL alone, so edits elsewhere on the line
+        # leave it valid.
         source = (
             'import urllib.request\n'
             'str1 = urllib.request.urlopen("https://example.com/report.txt").read().decode()\n'
@@ -733,7 +735,7 @@ class TestUrlCacheAcrossRuns(unittest.TestCase):
         self._run(source)
         edited = source.replace('str1', 'text')
         self.assertEqual(self._run(edited)['text'], 'weather report')
-        self.assertEqual(len(self.fetches), 2)
+        self.assertEqual(len(self.fetches), 1)
 
     def test_the_cache_lands_beside_the_edited_file(self):
         self._run('import urllib.request\n'

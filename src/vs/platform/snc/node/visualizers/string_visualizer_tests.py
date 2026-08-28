@@ -8994,18 +8994,18 @@ class TestActionButtonRendering(unittest.TestCase):
     # ---- Labels --------------------------------------------------------------
 
     def test_get_label_changes_to_map_in_replace_mode(self):
-        """find_or_map label is 'Match Objs' until the replace row is open, then 'Map Matches'."""
+        """find_or_map label is 'Match Objects' until the replace row is open, then 'Map Matches'."""
         model = init_model(self.value)
         model['search'] = r"r'hello'"
         html_get = visualize(self.value, model, None, None, max_width=400)
-        self.assertIn('Match Objs', html_get)
+        self.assertIn('Match Objects', html_get)
         self.assertNotIn('Map Matches', html_get)
 
         model['replace_visible'] = True
         model['replace_text'] = "'world'"
         html_transform = visualize(self.value, model, None, None, max_width=400)
         self.assertIn('Map Matches', html_transform)
-        self.assertNotIn('Match Objs', html_transform)
+        self.assertNotIn('Match Objects', html_transform)
 
     def test_button_labels(self):
         """Standard set of labels is present regardless of first-match mode."""
@@ -9013,7 +9013,7 @@ class TestActionButtonRendering(unittest.TestCase):
             model = init_model(self.value)
             model['search'] = search
             html_output = visualize(self.value, model, None, None, max_width=400)
-            for label in ('Match Objs', 'Substrs', 'Idxs', 'Loop',
+            for label in ('Match Objects', 'Substrs', 'Indexes', 'Loop',
                           'Any/All', 'Delete', 'Split', 'Replace', 'Filter'):
                 self.assertIn(label, html_output, f"label {label!r} missing for search={search!r}")
 
@@ -9069,8 +9069,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         self.assertIn("action=&#x27;find_indices&#x27;", html_output)
-        # Label is 'Idxs' in the new layout.
-        self.assertIn('Idxs', html_output)
+        self.assertIn('Indexes', html_output)
 
     def test_find_indices_button_enabled_without_replace(self):
         model = init_model(self.value)
@@ -12102,7 +12101,8 @@ class TestToolToolbar(unittest.TestCase):
         # (it does appear inside the dropdown panel option rows).
         # Find the trigger button content and assert "Literal" isn't in it.
         import re as _re
-        m = _re.search(r'<span class="tool-button active tool-dropdown-trigger-button[^"]*">(.*?)</span>(?=<div class="snc-dropdown-panel)', html_str)
+        # DOTALL: the pick chip holds an inline SVG, which spans lines.
+        m = _re.search(r'<span class="tool-button active tool-dropdown-trigger-button[^"]*">(.*?)</span>(?=<div class="snc-dropdown-panel)', html_str, _re.DOTALL)
         self.assertIsNotNone(m, f"Could not find compact dropdown trigger button in HTML")
         trigger_content = m.group(1)
         for name in ('Literal', 'Fuzzy', 'Index', 'Pick'):
@@ -13134,8 +13134,8 @@ class TestSegmentSelection(unittest.TestCase):
         model = init_model(value)
         html_str = visualize(value, model, None, None)
         self.assertIn('data-tool="pick"', html_str)
-        # Pragmasevka cursor-default glyph U+F01C0 is rendered inside the chip.
-        self.assertIn('\U000F01BD', html_str)
+        # The chip holds the pick-tool icon, drawn as an inline SVG.
+        self.assertRegex(html_str, r'data-tool="pick"[^>]*><svg class="search-icon"')
 
     def test_pick_tool_button_dimmed_when_no_search(self):
         """The pick tool button is meaningless without a search, so dim it."""
@@ -14231,6 +14231,296 @@ class TestReadOnly(unittest.TestCase):
         self.assertIn('hello', out)
         self.assertNotIn('snc-py-exps', out)
         self.assertNotIn('py-exp-grab', out)
+
+
+# =============================================================================
+# Fetch Menu
+# =============================================================================
+#
+# A string that names a place to read from -- a URL, a path -- is one read away
+# from the value it stands for. Dragging the file or the URL in writes that read
+# (pythonDropProvider.ts); the Fetch menu writes the same read for a string the
+# program has already got hold of.
+
+import os as _os
+import tempfile as _tempfile
+
+from string_visualizer import FetchClick
+
+
+def make_fetch_event(source: str, fmt: str) -> dict:
+    """Create a FetchClick event dict."""
+    return {
+        'pythonEventStr': repr(FetchClick(source=source, fmt=fmt)),
+        'eventJSON': {},
+    }
+
+
+def fetch_event_attr(source: str, fmt: str) -> str:
+    """The mousedown attribute value a Fetch row carries, as it reads in HTML."""
+    import html as _html
+    return _html.escape(repr(FetchClick(source=source, fmt=fmt)))
+
+
+class TestFetchMenuWrites(unittest.TestCase):
+    """The line each Fetch row writes, and what it says it can't run without."""
+
+    URL = 'https://example.com/data.json'
+
+    def fetch(self, source, fmt, value=None, var_and_exp=('url1', 'url1')):
+        value = self.URL if value is None else value
+        model = init_model(value, var_and_exp=var_and_exp)
+        _, commands = update(make_fetch_event(source, fmt), var_and_exp,
+                             model, value)
+        self.assertEqual(len(commands), 1)
+        return commands[0]
+
+    def test_a_url_as_a_string(self):
+        cmd = self.fetch('url', 'text')
+        self.assertEqual(cmd[:2],
+                         ('url1_text',
+                          'urllib.request.urlopen(url1).read().decode()'))
+        self.assertEqual(cmd[2], ('import urllib.request',))
+
+    def test_a_url_as_json(self):
+        cmd = self.fetch('url', 'json')
+        self.assertEqual(cmd[:2],
+                         ('url1_data', 'json.load(urllib.request.urlopen(url1))'))
+        self.assertEqual(cmd[2], ('import json', 'import urllib.request'))
+
+    def test_a_file_as_a_string(self):
+        cmd = self.fetch('file', 'text', var_and_exp=('path1', 'path1'))
+        self.assertEqual(cmd[:2], ('path1_text', 'open(path1).read()'))
+        self.assertEqual(len(cmd), 2, 'a builtin read needs no import')
+
+    def test_a_file_as_csv(self):
+        cmd = self.fetch('file', 'csv', var_and_exp=('path1', 'path1'))
+        self.assertEqual(cmd[:2],
+                         ('path1_rows',
+                          "list(csv.reader(open(path1, newline='')))"))
+        self.assertEqual(cmd[2], ('import csv',))
+
+    def test_a_file_as_json(self):
+        cmd = self.fetch('file', 'json', var_and_exp=('path1', 'path1'))
+        self.assertEqual(cmd[:2], ('path1_data', 'json.load(open(path1))'))
+        self.assertEqual(cmd[2], ('import json',))
+
+    def test_a_file_as_excel(self):
+        # Every sheet, because which one holds the data isn't ours to guess --
+        # the same read the drop provider writes for a dropped spreadsheet.
+        cmd = self.fetch('file', 'excel', var_and_exp=('path1', 'path1'))
+        self.assertEqual(
+            cmd[:2],
+            ('path1_sheets',
+             "{sheet_name: pd.read_excel(path1, sheet_name=sheet_name)"
+             ".to_dict('records') for sheet_name in "
+             "pd.ExcelFile(path1).sheet_names}"))
+        self.assertEqual(cmd[2], ('import pandas as pd',))
+
+    def test_a_string_with_no_name_of_its_own_writes_a_result(self):
+        cmd = self.fetch('url', 'text', var_and_exp=(None, "rows[0]['url']"))
+        self.assertEqual(
+            cmd[:2],
+            ('result_text',
+             "urllib.request.urlopen(rows[0]['url']).read().decode()"))
+
+    def test_a_cell_reads_by_the_binder_and_names_a_result(self):
+        # Nested in a table cell the value is bound to a name the parent
+        # substitutes into, which is no name to call the answer by.
+        from visualizer_utils import CHILD_SOURCE_BINDER as binder
+        cmd = self.fetch('url', 'text', var_and_exp=(None, binder))
+        self.assertEqual(cmd[0], 'result_text')
+        self.assertEqual(cmd[1],
+                         f'urllib.request.urlopen({binder}).read().decode()')
+
+    def test_a_fetch_leaves_a_linked_line_alone(self):
+        # Reading what the string names is about the string rather than about
+        # the search, so it writes a line of its own and rewrites nothing.
+        value = self.URL
+        var_and_exp = ('url1', 'url1')
+        model = init_model(value, var_and_exp=var_and_exp)
+        model['search'] = r"r'example'"
+        model['linked_action'] = 'find_or_map'
+        model['linked_source_expr'] = 'url1'
+        model['auto_linked_once'] = True
+        _, commands = update(make_fetch_event('url', 'text'), var_and_exp,
+                             model, value)
+        self.assertEqual([type(c) for c in commands], [tuple])
+        self.assertEqual(model['linked_action'], 'find_or_map')
+
+
+class TestFetchMenuRender(unittest.TestCase):
+    """Which rows the menu offers live, read off the string itself."""
+
+    URL = 'https://example.com/data.json'
+
+    def setUp(self):
+        self.dir = _tempfile.TemporaryDirectory()
+        self.path = _os.path.join(self.dir.name, 'data.csv')
+        with open(self.path, 'w') as f:
+            f.write('a,b\n1,2\n')
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def render(self, value, var_and_exp=('str1', 'str1')):
+        model = init_model(value, var_and_exp=var_and_exp)
+        return visualize(value, model, None, lambda c: eval(c), max_width=400,
+                         var_and_exp=var_and_exp)
+
+    def submenu_class(self, out, label):
+        """The classes on the row that opens *label*'s submenu."""
+        m = re.search(r'<div class="([^"]*)"><div class="snc-dropdown-option">'
+                      r'<span class="snc-dropdown-option-label">' + label, out)
+        return m.group(1).split() if m else None
+
+    def test_the_button_is_there_for_any_string(self):
+        out = self.render('hello world')
+        self.assertIn('>Fetch<', out)
+        self.assertIn('Fetch URL', out)
+        self.assertIn('Read Filepath', out)
+
+    def test_a_string_that_names_nowhere_dims_the_button(self):
+        out = self.render('hello world')
+        m = re.search(r'<span class="([^"]*)"><span class="action-button">'
+                      r'<span class="text">Fetch</span>', out)
+        self.assertIsNotNone(m)
+        self.assertIn('dimmed', m.group(1).split())
+        self.assertIn('dimmed', self.submenu_class(out, 'Fetch URL'))
+        self.assertIn('dimmed', self.submenu_class(out, 'Read Filepath'))
+
+    def test_a_url_lights_the_url_rows_only(self):
+        out = self.render(self.URL, var_and_exp=('url1', 'url1'))
+        self.assertNotIn('dimmed', self.submenu_class(out, 'Fetch URL'))
+        self.assertIn('dimmed', self.submenu_class(out, 'Read Filepath'))
+        self.assertIn(fetch_event_attr('url', 'json'), out)
+
+    def test_a_path_to_a_file_that_is_there_lights_the_file_rows_only(self):
+        out = self.render(self.path, var_and_exp=('path1', 'path1'))
+        self.assertNotIn('dimmed', self.submenu_class(out, 'Read Filepath'))
+        self.assertIn('dimmed', self.submenu_class(out, 'Fetch URL'))
+
+    def test_a_path_to_a_file_that_is_not_there_is_no_path(self):
+        out = self.render(_os.path.join(self.dir.name, 'gone.csv'),
+                          var_and_exp=('path1', 'path1'))
+        self.assertIn('dimmed', self.submenu_class(out, 'Read Filepath'))
+
+    def test_a_long_string_is_asked_of_the_filesystem_without_raising(self):
+        # A path too long to be one is not one; the OS says so by raising,
+        # which is the same no.
+        out = self.render('x' * 5000 + '\nmore', var_and_exp=('str1', 'str1'))
+        self.assertIn('dimmed', self.submenu_class(out, 'Read Filepath'))
+
+    def test_a_live_row_hands_over_the_code_it_would_write(self):
+        out = self.render(self.path, var_and_exp=('path1', 'path1'))
+        self.assertIn(exp_attr(PyExp("list(csv.reader(open(path1, newline='')))",
+                                     ('import csv',))), out)
+
+    def test_a_dimmed_row_hands_over_nothing(self):
+        out = self.render('hello world')
+        self.assertNotIn('urlopen', out)
+
+    def test_the_menu_is_a_hover_menu_with_hover_submenus(self):
+        # The CSS opens the submenus (a hover menu is a static clone the front
+        # end positions, and nothing walks into one looking for triggers), so
+        # the shape it keys off is part of what this renders.
+        out = self.render(self.URL, var_and_exp=('url1', 'url1'))
+        self.assertIn('snc-dropdown-panel left fetch-menu-panel has-submenu"'
+                      ' snc-dropdown-align="left" data-hover-menu', out)
+        self.assertIn('snc-dropdown-panel flyout fetch-format-panel"'
+                      ' snc-dropdown-align="flyout" data-hover-menu', out)
+
+
+# =============================================================================
+# What a menu row reads as, when the string is a cell
+# =============================================================================
+#
+# A row of a menu is a button like the ones beside it: clicked in a table's
+# cell, what it writes becomes a COLUMN. So its handle has the same two
+# readings a button's has -- this row's answer, and the column's -- and says
+# which is which. A row whose code is a statement has only the one: a column
+# holds an expression, so there is no list reading to offer.
+
+import html as _html_mod
+import json as _json
+
+from visualizer_utils import label_readings
+
+
+class TestMenuRowReadings(unittest.TestCase):
+
+    def every_row(self, sub_expr):
+        """Stands in for the table: a column expression, read down the list."""
+        return [f'[{sub_expr.replace("$", "item")} for item in x]']
+
+    def render(self, value, var_and_exp, every_row=True, **model_keys):
+        model = init_model(value, var_and_exp=var_and_exp)
+        model.update(model_keys)
+        return visualize(value, model, None, lambda c: eval(c, {'re': re}),
+                         max_width=400, var_and_exp=var_and_exp,
+                         every_row_exps=self.every_row if every_row else None)
+
+    def readings(self, out, label):
+        """What the menu row labelled *label* offers, as the tooltip gets it."""
+        m = re.search(r'<div class="snc-dropdown-option[^"]*" '
+                      r'snc-py-exps="([^"]*)"[^>]*><span snc-mouse-down="[^"]*"'
+                      r' class="snc-dropdown-option-label">' + re.escape(label),
+                      out)
+        return _json.loads(_html_mod.unescape(m.group(1))) if m else None
+
+    # --- Fetch --------------------------------------------------------------
+
+    def fetch_render(self, **kw):
+        d = _tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = _os.path.join(d.name, 'data.csv')
+        with open(path, 'w') as f:
+            f.write('a,b\n')
+        return self.render(path, (None, "rows[0]"), **kw), path
+
+    def test_a_fetch_row_offers_the_column_it_would_write(self):
+        out, path = self.fetch_render()
+        self.assertIn(
+            py_exp_attrs(label_readings(
+                PyExp('open(rows[0]).read()'),
+                [PyExp('[open(item).read() for item in x]')]),
+                draggable=False, align='right').strip(),
+            out)
+
+    def test_a_fetch_rows_column_reading_carries_the_import_too(self):
+        # The column is evaluated in the user's scope, so a read that names a
+        # module needs it there whichever reading is taken.
+        out, _path = self.fetch_render()
+        csv_row = self.readings(out, 'as CSV')
+        self.assertEqual([r['label'] for r in csv_row], ['One', 'List'])
+        self.assertEqual(csv_row[1]['imports'], ['import csv'])
+
+    def test_with_no_table_above_a_fetch_row_has_the_one_reading(self):
+        out, _path = self.fetch_render(every_row=False)
+        rows = self.readings(out, 'as string')
+        self.assertEqual([r.get('label') for r in rows], [None])
+
+    # --- Any/All and Loop ---------------------------------------------------
+
+    def predicate_render(self, **kw):
+        return self.render('foo bar', ('str1', 'str1'), search=r"r'foo'", **kw)
+
+    def test_a_predicate_row_offers_the_column_it_would_write(self):
+        rows = self.readings(self.predicate_render(), 'Any')
+        self.assertEqual([r['label'] for r in rows], ['One', 'List'])
+        self.assertTrue(rows[1]['expr'].endswith('for item in x]'),
+                        rows[1]['expr'])
+
+    def test_a_row_that_writes_a_statement_has_no_column_reading(self):
+        # `if any(...):` is a line and only ever a line -- a column holds an
+        # expression, so there is nothing here to read down a list.
+        rows = self.readings(self.predicate_render(), 'If Any')
+        self.assertEqual([r.get('label') for r in rows], [None])
+
+    def test_a_loop_row_writes_a_statement_too(self):
+        rows = self.readings(self.predicate_render(), 'Over match objects')
+        self.assertEqual([r.get('label') for r in rows], [None])
+
 
 if __name__ == '__main__':
     unittest.main()

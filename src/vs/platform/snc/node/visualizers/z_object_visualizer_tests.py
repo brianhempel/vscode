@@ -1823,7 +1823,7 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         model['fields'] = ['$.x', '$.y']
         html_out = visualize(obj, model, _get_visualizer, None)
         m = re.search(
-            r'<td snc-mouse-down="RemoveFieldClick[^"]*"([^>]*?)>',
+            r'<div snc-mouse-down="RemoveFieldClick[^"]*"([^>]*?)>',
             html_out,
         )
         self.assertIsNotNone(m, "RemoveFieldClick button not found")
@@ -1839,7 +1839,7 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         model['fields'] = ['$.x', '$.y']
         html_out = visualize(obj, model, _get_visualizer, None)
         m = re.search(
-            r'<td snc-mouse-down="DragStart[^"]*"([^>]*?)>',
+            r'<div snc-mouse-down="DragStart[^"]*"([^>]*?)>',
             html_out,
         )
         self.assertIsNotNone(m, "DragStart handle not found")
@@ -1855,10 +1855,10 @@ class TestObjectVisualizerTooltips(unittest.TestCase):
         model['fields'] = ['$.x']
         html_out = visualize(obj, model, _get_visualizer, None)
         m = re.search(
-            r'<tr snc-mouse-down="AddFieldClick[^"]*"([^>]*?)>',
+            r'<div snc-mouse-down="AddFieldClick[^"]*"([^>]*?)>',
             html_out,
         )
-        self.assertIsNotNone(m, "AddFieldClick (+) row not found")
+        self.assertIsNotNone(m, "AddFieldClick (+) bar not found")
         attrs = m.group(1)
         self.assertIn('data-tooltip="Add attribute"', attrs)
 

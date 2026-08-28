@@ -52,7 +52,7 @@ for _icon in _ICON_NAMES:
     with open(os.path.join(os.path.dirname(__file__), f'icons/{_icon}.svg'), 'r') as _f:
         _svg_content = (_f.read()
                         .replace('<?xml version="1.0" encoding="utf-8"?>\n', '')
-                        .replace('<svg ', '<svg class="search-icon"'))
+                        .replace('<svg ', '<svg class="search-icon" '))
         ICONS[_icon] = _STYLE_RE.sub(
             lambda m: ' '.join(f'{k}="{v}"'
                                for attr in m[1].rstrip(';').split(';')
@@ -1168,6 +1168,14 @@ _CODE_NEEDS = tuple(
         (r'np\.', 'import numpy as np'),
         (r'math\.', 'import math'),
         (r'Counter\(', 'from collections import Counter'),
+        # The reads the string visualizer's Fetch menu writes, and the drop
+        # providers write for a dragged file or URL. `urllib.request` names the
+        # corner of the package these reach for -- a file using another one
+        # imports it itself.
+        (r'json\.', 'import json'),
+        (r'csv\.', 'import csv'),
+        (r'urllib\.request\.', 'import urllib.request'),
+        (r'pd\.', 'import pandas as pd'),
     ))
 
 # A string literal, prefix and all -- but not an f-string, whose braces hold

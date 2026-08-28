@@ -91,6 +91,20 @@ PICK TOOL:
   comprehension over re.finditer(...), e.g.
     group_1 -> [m[1] for m in re.finditer(r'pat', src, flags=re.M)]
 
+FETCH MENU:
+- The one button in the action bar that asks nothing of the search: a string
+  that names a place -- a URL, a path -- is one read away from the value it
+  stands for, and this writes that read as a line of its own.
+    Fetch URL     > as string / as JSON
+    Read Filepath > as string / as CSV / as JSON / as Excel
+- The same reads pythonDropProvider.ts writes when a URL or a file is dragged
+  into the editor, offered after the fact for a string the program already has.
+  See FETCH_MENUS.
+- Which rows are live is read off the value: a URL by how it starts, a path by
+  the file being there (asked of the filesystem, in the user's own process).
+- Unlike the action buttons it links nothing -- there is no gesture afterwards
+  for a line to be kept in step with.
+
 MODEL STATE:
 - search: Regex pattern in Pythonic raw-string form, e.g. r'hello.*world'
   with optional postfix flags (1, i, c).
@@ -238,6 +252,17 @@ class CaptureGroupsToggle:
 class ActionButtonClick:
     action: str  # 'match_strings', 'find_or_map', 'replace', 'delete', 'loop', 'loop_match_strings', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'find_indices', 'split'
     copy: bool   # True → CopyToClipboard, False → NewCode
+
+@dataclass(frozen=True, slots=True)
+class FetchClick:
+    """A row of the Fetch menu: read the string as the place it names.
+
+    *source* is where the bytes come from ('url' over the network, 'file' off
+    the disk) and *fmt* how they are read ('text', 'json', 'csv', 'excel').
+    See FETCH_MENUS for what each pair writes.
+    """
+    source: str
+    fmt: str
 
 @dataclass(frozen=True, slots=True)
 class RepetitionInput:
@@ -3176,6 +3201,23 @@ def build_preview_regex(model, string_value: str) -> str | None:
         else:
             return append_segment_to_regex(current_regex, 'literal', selected_text)
 
+def _readings(expr: str, also=()):
+    """What a control hands over: its own answer, and the other ways it reads.
+
+    One expression on its own needs no name -- there is nothing to tell it
+    apart from. Several are named (One / List), so a tooltip can say which of
+    them is this string's answer and which is the whole column's. Each carries
+    what its own text needs imported, whoever wrote it.
+    """
+    primary = PyExp(expr, code_imports(expr))
+    if not also:
+        return primary
+    return label_readings(primary, [
+        (e if isinstance(e, PyExp) else PyExp(e))._replace(
+            imports=code_imports(e.expr if isinstance(e, PyExp) else e))
+        for e in also])
+
+
 def _action_btn(label: str, action: str, enabled: bool = True,
                 expr: str = '', linked: bool = False, also=()) -> str:
     event = repr(ActionButtonClick(action=action, copy=False))
@@ -3184,12 +3226,8 @@ def _action_btn(label: str, action: str, enabled: bool = True,
         cls += ' dimmed'
     if linked:
         cls += ' linked'
-    primary = PyExp(expr, code_imports(expr))
-    reads = (label_readings(primary, [
-        (e if isinstance(e, PyExp) else PyExp(e))._replace(
-            imports=code_imports(e.expr if isinstance(e, PyExp) else e))
-        for e in also]) if also else primary)
-    expr_attr = py_exp_attrs(reads, draggable=False, attr='data-action-expr')
+    expr_attr = py_exp_attrs(_readings(expr, also), draggable=False,
+                             attr='data-action-expr')
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
             f'{expr_attr}>{label}</span>')
 
@@ -3217,16 +3255,29 @@ def _preview_expr(model: dict, action: str, eval_in_scope, source_expr=None) -> 
         return ''
 
 
-def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '') -> str:
-    act_event = repr(ActionButtonClick(action=action, copy=False))
+def _menu_row(label: str, event: str, enabled: bool, expr: str = '',
+              also=()) -> str:
+    """One row of a menu: what it says, what it sends, and what it writes.
+
+    The row is the handle for its own code, offered rightwards so a tooltip
+    doesn't cover the rows around it. A row is a button like the ones beside it
+    -- in a table's cell what it writes becomes a column -- so it offers the
+    same readings a button does (see _readings).
+    """
     disabled = '' if enabled else ' dimmed'
-    exp_attrs = py_exp_attrs(PyExp(expr, code_imports(expr)), draggable=False,
+    exp_attrs = py_exp_attrs(_readings(expr, also), draggable=False,
                              align='right')
     return (
         f'<div class="snc-dropdown-option{disabled}"{exp_attrs}>'
-        f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
+        f'<span snc-mouse-down="{html.escape(event)}" class="snc-dropdown-option-label">{label}</span>'
         f'</div>'
     )
+
+
+def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '',
+                  also=()) -> str:
+    return _menu_row(label, repr(ActionButtonClick(action=action, copy=False)),
+                     enabled, expr, also)
 
 
 def _every_row_action_exps(model: dict, action: str, eval_in_scope,
@@ -3238,11 +3289,178 @@ def _every_row_action_exps(model: dict, action: str, eval_in_scope,
     offered `re.split(r',', parts[0], ...)` while the column it was about to
     write said `re.split(r',', $, ...)`. The action generated against `$` IS
     that column, so the table lifts it the same way it lifts an access path.
+
+    Nothing for an action that writes a STATEMENT: `if any(...)` is a line and
+    only ever a line, and a column holds an expression. Read down a list it
+    would say nothing -- so it says nothing.
     """
     if every_row_exps is None:
         return []
     column = _preview_expr(model, action, eval_in_scope, source_expr='$')
-    return list(every_row_exps(column)) if column else []
+    if not column or not dollar_expr_parses(column):
+        return []
+    return list(every_row_exps(column))
+
+
+# What the Fetch menu offers and the read each row writes. A string that names
+# a place -- a URL, a path -- is one `urlopen` or one `open` away from the value
+# it stands for, and these are the reads pythonDropProvider.ts already writes
+# when a URL or a file is dragged into the editor. Same reads, offered after the
+# fact for a string the program has already got hold of.
+#
+# Each menu is (source, its row's label, its formats); each format is (fmt, its
+# row's label, what to call the answer, how the read reads).
+FETCH_MENUS = (
+    ('url', 'Fetch URL', (
+        ('text', 'as string', 'text',
+         lambda src: f'urllib.request.urlopen({src}).read().decode()'),
+        # json.load takes the response itself: a decode the reader would only
+        # have to undo is a step to leave out.
+        ('json', 'as JSON', 'data',
+         lambda src: f'json.load(urllib.request.urlopen({src}))'),
+    )),
+    ('file', 'Read Filepath', (
+        ('text', 'as string', 'text', lambda src: f'open({src}).read()'),
+        ('csv', 'as CSV', 'rows',
+         lambda src: f"list(csv.reader(open({src}, newline='')))"),
+        ('json', 'as JSON', 'data', lambda src: f'json.load(open({src}))'),
+        # Every sheet, because which one holds the data isn't ours to guess.
+        ('excel', 'as Excel', 'sheets',
+         lambda src: (f'{{sheet_name: pd.read_excel({src}, sheet_name=sheet_name)'
+                      f".to_dict('records') for sheet_name in "
+                      f'pd.ExcelFile({src}).sheet_names}}')),
+    )),
+)
+
+# The schemes worth offering to fetch. The runner caches what `urlopen` reads
+# (see url_cache.py), and only these are cached -- a rerun on every keystroke
+# refetching is what makes a URL worth writing as a URL at all.
+_FETCH_URL_SCHEMES = ('http://', 'https://')
+
+
+def _names_a_url(value: str) -> bool:
+    """Whether the string names something to read over the network."""
+    text = (value or '').strip()
+    return (text.lower().startswith(_FETCH_URL_SCHEMES)
+            and not any(char.isspace() for char in text))
+
+
+def _names_a_file(value: str) -> bool:
+    """Whether the string names a file that is there.
+
+    Asked of the filesystem rather than of the text, and in the user's own
+    process with their own working directory, so the answer is the one `open()`
+    would give a moment later. A string too long or too strange to be a path is
+    not one, and the OS says so by raising -- which is the same no.
+    """
+    text = value or ''
+    if not text or '\n' in text or _names_a_url(text):
+        return False
+    try:
+        return os.path.isfile(text)
+    except (OSError, ValueError):
+        return False
+
+
+def _fetch_format(source: str, fmt: str):
+    """The FETCH_MENUS row a FetchClick names, or None if it names none."""
+    for menu_source, _, formats in FETCH_MENUS:
+        if menu_source == source:
+            for row in formats:
+                if row[0] == fmt:
+                    return row
+    return None
+
+
+def _fetch_code(source_expr: str, source: str, fmt: str):
+    """The line a Fetch row writes: (what to call it, the read itself).
+
+    The name follows the same rule the generated actions use -- the source's
+    own name and what the read makes of it, or a `result` where the string has
+    no name to lend. A cell's binder is a name the parent substitutes into
+    rather than one the user wrote, so it lends none either.
+    """
+    row = _fetch_format(source, fmt)
+    if not row or not source_expr:
+        return None
+    _, _, suffix, read = row
+    has_var = (source_expr != CHILD_SOURCE_BINDER and source_expr.isidentifier()
+               and not keyword.iskeyword(source_expr))
+    return (f'{source_expr if has_var else "result"}_{suffix}', read(source_expr))
+
+
+def _fetch_row_exps(source: str, fmt: str, every_row_exps) -> list:
+    """What a Fetch row's read says of EVERY row, when the string is a cell.
+
+    Clicked in a cell the read becomes a column -- `open($).read()`, one answer
+    each row has -- so the row offers that reading beside this string's own,
+    exactly as an action button does (see _every_row_action_exps). Written
+    against `$` here rather than the binder the click uses: the two spellings
+    are the same question asked of the two things that answer it, a table's
+    column and a parent's substitution.
+    """
+    row = _fetch_format(source, fmt)
+    if every_row_exps is None or not row:
+        return []
+    return list(every_row_exps(row[3]('$')))
+
+
+def _fetch_source_expr(model: dict, var_and_exp=None) -> str | None:
+    """How the code names the string being read."""
+    if var_and_exp:
+        var_name, expr = var_and_exp
+        return var_name if var_name else expr
+    return model.get('_source_expr')
+
+
+def _render_fetch_button(model: dict, value: str, every_row_exps=None) -> str:
+    """The Fetch button: read the string as the place it names.
+
+    Two rows, each with a submenu of the ways its bytes read. Alone in this bar
+    the button asks nothing of the search -- what it acts on is the string
+    itself -- so it is live where every other button is dimmed, and dim where
+    the string names nowhere to read from.
+
+    Which rows are live is read off the value: a URL by how it starts, a path by
+    the file being there. The submenus open on hover in CSS alone, since a hover
+    menu is a static clone the front end positions (see showHoverMenu in snc.ts)
+    and nothing walks into one looking for further triggers.
+    """
+    source_expr = _fetch_source_expr(model)
+    live = {'url': _names_a_url(value), 'file': _names_a_file(value)}
+
+    rows = []
+    for source, label, formats in FETCH_MENUS:
+        enabled = bool(source_expr) and live[source]
+        format_rows = []
+        for fmt, fmt_label, _, _ in formats:
+            code = _fetch_code(source_expr, source, fmt) if enabled else None
+            format_rows.append(_menu_row(
+                html.escape(fmt_label), repr(FetchClick(source=source, fmt=fmt)),
+                enabled, code[1] if code else '',
+                also=_fetch_row_exps(source, fmt, every_row_exps) if code else ()))
+        rows.append(
+            f'<div class="snc-dropdown-trigger fetch-submenu'
+            f'{"" if enabled else " dimmed"}">'
+            f'<div class="snc-dropdown-option">'
+            f'<span class="snc-dropdown-option-label">{html.escape(label)}</span>'
+            f'<span class="submenu-right-arrow">▸</span>'
+            f'</div>'
+            f'<div class="snc-dropdown-panel flyout fetch-format-panel"'
+            f' snc-dropdown-align="flyout" data-hover-menu>'
+            f'{"".join(format_rows)}</div>'
+            f'</div>')
+
+    panel = (
+        f'<div class="snc-dropdown-panel left fetch-menu-panel has-submenu"'
+        f' snc-dropdown-align="left" data-hover-menu>{"".join(rows)}</div>'
+    )
+    enabled = bool(source_expr) and any(live.values())
+    return (
+        f'<span class="snc-dropdown-trigger{"" if enabled else " dimmed"}">'
+        f'<span class="action-button"><span class="text">Fetch</span></span>'
+        f'{panel}</span>'
+    )
 
 
 def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=None,
@@ -3294,11 +3512,13 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     loop_match_strings_enabled = loop_enabled and not has_replace
 
     def loop_row(label, action, enabled):
-        return _dropdown_row(label, action, enabled, expr(action) if enabled else '')
+        return _dropdown_row(label, action, enabled,
+                             expr(action) if enabled else '',
+                             also=also(action) if enabled else ())
 
     # The 'loop' action loops over `val` (transformed) when has_replace, else over
     # `mtch` (match objects). Mirror the find_or_map button's label switch
-    # (Match Objs <-> Map Matches) on replace_visible so opening the replace box
+    # (Match Objects <-> Map Matches) on replace_visible so opening the replace box
     # gives immediate UI feedback.
     over_match_label = 'Over mapped' if replace_visible else 'Over match objects'
     loop_panel = (
@@ -3327,12 +3547,19 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     any_suffix = _predicate_suffix(any_val)
     all_suffix = _predicate_suffix(all_val)
 
+    all_enabled = has_search and has_replace and not first
+
+    def predicate_row(label, action, enabled):
+        return _dropdown_row(label, action, enabled,
+                             expr(action) if enabled else '',
+                             also=also(action) if enabled else ())
+
     predicate_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{_dropdown_row(f"Any{any_suffix}", "any", has_search, expr("any") if has_search else "")}'
-        f'{_dropdown_row(f"If Any{any_suffix}", "if_any", has_search, expr("if_any") if has_search else "")}'
-        f'{_dropdown_row(f"All{all_suffix}", "all", has_search and has_replace and not first, expr("all") if has_search and has_replace and not first else "")}'
-        f'{_dropdown_row(f"If All{all_suffix}", "if_all", has_search and has_replace and not first, expr("if_all") if has_search and has_replace and not first else "")}'
+        f'{predicate_row(f"Any{any_suffix}", "any", has_search)}'
+        f'{predicate_row(f"If Any{any_suffix}", "if_any", has_search)}'
+        f'{predicate_row(f"All{all_suffix}", "all", all_enabled)}'
+        f'{predicate_row(f"If All{all_suffix}", "if_all", all_enabled)}'
         f'</div>'
     )
     predicate_btn = (
@@ -3355,6 +3582,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     parts.append(btn(f'{ICONS["replace"]}<span class="text">Replace<span class="shortcut">⌘R</span></span>', 'replace', has_search and has_replace))
     parts.append(btn(f'{ICONS["filter"]}<span class="text">Filter</span>', 'filter', has_search and has_replace))
+
+    # Last, and about the string rather than about the search -- see
+    # _render_fetch_button.
+    parts.append(_render_fetch_button(model, value, every_row_exps))
 
     return (
         f'<div class="action-buttons">'
@@ -3508,6 +3739,7 @@ def _render_expand_bar(expanded: bool, value: str, model, *,
     return (
         f'<div class="expand-and-len">'
         f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
+        f'{_render_auxiliary_attributes(value, model, small=small)}'
         f'</div>'
     )
 
@@ -3613,9 +3845,9 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
                     f'snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" ')
         small_class = ' small' if small else ''
         small_html = (
-            f'<div tabindex="0" {handlers}class="visualizer-container literal-tool-selected{small_class}{expanded_class}{expandable_class}"><div class="snc-tool-and-visualizer"><div class="string-visualizer snc-base-visualizer"{size_styling}><div></div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'<div tabindex="0" {handlers}class="visualizer-container literal-tool-selected{small_class}{expanded_class}{expandable_class}"><div class="snc-tool-and-visualizer"><div class="string-visualizer snc-base-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
             f'{display_html}'
-            f'</div>{expand_toggle_html}</div></div>'
+            f'</div></div>{expand_toggle_html}</div></div>'
         )
         return [wrap_drag_grab(small_html, var_and_exp)]
 
@@ -3835,8 +4067,6 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
                                                     max_width, every_row_exps)
         )
 
-        auxiliary_html = _render_auxiliary_attributes(value, model, small=small)
-
         search_box_html = (
             f'<div class="search-div toolbar-anchor {"expanded" if replace_visible else ""}">'
             f'<div class="search-div-row">'
@@ -3851,7 +4081,6 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f'<div class="disclosure-button-spacer"></div>'
             f'{action_buttons_html}'
             f"</div>"
-            f'{auxiliary_html}'
             f"</div>"
             f"</div>"
         )
@@ -5915,6 +6144,18 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             model['redoHistory'] = []
                             model['search'] = new_regex
 
+        case FetchClick(source=source, fmt=fmt):
+            # Reading what the string names is about the string rather than
+            # about the search, so it writes a line of its own and links
+            # nothing: there is no gesture afterwards to keep a line in step
+            # with, the way a selection keeps its `re.finditer` in step.
+            _commit_open_dropdown_edit(model)
+            model['openDropdown'] = None
+            result = _fetch_code(_fetch_source_expr(model, var_and_exp),
+                                 source, fmt)
+            if result:
+                commands.append(new_code_command(result, code_imports))
+
         case ActionButtonClick(action=action, copy=copy):
             _commit_open_dropdown_edit(model)
             model['openDropdown'] = None
@@ -5955,7 +6196,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     if is_nested(var_and_exp):
         return (model, commands)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, FetchClick, Unlink, Relink)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -5967,7 +6208,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (Unlink, Relink))):
+          and not isinstance(msg, (FetchClick, Unlink, Relink))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).

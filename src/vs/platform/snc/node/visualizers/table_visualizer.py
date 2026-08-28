@@ -9726,9 +9726,14 @@ def _render_auxiliary_attributes(model, lst):
     source_expr = model.get('_source_expr') if model else None
     len_exp = f'len({source_expr})' if source_expr else None
     len_n = len(lst)
+    # A dict counts entries, a list counts items; either way one of them is
+    # singular. Parenthesised because a bare chain of conditionals binds to the
+    # right and would answer 'entries' for every plural, dict or not.
+    noun = (('entries' if len_n != 1 else 'entry') if model['_is_dict']
+            else ('items' if len_n != 1 else 'item'))
     return (
         f'<div class="auxiliary-attributes">'
-        f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} {'entries' if len_n != 1 else 'entry' if model['_is_dict'] else 'items' if len_n != 1 else 'item'}</div>'
+        f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} {noun}</div>'
         f'</div>'
     )
 
@@ -9745,8 +9750,6 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
     preview_row = (f'<div class="search-div-row">{preview_html}</div>'
                    if preview_html else '')
 
-    auxiliary_html = _render_auxiliary_attributes(model, lst)
-
     return (
         f'<div class="search-div toolbar-anchor{has_focused_child_class}">'
         f'<div class="search-div-row">'
@@ -9756,7 +9759,6 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
         f'<div class="search-div-row">'
         f'{action_buttons_html}'
         f'</div>'
-        f'{auxiliary_html}'
         f'</div>'
     )
 
@@ -10641,6 +10643,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         # how much is being clipped.
         strs.append(f'<div class="expand-and-len">')
         strs.append(render_expand_toggle(expanded, repr(ExpandToggle()), small=small))
+        strs.append(_render_auxiliary_attributes(model, lst))
         strs.append(f'</div>')
 
 

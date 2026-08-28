@@ -2377,7 +2377,6 @@ def install_url_cache() -> Callable[[], None]:
     """
     try:
         return url_cache.install(
-            lambda: _source_code,
             lambda: url_cache.cache_dir_for(_file_path, os.getcwd()),
         )
     except Exception as e:

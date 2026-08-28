@@ -1164,11 +1164,6 @@ class TestHeaderRowGroup(unittest.TestCase):
                           ['$k', '*$v'], ["$['who']", "$['age']"])
         self.assertIn('col-subheader', self.head_of(out))
 
-    def test_the_add_column_button_is_in_the_head(self):
-        # It sits in the top header row, so it pins with it.
-        out = self.render({'a': 1})
-        self.assertIn('col-add', self.head_of(out))
-
 
 class TestRowIndexHeader(unittest.TestCase):
     """The row-index column heads itself with the sigil that names it: a column
@@ -6649,6 +6644,50 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         self.assertIn("re.split(r',', ($), flags=re.M)", model['columns'])
         self.assertEqual([c for c in commands if isinstance(c, AddImports)],
                          [AddImports(imports=('import re',))])
+
+    def test_a_fetch_from_a_cell_becomes_a_column_too(self):
+        """The Fetch menu is a button like the ones beside it: what it writes
+        in a cell is a read every row answers, so it lands as a column rather
+        than as a line about row 0."""
+        import string_visualizer
+        d = tempfile.mkdtemp()
+        rows = []
+        for i, text in enumerate(['hello', 'world']):
+            path = os.path.join(d, f'f{i}.txt')
+            with open(path, 'w') as f:
+                f.write(text)
+            rows.append(path)
+        model, commands, eval_in_scope = self._drive(rows, '$', [
+            string_visualizer.FetchClick(source='file', fmt='text'),
+        ])
+        added = [c for c in model['columns'] if c != '$']
+        self.assertEqual(added, ['open(($)).read()'],
+                         f"expected one read column, got {model['columns']}")
+        self.assertEqual([eval_in_scope(replace_dollars_in_py_exp(added[0], [f'rows[{i}]']))
+                          for i in range(len(rows))], ['hello', 'world'])
+        self.assertEqual([c for c in commands if is_new_code(c)], [],
+                         'the read became a column, so no line goes to the file')
+
+    def test_a_fetch_row_in_a_cell_offers_the_column_it_would_write(self):
+        """And says so before it is clicked: the row's own handle carries the
+        column reading beside this row's, the way an action button's does."""
+        import string_visualizer
+        rows = ['https://example.com/a', 'https://example.com/b']
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
+        eval_in_scope = lambda code: eval(code, {'re': re, 'rows': rows})
+        model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
+                           var_and_exp=('rows', 'rows'), slots_config=['$'])
+        model['focused_child'] = f'0{CELL_KEY_SEP}$'
+        rendered = visualize(rows, model, get_vis, eval_in_scope)
+        offered = [entry for handle in handles_in(rendered) for entry in handle
+                   if 'urlopen' in entry['expr'] and 'decode()' in entry['expr']]
+        self.assertTrue(offered, 'no handle offers the read the menu would write')
+        by_label = {entry.get('label'): entry['expr'] for entry in offered}
+        self.assertEqual(
+            by_label.get('One'),
+            'urllib.request.urlopen(rows[0]).read().decode()')
+        self.assertIn('for ', by_label.get('List', ''),
+                      f'no column reading among {sorted(by_label)}')
 
     def test_an_action_that_needs_nothing_asks_for_nothing(self):
         import string_visualizer
@@ -15795,9 +15834,13 @@ class AddColumnMenuCase(unittest.TestCase):
         return model
 
     def head(self, model, lst=None):
-        """The header rows -- everything the (+) and its menu are drawn in."""
-        out = visualize(self.ROWS if lst is None else lst, model, self.gv, None)
-        return out[:out.index('</thead>')]
+        """Everything the (+) and its menu are drawn in.
+
+        The whole render, not the header rows: the (+) hangs off the table
+        rather than sitting in a header cell, so it is drawn after the table
+        closes and slicing to `</thead>` would cut it off.
+        """
+        return visualize(self.ROWS if lst is None else lst, model, self.gv, None)
 
     def panel(self, model, lst=None):
         head = self.head(model, lst)
@@ -17514,13 +17557,13 @@ def make_expand_toggle_event() -> dict:
 
 def _pane_max_height(output: str) -> int:
     """How tall the table's scroll pane was allowed to get, in px."""
-    style = re.search(r'<div class="list-table-scroll" style="([^"]*)"', output)[1]
+    style = re.search(r'<div class="list-table-scroll[^"]*" style="([^"]*)"', output)[1]
     return int(re.search(r'max-height: (\d+)px', style)[1])
 
 
 def _pane_min_height(output: str) -> int:
     """How tall the table's scroll pane actually asks to be, in px."""
-    style = re.search(r'<div class="list-table-scroll" style="([^"]*)"', output)[1]
+    style = re.search(r'<div class="list-table-scroll[^"]*" style="([^"]*)"', output)[1]
     return int(re.search(r'min-height: (\d+)px', style)[1])
 
 
@@ -19913,17 +19956,17 @@ class TestAddColumnBesideBox(AddColumnBesideCase):
     def test_before_draws_the_box_to_the_left_of_that_column(self):
         model = self.open_at(1, after=False)
         names = _cell_names(_header_row(self.render(model)))
-        self.assertEqual(names, ['', "$['a']", 'BOX', "$['b']", "$['c']", '+'])
+        self.assertEqual(names, ['', "$['a']", 'BOX', "$['b']", "$['c']"])
 
     def test_after_draws_it_to_the_right(self):
         model = self.open_at(1, after=True)
         names = _cell_names(_header_row(self.render(model)))
-        self.assertEqual(names, ['', "$['a']", "$['b']", 'BOX', "$['c']", '+'])
+        self.assertEqual(names, ['', "$['a']", "$['b']", 'BOX', "$['c']"])
 
     def test_the_plus_still_draws_its_box_at_the_far_right(self):
         model = self.click(self.model(), AddColumnClick())
         names = _cell_names(_header_row(self.render(model)))
-        self.assertEqual(names, ['', "$['a']", "$['b']", "$['c']", 'BOX', '+'])
+        self.assertEqual(names, ['', "$['a']", "$['b']", "$['c']", 'BOX'])
 
     def test_the_body_keeps_its_columns_lined_up(self):
         # A header cell with no cell under it would slide every column right of

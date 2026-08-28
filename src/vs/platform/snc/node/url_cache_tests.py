@@ -16,7 +16,6 @@ import url_cache
 from url_cache import (
     CACHE_DIR_NAME,
     cache_dir_for,
-    current_line_source,
     install,
     make_caching_urlopen,
 )
@@ -71,14 +70,9 @@ class _CacheTestCase(unittest.TestCase):
         self.cache_dir = os.path.join(self._tmp.name, CACHE_DIR_NAME)
         self.addCleanup(self._tmp.cleanup)
 
-    def wrapper(self, real_urlopen, line_source='str1 = urlopen(URL).read()'):
+    def wrapper(self, real_urlopen):
         """Build a caching urlopen over this test's cache dir."""
-        self.line_source = line_source
-        return make_caching_urlopen(
-            real_urlopen,
-            lambda: self.cache_dir,
-            lambda: self.line_source,
-        )
+        return make_caching_urlopen(real_urlopen, lambda: self.cache_dir)
 
 
 class TestCacheDirFor(_CacheTestCase):
@@ -105,46 +99,8 @@ class TestCacheDirFor(_CacheTestCase):
             os.path.join('/home/me/proj', CACHE_DIR_NAME))
 
 
-class TestCurrentLineSource(unittest.TestCase):
-    """Cache invalidation keys off the user's line, found by walking frames."""
-
-    def _run_user_code(self, source_code):
-        """Exec source_code the way the runner does, returning what it captured."""
-        captured = {}
-        code_object = compile(source_code, '<string>', 'exec')
-        exec(code_object, {'_capture': captured, '_probe': lambda: current_line_source(source_code)})
-        return captured.get('got')
-
-    def test_returns_the_source_of_the_calling_line(self):
-        source = 'x = 1\n_capture["got"] = _probe()\n'
-        self.assertEqual(self._run_user_code(source), '_capture["got"] = _probe()')
-
-    def test_strips_indentation_so_reindenting_does_not_invalidate(self):
-        source = 'if True:\n    _capture["got"] = _probe()\n'
-        self.assertEqual(self._run_user_code(source), '_capture["got"] = _probe()')
-
-    def test_uses_the_innermost_user_frame(self):
-        source = (
-            'def fetch():\n'
-            '    return _probe()\n'
-            '_capture["got"] = fetch()\n'
-        )
-        self.assertEqual(self._run_user_code(source), 'return _probe()')
-
-    def test_returns_none_when_there_is_no_user_frame(self):
-        self.assertIsNone(current_line_source('x = 1\n'))
-
-    def test_returns_none_when_the_line_is_out_of_range(self):
-        source = 'x = 1\n_capture["got"] = _probe()\n'
-        captured = {}
-        code_object = compile(source, '<string>', 'exec')
-        # Simulates stale source: the runner's snapshot is shorter than the code running.
-        exec(code_object, {'_capture': captured, '_probe': lambda: current_line_source('x = 1\n')})
-        self.assertIsNone(captured.get('got'))
-
-
 class TestCachingUrlopen(_CacheTestCase):
-    """The wrapper fetches once, then serves from disk until the line changes."""
+    """The wrapper fetches a URL once and serves every later read from disk."""
 
     def test_first_call_fetches_and_returns_the_body(self):
         real = _FakeUrlopen(_FakeResponse(b'hello'))
@@ -153,7 +109,7 @@ class TestCachingUrlopen(_CacheTestCase):
         self.assertEqual(urlopen('https://example.com/a.txt').read(), b'hello')
         self.assertEqual(real.call_count, 1)
 
-    def test_second_call_with_unchanged_line_does_not_refetch(self):
+    def test_a_second_read_of_the_same_url_does_not_refetch(self):
         real = _FakeUrlopen(_FakeResponse(b'hello'), _FakeResponse(b'CHANGED'))
         urlopen = self.wrapper(real)
 
@@ -170,15 +126,6 @@ class TestCachingUrlopen(_CacheTestCase):
         self.assertEqual(self.wrapper(later)('https://example.com/a.txt').read(), b'hello')
         self.assertEqual(later.call_count, 0)
 
-    def test_editing_the_line_refetches(self):
-        real = _FakeUrlopen(_FakeResponse(b'hello'), _FakeResponse(b'fresh'))
-        urlopen = self.wrapper(real)
-
-        urlopen('https://example.com/a.txt')
-        self.line_source = 'text = urlopen(URL).read()'
-        self.assertEqual(urlopen('https://example.com/a.txt').read(), b'fresh')
-        self.assertEqual(real.call_count, 2)
-
     def test_a_different_url_is_cached_separately(self):
         real = _FakeUrlopen(_FakeResponse(b'a'), _FakeResponse(b'b'))
         urlopen = self.wrapper(real)
@@ -188,32 +135,17 @@ class TestCachingUrlopen(_CacheTestCase):
         self.assertEqual(urlopen('https://example.com/a.txt').read(), b'a')
         self.assertEqual(real.call_count, 2)
 
-    def test_two_lines_reading_the_same_url_do_not_evict_each_other(self):
+    def test_every_read_of_one_url_shares_a_single_entry(self):
+        # The URL is the whole key, so it does not matter how many lines read it
+        # or how often they rerun: the network is touched once.
         real = _FakeUrlopen(_FakeResponse(b'first'), _FakeResponse(b'second'))
-        urlopen = self.wrapper(real, 'a = urlopen(URL).read()')
-
-        # Each line misses once, because each keeps its own entry.
-        self.assertEqual(urlopen('https://example.com/a.txt').read(), b'first')
-        self.line_source = 'b = urlopen(URL).read()'
-        self.assertEqual(urlopen('https://example.com/a.txt').read(), b'second')
-        self.assertEqual(real.call_count, 2)
-
-        # From then on every rerun of either line is served from disk.
-        for _ in range(3):
-            self.line_source = 'a = urlopen(URL).read()'
-            self.assertEqual(urlopen('https://example.com/a.txt').read(), b'first')
-            self.line_source = 'b = urlopen(URL).read()'
-            self.assertEqual(urlopen('https://example.com/a.txt').read(), b'second')
-        self.assertEqual(real.call_count, 2)
-
-    def test_unknown_line_source_still_serves_a_cached_entry(self):
-        real = _FakeUrlopen(_FakeResponse(b'hello'))
         urlopen = self.wrapper(real)
-        urlopen('https://example.com/a.txt')
 
-        self.line_source = None
-        self.assertEqual(urlopen('https://example.com/a.txt').read(), b'hello')
+        for _ in range(4):
+            self.assertEqual(urlopen('https://example.com/a.txt').read(), b'first')
         self.assertEqual(real.call_count, 1)
+        self.assertEqual(
+            len([f for f in os.listdir(self.cache_dir) if f.endswith('.body')]), 1)
 
     def test_writes_the_body_and_metadata_into_the_cache_dir(self):
         real = _FakeUrlopen(_FakeResponse(b'hello', status=201, headers={'Content-Type': 'text/csv'}))
@@ -229,7 +161,6 @@ class TestCachingUrlopen(_CacheTestCase):
         with open(os.path.join(self.cache_dir, metas[0])) as f:
             meta = json.load(f)
         self.assertEqual(meta['url'], 'https://example.com/a.txt')
-        self.assertEqual(meta['line_source'], self.line_source)
         self.assertEqual(meta['status'], 201)
         self.assertEqual(meta['headers']['Content-Type'], 'text/csv')
 
@@ -273,7 +204,7 @@ class TestCachedResponseShape(_CacheTestCase):
 
 
 class TestErrorCaching(_CacheTestCase):
-    """Failures are cached too, so a broken line is not retried every rerun."""
+    """Failures are cached too, so a broken URL is not retried every rerun."""
 
     def test_the_error_is_raised_to_the_caller(self):
         real = _FakeUrlopen(urllib.error.URLError('no such host'))
@@ -316,6 +247,7 @@ class TestErrorCaching(_CacheTestCase):
         self.assertEqual(urlopen('https://example.com/a.txt').read(), b'back online')
 
     def test_a_successful_entry_never_goes_stale(self):
+        # Only failures carry a TTL; a body is kept until the cache dir is deleted.
         original_ttl = url_cache.ERROR_TTL_SECONDS
         url_cache.ERROR_TTL_SECONDS = 0
         self.addCleanup(lambda: setattr(url_cache, 'ERROR_TTL_SECONDS', original_ttl))
@@ -337,15 +269,6 @@ class TestErrorCaching(_CacheTestCase):
             with self.assertRaises(ValueError):
                 urlopen('https://example.com/a.txt')
         self.assertEqual(real.call_count, 2)
-
-    def test_editing_the_line_retries_a_failed_fetch(self):
-        real = _FakeUrlopen(urllib.error.URLError('no such host'), _FakeResponse(b'recovered'))
-        urlopen = self.wrapper(real)
-
-        with self.assertRaises(urllib.error.URLError):
-            urlopen('https://nope.example/a.txt')
-        self.line_source = 'str1 = urlopen(FIXED_URL).read()'
-        self.assertEqual(urlopen('https://nope.example/a.txt').read(), b'recovered')
 
     def test_http_errors_keep_their_status_code(self):
         # HTTPError holds a file wrapper that complains if it's collected unclosed,
@@ -398,7 +321,7 @@ class TestBypasses(_CacheTestCase):
 
     def test_a_missing_cache_dir_is_not_fatal(self):
         real = _FakeUrlopen(_FakeResponse(b'hello'), _FakeResponse(b'hello again'))
-        urlopen = make_caching_urlopen(real, lambda: None, lambda: 'line')
+        urlopen = make_caching_urlopen(real, lambda: None)
 
         self.assertEqual(urlopen('https://example.com/a.txt').read(), b'hello')
         self.assertEqual(urlopen('https://example.com/a.txt').read(), b'hello again')
@@ -453,7 +376,7 @@ class TestInstall(unittest.TestCase):
 
     def test_install_patches_and_restores(self):
         original = urllib.request.urlopen
-        restore = install(lambda: '', lambda: None)
+        restore = install(lambda: None)
         self.addCleanup(restore)
 
         self.assertIsNot(urllib.request.urlopen, original)
@@ -462,11 +385,11 @@ class TestInstall(unittest.TestCase):
 
     def test_installing_twice_does_not_double_wrap(self):
         original = urllib.request.urlopen
-        restore = install(lambda: '', lambda: None)
+        restore = install(lambda: None)
         self.addCleanup(restore)
         patched = urllib.request.urlopen
 
-        install(lambda: '', lambda: None)
+        install(lambda: None)
         self.assertIs(urllib.request.urlopen, patched)
 
         restore()

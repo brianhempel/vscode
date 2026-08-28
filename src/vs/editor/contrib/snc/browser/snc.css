@@ -700,6 +700,27 @@
 	z-index: 10000;
 }
 
+/* A submenu one level inside a hover menu (the string visualizer's Fetch rows).
+   The menu itself is a static clone the front end lifts out and positions (see
+   showHoverMenu in snc.ts) and nothing walks into one looking for further
+   triggers, so a submenu opens on hover here rather than in TypeScript. Clicks
+   still route: the clone's mousedown listener walks up from whatever was hit. */
+.snc-hover-menu .snc-dropdown-trigger:hover > .snc-dropdown-panel[data-hover-menu] {
+	display: block;
+}
+
+/* A panel a submenu hangs off can't clip: the flyout sits outside its right
+   edge, and the default overflow would scroll it into the panel instead. */
+.snc-dropdown-panel.has-submenu {
+	overflow: visible;
+}
+
+/* A row that opens a submenu is as wide as the menu, not as wide as its text --
+   .snc-dropdown-trigger is inline-flex, the same fix .col-menu-panel makes. */
+.fetch-menu-panel .snc-dropdown-trigger {
+	display: block;
+}
+
 .snc-dropdown-option {
 	padding: 1px 4px;
   border-radius: 3px;

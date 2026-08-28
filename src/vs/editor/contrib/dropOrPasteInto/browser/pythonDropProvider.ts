@@ -148,8 +148,8 @@ function importPlacements(model: ITextModel, importStatements: readonly string[]
  *
  * A `.csv` comes in as its rows and a spreadsheet as its sheets, since that is
  * what the file is; anything else is read as text. URLs are read with
- * `urllib.request`; the runner caches the response so a rerun on every keystroke
- * doesn't refetch. See `url_cache.py`.
+ * `urllib.request`; the runner caches the response by URL so a rerun on every
+ * keystroke doesn't refetch. See `url_cache.py`.
  */
 export class PythonReadDropProvider implements DocumentDropEditProvider {
 

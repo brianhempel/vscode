@@ -1094,6 +1094,27 @@ class TestImportsForCode(unittest.TestCase):
         self.assertEqual(imports_for_code('Counter(xs)'),
                          ('from collections import Counter',))
 
+    def test_the_reads_the_fetch_menu_writes(self):
+        # The string visualizer's Fetch menu reads a URL or a file, and each
+        # way of reading one names its module.
+        self.assertEqual(imports_for_code('json.load(open(path1))'),
+                         ('import json',))
+        self.assertEqual(imports_for_code("list(csv.reader(open(p, newline='')))"),
+                         ('import csv',))
+        self.assertEqual(
+            imports_for_code('urllib.request.urlopen(url1).read().decode()'),
+            ('import urllib.request',))
+        self.assertEqual(imports_for_code("pd.read_excel(p, sheet_name='a')"),
+                         ('import pandas as pd',))
+        self.assertEqual(
+            imports_for_code('json.load(urllib.request.urlopen(url1))'),
+            ('import json', 'import urllib.request'))
+
+    def test_another_corner_of_urllib_is_not_the_request_one(self):
+        # `import urllib.request` is what the reads here need; a file reaching
+        # for another corner of the package says so itself.
+        self.assertEqual(imports_for_code('urllib.parse.quote(s)'), ())
+
     def test_builtins_and_slices_need_nothing(self):
         self.assertEqual(imports_for_code('[x[1:] for x in data]'), ())
         self.assertEqual(imports_for_code('min(data)'), ())

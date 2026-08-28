@@ -1191,6 +1191,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		while (ancestor && ancestor !== this.domNode) {
 			const ck = ancestor.getAttribute('snc-child-key');
 			if (ck) { childKeyChain.push(ck); }
+			// A nested visualizer's toolbar is itself hoisted to the widget
+			// root, so a trigger in one has no `snc-child-key` ancestors left
+			// to walk - they went with the toolbar, which carries what it
+			// found as a chain (hoistNestedToolbars). Without this a menu in a
+			// table cell's action bar sent its clicks to the TABLE, which has
+			// no such event, and the row did nothing at all.
+			const inherited = ancestor.getAttribute('snc-child-key-chain');
+			if (inherited) { childKeyChain.push(...JSON.parse(inherited) as string[]); }
 			ancestor = ancestor.parentElement;
 		}
 
@@ -3262,6 +3270,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// Streaming state
 	private currentRunId: string | null = null;
 	/**
+	 * Where each line the run in flight was told about has got to since: keyed
+	 * by the number Python was given, valued at the number the file has now.
+	 *
+	 * A command names the line its visualizer was on when the run's source was
+	 * taken, and the file can have moved on before the command lands -- an
+	 * import this run inserted above it, a sibling's config comment, the user
+	 * typing. Kept in step by adjustVisualizationItemsForContentChange, beside
+	 * the item and link lines it already corrects, so all three agree about
+	 * where a widget went.
+	 */
+	private readonly reportedLineNow = new Map<number, number>();
+	/**
 	 * File whose console the run in flight belongs to. Held separately from the
 	 * editor's model because the user can switch tabs mid-run, and the output
 	 * still belongs to the file that produced it.
@@ -3856,6 +3876,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.linkedSelections = survivingLinks;
 				for (const link of deadLinks) {
 					this.teardownLink(link);
+				}
+			}
+
+			// And the lines the run in flight was told about, by the same rule:
+			// a command still names the number it was given, so this is what
+			// says where that line is now. A line that was deleted keeps its
+			// last position rather than being dropped -- a command for it is
+			// answered by handleSetConfigComment's own bounds check, and a
+			// missing key would silently read as "never moved".
+			for (const [reported, current] of this.reportedLineNow) {
+				if (isStartOfLineInsertion ? current >= startLine : current > endLine) {
+					this.reportedLineNow.set(reported, current + lineDelta);
 				}
 			}
 		}
@@ -5653,7 +5685,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (!model) {
 			return;
 		}
-		const boundLine = command.triggerLine;
+		// Where that line is NOW: an import this run inserted above it has
+		// already gone in by the time this lands, and the comment belongs above
+		// the line as it stands, not as Python was told about it. Left as
+		// reported when the run had nothing to say about the line -- there is
+		// nothing better to go on, and it is right whenever nothing moved.
+		const boundLine = this.reportedLineNow.get(command.triggerLine) ?? command.triggerLine;
 		if (boundLine < 1 || boundLine > model.getLineCount()) {
 			// The file has moved on since the visualizer's line was reported.
 			return;
@@ -6441,6 +6478,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Start a new streaming run
 		const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.currentRunId = runId;
+		// The lines this run is about to be told about, as they stand now. Its
+		// commands come back naming these numbers, and the file can have moved
+		// on by then -- see reportedLineNow.
+		this.reportedLineNow.clear();
+		for (const visItem of this.visualizationItems) {
+			this.reportedLineNow.set(visItem.line, visItem.line);
+		}
 		// No widget has been reached yet, so the run can be handed events
 		// for any of them (see the gate above). A warm worker taking this run
 		// says otherwise, and seeds the set -- see the 'resumed' handler.
