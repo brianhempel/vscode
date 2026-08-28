@@ -681,6 +681,9 @@
 	position: relative;
 	display: inline-flex;
 }
+.snc-dropdown-trigger:has(> .col-input) {
+	width: -webkit-fill-available;
+}
 
 .snc-dropdown-trigger > .snc-dropdown-panel[data-hover-menu] {
 	display: none;
@@ -2134,7 +2137,7 @@
 	font-size: inherit;
 	outline: none;
 	min-width: 120px;
-	text-align: center;
+	width: -webkit-fill-available;
 }
 
 .list-visualizer .col-suggestion {
