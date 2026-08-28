@@ -21,7 +21,7 @@ import { INativeHostService } from '../../../../platform/native/common/native.js
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { installStudyLogSink, ISNCStudyLogEvent, ISNCStudyLogSink, ISNCStudyLogWriter, SNC_STUDY_LOG_CHANNEL, StudyLogCoalescer, studyLog, truncateForLog, uninstallStudyLogSink } from '../../../../platform/snc/common/sncStudyLog.js';
+import { installStudyLogSink, ISNCStudyLogEvent, ISNCStudyLogRepoInfo, ISNCStudyLogSink, ISNCStudyLogWriter, SNC_STUDY_LOG_CHANNEL, StudyLogCoalescer, studyLog, truncateForLog, uninstallStudyLogSink } from '../../../../platform/snc/common/sncStudyLog.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IHostService } from '../../../services/host/browser/host.js';
@@ -109,7 +109,7 @@ class SNCStudyLogService extends Disposable implements ISNCStudyLogSink {
 
 		this.writer.getSessionInfo().then(info => {
 			this.sessionId = info.sessionId;
-			this.logSessionStart(info.startedAt);
+			this.logSessionStart(info.startedAt, undefined, info.repo);
 		}, err => {
 			this.sessionId = `window-${this.windowId}`;
 			this.logSessionStart(undefined, String(err));
@@ -139,12 +139,13 @@ class SNCStudyLogService extends Disposable implements ISNCStudyLogSink {
 		}));
 	}
 
-	private logSessionStart(startedAt: string | undefined, error?: string): void {
+	private logSessionStart(startedAt: string | undefined, error?: string, repo?: ISNCStudyLogRepoInfo): void {
 		this.log('session.start', {
 			startedAt,
 			error,
 			version: this.productService.version,
 			commit: this.productService.commit,
+			repo,
 			quality: this.productService.quality,
 			nameLong: this.productService.nameLong,
 			os: PlatformToString(platform),

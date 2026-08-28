@@ -34,6 +34,34 @@ export interface ISNCStudyLogSessionInfo {
 	defaultDirectory: string;
 	/** ISO timestamp of when the main process started. */
 	startedAt: string;
+	/**
+	 * The source checkout the app was launched from, when it is one. What
+	 * `product.json`'s `commit` says for a packaged build, a from-source build
+	 * has to ask git -- and it has to say whether the tree was dirty, since a
+	 * log of an edited checkout would otherwise point at code that never ran.
+	 */
+	repo?: ISNCStudyLogRepoInfo;
+}
+
+export interface ISNCStudyLogRepoInfo {
+	/** The checkout git answered for (the app root). */
+	root: string;
+	/** Full HEAD sha. */
+	head?: string;
+	/** Branch name, or `HEAD` when detached. */
+	branch?: string;
+	/** `git describe --tags --always --dirty`. */
+	describe?: string;
+	/** Whether `git status --porcelain` reported anything. */
+	dirty?: boolean;
+	/** How many paths `git status --porcelain` listed. */
+	dirtyFiles?: number;
+	/** The first of those paths (status code + path), capped. */
+	dirtyPaths?: string[];
+	/** sha1 of `git diff HEAD` -- the same edited tree hashes the same, so two logs can be told to be from identical code. Absent when clean. */
+	diffSha1?: string;
+	/** Why the rest is missing: git not found, not a checkout, timed out. */
+	error?: string;
 }
 
 export interface ISNCStudyLogWriter {

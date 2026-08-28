@@ -54,7 +54,7 @@ Every line is one JSON object:
 ### App / session
 | type | payload |
 |---|---|
-| `session.start` | `version`, `commit`, `quality`, `os`, `osFamily`, `userAgent`, `screen`, `timezoneOffsetMinutes`, `settings` (all `snc.*` values), `startedAt` (main process start). |
+| `session.start` | `version`, `commit` (from `product.json`; unset in a from-source build), `repo` (what git says about the checkout the app runs from: `root`, `head`, `branch`, `describe`, `dirty`, `dirtyFiles`, `dirtyPaths` (first 40), `diffSha1` (sha1 of `git diff HEAD`, so two sessions on the same uncommitted edits hash alike; absent when clean), or `error` when git could not answer), `quality`, `os`, `osFamily`, `userAgent`, `screen`, `timezoneOffsetMinutes`, `settings` (all `snc.*` values), `startedAt` (main process start). |
 | `settings.changed` | `snc` (new values of all `snc.*`), `source`. |
 | `settings.loggingEnabled` / `settings.loggingDisabled` | — |
 | `app.focus` / `app.blur` | Window focus. |
@@ -89,7 +89,8 @@ Only Python files, untitled buffers and SNC stdin documents (`*.snc*`) get file 
 |---|---|
 | `widget.mousedown` | Raw DOM mousedown on any widget, before any routing: `button`, `detail`, `x`,`y`, modifiers, `target`. Action-button clicks show up here via `target.attrs['data-action-expr']`/`actionExpr`; the code they produce follows as `snc.command` + `file.sncEdit`. |
 | `widget.mouse` | A mousedown/mouseup actually sent to Python: `pythonEventStr` (e.g. `MouseDown(5)`, wrapped with child keys), `event` (the JSON Python gets: `offsetY`, `elementHeight`, modifiers, ...). |
-| `widget.mouseMove` | **Coalesced** mousemove/mouseout sent to Python: new record whenever `(line, visIndex, pythonEventStr)` changes, otherwise at most every 250 ms; `coalesced` = suppressed count; trailing record after 250 ms of stillness. Flushed before any `widget.mouse`. Moves over non-focused (small) widgets never reach Python and are not logged. |
+| `widget.mouseMove` | **Coalesced** mousemove/mouseout sent to Python: new record whenever `(line, visIndex, pythonEventStr)` changes, otherwise at most every 250 ms; `coalesced` = suppressed count; trailing record after 250 ms of stillness. Flushed before any `widget.mouse`. Moves over non-focused (small) widgets never reach Python and are not logged. A mouseout/mouseleave also carries `to` (the element the pointer went to): its `offsetY` is measured against the element being left, so it reads as nonsense without that. |
+| `widget.emptyEventStr` | A pointer event resolved to an empty Python event string. Should never occur (the dispatchers skip these); if it does, it is a bug -- the event was dropped rather than sent as a no-op run. `event`, `target`. |
 | `widget.key` | `pythonEventStr`, `keyString` (normalized, e.g. `cmd shift z`), `handled` (widget intercepted it), `event`. |
 | `widget.input` | `pythonEventStr`, `value` (full input text). |
 | `widget.drop` | py-exp dropped into a widget input: `text`, `insertAt`, `previousValue`. |
@@ -110,11 +111,13 @@ Only Python files, untitled buffers and SNC stdin documents (`*.snc*`) get file 
 | `run.end` | `runId`, `trigger`, `durationMs` (wall, start→end message), `toFirstItemMs`, `toFirstRenderMs`, `exitCode`, `syntaxError`, `awaitingInput`, `stderr`, `backendTiming` (spawn timing from the pool), `loopCounts`, `itemCount`, `items: [{line, visIndex, executionStep, path, visType, htmlLength, hasModel, html?, model?}]` (html/model only with `logFullHtml`). |
 | `run.error` | `runId`, `trigger`, `durationMs`, `error`. |
 | `run.warning` | `runId`, `warning`. |
-| `run.cancelled` | `runId`, `by` (`superseded:<trigger of the new run>` or `cancelCurrentRun`), `elapsedMs`. |
+| `run.cancelled` | `runId`, `by` (`superseded:<trigger of the new run>`, `overtaken:<trigger>`, or `cancelCurrentRun`), `elapsedMs`. |
+| `run.item` | A widget's item arrived and did something worth noting: `line`, `visIndex`, `step`, `handledEventIds` (queued events this item applied, now retired), `commands` (types of the commands it carried), `stillQueued` (events it declined, to be retried), `dropped` (`declined-twice` when this was already the retry and they were thrown away). Plain items -- neither events nor commands -- are not logged one by one; `run.end`'s `itemCount`/`items` has them. |
+| `run.eventsDropped` | The end-of-run sweep threw queued events away: `reason` (`widget-not-reached`: the run ended without ever reaching the widget, so it is not part of this execution), `widgets: [{line, visIndex, events}]`. |
 | `run.startFailed` | IPC call to start failed: `error`. |
 | `snc.command` | A command Python sent back: `runId`, `trigger`, `command` (full `SNCCommand`: `NewCode` edits + imports, `ChangeSelectedText`, `ChangeSourceExpr`, `SetConfigComment`, `CopyToClipboard`). The model edit it causes is the next `file.sncEdit`. |
 
-`trigger` values: `initial`, `edit`, `cursor-line`, `expand`, `stdin`, `loop-slider`, `editor-visible`, `widget:mousedown` / `widget:mouseup` / `widget:mousemove` / `widget:mouseout` / `widget:keydown` / `widget:input`, `scheduled`.
+`trigger` values: `initial`, `edit`, `cursor-line`, `expand`, `stdin`, `loop-slider`, `editor-visible`, `widget:mousedown` / `widget:mouseup` / `widget:mousemove` / `widget:mouseout` / `widget:keydown` / `widget:input`, `queued-events` (a retry for events a run declined), `scheduled`.
 
 ## Analysis
 
