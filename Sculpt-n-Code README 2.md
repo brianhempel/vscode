@@ -23,7 +23,9 @@ The system is split across three layers:
 │  - SNCController: editor contribution, manages lifecycle │
 │  - VisualizationWidget: overlay widget per value per line│
 │  - Debounced re-execution on every edit                  │
-│  - Routes mouse/keyboard events from HTML back to Python │
+│  - Routes HTML mouse/key events back to Python: into the │
+│    run in flight when it can still answer them, else a   │
+│    new one                                               │
 │  - Elm-style command handling (e.g. NewCode inserts line │
 │    edits; CopyToClipboard writes text to clipboard)      │
 └────────────────────┬─────────────────────────────────────┘
@@ -44,7 +46,9 @@ The system is split across three layers:
 │  - AST parsing → CodeTransformer → compile → exec        │
 │  - Pool-worker mode: workers emit checkpoint_ready(1),   │
 │    optionally warm to checkpoint_ready(2) by pre-running │
-│    leading imports for the current code                  │
+│    leading imports; a warmed worker then serves any code │
+│    with those same imports, compiling whatever body it   │
+│    is handed                                             │
 │  - Per-run visualizer reload by file mtime; pluggable    │
 │    visualizer system loaded from disk                    │
 │                                                          │
@@ -78,11 +82,15 @@ One invariant on the Python side: **a single reader owns the protocol fd**, via 
 
 Visualizers that support interaction implement the Elm architecture:
 
-- **`init_model(value)`** — returns initial state for this visualization instance.
-- **`visualize(value, model)`** — renders HTML from the value and current model. HTML elements can carry `snc-mouse-down`, `snc-mouse-move`, `snc-mouse-up`, `snc-key-down`, and `snc-input` attributes whose values are Python expression strings. Nested visualizers can route events with `snc-child-key`.
-- **`update(event, source_code, source_line, model, value)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits), `CopyToClipboard`, and `SetConfigComment` (rewrite the line's saved-config comment; see below).
+- **`init_model(value, get_visualizer)`** — returns initial state for this visualization instance.
+- **`visualize(value, model, get_visualizer)`** — renders HTML from the value and current model. HTML elements can carry `snc-mouse-down`, `snc-mouse-move`, `snc-mouse-up`, `snc-key-down`, and `snc-input` attributes whose values are Python expression strings. Nested visualizers can route events with `snc-child-key`.
+- **`update(event, var_and_exp, model, value, get_visualizer)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits), `CopyToClipboard`, and `SetConfigComment` (rewrite the line's saved-config comment; see below).
+
+All three are called through `call_with_supported_kwargs`, so a visualizer names only the extra keyword arguments it actually wants — `eval_in_scope`, `var_and_exp`, `small`, `source_span`, `slots_config`, `config_path` — and simply isn't handed the rest. That is how an older or simpler visualizer keeps working as the runner learns to offer more.
 
 Models are serialized to JSON and round-tripped through the TypeScript frontend so they survive across re-executions. The value itself is **not** stored in the model; it is always passed as a parameter.
+
+Static (non-interactive) visualizers only need `can_visualize(value)` and `visualize(value)`.
 
 #### How an event reaches its visualizer
 
@@ -93,7 +101,7 @@ An event is queued on its widget (`unhandledEvents`, keyed by `(line, visIndex)`
 
 **The runner reports which events it applied**, as `handledEventIds` on the item, and the editor requeues everything else. It can't be inferred from what was sent: the runner declines to replay onto a model it had to rebuild (a changed type invalidates the `_type_fingerprint`), and events can arrive just behind the widget. Ids are stamped in `sendEventToPython` because object identity doesn't survive the trip through Python. Leftovers get exactly one `queued-events` retry, after which they're dropped rather than spinning runs forever; events for a widget a completed run never reached are dropped too, since that widget isn't part of this execution.
 
-Static (non-interactive) visualizers only need `can_visualize(value)` and `visualize(value)`.
+This composes with the loop rule below: a site logged repeatedly in one run replays its queued events on the *first* logging and carries the resulting model through the rest, so it is that first item which reports them handled.
 
 ### Per-line visualizer config: the `#%click` comment
 
@@ -159,7 +167,7 @@ The service prefers a ready CP2 worker, falls back to CP1, and otherwise waits f
 
 - **A run waiting for a worker outranks warming one.** A worker that reaches checkpoint 1 while a run has nothing to run on is handed over immediately rather than being sent off to import; queueing a keystroke behind someone else's `import pandas` is how a run ends up waiting seconds for a worker that was ready.
 - **Queued runs are dropped, not served.** A new run supersedes the one in flight (its worker is killed), and equally supersedes any run still waiting for a worker -- their output would be discarded on arrival. Without this a burst of N events costs N worker acquisitions, and the queue itself becomes the latency.
-- **CP2 refills as workers are taken**, not only when a run completes. A burst of runs never reaches `end` (each kills the one before it), so waiting for completion lets the pool drain to empty and dumps the whole burst onto CP1. The one exception is the run that invalidated the pool: respawning ten workers about to be killed again is what makes typing out an `import` expensive.
+- **CP2 refills as workers are taken**, not only when a run completes. A burst of runs never reaches `end` (each kills the one before it), so waiting for completion lets the pool drain to empty and dumps the whole burst onto CP1. The one exception is the run that invalidated the pool: respawning a poolful of workers about to be killed again is what makes typing out an `import` expensive.
 
 ### Visualizer Discovery
 
