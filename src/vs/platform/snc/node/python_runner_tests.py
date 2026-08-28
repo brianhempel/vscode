@@ -31,10 +31,12 @@ from python_runner import (
     VisualizerOfStaticVisualizer,
     _build_new_code_edits,
     _commands_to_dicts,
+    drain_stdin_lines,
     execute_code,
     imports_match,
     install_url_cache,
     log_value,
+    read_stdin_line,
     reseed,
     split_leading_imports,
     transform_code_to_ast,
@@ -1586,6 +1588,160 @@ class TestLoopIterations(unittest.TestCase):
             python_runner._visualizers = saved
         htmls = [m['item']['html'] for m in msgs.all() if m.get('type') == 'item' and m['item']['line'] == 2]
         self.assertEqual(htmls, ['<b>6</b>'] * 3)
+
+
+def fake_stdin(test):
+    """Point the runner's protocol fd at a pipe for the duration of `test`.
+
+    Restores the non-blocking flag too: leaving it set would let a later test
+    drain the real fd 0, which blocks when pytest is run with a terminal.
+    """
+    r, w = os.pipe()
+    saved = (python_runner._stdin_fd, python_runner._stdin_buf, python_runner._stdin_nonblocking)
+
+    def restore():
+        (python_runner._stdin_fd, python_runner._stdin_buf,
+         python_runner._stdin_nonblocking) = saved
+        for fd in (r, w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    test.addCleanup(restore)
+    python_runner._stdin_fd, python_runner._stdin_buf = r, b''
+    python_runner._stdin_nonblocking = False
+    return r, w
+
+
+class TestStdinProtocolReader(unittest.TestCase):
+    """One reader owns the protocol fd.
+
+    The handshake used to use `sys.stdin.readline()`, whose TextIOWrapper reads
+    ahead: bytes it buffers are invisible to a later raw read, so a message
+    arriving hard behind another would vanish. These share one buffer instead.
+    """
+
+    def setUp(self):
+        self.r, self.w = fake_stdin(self)
+
+    def test_a_line_is_read_back(self):
+        os.write(self.w, b'{"type": "run"}\n')
+        self.assertEqual(read_stdin_line(), '{"type": "run"}')
+
+    def test_a_message_arriving_behind_another_is_not_lost(self):
+        # The two land in one read. The second must survive for the drain.
+        os.write(self.w, b'{"type": "run"}\n{"type": "events"}\n')
+        self.assertEqual(read_stdin_line(), '{"type": "run"}')
+        python_runner.unblock_stdin()
+        self.assertEqual(drain_stdin_lines(), ['{"type": "events"}'])
+
+    def test_draining_an_empty_pipe_does_not_block(self):
+        python_runner.unblock_stdin()
+        self.assertEqual(drain_stdin_lines(), [])
+
+    def test_a_partial_line_waits_for_its_newline(self):
+        python_runner.unblock_stdin()
+        os.write(self.w, b'{"type": "ev')
+        self.assertEqual(drain_stdin_lines(), [])
+        os.write(self.w, b'ents"}\n')
+        self.assertEqual(drain_stdin_lines(), ['{"type": "events"}'])
+
+    def test_the_drain_returns_everything_pending_in_order(self):
+        python_runner.unblock_stdin()
+        os.write(self.w, b'one\ntwo\nthree\n')
+        self.assertEqual(drain_stdin_lines(), ['one', 'two', 'three'])
+
+
+class TestHandledEventReporting(unittest.TestCase):
+    """An item says which of the queued events it actually applied.
+
+    The editor used to infer this from the snapshot it sent, which is wrong
+    whenever the runner declines to replay -- the events were dropped from the
+    queue having never reached a visualizer.
+    """
+
+    SRC = "x = 5\n"
+
+    class SeenVis:
+        def can_visualize(value):
+            return isinstance(value, int)
+
+        def init_model(value, get_visualizer):
+            return {'seen': []}
+
+        def visualize(value, model, get_visualizer):
+            return f"<i>{','.join(model['seen'])}</i>"
+
+        def update(event, var_and_exp, model, value, get_visualizer):
+            return {'seen': model['seen'] + [event['eventJSON']['type']]}, []
+
+    def _items(self, models_and_events):
+        saved = python_runner._visualizers
+        python_runner._visualizers = lambda: [self.SeenVis]
+        try:
+            import_code, body_code = split_leading_imports(self.SRC)
+            with capture_stream_messages() as msgs:
+                python_runner._execute_run(body_code, json.dumps(models_and_events), 'run-1',
+                                           import_code=import_code)
+        finally:
+            python_runner._visualizers = saved
+        return [m['item'] for m in msgs.all() if m.get('type') == 'item']
+
+    def _event(self, event_id, kind):
+        return {'line': 1, 'visIndex': 0, 'id': event_id,
+                'pythonEventStr': 'lambda e: None', 'eventJSON': {'type': kind}}
+
+    def test_a_run_with_no_events_reports_none_handled(self):
+        item = self._items([])[0]
+        self.assertEqual(item['handledEventIds'], [])
+
+    def test_replayed_events_are_reported_by_id(self):
+        # The model has to come from a real run, so its fingerprint matches.
+        model = self._items([])[0]['model']
+        item = self._items([{'line': 1, 'visIndex': 0, 'model': model,
+                             'events': [self._event(7, 'mousemove'), self._event(8, 'mouseup')]}])[0]
+
+        self.assertEqual(item['handledEventIds'], [7, 8])
+        self.assertIn('mousemove,mouseup', item['html'])
+
+    def test_an_event_queued_after_dispatch_is_picked_up(self):
+        # The editor keeps sending while a run is in flight; a visualizer is
+        # reached long before the program ends, so the run answers the newest
+        # events rather than only the ones it launched with.
+        model = self._items([])[0]['model']
+        _, w = fake_stdin(self)
+        python_runner.unblock_stdin()
+        os.write(w, (json.dumps({'type': 'events', 'events': [self._event(9, 'mouseup')]}) + '\n').encode())
+
+        item = self._items([{'line': 1, 'visIndex': 0, 'model': model}])[0]
+
+        self.assertEqual(item['handledEventIds'], [9])
+        self.assertIn('mouseup', item['html'])
+
+    def test_a_late_event_for_an_unknown_widget_is_left_queued(self):
+        # No model for that widget in this run, so nothing replays onto it and
+        # the editor has to keep the event for next time.
+        _, w = fake_stdin(self)
+        python_runner.unblock_stdin()
+        late = {**self._event(9, 'mouseup'), 'line': 99}
+        os.write(w, (json.dumps({'type': 'events', 'events': [late]}) + '\n').encode())
+
+        item = self._items([])[0]
+
+        self.assertEqual(item['handledEventIds'], [])
+
+    def test_events_the_runner_declines_to_replay_are_not_reported(self):
+        # A model whose fingerprint no longer matches is rebuilt, and its
+        # events belong to what was there before -- so they go unapplied and
+        # must stay queued rather than being silently dropped.
+        model = self._items([])[0]['model']
+        stale = {**model, '_type_fingerprint': 'something else'}
+        item = self._items([{'line': 1, 'visIndex': 0, 'model': stale,
+                             'events': [self._event(7, 'mousemove')]}])[0]
+
+        self.assertEqual(item['handledEventIds'], [])
+        self.assertNotIn('mousemove', item['html'])
 
 
 class TestReadOnly(unittest.TestCase):

@@ -59,8 +59,11 @@ Node.js and Python communicate over stdio using **newline-delimited JSON (NDJSON
 
 | Message Type | Direction | Purpose |
 |---|---|---|
+| `init_imports` | Node → Python | Warm this worker to checkpoint 2 by pre-running the code's leading imports |
+| `run` | Node → Python | Execute this code; carries `models_and_events`, `stdin`, `loop_selections`, the focused line |
+| `events` | Node → Python | Events for a run already under way, for a widget it hasn't reached yet |
 | `checkpoint_ready` | Python → Node | Worker reached checkpoint 1 or 2 and is ready |
-| `item` | Python → Node → Renderer | A single visualization item (line, visIndex, html, model) |
+| `item` | Python → Node → Renderer | A single visualization item (line, visIndex, html, model, handledEventIds) |
 | `command` | Python → Node → Renderer | An Elm-style command for VS Code (e.g. `NewCode`) |
 | `loop` | Python → Node → Renderer | A loop/function finished: `{line, path, count}`; sizes its slider (see Loops below) |
 | `output` | Python → Node → Renderer | A chunk of the program's stdout/stderr, tagged with how much stdin had been consumed |
@@ -68,6 +71,8 @@ Node.js and Python communicate over stdio using **newline-delimited JSON (NDJSON
 | `warning` | Python → Node → Renderer | Visualizer load/runtime warning |
 | `error` | Node → Renderer | Process error or timeout |
 | `spawn` | Node → Renderer | Timing data when process was spawned |
+
+One invariant on the Python side: **a single reader owns the protocol fd**, via `read_stdin_line` / `drain_stdin_lines`, which share one byte buffer. `sys.stdin.readline()` must not be used alongside them — it is a `TextIOWrapper` over a `BufferedReader` that reads ahead by whole chunks, so bytes sitting in its buffer are invisible to a raw read, and an `events` message arriving hard behind a `run` message would simply vanish. (The fd is switched to non-blocking once the handshake is read, so the mid-run drain never stalls the user's program. `sys.stdin` itself is the program's stand-in stream — see the console section — and is unrelated to this fd.)
 
 ### Interactive Visualizer Protocol (Elm Architecture)
 
@@ -78,6 +83,15 @@ Visualizers that support interaction implement the Elm architecture:
 - **`update(event, source_code, source_line, model, value)`** — processes a UI event and returns `(new_model, commands)`. Commands include `NewCode` (line-based insert edits), `CopyToClipboard`, and `SetConfigComment` (rewrite the line's saved-config comment; see below).
 
 Models are serialized to JSON and round-tripped through the TypeScript frontend so they survive across re-executions. The value itself is **not** stored in the model; it is always passed as a parameter.
+
+#### How an event reaches its visualizer
+
+An event is queued on its widget (`unhandledEvents`, keyed by `(line, visIndex)`) and ships with the next run in `models_and_events`. A run reaches a widget long before the program ends, so an event does **not** need a run of its own:
+
+- If a run is in flight that hasn't yet produced the item for that widget, the event is sent to it (`sendEvents` → an `events` message on the worker's stdin) and **no new run starts**. `log_value` drains stdin just before it looks up a widget's events, so the run applies everything queued up to the instant it arrives there. A hover at 60Hz then costs one run per trip through the program instead of sixty.
+- Otherwise the event starts a run as before.
+
+**The runner reports which events it applied**, as `handledEventIds` on the item, and the editor requeues everything else. It can't be inferred from what was sent: the runner declines to replay onto a model it had to rebuild (a changed type invalidates the `_type_fingerprint`), and events can arrive just behind the widget. Ids are stamped in `sendEventToPython` because object identity doesn't survive the trip through Python. Leftovers get exactly one `queued-events` retry, after which they're dropped rather than spinning runs forever; events for a widget a completed run never reached are dropped too, since that widget isn't part of this execution.
 
 Static (non-interactive) visualizers only need `can_visualize(value)` and `visualize(value)`.
 
@@ -135,9 +149,17 @@ cursor is on is shown in full so it can be edited.
 To minimize latency between a keystroke and seeing updated visualizations, SNC uses pre-spawned worker pools:
 
 - **Checkpoint 1 (CP1)**: Pool workers start with visualizers loaded and emit `checkpoint_ready(1)`. CP1 workers run full transform+compile+exec and then exit.
-- **Checkpoint 2 (CP2)**: Workers can be warmed with `init_imports` for the current code, pre-running leading imports and emitting `checkpoint_ready(2)`. CP2 workers then execute only the transformed body with cached imports and exit.
+- **Checkpoint 2 (CP2)**: Workers can be warmed with `init_imports`, pre-running the leading imports and emitting `checkpoint_ready(2)`. A CP2 worker compiles the body of whatever run it is handed and executes it against those warmed globals.
 
-The service prefers ready CP2 workers when code matches the currently warmed code, falls back to CP1 workers otherwise, invalidates stale CP2 workers on code changes, and refills pools lazily after runs complete.
+Every worker handles exactly one run and exits.
+
+**A warmed worker is matched on the leading imports, not the whole file.** That is all it has executed, so a warmed worker serves any program with the same imports -- which is nearly every keystroke, since editing the body doesn't touch them. `importPrefixOf` (Node) and `_leading_import_stmts` (Python) compute that key on their respective sides; the Node one is a line scanner rather than a parser, so it can disagree on exotic input. That only ever costs a warmed worker: the run message carries the current code, and the worker re-checks with a real AST (`imports_match`). If the imports turn out to differ it executes them itself, degrading to the checkpoint 1 path in place, so a worker can always serve the run it is handed.
+
+The service prefers a ready CP2 worker, falls back to CP1, and otherwise waits for the next worker to become ready. Some consequences worth knowing, each of which was a real source of lag:
+
+- **A run waiting for a worker outranks warming one.** A worker that reaches checkpoint 1 while a run has nothing to run on is handed over immediately rather than being sent off to import; queueing a keystroke behind someone else's `import pandas` is how a run ends up waiting seconds for a worker that was ready.
+- **Queued runs are dropped, not served.** A new run supersedes the one in flight (its worker is killed), and equally supersedes any run still waiting for a worker -- their output would be discarded on arrival. Without this a burst of N events costs N worker acquisitions, and the queue itself becomes the latency.
+- **CP2 refills as workers are taken**, not only when a run completes. A burst of runs never reaches `end` (each kills the one before it), so waiting for completion lets the pool drain to empty and dumps the whole burst onto CP1. The one exception is the run that invalidated the pool: respawning ten workers about to be killed again is what makes typing out an `import` expensive.
 
 ### Visualizer Discovery
 

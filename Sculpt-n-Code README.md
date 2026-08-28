@@ -50,7 +50,9 @@ The Python visualizers are at: `src/vs/platform/snc/common/node/visualizers`
 
 Visualizers use the Elm architecture (albeit a custom implementation in Python). They take in a Python value and a visualizer-specific model state and render HTML which is delivered to the VS Code front-end for display. They may specify events on that HTML which are routed to a visualizer-specific Python update function which updates the model (and thereby the displayed HTML).
 
-User events trigger a full re-run to get back to the appropriate visualizer to run the event through its Elm-like update and visualize functions. To speed this up, Python is preloaded at two checkpoints to avoid paying startup costs. Checkpoint 1 is after the python_runner.py is started up; checkpoint 2 is after just the `import`s on the open file (to avoid re-paying import and source-to-source translation cost). Checkpoint 2 is used if the code didn't change, checkpoint 1 otherwise.
+User events trigger a re-run to get back to the appropriate visualizer to run the event through its Elm-like update and visualize functions. To speed this up, Python is preloaded at two checkpoints to avoid paying startup costs. Checkpoint 1 is after the python_runner.py is started up; checkpoint 2 is after just the `import`s on the open file (to avoid re-paying import cost). Checkpoint 2 is used when the open file's leading `import`s are unchanged -- which is nearly always, since editing the body doesn't touch them -- and checkpoint 1 otherwise.
+
+An event doesn't always need a re-run of its own. A run that hasn't yet reached the widget the event is for is still able to answer it, so the event is handed to that run instead and it renders with everything the user has done up to the moment it gets there. This is what keeps a gesture (a drag, a hover) to roughly one run per trip through the program rather than one run per event.
 
 ### Python interpreter selection
 

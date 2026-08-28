@@ -460,12 +460,23 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
 
     model = None
 
+    # The queued events this item actually applied, by the id the editor gave
+    # them. It requeues everything it doesn't see here, so an event the runner
+    # declines to replay (below) survives instead of being silently dropped.
+    handled_event_ids: List[Any] = []
+
     # What the line's `#%click` comment holds is this visualizer's saved config
     # (columns, fields, ...). It is installed for the visualizer to read while
     # it runs, and collected afterwards to see whether it saved anything.
     line_slots = parse_config_comment(_source_code, line)
     line_config_sig = config_sig(line_slots)
     set_line_config(line_slots)
+
+    # Take everything the editor has queued up to this instant, not just what
+    # existed when the run launched. A visualizer the user is interacting with
+    # is reached long before the program ends, so this is what lets one run
+    # answer a whole gesture instead of one run per event.
+    merge_queued_events()
 
     try:
         item_model_and_events = next((m_e for m_e in models_and_events if m_e.get('line') == line and m_e.get('visIndex') == idx_in_line), {})
@@ -518,6 +529,11 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
                     vis.update, ev, var_and_exp, model, value, get_visualizer,
                     eval_in_scope=eval_in_scope, source_span=span)
                 commands.extend(cmds)
+                # Reported on the item so the editor drops exactly these from
+                # its queue. Appended as we go: if `update` raises partway, the
+                # ones already applied are still applied.
+                if 'id' in ev:
+                    handled_event_ids.append(ev['id'])
 
         if isinstance(model, dict):
             model['_type_fingerprint'] = fingerprint
@@ -568,7 +584,8 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         "visIndex": idx_in_line,
         "execution_step": execution_step,
         "path": path,
-        "html": html_content
+        "html": html_content,
+        "handledEventIds": handled_event_ids
     }
     if model is not None:
         item["model"] = model
@@ -2232,6 +2249,115 @@ def install_url_cache() -> Callable[[], None]:
         return lambda: None
 
 
+# ---- The protocol channel on stdin ----
+#
+# One reader owns this fd and its buffer. Nothing may use `sys.stdin.readline()`
+# alongside it: that is a TextIOWrapper over a BufferedReader, which reads ahead
+# by whole chunks, and bytes sitting in its buffer are invisible to the raw
+# reads here -- a message arriving hard behind another would simply vanish.
+#
+# `sys.stdin` is the user program's stand-in stream (see std_streams); it is
+# unrelated to this fd, so draining here is safe while user code runs.
+_stdin_fd = 0
+_stdin_buf = b''
+# Draining is only safe once the fd is non-blocking, which only the pool worker
+# does. Direct mode reads its program off stdin and never drains.
+_stdin_nonblocking = False
+
+
+def _buffered_line() -> Optional[str]:
+    """A complete line already in the buffer, or None. Consumes it."""
+    global _stdin_buf
+    idx = _stdin_buf.find(b'\n')
+    if idx == -1:
+        return None
+    line, _stdin_buf = _stdin_buf[:idx], _stdin_buf[idx + 1:]
+    return line.decode('utf-8', 'replace')
+
+
+def read_stdin_line() -> Optional[str]:
+    """Wait for the next protocol line. None at end of stream."""
+    global _stdin_buf
+    while True:
+        line = _buffered_line()
+        if line is not None:
+            return line
+        try:
+            chunk = os.read(_stdin_fd, 65536)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        _stdin_buf += chunk
+
+
+def unblock_stdin() -> None:
+    """Switch the protocol fd to non-blocking, for `drain_stdin_lines`.
+
+    Only once the handshake has been read -- `read_stdin_line` needs to block.
+    Wants python 3.12+ on Windows, where pipes gained non-blocking support.
+    """
+    global _stdin_nonblocking
+    try:
+        os.set_blocking(_stdin_fd, False)
+        _stdin_nonblocking = True
+    except OSError:
+        pass
+
+
+def drain_stdin_lines() -> List[str]:
+    """Every complete protocol line that has arrived, without waiting.
+
+    A trailing partial line stays buffered for the next drain, so a message
+    split across reads is never torn in half. Empty until `unblock_stdin`:
+    reading a blocking fd here would stall the user's program.
+    """
+    global _stdin_buf
+    if not _stdin_nonblocking:
+        return []
+    while True:
+        try:
+            chunk = os.read(_stdin_fd, 65536)
+        except (BlockingIOError, OSError):
+            break
+        if not chunk:
+            break
+        _stdin_buf += chunk
+
+    lines: List[str] = []
+    while True:
+        line = _buffered_line()
+        if line is None:
+            return lines
+        lines.append(line)
+
+
+def merge_queued_events() -> None:
+    """Fold events that arrived since dispatch into `models_and_events`.
+
+    The editor keeps sending `{"type": "events", "events": [...]}` while a run
+    is in flight, so that a run reaching a visualizer can answer everything the
+    user has done up to that instant. An event for a widget that isn't in the
+    snapshot gets an entry with no model, so it won't replay onto a rebuilt
+    model -- it just goes unhandled and the editor keeps it queued.
+    """
+    for text in drain_stdin_lines():
+        try:
+            msg = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict) or msg.get('type') != 'events':
+            continue
+        for ev in msg.get('events') or []:
+            entry = next((m_e for m_e in models_and_events
+                          if m_e.get('line') == ev.get('line')
+                          and m_e.get('visIndex') == ev.get('visIndex')), None)
+            if entry is None:
+                entry = {'line': ev.get('line'), 'visIndex': ev.get('visIndex')}
+                models_and_events.append(entry)
+            entry.setdefault('events', []).append(ev)
+
+
 def run_pool_worker_mode(working_directory: str) -> None:
     """
     Run as a pool worker process (cross-platform, no os.fork).
@@ -2277,8 +2403,8 @@ def run_pool_worker_mode(working_directory: str) -> None:
     emit_checkpoint_ready(1)
 
     # ---- Wait for first message ----
-    line = sys.stdin.readline()
-    if not line:
+    line = read_stdin_line()
+    if line is None:
         sys.exit(0)
 
     try:
@@ -2317,8 +2443,8 @@ def run_pool_worker_mode(working_directory: str) -> None:
         emit_checkpoint_ready(2)
 
         # ---- Wait for run message ----
-        line = sys.stdin.readline()
-        if not line:
+        line = read_stdin_line()
+        if line is None:
             sys.exit(0)
 
         try:
@@ -2341,6 +2467,10 @@ def run_pool_worker_mode(working_directory: str) -> None:
         _reload_stale_visualizers()
 
         emit_meta(f'checkpoint2-run-{run_id}')
+
+        # The handshake is done; from here the fd carries events for a run
+        # already under way, drained when a visualizer is reached.
+        unblock_stdin()
 
         globals_dict: Optional[Dict[str, Any]] = None
         run_import_code: Any = None
@@ -2390,6 +2520,10 @@ def run_pool_worker_mode(working_directory: str) -> None:
         _reload_stale_visualizers()
 
         emit_meta(f'checkpoint1-run-{run_id}')
+
+        # The handshake is done; from here the fd carries events for a run
+        # already under way, drained when a visualizer is reached.
+        unblock_stdin()
 
         if not code.strip():
             result = {"stdout": "", "stderr": "", "exitCode": 0, "syntaxError": False}

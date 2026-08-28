@@ -14,7 +14,7 @@ import { Selection, SelectionDirection } from '../../../common/core/selection.js
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
 import { IModelDeltaDecoration, ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
-import { ILoopReport, IProcessOptions, IVisualizationItem, LoopPath, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, SNC_READ_ONLY_VISUALIZERS_SETTING, UiEvent } from '../../../../platform/snc/common/snc.js';
+import { ILoopReport, IProcessOptions, IVisualizationItem, LoopPath, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, SNC_READ_ONLY_VISUALIZERS_SETTING, UiEvent, UiEventSpec } from '../../../../platform/snc/common/snc.js';
 import { IPythonImportInsertion, pythonImportInsertion } from '../../../../platform/snc/common/pythonImports.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -2842,6 +2842,11 @@ const CONFIG_COMMENT_RE = new RegExp(`^\\s*${CONFIG_COMMENT_PREFIX}(?:\\s|$)`);
  * blank lines and comments between (the rule the Python runner reads it by),
  * or 0 when there is none.
  */
+/** Identifies a widget within a run: its line and its site on that line. */
+function widgetKey(line: number, visIndex: number): string {
+	return `${line}:${visIndex}`;
+}
+
 function configCommentLineAbove(model: ITextModel, line: number): number {
 	for (let ln = Math.min(line, model.getLineCount()) - 1; ln >= 1; ln--) {
 		const text = model.getLineContent(ln).trim();
@@ -3227,12 +3232,24 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// scheduled, and call the backend idle just as it is starting work.
 	private runStarting = false;
 
+	/** Source of `UiEvent.id`, stamped in sendEventToPython. */
+	private lastEventId = 0;
+
+	/**
+	 * Widgets the current run has already produced an item for. A run can still
+	 * be handed events for a widget it hasn't reached; once it has, anything
+	 * further needs a new run. Cleared when a run starts.
+	 */
+	private readonly itemsThisRun = new Set<string>();
+
+	/** Pending `queued-events` rerun, so a burst of items only schedules one. */
+	private requeuedRunTimer: any = null;
+
 	// Sticky notification shown when the python executable can't be launched
 	// (e.g. neither the Python extension's selection nor the 'python3'
 	// fallback exists). Auto-dismissed when a subsequent run starts producing
 	// output, indicating Python is working again.
 	private pythonSpawnFailureNotification: INotificationHandle | null = null;
-	private eventsBeingHandledCurrentRun: { line: number; visIndex: number; events: UiEvent[] }[] = [];
 
 	// ---- Loop sliders ----
 	/**
@@ -3918,7 +3935,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private teardownLink(link: { line: number; visIndex: number; decorationId: string }): void {
 		this.removeLinkLocal(link);
-		const event: UiEvent = {
+		const event: UiEventSpec = {
 			line: link.line,
 			visIndex: link.visIndex,
 			pythonEventStr: 'lambda e: Unlink()',
@@ -4028,7 +4045,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		}
 
-		const event: UiEvent = {
+		const event: UiEventSpec = {
 			line,
 			visIndex,
 			pythonEventStr: "lambda e: Relink(mode=e.get('mode', 'insert'), text=e.get('text', ''))",
@@ -4351,7 +4368,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const channel = this.mainProcessService.getChannel('sncProcess');
 		const runId = this.currentRunId;
 		this.currentRunId = null;
-		this.eventsBeingHandledCurrentRun = [];
 		this.logRunCancelled(runId, 'cancelCurrentRun');
 		try {
 			channel.call('cancel', [runId]).catch(() => { /* ignore */ });
@@ -4809,7 +4825,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const eventJSON = { type: ev.type, button: ev.button, buttons: ev.buttons, detail: ev.detail, offsetY: ev.clientY - rect.top, elementHeight: rect.height, timeStamp: ev.timeStamp, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey };
 
-		const event: UiEvent = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
+		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		// console.log('SNC viz_pointer event', JSON.stringify(event));
 		if (ev.type === 'mousemove' || ev.type === 'mouseout' || ev.type === 'mouseleave') {
 			this.moveLogCoalescer.note(`${lineNumber}:${visIndex}:${pythonEventStr}`, { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON }, this.editor.getModel()?.uri.toString());
@@ -4862,7 +4878,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			shiftKey: ev.shiftKey
 		};
 
-		const event: UiEvent = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
+		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		// console.log('SNC keyboard event', JSON.stringify(event));
 		studyLog.log('widget.key', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, keyString, handled: isHandled, event: eventJSON }, this.editor.getModel()?.uri.toString());
 
@@ -4874,13 +4890,36 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private onInputEvent(lineNumber: number, visIndex: number, pythonEventStr: string, value: string): void {
 		const eventJSON = { type: 'input', value };
-		const event: UiEvent = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
+		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		studyLog.log('widget.input', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, value }, this.editor.getModel()?.uri.toString());
 		this.sendEventToPython(event);
 	}
 
-	private sendEventToPython(event: UiEvent) {
-		this.runProgram(this.getProgram(), event, `widget:${event.eventJSON?.type ?? 'event'}`);
+	/**
+	 * Run again for events no run has managed to apply.
+	 *
+	 * The gate in `runProgram` hands events to the run in flight rather than
+	 * starting a new one, which leaves them stranded if that run was already
+	 * past the widget (or never reached it). This is how they get picked up.
+	 * Deferred so a burst of items schedules one run, and so we aren't
+	 * re-entering `runProgram` from inside the stream handler.
+	 */
+	private scheduleQueuedEventRun(): void {
+		if (this.requeuedRunTimer) { return; }
+		this.requeuedRunTimer = setTimeout(() => {
+			this.requeuedRunTimer = null;
+			if (this.isPythonModel() && this.visualizationItems.some(v => v.unhandledEvents?.length)) {
+				this.runProgram(this.getProgram(), undefined, 'queued-events');
+			}
+		}, 0);
+	}
+
+	private sendEventToPython(event: UiEventSpec) {
+		// Every event gets its id here, the one place they all funnel through.
+		// The runner echoes the ids it applied back on the item, which is how a
+		// queued event is retired -- see IVisualizationItem.handledEventIds.
+		const queued: UiEvent = { ...event, id: ++this.lastEventId };
+		this.runProgram(this.getProgram(), queued, `widget:${queued.eventJSON?.type ?? 'event'}`);
 	}
 
 	/** Line, visIndex and (best-effort) visualizer type of a widget, for the study log. */
@@ -6009,6 +6048,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 			if (!found) {
 				console.error(`SNC: No vis at ${uiEvent.line}:${uiEvent.visIndex} to queue event on!`)
 			}
+
+			// The run in flight hasn't reached this widget yet, so it can still
+			// answer this event. Killing it to start another would only pay the
+			// startup again and put us further behind -- a gesture at 60Hz
+			// outruns any number of workers. Hand the event over instead; the
+			// run reports what it applied and `itemArrived` starts the next run
+			// if anything is left over.
+			if (this.currentRunId && !this.itemsThisRun.has(widgetKey(uiEvent.line, uiEvent.visIndex))) {
+				this.runStarting = false;
+				try { await channel.call('sendEvents', [[uiEvent]]); } catch { /* run is ending; it stays queued */ }
+				return;
+			}
 		}
 
 		// Cancel any previous streaming run. Disown it first so nothing more it
@@ -6020,7 +6071,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 			cancelledPrevious = previousRunId;
 			this.logRunCancelled(previousRunId, `superseded:${trigger}`);
 			this.currentRunId = null;
-			this.eventsBeingHandledCurrentRun = [];
 			try { await channel.call('cancel', [previousRunId]); } catch { /* ignore */ }
 			// Another call may have started a run while this one waited. Its
 			// event snapshot is older than the one taken below, so it gives way.
@@ -6028,7 +6078,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const overtakenRunId = this.currentRunId;
 				this.logRunCancelled(overtakenRunId, `overtaken:${trigger}`);
 				this.currentRunId = null;
-				this.eventsBeingHandledCurrentRun = [];
 				try { await channel.call('cancel', [overtakenRunId]); } catch { /* ignore */ }
 			}
 		}
@@ -6082,16 +6131,37 @@ export class SNCController extends Disposable implements IEditorContribution {
 					this.visualizationItems = this.visualizationItems.map(visItem => {
 						if (visItem.line == msg.item.line && visItem.visIndex == msg.item.visIndex) {
 							found = true;
-							const handled_events: UiEvent[] = this.eventsBeingHandledCurrentRun.find(ev => ev.line == msg.item.line && ev.visIndex == msg.item.visIndex)?.events || [];
+							// What the runner says it applied, not what we sent it:
+							// it declines to replay onto a rebuilt model, and it
+							// may have picked up events queued after dispatch.
+							const handled = new Set(msg.item.handledEventIds ?? []);
 							return {
 								...msg.item,
-								unhandledEvents: (visItem.unhandledEvents || []).filter(ev => !handled_events.includes(ev))
+								unhandledEvents: (visItem.unhandledEvents || []).filter(ev => !handled.has(ev.id))
 							};
 						}
 						return visItem;
 					});
 					if (!found) {
 						this.visualizationItems = [...this.visualizationItems, msg.item];
+					}
+
+					// This run is past that widget now, so whatever it didn't
+					// apply needs another run -- events race in just behind the
+					// widget, and the runner won't replay onto a model it had
+					// to rebuild. Unless this run *was* that retry: then it has
+					// declined them twice and will keep doing so, so drop them
+					// rather than spin runs forever.
+					this.itemsThisRun.add(widgetKey(msg.item.line, msg.item.visIndex));
+					const isThisItem = (v: IVisualizationItem) =>
+						v.line === msg.item.line && v.visIndex === msg.item.visIndex;
+					if (this.visualizationItems.find(isThisItem)?.unhandledEvents?.length) {
+						if (this.runTriggerById.get(msg.runId) === 'queued-events') {
+							this.visualizationItems = this.visualizationItems.map(v =>
+								isThisItem(v) ? { ...v, unhandledEvents: [] } : v);
+						} else {
+							this.scheduleQueuedEventRun();
+						}
 					}
 
 					// Throttle UI updates
@@ -6203,8 +6273,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 						}
 					}
 
+					// The run finished without ever reaching these widgets, so
+					// they aren't part of this execution and events queued for
+					// them are for something that is gone. (A superseded run
+					// never gets here -- it is disowned above, so its events
+					// survive for the run that replaced it.)
+					this.visualizationItems = this.visualizationItems.map(v =>
+						v.unhandledEvents?.length && !this.itemsThisRun.has(widgetKey(v.line, v.visIndex))
+							? { ...v, unhandledEvents: [] }
+							: v);
+
 					this.currentRunId = null;
-					this.eventsBeingHandledCurrentRun = [];
 					// Counted after the widgets are updated above, so a waiter
 					// that sees this can already read the new DOM.
 					sncRunsSettled++;
@@ -6243,7 +6322,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 					}
 
 					this.currentRunId = null;
-					this.eventsBeingHandledCurrentRun = [];
 					this.visualizationItems = [];
 					this.clearVisualizationWidgets();
 					sncRunsSettled++;
@@ -6265,6 +6343,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// Start a new streaming run
 		const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.currentRunId = runId;
+		// No widget has been reached yet, so the run can be handed events
+		// for any of them (see the gate above).
+		this.itemsThisRun.clear();
 		this.consoleFilePath = filePath;
 		if (filePath) {
 			this.consoleService.runStarted(filePath);
@@ -6287,12 +6368,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 			queuedEvents: models_and_events.reduce((n, m) => n + (m['events']?.length ?? 0), 0),
 			modelsSent: models_and_events.length,
 		}, this.editor.getModel()?.uri.toString());
-
-		this.eventsBeingHandledCurrentRun = models_and_events.map(m_e => ({
-			line: m_e.line,
-			visIndex: m_e.visIndex,
-			events: m_e['events'] || []
-		}))
 
 		try {
 			const focusedLine = this.effectiveFocusedLine();
@@ -6324,7 +6399,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.consoleService.runAbandoned(this.consoleFilePath);
 			}
 			this.currentRunId = null;
-			this.eventsBeingHandledCurrentRun = [];
 			this.clearVisualizationWidgets();
 			// A run that never started is as over as one that ran, and a waiter
 			// that only counted successes would wait out its whole timeout here.

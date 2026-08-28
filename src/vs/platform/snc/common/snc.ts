@@ -15,6 +15,12 @@ export interface IVisualizationItem {
 	model?: unknown;
 	unhandledEvents?: UiEvent[];
 	/**
+	 * Ids of the queued events this item applied. The editor requeues every
+	 * event it doesn't find here, so events the runner declined to replay (a
+	 * rebuilt model, an update that raised partway) are not lost.
+	 */
+	handledEventIds?: number[];
+	/**
 	 * Which iteration of which loops the value was produced under: one
 	 * `[headerLine, iteration]` per enclosing loop, outermost first. A function
 	 * body counts as a loop over its calls (`[defLine, callNumber]`).
@@ -36,7 +42,16 @@ export interface ILoopReport {
 	kind: 'loop' | 'call';
 }
 
-export type UiEvent = { line: number; visIndex: number, pythonEventStr: string, eventJSON: any };
+/**
+ * A queued interaction awaiting a visualizer. `id` is stamped by
+ * `sendEventToPython` and is how the runner reports back which events it
+ * applied (`IVisualizationItem.handledEventIds`) -- the objects themselves
+ * don't survive the trip to python and back.
+ */
+export type UiEvent = { id: number, line: number; visIndex: number, pythonEventStr: string, eventJSON: any };
+
+/** A UI event as its callers build it, before it is given a queue id. */
+export type UiEventSpec = Omit<UiEvent, 'id'>;
 
 export interface IProcessResult {
 	stdout: string; // Always empty from a run: program output streams as `output` messages
@@ -196,6 +211,14 @@ export interface ISNCProcessService {
 	 * Cancel a streaming run by runId. No-op if already finished or not found.
 	 */
 	cancel(runId: string): Promise<void>;
+
+	/**
+	 * Hand events to the run already in flight, for a visualizer it hasn't
+	 * reached yet. Lets one run answer a whole gesture instead of starting a
+	 * run per event; the run reports back what it managed to apply. A no-op if
+	 * nothing is running -- the editor still has them queued either way.
+	 */
+	sendEvents(events: UiEvent[]): Promise<void>;
 
 	/**
 	 * Set the Python executable to use for spawning workers. The renderer

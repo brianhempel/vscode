@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Promises } from '../../../base/node/pfs.js';
-import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData, ILoopReport } from '../common/snc.js';
+import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData, ILoopReport, UiEvent } from '../common/snc.js';
 import { Emitter } from '../../../base/common/event.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,12 +42,12 @@ interface RunState {
 }
 
 /**
- * Checkpoint 1 workers are the cold-start reserve: they serve the first run in a
- * directory and the runs whose imports a warmed worker can't cover. Typing is
- * served by checkpoint 2, so this doesn't need to absorb a keystroke burst —
- * two covers a run plus the ~100ms it takes to replace the one it consumed.
+ * Checkpoint 1 workers are the fallback for runs a warmed worker can't cover.
+ * Sized to absorb a burst: a run only ends up here once checkpoint 2 is empty,
+ * and a burst of runs (each killing the one before it) can empty it, so this
+ * pool is what stands between a burst and a run waiting on a cold spawn.
  */
-const CP1_POOL_SIZE = 2;
+const CP1_POOL_SIZE = 5;
 const CP2_POOL_SIZE = 10;
 
 /**
@@ -393,6 +393,21 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	}
 
 	/**
+	 * Drop every run still queued for a worker.
+	 *
+	 * Each waiter is a run the editor has already moved past — a newer run is
+	 * starting, and the service only ever shows the newest. Serving them in turn
+	 * makes a burst of N events cost N worker acquisitions, which is how a
+	 * mousemove flood turns into seconds of queueing. Their promises reject, and
+	 * `startProgram` returns quietly on that path.
+	 */
+	private abandonQueuedRuns(): void {
+		while (this.workerWaiters.length > 0) {
+			try { this.workerWaiters.shift()!.reject(new Error('superseded by a newer run')); } catch { /* ignore */ }
+		}
+	}
+
+	/**
 	 * Remove a worker from whichever pool it belongs to.
 	 */
 	private removeWorkerFromPool(worker: PoolWorker): void {
@@ -437,8 +452,12 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 				if (msg.type === 'checkpoint_ready') {
 					if (msg.checkpoint === 1) {
-						// If this worker is destined for CP2, advance it now
-						if (this.checkpoint2Pool.includes(worker) && worker.code) {
+						// Advance it to checkpoint 2 if that's what it's for --
+						// but not while a run has nothing to run on. A waiting
+						// run outranks warming for some future one: queueing it
+						// behind someone else's imports is how a keystroke ends
+						// up waiting seconds for a worker that was ready.
+						if (this.checkpoint2Pool.includes(worker) && worker.code && this.workerWaiters.length === 0) {
 							this.warmToCheckpoint2(worker, worker.code);
 						} else {
 							worker.ready = true;
@@ -644,6 +663,12 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.activeWorker = null;
 		}
 
+		// Runs still queued for a worker are superseded by this one exactly as the
+		// active run just was, and their output would be discarded on arrival. Let
+		// them go instead of handing each one a worker in turn: under a flood of
+		// events the queue is the lag. Only the newest run is worth running.
+		this.abandonQueuedRuns();
+
 		// Ensure pool is seeded for this working directory. Checkpoint 2 is left
 		// to the end of the run: warming it with code we may be about to
 		// invalidate two lines below would just burn processes.
@@ -654,7 +679,8 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		// — nearly every keystroke — keeps it, and just freshens the code new
 		// workers warm on so they can skip compiling the body too.
 		const importPrefix = importPrefixOf(content);
-		if (importPrefix !== this.checkpoint2ImportPrefix) {
+		const invalidated = importPrefix !== this.checkpoint2ImportPrefix;
+		if (invalidated) {
 			this.invalidateCheckpoint2Pool(content, importPrefix);
 		} else {
 			this.checkpoint2Code = content;
@@ -673,6 +699,11 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			const workerOrPromise = this.takeReadyWorker(importPrefix);
 			worker = workerOrPromise instanceof Promise ? await workerOrPromise : workerOrPromise;
 		} catch {
+			// Either the python executable is broken — handleSpawnFailure has
+			// already told the user and cleaned up — or a newer run superseded
+			// this one, which needs no announcement. Just don't leak the run.
+			if (state.timeoutId) { clearTimeout(state.timeoutId); }
+			this.runs.delete(runId);
 			return;
 		}
 
@@ -700,8 +731,13 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.runs.delete(runId);
 		}
 
-		// Replenish checkpoint 1 only; checkpoint 2 waits for the run to end.
-		this.ensurePoolFilled(options.workingDirectory, false);
+		// Replenish. Checkpoint 2 is skipped only when we just invalidated it: that
+		// is the rapid-import-editing case, where respawning ten workers we are
+		// about to kill again is pure churn. Every other run must top it up here —
+		// a burst of runs never reaches `run end` (each kills the one before it),
+		// so leaving the refill to run-end alone lets the pool drain to empty and
+		// dumps the whole burst onto checkpoint 1.
+		this.ensurePoolFilled(options.workingDirectory, !invalidated);
 	}
 
 	async setPythonExecutable(executable: string): Promise<void> {
@@ -721,6 +757,17 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		this.drainAllPools();
 		if (this.poolWorkingDirectory && !this._disposed) {
 			this.ensurePoolFilled(this.poolWorkingDirectory);
+		}
+	}
+
+	async sendEvents(events: UiEvent[]): Promise<void> {
+		const worker = this.activeWorker;
+		if (!worker || events.length === 0) { return; }
+		try {
+			worker.child.stdin?.write(JSON.stringify({ type: 'events', events }) + '\n');
+		} catch {
+			// The run is on its way out. The editor keeps them queued and the
+			// next run will carry them, so there is nothing to report.
 		}
 	}
 
