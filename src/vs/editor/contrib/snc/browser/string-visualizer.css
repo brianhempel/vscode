@@ -398,7 +398,7 @@ body.snc-shift-down .tool-button[data-tool="index"] {
   background: none;
   padding: 0px;
   position: initial;
-  background: #f5f5f5;
+  background: var(--snc-menu-bg);
   border: 1px solid var(--snc-border-color);
   position: absolute;
   left: 0px;

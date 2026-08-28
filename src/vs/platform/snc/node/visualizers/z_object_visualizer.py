@@ -675,7 +675,16 @@ def _visualize_small(obj, model, eval_in_scope, max_width=None, max_height=None,
         dyn_style += 'white-space:nowrap;text-overflow:ellipsis;'
     style_attr = f' style="{dyn_style}"' if dyn_style else ''
 
-    return f'<span class="small"{style_attr}>{content}</span>'
+
+    return (
+        f'<div tabindex="0" class="visualizer-container small">'
+        f'<div class="snc-tool-and-visualizer">'
+        f'<div class="obj-visualizer obj-visualizer-small snc-base-visualizer"{style_attr}>'
+        f'{content}'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+    )
 
 
 def _nested_every_row_exps(every_row_exps, accessor: str, sub_expr: str) -> list:
@@ -770,12 +779,12 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                     child_html = add_drag_readings(child_html, child_expr,
                                                    every_row_exps(accessor_code))
                 child_wrapped = wrap_child_html(child_html, accessor_code)
-                value_td = f'<td>{child_wrapped}</td>'
+                value_td = f'<td class="obj-td">{child_wrapped}</td>'
             else:
                 if exp_attr:
-                    value_td = f'<td><span{exp_attr} class="py-exp-grab">{html.escape(val_str)}</span></td>'
+                    value_td = f'<td class="obj-td"><span{exp_attr} class="py-exp-grab">{html.escape(val_str)}</span></td>'
                 else:
-                    value_td = f'<td>{html.escape(val_str)}</td>'
+                    value_td = f'<td class="obj-td">{html.escape(val_str)}</td>'
 
             drag_from = model.get('drag_from_index')
             drag_over = model.get('drag_over_index')
@@ -797,20 +806,19 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 )
                 continue
 
+            drag_hover_html = (
+                f'<div class="obj-drag-hover-items">'
+                f'<div snc-mouse-down="{html.escape(drag_start_event)}" data-tooltip="Drag to reorder" class="obj-drag-hover-item obj-drag-handle">⣿</div>'
+                f'<div snc-mouse-down="{html.escape(remove_event)}" data-tooltip="Remove attribute" class="obj-remove obj-drag-hover-item">×</div>'
+                f'</div>'
+            )
+
             field_trs.append(
-                f'<tr class="snc-hover-hidden-parent{drag_cls}" '
+                f'<tr class="snc-hover-hidden-parent{drag_cls} obj-tr" '
                 f'snc-mouse-move="{html.escape(drag_over_event)}" '
                 f'snc-mouse-up="{html.escape(drag_end_event)}">'
-                f'<td snc-mouse-down="{html.escape(drag_start_event)}" '
-                f'data-tooltip="Drag to reorder" '
-                f'class="handle full-opacity-on-hover">'
-                f'<span class="snc-hover-hidden">☰</span></td>'
-                f'<td snc-mouse-down="{html.escape(remove_event)}" '
-                f'data-tooltip="Remove attribute" '
-                f'class="remove full-opacity-on-hover">'
-                f'<span class="snc-hover-hidden">×</span></td>'
-                f'<td snc-mouse-down="{html.escape(click_event)}" class="field-name">'
-                f'{html.escape(accessor_code)}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
+                f'<td snc-mouse-down="{html.escape(click_event)}" class="obj-td field-name">'
+                f'{drag_hover_html}{html.escape(accessor_code)}<span class="field-args">{html.escape(placeholder_args)}</span></td>'
                 f'{value_td}'
                 f'</tr>'
             )
@@ -823,34 +831,38 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     if read_only:
         return (
             f'<div class="visualizer-container">'
-            f'<div class="obj-visualizer">'
-            f'<h4>{html.escape(full_class_name)} {html.escape(repr(obj))}</h4>'
+            f'<div class="snc-tool-and-visualizer">'
+            f'<div class="obj-visualizer obj-visualizer-read-only snc-base-visualizer">'
+            f'<div class="obj-header">{html.escape(full_class_name)}</div>'
             f'<table>'
             f'{field_trs_str}'
             f'</table>'
-            f'</div></div>'
+            f'</div>'
+            f'</div>'
+            f'</div>'
         )
 
     add_event = repr(AddFieldClick())
-    add_button = (
-        f'<tr snc-mouse-down="{html.escape(add_event)}" data-tooltip="Add attribute" class="snc-hover-hidden-parent">'
-        f'<td style="min-width:0.8em"></td><td style="min-width:1em"></td>'
-        f'<td class="snc-hover-hide-border full-opacity-on-hover add" colspan=2>'
-            f'<span class="snc-hover-hidden add-icon">+</span>'
-        f'</td>'
-        f'</tr>'
+    add_bar = (
+        f'<div snc-mouse-down="{html.escape(add_event)}" data-tooltip="Add attribute" class="obj-add-bar">'
+        f'<span class="obj-add-icon">+</span>'
+        f'</div>'
     )
 
     key_handler = repr(KeyDown())
+    # {html.escape(repr(obj))} ?
     return (
         f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" class="visualizer-container">'
-        f'<div class="obj-visualizer">'
-        f'<h4>{html.escape(full_class_name)} {html.escape(repr(obj))}</h4>'
+        f'<div class="snc-tool-and-visualizer">'
+        f'<div class="obj-visualizer snc-base-visualizer">'
+        f'<div class="obj-header">{html.escape(full_class_name)}</div>'
         f'<table>'
         f'{field_trs_str}'
-        f'{add_button}'
         f'</table>'
-        f'</div></div>'
+        f'{add_bar}'
+        f'</div>'
+        f'</div>'
+        f'</div>'
     )
 
 
@@ -913,7 +925,6 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eva
 
     return (
         f'<tr>'
-        f'<td></td><td></td>'
         f'<td style="padding-right:8px;">'
         f'{input_html}'
         f'</td>'

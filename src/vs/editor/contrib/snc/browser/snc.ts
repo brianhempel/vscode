@@ -2489,7 +2489,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const scrollers = new Set<HTMLElement>();
 
 		for (const anchor of anchors) {
-			const scroller = anchor.closest('.list-table-scroll') as HTMLElement | null;
+			const scroller = anchor.closest('.snc-base-visualizer') as HTMLElement | null;
 			if (!scroller) { continue; }
 
 			// Capture position + child-key chain BEFORE detaching (ancestors are
