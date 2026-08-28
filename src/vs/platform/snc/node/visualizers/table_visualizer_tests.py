@@ -416,7 +416,8 @@ class TestNestedComposition(unittest.TestCase):
         lst = [[1, 2], [3, 4]]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(list(model['columns']), ['$[0]', '$[1]'])
+        self.assertEqual(list(model['columns']),
+                         ['$', 'len($)', '$[0]', '$[1]'])
         self.assertIn('0\x00$[0]', model['children'])
         self.assertIn('0\x00$[1]', model['children'])
         self.assertIn('1\x00$[0]', model['children'])
@@ -1516,14 +1517,15 @@ class TestDictCellsBecomeTables(unittest.TestCase):
         d = {'alice': {'age': 30, 'city': 'SD'},
              'bob': {'age': 25, 'city': 'LA'}}
         model = init_model(d, mock_get_visualizer_dict_tables)
-        self.assertEqual(list(model['columns']), ['$k', "$v['age']", "$v['city']"])
+        self.assertEqual(list(model['columns']),
+                         ['$k', '$v', "$v['age']", "$v['city']"])
 
     def test_the_leading_dollar_is_rewritten_through_the_substitution(self):
         # Not str.replace: a field with a $ inside a string literal is exactly
         # the trap dollar_expr_names_index exists to avoid.
         d = {'x': {'a$b': 1}}
         model = init_model(d, mock_get_visualizer_dict_tables)
-        self.assertEqual(list(model['columns']), ['$k', "$v['a$b']"])
+        self.assertEqual(list(model['columns']), ['$k', '$v', "$v['a$b']"])
 
     def test_an_empty_dict_still_gets_the_two_columns(self):
         model = init_model({}, mock_get_visualizer_dict_tables)
@@ -1553,6 +1555,103 @@ class TestDictCellsBecomeTables(unittest.TestCase):
         self.assertIsNone(model['children'][f"0{CELL_KEY_SEP}$['info']"])
 
 
+class TestDefaultColumns(unittest.TestCase):
+    """What a table opens with when nothing has been saved for it.
+
+    Three things in order: the row itself, then how big it is where the rows
+    are lists, then the fields it spreads into where there are few enough of
+    them to read across.
+
+    The row keeps a column of its own even where its fields are shown beside
+    it. It is the thing the table is drawing: a table made entirely of reads
+    OFF the row leaves nowhere to see the row whole, drag it, or ask a question
+    of it -- which is why a dict has always shown `$v` beside its key, and `$`
+    is the same column for a list.
+
+    `len` where the rows are LISTS, by the type rather than by having a length:
+    a string and a dict have one too, and neither is a thing whose size is what
+    a reader came for. Over a dict it is asked of the values, since the row
+    itself is a pair and is two long whatever is in it.
+
+    Five fields is where a table stops being worth its width. Past that the row
+    stands alone and every field is one click away in the (+) menu, which
+    offers all of them however many detection chose to draw.
+    """
+
+    def cols(self, value):
+        return list(init_model(value, mock_get_visualizer_dict_tables)['columns'])
+
+    def test_a_list_of_scalars_is_the_row_alone(self):
+        self.assertEqual(self.cols([1, 2, 3]), ['$'])
+
+    def test_strings_have_a_length_but_are_not_lists(self):
+        self.assertEqual(self.cols(['hello', 'world']), ['$'])
+
+    def test_an_empty_list_is_the_row_alone(self):
+        self.assertEqual(self.cols([]), ['$'])
+
+    def test_a_ragged_list_is_the_row_alone(self):
+        # Detection asks every sampled row, so one that isn't tabular takes the
+        # fields away from all of them -- the rule that predates this.
+        self.assertEqual(self.cols(['hello', 42]), ['$'])
+
+    def test_a_list_of_records_shows_the_row_and_its_fields(self):
+        self.assertEqual(self.cols([{'b': 3, 'c': 'x'}, {'b': 1, 'c': 'y'}]),
+                         ['$', "$['b']", "$['c']"])
+
+    def test_a_dict_has_a_length_but_is_not_a_list(self):
+        self.assertNotIn('len($)', self.cols([{'b': 3}, {'b': 1}]))
+
+    def test_five_fields_still_spread(self):
+        row = {c: 1 for c in 'abcde'}
+        self.assertEqual(self.cols([row, row]),
+                         ['$'] + [f"$[{c!r}]" for c in 'abcde'])
+
+    def test_six_fields_leave_the_row_standing_alone(self):
+        row = {c: 1 for c in 'abcdef'}
+        self.assertEqual(self.cols([row, row]), ['$'])
+
+    def test_a_list_of_lists_shows_how_long_each_is(self):
+        self.assertEqual(self.cols([[1, 2, 3], [4, 5, 6]]),
+                         ['$', 'len($)', '$[0]', '$[1]', '$[2]'])
+
+    def test_long_lists_keep_the_length_and_drop_the_positions(self):
+        # The count is what a reader wants from a row of six things; six more
+        # columns of them is not.
+        self.assertEqual(self.cols([list(range(6)), list(range(6))]),
+                         ['$', 'len($)'])
+
+    def test_a_dict_of_scalars_is_the_key_and_the_value(self):
+        self.assertEqual(self.cols({'a': 1, 'b': 2}), ['$k', '$v'])
+
+    def test_an_empty_dict_is_the_key_and_the_value(self):
+        self.assertEqual(self.cols({}), ['$k', '$v'])
+
+    def test_a_dict_of_records_shows_the_value_and_its_fields(self):
+        d = {'alice': {'age': 30, 'city': 'SD'},
+             'bob': {'age': 25, 'city': 'LA'}}
+        self.assertEqual(self.cols(d), ['$k', '$v', "$v['age']", "$v['city']"])
+
+    def test_a_dict_of_lists_shows_how_big_each_group_is(self):
+        # The shape Group By writes.
+        self.assertEqual(self.cols({'eng': [1, 2], 'mkt': [3]}),
+                         ['$k', '$v', 'len($v)', '$v[0]', '$v[1]'])
+
+    def test_a_dict_of_long_lists_keeps_the_size_alone(self):
+        self.assertEqual(self.cols({'eng': list(range(6))}),
+                         ['$k', '$v', 'len($v)'])
+
+    def test_the_length_is_asked_of_the_value_not_of_the_pair(self):
+        # Every dict row is a pair, so `len($)` would read 2 down the whole
+        # column and say nothing.
+        self.assertNotIn('len($)', self.cols({'eng': [1, 2]}))
+
+    def test_a_field_with_a_dollar_in_it_is_rebound_through_the_substitution(self):
+        # Not str.replace: a field with a $ inside a string literal is exactly
+        # the trap dollar_expr_names_index exists to avoid.
+        self.assertEqual(self.cols({'x': {'a$b': 1}}), ['$k', '$v', "$v['a$b']"])
+
+
 class TestTableDetection(unittest.TestCase):
     """Test that init_model detects table mode for homogeneous lists."""
 
@@ -1578,7 +1677,8 @@ class TestTableDetection(unittest.TestCase):
         lst = [[1, 2, 3], [4, 5, 6]]
         model = init_model(lst, mock_get_visualizer)
         self.assertEqual(model['display_mode'], 'table')
-        self.assertEqual(list(model['columns']), ['$[0]', '$[1]', '$[2]'])
+        self.assertEqual(list(model['columns']),
+                         ['$', 'len($)', '$[0]', '$[1]', '$[2]'])
 
     def test_mixed_types_is_table_mode_with_dollar_column(self):
         lst = ["hello", 42]
@@ -2552,8 +2652,9 @@ class TestColumnConfig(unittest.TestCase):
         model['adding_column'] = True
         update(make_column_mouse_event(repr(ColumnSelect(name="$['x']"))),
                None, model, lst, mock_get_visualizer)
-        self.assertEqual(take_line_config(),
-                         ([{'expr': "$['name']"}, {'expr': "$['x']"}], True))
+        self.assertEqual(
+            take_line_config(),
+            ([{'expr': '$'}, {'expr': "$['name']"}, {'expr': "$['x']"}], True))
 
 
 class TestColumnVisualize(unittest.TestCase):
@@ -7939,6 +8040,12 @@ class TestColumnSearchEvents(unittest.TestCase):
     def make_model(self):
         lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bo', 'age': 20}]
         model = init_model(lst, mock_get_visualizer)
+        # The two fields alone: a `$` column claims anything written about the
+        # row, so a table that opens with one has no term left over to be a
+        # hand-written search. That is its own question -- see
+        # test_the_dollar_column_claims_a_search_about_the_row -- and not the
+        # one these tests are asking.
+        model['columns'] = _as_columns(["$['name']", "$['age']"])
         return lst, model
 
     def test_typing_stores_the_text_and_recomposes_the_main_search(self):
@@ -8104,9 +8211,13 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
     there reads back into the column rows, and what no column claims is kept so
     the next column edit doesn't drop it."""
 
-    def make_model(self):
+    def make_model(self, columns=("$['name']", "$['age']")):
+        # The two fields alone by default, for the reason TestColumnSearchEvents
+        # pins the same pair: `$` claims whatever is written about the row, so
+        # nothing is left over while it is on screen.
         lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bo', 'age': 20}]
         model = init_model(lst, mock_get_visualizer)
+        model['columns'] = _as_columns(list(columns))
         return lst, model
 
     def search(self, model, lst, text):
@@ -8149,6 +8260,17 @@ class TestSearchBoxReadsBackIntoTheColumns(unittest.TestCase):
         lst, model = self.make_model()
         model = self.search(model, lst, 'len($) > 1')
         self.assertFalse(model.get('column_searches'))
+        self.assertEqual(model['search'], 'len($) > 1')
+
+    def test_the_dollar_column_claims_a_search_about_the_row(self):
+        # What a table opens with now has `$` in it, and `$` is the row -- so a
+        # search written about the row is that column's, and shows as its chip
+        # rather than sitting in the main box with nowhere to point at. It is
+        # the column's on the way back out too: removing `$` takes it, the way
+        # removing any column takes the search that was typed for it.
+        lst, model = self.make_model(columns=['$', "$['name']"])
+        model = self.search(model, lst, 'len($) > 1')
+        self.assertEqual(_column_search_row(model, '$')['text'], 'len($) > 1')
         self.assertEqual(model['search'], 'len($) > 1')
 
     def test_the_half_no_column_claims_survives_a_column_edit(self):
@@ -15328,6 +15450,175 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         self.assertIn('placeholder="Add subcolumn"', panel)
 
 
+from table_visualizer import SplatColumnClick, UnsplatColumnClick
+
+EXPAND_ROW = 'Expand list items into rows'
+COLLAPSE_ROW = 'Collapse lists to single cells'
+
+
+class ExpandRowCase(unittest.TestCase):
+    """The column ▾ menu's Expand list items into rows row, over a table whose
+    first column holds a list in every cell."""
+
+    LINES = ['id,name', '1,Alice']
+    SPLIT = "$.split(',')"
+    gv = staticmethod(mock_get_visualizer)
+
+    def model(self, columns=None, lst=None):
+        model = init_model(self.LINES if lst is None else lst, self.gv)
+        model['columns'] = {self.SPLIT: {}} if columns is None else columns
+        model['openDropdown'] = {'id': menu_id(model)}
+        return model
+
+    def menu(self, model, lst=None):
+        return _first_column_header(
+            visualize(self.LINES if lst is None else lst, model, self.gv, None))
+
+    def click(self, model, col, lst=None, event=SplatColumnClick):
+        with patch('table_visualizer.save_columns_config'):
+            new_model, _ = update(
+                make_column_mouse_event(repr(event(col=col))), None,
+                model, self.LINES if lst is None else lst, self.gv)
+        return new_model
+
+    def collapse(self, model, col, lst=None):
+        return self.click(model, col, lst, event=UnsplatColumnClick)
+
+
+class TestExpandListItemsRow(ExpandRowCase):
+    """One click for what a `*` typed into the header box has always done:
+    spread a column of lists down the rows, an element to a row.
+
+    Offered where the cells are lists and nowhere else -- unlike Subcolumns,
+    which is always there because an expression can be written against any
+    column. There is nothing to write here: the row IS the whole action, and
+    over a column of numbers it would name something that cannot happen.
+    """
+
+    def test_it_sits_above_subcolumns(self):
+        # Beside the rows that decide which columns exist, and ahead of
+        # Subcolumns because splatting is what a splat's sub-columns are read
+        # against -- the coarser question of the two.
+        self.assertEqual(
+            re.findall(rf'>(Remove Column|{EXPAND_ROW}|Subcolumns|Sort)<',
+                       self.menu(self.model())),
+            ['Remove Column', EXPAND_ROW, 'Subcolumns', 'Sort'])
+
+    def test_it_is_not_offered_where_the_cells_are_not_lists(self):
+        self.assertNotIn(EXPAND_ROW,
+                         self.menu(self.model({'$': {}}, lst=[1, 2, 3]),
+                                   lst=[1, 2, 3]))
+
+    def test_a_column_that_already_splats_does_not_offer_it_again(self):
+        self.assertNotIn(EXPAND_ROW, self.menu(self.model({f'*{self.SPLIT}': {}})))
+
+    def test_clicking_it_splats_the_column_in_place(self):
+        model = self.click(self.model(), self.SPLIT)
+        self.assertEqual(list(model['columns']), [f'*{self.SPLIT}'])
+
+    def test_elements_with_nothing_to_spread_get_no_subcolumns(self):
+        # The rules produce `$` alone for a list of strings, and a splat with
+        # no sub-columns already shows the element itself -- so a lone `$`
+        # sub-column would be the same cell drawn one level down.
+        model = self.click(self.model(), self.SPLIT)
+        self.assertEqual(model['columns'][f'*{self.SPLIT}'].get('cols'), None)
+
+
+class TestExpandListItemsSubcolumns(ExpandRowCase):
+    """What the new splat opens with: the same rules the table itself opens
+    with, asked of one ELEMENT rather than of a row."""
+
+    gv = staticmethod(mock_get_visualizer_dict_tables)
+    LINES = [{'pets': [{'kind': 'cat', 'n': 1}]},
+             {'pets': [{'kind': 'rat', 'n': 2}, {'kind': 'bat', 'n': 3}]}]
+    SPLIT = "$['pets']"
+
+    def test_the_elements_fields_come_across_beside_the_element(self):
+        model = self.click(self.model(), self.SPLIT)
+        self.assertEqual(list(model['columns'][f'*{self.SPLIT}']['cols']),
+                         ['$', "$['kind']", "$['n']"])
+
+    def test_sub_columns_written_against_the_cell_do_not_survive(self):
+        # They were read off the whole list; under the splat the same text
+        # would be read off one element, which is not what was asked for.
+        model = self.model({self.SPLIT: {'cols': {'len($)': {}}}})
+        model = self.click(model, self.SPLIT)
+        self.assertNotIn('len($)', model['columns'][f'*{self.SPLIT}']['cols'])
+
+
+class TestCollapseListsRow(ExpandRowCase):
+    """The dual, in the same slot: a splat says Collapse lists to single cells
+    where a column of lists says Expand list items into rows.
+
+    One row rather than two, because a column is only ever on one side of the
+    star -- a menu that offered both would have one of them do nothing, and the
+    reader would have to work out which.
+
+    It gives the column back its own cell, holding the whole list. No
+    sub-columns come with it: `single cells` is the whole of what it promises,
+    and spreading the list across on the way back would be the expansion again
+    sideways.
+    """
+
+    def test_it_takes_the_expand_rows_place(self):
+        self.assertEqual(
+            re.findall(rf'>(Remove Column|{EXPAND_ROW}|{COLLAPSE_ROW}'
+                       rf'|Subcolumns|Sort)<',
+                       self.menu(self.model({f'*{self.SPLIT}': {}}))),
+            ['Remove Column', COLLAPSE_ROW, 'Subcolumns', 'Sort'])
+
+    def test_a_column_of_lists_offers_the_expansion_instead(self):
+        menu = self.menu(self.model())
+        self.assertIn(EXPAND_ROW, menu)
+        self.assertNotIn(COLLAPSE_ROW, menu)
+
+    def test_a_column_that_is_neither_offers_nothing(self):
+        self.assertNotIn(COLLAPSE_ROW,
+                         self.menu(self.model({'$': {}}, lst=[1, 2, 3]),
+                                   lst=[1, 2, 3]))
+
+    def test_clicking_it_takes_the_star_off_in_place(self):
+        model = self.model({'$i': {}, f'*{self.SPLIT}': {}})
+        model = self.collapse(model, f'*{self.SPLIT}')
+        self.assertEqual(list(model['columns']), ['$i', self.SPLIT])
+
+    def test_the_splats_sub_columns_go_with_it(self):
+        # They were read off one element; the collapsed column has no element,
+        # and the same text over it would be read off the whole list.
+        model = self.model({f'*{self.SPLIT}': {'cols': {'$[0]': {}}}})
+        model = self.collapse(model, f'*{self.SPLIT}')
+        self.assertEqual(model['columns'][self.SPLIT].get('cols'), None)
+
+    def test_it_undoes_an_expansion(self):
+        model = self.click(self.model(), self.SPLIT)
+        model = self.collapse(model, f'*{self.SPLIT}')
+        self.assertEqual(list(model['columns']), [self.SPLIT])
+
+    def test_neither_is_offered_where_the_name_is_already_taken(self):
+        # Both spellings on screen at once: the column each row would rename to
+        # is a column already, and a rename that merged the two would take one
+        # of them away without saying so. Asked of each column's own menu,
+        # since it is the pair that makes the trouble.
+        columns = {self.SPLIT: {}, f'*{self.SPLIT}': {}}
+        for index in (0, 1):
+            model = self.model(columns)
+            model['openDropdown'] = {'id': menu_id(model, index=index)}
+            out = visualize(self.LINES, model, self.gv, None)
+            with self.subTest(index=index):
+                self.assertIn('col-menu-panel', out)
+                self.assertNotIn(EXPAND_ROW, out)
+                self.assertNotIn(COLLAPSE_ROW, out)
+
+    def test_a_click_on_a_taken_name_leaves_the_columns_alone(self):
+        # The row is not drawn, so this is a stale click -- and the sub-columns
+        # must not be torn down for a rename that cannot happen.
+        columns = {self.SPLIT: {}, f'*{self.SPLIT}': {'cols': {'$[0]': {}}}}
+        model = self.collapse(self.model(columns), f'*{self.SPLIT}')
+        self.assertEqual(list(model['columns']), [self.SPLIT, f'*{self.SPLIT}'])
+        self.assertEqual(list(model['columns'][f'*{self.SPLIT}']['cols']),
+                         ['$[0]'])
+
+
 class TestSubcolCandidates(unittest.TestCase):
     """What the menu offers to show: the fields of whatever a sub-column would
     read -- the cell's value for a plain column, and the ELEMENT for a splat,
@@ -15683,12 +15974,22 @@ class TestAddColumnMenuOverGroups(AddColumnMenuCase):
         self.assertEqual(self.sections(self.panel(self.model()))[1],
                          ['$', 'len($v)'])
 
-    def test_ticking_it_adds_the_column(self):
+    def toggle(self, model):
         with patch('table_visualizer.save_columns_config'):
-            model, _ = update(make_column_mouse_event(
-                repr(ColumnToggle(expr='len($v)'))), None, self.model(),
+            out, _ = update(make_column_mouse_event(
+                repr(ColumnToggle(expr='len($v)'))), None, model,
                 self.ROWS, self.gv)
-        self.assertIn('len($v)', model['columns'])
+        return out
+
+    def test_the_table_opens_with_it_already_ticked(self):
+        # It is the question this shape is read for, so the defaults draw it
+        # and the menu's job here is to take it away rather than to offer it.
+        self.assertIn('len($v)', self.model()['columns'])
+
+    def test_ticking_it_off_and_on_again_gets_the_column_back(self):
+        model = self.toggle(self.model())
+        self.assertNotIn('len($v)', model['columns'])
+        self.assertIn('len($v)', self.toggle(model)['columns'])
 
 
 class TestTableFieldCandidates(unittest.TestCase):
@@ -18796,11 +19097,16 @@ class TestEveryExpressionTheTableHandsOver(unittest.TestCase):
     """
 
     # (name, value, columns) -- a shape per row of the audit.
+    # The first three are what those shapes OPEN with, so the audit covers the
+    # table a reader is actually handed.
     SHAPES = (
         ('list of dicts', [{'b': 3, 'c': 'x'}, {'b': 1, 'c': 'y'}],
-         ["$['b']", "$['c']"]),
+         ['$', "$['b']", "$['c']"]),
+        ('list of lists', [[1, 2], [3, 4]],
+         ['$', 'len($)', '$[0]', '$[1]']),
         ('dict root', {'a': 1, 'b': 2}, ['$k', '$v']),
-        ('dict of lists', {'a': [1, 2], 'b': [3]}, ['$k', 'len($v)']),
+        ('dict of lists', {'a': [1, 2], 'b': [3]},
+         ['$k', '$v', 'len($v)', '$v[0]', '$v[1]']),
         ('splat, no sub-columns', [{'pets': ['cat', 'dog']}, {'pets': ['rat']}],
          {"*$['pets']": {}}),
         ('splat with sub-columns',
@@ -19518,12 +19824,17 @@ class AddColumnBesideCase(unittest.TestCase):
     """A table of three columns, with one column's ▾ menu open."""
 
     LST = [{'a': 1, 'b': 2, 'c': 3}]
+    # Pinned rather than detected: these tests are about where a box lands
+    # among the columns, so what the columns are is the fixture rather than the
+    # thing under test -- and the defaults would open with `$` at the front,
+    # shifting every position they name.
+    COLUMNS = ["$['a']", "$['b']", "$['c']"]
 
     def model(self, lst=None, columns=None, index=0):
         model = init_model(self.LST if lst is None else lst,
                            mock_get_visualizer)
-        if columns is not None:
-            model['columns'] = columns
+        model['columns'] = _as_columns(self.COLUMNS if columns is None
+                                       else columns)
         model['openDropdown'] = {'id': menu_id(model, index=index)}
         return model
 
@@ -19906,8 +20217,12 @@ def row_model(lst=None, columns=None, source='data', open_row=None):
     open on one of its rows."""
     lst = ROW_LIST if lst is None else lst
     model = init_model(lst, mock_get_visualizer)
-    if columns is not None:
-        model['columns'] = _as_columns(columns)
+    # The fields alone by default: these tests ask what a ROW hands over, and
+    # the two named columns say that more plainly than the defaults, which open
+    # with `$` in front of them. What a row hands over when `$` IS on screen is
+    # its own test -- see test_the_dollar_column_is_a_cell_like_any_other.
+    model['columns'] = _as_columns(["$['b']", "$['c']"] if columns is None
+                                   else columns)
     model['_source_expr'] = source
     if open_row is not None:
         model['openDropdown'] = {'id': _menu_id('row-menu', str(open_row))}
@@ -19937,6 +20252,15 @@ class TestRowTupleExpr(unittest.TestCase):
     def test_a_column_the_user_took_away_is_not_in_it(self):
         lst, model = row_model(columns=["$['c']"])
         self.assertEqual(_row_tuple_expr(model, lst, 2), "data[2]['c']")
+
+    def test_the_dollar_column_is_a_cell_like_any_other(self):
+        # What a table opens with now, so this is what a row hands over until
+        # someone edits the columns. The item reads twice -- once whole, once
+        # per field -- which is what the screen says, and the row hands over
+        # what is on the screen rather than an opinion about it.
+        lst, model = row_model(columns=['$', "$['b']", "$['c']"])
+        self.assertEqual(_row_tuple_expr(model, lst, 1),
+                         "(data[1], data[1]['b'], data[1]['c'])")
 
     def test_one_column_is_not_written_as_a_one_tuple(self):
         # `(data[0]['b'],)` is the tuple the label promises and not the thing

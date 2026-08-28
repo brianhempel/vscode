@@ -32,11 +32,12 @@ Columns shown in the table are configurable and persisted:
    - A save goes into the line's config store; the runner turns it into a
      rewrite of the comment
 
-2. Auto-detection via _detect_table_columns:
-   - Samples items and returns union of fields if all support get_fields
-
-3. Default: ['$'] (the item itself)
-   - Used when items lack fields (strings, ints, mixed types, empty lists)
+2. The defaults, via _default_columns:
+   - The row itself -- ['$'], or ['$k', '$v'] for a dict -- always
+   - Its length where the rows are lists
+   - The fields the rows spread into, where all sampled items support
+     get_fields and there are no more than MAX_DEFAULT_FIELDS of them
+   - So strings, ints, mixed types and empty lists open as ['$'] alone
    - Users can add computed columns via the (+) button
 ================================================================================
 """
@@ -403,6 +404,28 @@ class ComputeExprKeyDown:
     has just finished writing should mean.
     """
     pass
+
+@dataclass(frozen=True, slots=True)
+class SplatColumnClick:
+    """User clicked Expand list items into rows, which turns a column of lists
+    into a splat: the elements spread DOWN, a row each, where the column had
+    one cell holding the lot.
+
+    The same edit a `*` typed into the header box makes, offered as a row
+    because the star is a spelling a reader has no way to guess.
+    """
+    col: str
+
+@dataclass(frozen=True, slots=True)
+class UnsplatColumnClick:
+    """User clicked Collapse lists to single cells, which takes the star back
+    off: the elements come home to one cell holding the whole list.
+
+    Its own event rather than a direction on SplatColumnClick, so a stale click
+    means what it says -- a menu drawn before the column was splatted cannot
+    unsplat it by arriving late.
+    """
+    col: str
 
 @dataclass(frozen=True, slots=True)
 class SubcolToggle:
@@ -2344,6 +2367,117 @@ def _subcol_candidates(col: str, lst, model, get_visualizer,
     else:
         values = _column_values(col, lst, model, eval_in_scope)
     return _get_all_possible_columns(values, get_visualizer) or []
+
+
+def _is_splat_column(col: str) -> bool:
+    """Whether a column spreads its value down the rows -- read off its own
+    last segment, since a splat nested under a plain column leads with the
+    parent and has no star at the front to recognise it by."""
+    return _split_splat(col.split(SUBCOL_SEP)[-1])[0]
+
+
+def _restarred(col: str) -> str:
+    """What a column is called on the other side of the star: the last segment
+    with one added, or with the one it has taken off."""
+    is_splat, inner = _split_splat(col.split(SUBCOL_SEP)[-1])
+    return inner if is_splat else SPLAT + col.split(SUBCOL_SEP)[-1]
+
+
+def _star_name_free(col: str, model) -> bool:
+    """Whether the name on the other side of the star is going spare.
+
+    Both spellings can be on screen at once -- a splat beside the column of
+    lists it spread -- and a rename onto a name a sibling has would merge the
+    two, taking one of them away without saying so. Asked before either row is
+    drawn, so the menu offers no move that cannot be made.
+    """
+    siblings = _siblings_of(model.get('columns') or {}, col)
+    return siblings is not None and _restarred(col) not in siblings
+
+
+def _can_expand_column(col: str, lst, model, eval_in_scope=None) -> bool:
+    """Whether Expand list items into rows has anything to do to *col*.
+
+    Its cells have to be lists -- there is nothing to spread down otherwise --
+    and it cannot already be a splat, whose cells are the elements it spread
+    and which has no second star to gain.
+
+    Sampled off the column's own values, the way the Subcolumns submenu samples
+    them, so both rows of the menu are asking about the same thing.
+    """
+    if _is_splat_column(col) or not _star_name_free(col, model):
+        return False
+    return _rows_are_lists(_column_values(col, lst, model, eval_in_scope))
+
+
+def _can_collapse_column(col: str, model) -> bool:
+    """Whether Collapse lists to single cells has anything to do to *col*.
+
+    Nothing to sample: a splat is spreading a list by the fact of being one, so
+    being one is the whole question.
+    """
+    return _is_splat_column(col) and _star_name_free(col, model)
+
+
+def _restar_column(model, col: str, eval_in_scope=None) -> 'str | None':
+    """Move a column across the star, and hand back what it is called now.
+
+    A rename, so the column keeps its place and everything keyed to it that
+    still means something. Its sub-columns are not among those: on one side
+    they are read off the whole list and on the other off one element, so the
+    same text asks a different question either way it is crossed. They go, and
+    each caller puts back what belongs on the side it landed.
+
+    Nothing is torn down until the rename is known to be good, so a stale click
+    on a name a sibling has taken leaves the column exactly as it was.
+    """
+    if not _star_name_free(col, model):
+        return None
+    columns = model.get('columns') or {}
+    for expr in list(_subs_at(columns, col) or {}):
+        _drop_subcolumn(model, col, expr, eval_in_scope)
+    # The last one out takes the map with it: a column carries no `cols` until
+    # something is put in it (see _subs_at), so one left empty here would be
+    # the only plain column in the table wearing the shape of a parent.
+    config = _siblings_of(columns, col).get(col)
+    if isinstance(config, dict) and config.get('cols') == {}:
+        del config['cols']
+    if not _rename_column(model, col, _restarred(col), eval_in_scope):
+        return None
+    return SUBCOL_SEP.join(col.split(SUBCOL_SEP)[:-1] + [_restarred(col)])
+
+
+def _expand_column_into_rows(model, col: str, lst, get_visualizer=None,
+                             eval_in_scope=None) -> None:
+    """Splat a column of lists, and open it with the sub-columns a table of its
+    ELEMENTS would open with.
+
+    A lone `$` is no sub-column at all: a splat with none already shows the
+    element itself, so it would be the same cell drawn one row further down.
+    """
+    target = _restar_column(model, col, eval_in_scope)
+    if target is None:
+        return
+    exprs = _default_columns(
+        _splat_elements(lst, model['columns'], target), get_visualizer)
+    if exprs != ['$']:
+        subs = _subs_at(model['columns'], target, create=True)
+        for expr in exprs:
+            _col_add(subs, expr)
+    _save_columns(model)
+
+
+def _collapse_column_into_cells(model, col: str, eval_in_scope=None) -> None:
+    """Take the star off a splat, giving the column back one cell holding the
+    whole list.
+
+    Nothing takes the sub-columns' place: `single cells` is the whole of what
+    this promises, and spreading the list ACROSS on the way back would be the
+    expansion again sideways. The rules that fill a new splat are one click
+    away in Subcolumns for a reader who wants them.
+    """
+    if _restar_column(model, col, eval_in_scope) is not None:
+        _save_columns(model)
 
 
 # The (+) menu offers two kinds of column, in two sections, because Show all
@@ -7199,8 +7333,8 @@ def get_fields(value):
 _DICT_DEFAULT_COLUMNS = ['$k', '$v']
 
 
-def _dict_value_columns(d, get_visualizer):
-    """A dict's columns: `$k`, then whatever its VALUES have to show.
+def _dict_value_fields(d, get_visualizer) -> list:
+    """A dict's VALUES' fields, rebound to read off `$v`.
 
     The values rather than the rows, because a dict's row is a pair this table
     made up to draw with -- there is no such object to hand a visualizer and
@@ -7208,27 +7342,82 @@ def _dict_value_columns(d, get_visualizer):
     dollar is rebound to `$v`
     -- through the substitution rather than str.replace, since a field may have
     a `$` inside a string literal.
+
+    Empty when the values have none, which includes the empty dict and the
+    simple {'a': 1} case.
     """
     fields = _collect_fields_from_samples(list(d.values()), get_visualizer,
                                           require_all=True)
     if not fields:
-        # Includes the empty dict and the simple {'a': 1} case, whose values
-        # have no fields: both want the plain two columns.
-        return list(_DICT_DEFAULT_COLUMNS)
+        return []
     # Rebound in two passes via a dollar-free placeholder, for the same reason
     # lift_column_predicate does: a replacement that itself contains a dollar
     # never re-parses, which would make every run after the first look like
     # code -- turning the `$` in `$['a$b']` into a binding too.
     holder = '_snc_val_'
-    return ['$k'] + [replace_dollars_in_py_exp(f, [holder]).replace(holder, '$v')
-                     for f in fields]
+    return [replace_dollars_in_py_exp(f, [holder]).replace(holder, '$v')
+            for f in fields]
 
 
-def _detect_table_columns(lst, get_visualizer):
-    """Sample items and return union of fields if all sampled items are tabular, else None."""
-    if isinstance(lst, dict):
-        return _dict_value_columns(lst, get_visualizer)
-    return _collect_fields_from_samples(lst, get_visualizer, require_all=True)
+def _dict_value_columns(d, get_visualizer):
+    """A dict's columns as the (+) menu offers them: `$k`, then whatever its
+    values have to show, and the plain two columns when they have nothing."""
+    fields = _dict_value_fields(d, get_visualizer)
+    return (['$k'] + fields) if fields else list(_DICT_DEFAULT_COLUMNS)
+
+
+# How many fields a table will spread across on its own. Past it the row stands
+# alone: a table wider than this is harder to read than the values it came from,
+# and every field is still one click away in the (+) menu, which offers all of
+# them however many were drawn here.
+MAX_DEFAULT_FIELDS = 5
+
+
+def _rows_are_lists(values) -> bool:
+    """Whether the rows are LISTS -- by the type rather than by having a
+    length, since a string and a dict have one too and neither is a thing whose
+    size is what a reader came for.
+
+    One sampled row is enough, by the rule a field only some rows have goes by:
+    the column means something wherever it is defined and reads as a hole where
+    it isn't.
+    """
+    if not values:
+        return False
+    return any(isinstance(values[i], list) for i in _sample_indices(values))
+
+
+def _default_columns(value, get_visualizer):
+    """The columns a table opens with, having nothing saved to open with.
+
+    The row itself, then how big it is where the rows are lists, then the
+    fields it spreads into where there are few enough of them to read across.
+
+    The row keeps a column of its own even where its fields are shown beside
+    it: it is the thing the table is drawing, and a table made entirely of
+    reads OFF the row leaves nowhere to see the row whole, drag it, or ask a
+    question of it. A dict has always shown `$v` beside its key for that
+    reason; `$` is the same column for a list.
+
+    A dict's length is asked of its VALUES -- its own row is a pair and is two
+    long whatever is in it -- and so are its fields, for the reason
+    `_dict_value_fields` gives.
+
+    Never empty, so there is no fallback for a caller to remember: the row is a
+    column every table has, whatever its rows turn out to be made of.
+    """
+    is_dict = isinstance(value, dict)
+    row = '$v' if is_dict else '$'
+    values = list(value.values()) if is_dict else value
+    columns = ['$k', '$v'] if is_dict else ['$']
+    if _rows_are_lists(values):
+        columns.append(f'len({row})')
+    fields = (_dict_value_fields(value, get_visualizer) if is_dict else
+              _collect_fields_from_samples(value, get_visualizer,
+                                           require_all=True) or [])
+    if 0 < len(fields) <= MAX_DEFAULT_FIELDS:
+        columns += fields
+    return columns
 
 
 _COLUMN_MGMT_DEFAULTS = {
@@ -7296,17 +7485,14 @@ def _resolve_columns(lst, get_visualizer, slots_config):
 
     `slots_config` is what was saved for it: the line's comment at the root,
     the parent's slot `children` when nested. A missing config falls back to
-    auto-detected columns (or ['$']).
+    the columns a table opens with.
     """
     if slots_config is not None:
         exprs, slot_children = parse_slots(slots_config)
         return _columns_from_slots(exprs, parse_slot_cols(slots_config)), slot_children
 
-    exprs = _detect_table_columns(lst, get_visualizer)
-    if exprs is None:
-        exprs = ['$']
-    # Detection never proposes a splat, so it never proposes sub-columns.
-    return _columns_from_slots(exprs, {}), {}
+    # The defaults never propose a splat, so they never propose sub-columns.
+    return _columns_from_slots(_default_columns(lst, get_visualizer), {}), {}
 
 
 def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
@@ -7936,6 +8122,38 @@ def _subcol_scope(col: str, binds: 'dict | None' = None) -> DollarScope:
     )
 
 
+def _render_column_restar(col, model, lst, eval_in_scope=None) -> str:
+    """Render the row that moves a column across the star: Expand list items
+    into rows over a column of lists, Collapse lists to single cells over the
+    splat that made.
+
+    One row rather than two, because a column is only ever on one side of the
+    star -- a menu offering both would have one of them do nothing, and the
+    reader would have to work out which.
+
+    A row that comes and goes with the data, unlike Subcolumns, which is always
+    there because an expression can be written against any column. There is
+    nothing to write here: the row IS the whole action, and over a column of
+    numbers it would name something that cannot happen.
+
+    It takes the dwell that puts an open submenu away, like every other row of
+    the menu that opens none of its own.
+    """
+    if _can_collapse_column(col, model):
+        label, event = 'Collapse lists to single cells', UnsplatColumnClick(col=col)
+    elif _can_expand_column(col, lst, model, eval_in_scope):
+        label, event = 'Expand list items into rows', SplatColumnClick(col=col)
+    else:
+        return ''
+    return (
+        f'<div class="snc-dropdown-option col-expand-rows"'
+        f'{_column_dwell_attr(model)}>'
+        f'<span snc-mouse-down="{html.escape(repr(event))}" '
+        f'class="snc-dropdown-option-label">{label}</span>'
+        f'</div>'
+    )
+
+
 def _render_column_subcols(col, model, lst, get_visualizer=None,
                            eval_in_scope=None) -> str:
     """Render the Subcolumns row of a column's ▾ menu, and its submenu when
@@ -8377,8 +8595,11 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
           f'class="snc-dropdown-option-label">Add Column {side}</span>'
           f'</div>'
           for side, after in (('Before', False), ('After', True))),
-        # Beside Remove Column: the two rows that decide which columns exist,
-        # ahead of the three that ask questions about the rows.
+        # Beside Remove Column: the rows that decide which columns exist,
+        # ahead of the three that ask questions about the rows. Expand comes
+        # first of them, because it decides what a sub-column would even be
+        # read against -- the whole list, or one element of it.
+        _render_column_restar(col, model, lst, eval_in_scope),
         _render_column_subcols(col, model, lst, get_visualizer,
                                eval_in_scope),
         _render_column_sort(col, model),
@@ -11142,6 +11363,23 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 commands.append(new_code_command(
                     (_compute_code_name(expr, source_expr), code),
                     code_imports))
+
+        # The menu goes away for both: the column it was opened on is called
+        # something else now, and the row that was clicked has become the other
+        # one -- there is nothing left to click a second time.
+        case SplatColumnClick(col=named):
+            col = _named_column(model, named)
+            if col is not None and _can_expand_column(col, value, model,
+                                                      eval_in_scope):
+                _close_column_menus(model)
+                _expand_column_into_rows(model, col, value, get_visualizer,
+                                         eval_in_scope)
+
+        case UnsplatColumnClick(col=named):
+            col = _named_column(model, named)
+            if col is not None and _can_collapse_column(col, model):
+                _close_column_menus(model)
+                _collapse_column_into_cells(model, col, eval_in_scope)
 
         # Sub-columns leave the menu open, like the tally and Compute: checking
         # several boxes in a row is what a list of them is for. Every one of
