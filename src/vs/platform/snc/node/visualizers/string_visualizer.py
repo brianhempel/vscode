@@ -148,7 +148,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
 from visualizer_utils import is_read_only
-from visualizer_utils import (replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
+from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
                               opens_block, with_pass_body,
                               Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
@@ -646,6 +646,12 @@ def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, m
     open_dropdown = model.get('openDropdown') if model else None
     is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
 
+    # The bounds say nothing about laziness; the label and the selected
+    # option both need to.
+    is_lazy = _segment_is_lazy(model, segment_index)
+    if is_lazy:
+        rep_str += '?'
+
     trigger_event = repr(DropdownToggle(dropdown_id))
     trigger_html = (
         f'<span class="segment-label repetition seg-length-{seg_len}" '
@@ -658,6 +664,9 @@ def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, m
         # we can mark it .selected in the rendered list.
         current_simple = (_quantifier_to_simple_option(min_count, max_count)
                           if min_count is not None else None)
+        if is_lazy:
+            # `*?` and `+?` are offered as options; other lazy forms select nothing.
+            current_simple = current_simple + '?' if current_simple in ('*', '+') else None
         # Fall back to derived prefill values if the openDropdown state hasn't
         # been seeded yet (e.g. legacy openDropdowns set without a toggle event).
         if min_count is not None and max_count is not None:
@@ -675,7 +684,8 @@ def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, m
             if value == current_simple:
                 cls += ' selected'
             options_html.append(
-                f'<div class="{cls}" snc-mouse-down="{html.escape(select_event)}">'
+                f'<div class="{cls}" data-tooltip="{html.escape(_REPETITION_TOOLTIP[value])}" '
+                f'snc-mouse-down="{html.escape(select_event)}">'
                 f'{html.escape(label)}</div>'
             )
 
@@ -689,7 +699,7 @@ def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, m
         exact_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='exact', value=e.get('value', ''))"
         exact_cls = 'snc-dropdown-option' + (' selected' if current_is_exact else '')
         options_html.append(
-            f'<div class="{exact_cls}">'
+            f'<div class="{exact_cls}" data-tooltip="{html.escape(_REPETITION_TOOLTIP["exact"])}">'
             f'{{'
             f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(exact_input_event)}" '
             f'value="{html.escape(exact_n)}" placeholder="n" />'
@@ -708,7 +718,7 @@ def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, m
         max_input_event = f"lambda e: RepetitionInput(dropdown_id='{dropdown_id}', field='max', value=e.get('value', ''))"
         range_cls = 'snc-dropdown-option' + (' selected' if current_is_range else '')
         options_html.append(
-            f'<div class="{range_cls}">'
+            f'<div class="{range_cls}" data-tooltip="{html.escape(_REPETITION_TOOLTIP["range"])}">'
             f'{{'
             f'<input class="snc-dropdown-input" type="text" snc-input="{html.escape(min_input_event)}" '
             f'value="{html.escape(range_min)}" placeholder="n" />'
@@ -1386,8 +1396,42 @@ REPETITION_OPTIONS = [
     ('1', '1'),
     ('?', '?'),
     ('*', '*'),
+    ('*?', '*?'),
     ('+', '+'),
+    ('+?', '+?'),
 ]
+
+# What each repetition option does, shown on hover. Keyed by the option value;
+# 'exact' and 'range' are the two typed-in rows below the simple options.
+REPETITION_TOOLTIPS = [
+    ('1', 'Exactly one'),
+    ('?', 'Zero or one'),
+    ('*', 'Zero or more, as many as possible'),
+    ('*?', 'Zero or more, the fewest possible'),
+    ('+', 'One or more, as many as possible'),
+    ('+?', 'One or more, the fewest possible'),
+    ('exact', 'Exactly n'),
+    ('range', 'Between n and m (leave m blank for no upper limit)'),
+]
+_REPETITION_TOOLTIP = dict(REPETITION_TOOLTIPS)
+
+
+def _segment_is_lazy(model: dict | None, segment_index: int) -> bool:
+    """Whether the segment's quantifier is lazy (`*?`, `+?`, `??`, `{n,m}?`).
+
+    Laziness is not part of the (min, max) bounds the highlighter carries, so
+    it is read back off the search itself.
+    """
+    search = model.get('search') if model else None
+    inner = get_regex_inner_pattern(search) if search else None
+    if not inner:
+        return False
+    try:
+        segments = parse_all_segments(inner)
+        _, quantifier = extract_quantifier(segments[segment_index]['text'])
+    except Exception:
+        return False
+    return len(quantifier) > 1 and quantifier.endswith('?')
 
 
 def replace_segment_repetition(selection_regex: str, segment_index: int, new_quantifier: str) -> str:
@@ -3595,12 +3639,20 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
 
 _TOOL_TOOLBAR_TOOLS = [
-    # (tool id, icon HTML/text, display name)
-    ('literal', 'ab', 'Literal'),
-    ('fuzzy', '.*', 'Fuzzy'),
-    ('index', '01', 'Index'),
-    ('pick', nerd_font_icon('\U000F01BD'), 'Pick'),
+    # (tool id, icon HTML/text, display name, modifier that overrides to it)
+    # The modifiers mirror _resolve_selection_type.
+    ('literal', 'ab', 'Literal', 'shift'),
+    ('fuzzy', '.*', 'Fuzzy', 'alt'),
+    ('index', '01', 'Index', 'ctrl'),
+    ('pick', nerd_font_icon('\U000F01BD'), 'Pick', None),
 ]
+
+
+def _tool_tooltip(name: str, modifier: str | None) -> str:
+    """The tool's name, and the key that picks it for a single gesture."""
+    if modifier is None:
+        return name
+    return f'{name} ({modifier_key_label(modifier)})'
 
 
 def _render_tool_toolbar(model, value: str = '', compact: bool = False) -> str:
@@ -3648,8 +3700,8 @@ def _tool_icon_html(tool: str, label: str) -> str:
 def _render_tool_toolbar_vertical(current: str, has_search: bool) -> str:
     # Shared with the list visualizer's Normal/Pick toolbar; only the tool list
     # differs. Labels are escaped here because most are plain text.
-    tools = [(tool, _tool_icon_html(tool, label), name)
-             for tool, label, name in _TOOL_TOOLBAR_TOOLS]
+    tools = [(tool, _tool_icon_html(tool, label), name, _tool_tooltip(name, modifier))
+             for tool, label, name, modifier in _TOOL_TOOLBAR_TOOLS]
     return render_tool_toolbar(
         tools, current,
         lambda tool: repr(ToolSelect(tool=tool)),
@@ -3671,7 +3723,7 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
     # rendered as siblings; CSS hides all but the matching .tool-icon based
     # on data-active-tool (and modifier-key body classes).
     icon_spans = []
-    for tool, label, _ in _TOOL_TOOLBAR_TOOLS:
+    for tool, label, _, _ in _TOOL_TOOLBAR_TOOLS:
         label_html = _tool_icon_html(tool, label)
         icon_spans.append(
             f'<span class="tool-icon" data-tool="{tool}">{label_html}</span>'
@@ -3684,7 +3736,8 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
 
     # Hover-menu panel: one row per tool (icon + name).
     rows = []
-    for tool, label, name in _TOOL_TOOLBAR_TOOLS:
+    for tool, label, name, modifier in _TOOL_TOOLBAR_TOOLS:
+        tooltip = html.escape(_tool_tooltip(name, modifier))
         opt_cls = 'snc-dropdown-option tool-dropdown-option'
         if tool == current:
             opt_cls += ' active'
@@ -3693,7 +3746,7 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
         if disabled:
             opt_cls += ' dimmed'
             rows.append(
-                f'<div class="{opt_cls}" data-tool="{tool}">'
+                f'<div class="{opt_cls}" data-tool="{tool}" data-tooltip="{tooltip}">'
                 f'<span class="tool-dropdown-icon">{label_html}</span>'
                 f'<span class="tool-dropdown-name">{html.escape(name)}</span>'
                 f'</div>'
@@ -3701,7 +3754,7 @@ def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
         else:
             event = repr(ToolSelect(tool=tool))
             rows.append(
-                f'<div class="{opt_cls}" data-tool="{tool}" '
+                f'<div class="{opt_cls}" data-tool="{tool}" data-tooltip="{tooltip}" '
                 f'snc-mouse-down="{html.escape(event)}">'
                 f'<span class="tool-dropdown-icon">{label_html}</span>'
                 f'<span class="tool-dropdown-name">{html.escape(name)}</span>'

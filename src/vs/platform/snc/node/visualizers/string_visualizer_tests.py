@@ -14,6 +14,7 @@ No arguments are required; all tests should pass.
 """
 
 import unittest
+from unittest.mock import patch
 import re
 from string_visualizer import (
     update, init_model, visualize,
@@ -44,6 +45,7 @@ from string_visualizer import (
     find_fuzzy_segment_at_index,
     replace_segment_pattern,
     replace_segment_repetition,
+    REPETITION_OPTIONS, REPETITION_TOOLTIPS,
     resize_literal_segment,
     resize_fuzzy_segment,
     extract_quantifier,
@@ -12003,10 +12005,38 @@ class TestToolToolbar(unittest.TestCase):
         model = init_model(value)
         model['search'] = r"r'a'"  # so pick button is enabled (still gets a tooltip either way)
         html_str = visualize(value, model, None, None)
-        self.assertRegex(html_str, r'data-tool="literal"[^>]*data-tooltip="Literal"|data-tooltip="Literal"[^>]*data-tool="literal"')
-        self.assertRegex(html_str, r'data-tool="fuzzy"[^>]*data-tooltip="Fuzzy"|data-tooltip="Fuzzy"[^>]*data-tool="fuzzy"')
-        self.assertRegex(html_str, r'data-tool="index"[^>]*data-tooltip="Index"|data-tooltip="Index"[^>]*data-tool="index"')
+        self.assertRegex(html_str, r'data-tool="literal"[^>]*data-tooltip="Literal[^"]*"|data-tooltip="Literal[^"]*"[^>]*data-tool="literal"')
+        self.assertRegex(html_str, r'data-tool="fuzzy"[^>]*data-tooltip="Fuzzy[^"]*"|data-tooltip="Fuzzy[^"]*"[^>]*data-tool="fuzzy"')
+        self.assertRegex(html_str, r'data-tool="index"[^>]*data-tooltip="Index[^"]*"|data-tooltip="Index[^"]*"[^>]*data-tool="index"')
         self.assertRegex(html_str, r'data-tool="pick"[^>]*data-tooltip="Pick"|data-tooltip="Pick"[^>]*data-tool="pick"')
+
+    def _tooltips(self, value):
+        model = init_model(value)
+        model['search'] = r"r'a'"
+        html_str = visualize(value, model, None, None)
+        return dict(re.findall(r'data-tool="(\w+)"[^>]*data-tooltip="([^"]*)"', html_str))
+
+    def test_tool_tooltips_name_the_modifier_that_overrides_to_them(self):
+        """Holding shift/option/control picks a tool for one gesture without
+        switching to it; the tooltip says which key, in the OS's own terms."""
+        import visualizer_utils
+        with patch.object(visualizer_utils, '_IS_MAC', True):
+            tips = self._tooltips("a\nb\nc\nd\ne")
+            self.assertEqual(tips['literal'], 'Literal (\u21e7)')
+            self.assertEqual(tips['fuzzy'], 'Fuzzy (\u2325)')
+            self.assertEqual(tips['index'], 'Index (\u2303)')
+            self.assertEqual(tips['pick'], 'Pick')
+        with patch.object(visualizer_utils, '_IS_MAC', False):
+            tips = self._tooltips("a\nb\nc\nd\ne")
+            self.assertEqual(tips['literal'], 'Literal (Shift)')
+            self.assertEqual(tips['fuzzy'], 'Fuzzy (Alt)')
+            self.assertEqual(tips['index'], 'Index (Ctrl)')
+
+    def test_compact_tool_rows_carry_the_same_tooltips(self):
+        import visualizer_utils
+        with patch.object(visualizer_utils, '_IS_MAC', True):
+            tips = self._tooltips("short")  # under 4 lines: compact dropdown
+            self.assertEqual(tips.get('fuzzy'), 'Fuzzy (\u2325)')
 
     def test_tool_button_tooltips_right_aligned(self):
         """Tool toolbar lives in the upper-right corner, so tooltips show to the
@@ -14517,3 +14547,80 @@ class TestMenuRowReadings(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# =============================================================================
+# Lazy repetition options and option tooltips
+# =============================================================================
+
+class TestLazyRepetitionOptions(unittest.TestCase):
+    """The repetition dropdown offers `*?` and `+?` (lazy: as few as possible)."""
+
+    def test_options_are_offered(self):
+        values = [value for value, _ in REPETITION_OPTIONS]
+        self.assertIn('*?', values)
+        self.assertIn('+?', values)
+
+    def test_selecting_lazy_star(self):
+        model = init_model("hello world")
+        model['search'] = r"r'hello.*world'"
+        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
+        model, _ = update(make_dropdown_select_event('repetition-1', '*?'), None, model, "hello world")
+        self.assertEqual(model['search'], r"r'hello.*?world'")
+
+    def test_selecting_lazy_plus(self):
+        model = init_model("hello world")
+        model['search'] = r"r'hello.*world'"
+        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
+        model, _ = update(make_dropdown_select_event('repetition-1', '+?'), None, model, "hello world")
+        self.assertEqual(model['search'], r"r'hello.+?world'")
+
+    def test_replace_repetition_with_lazy_star(self):
+        self.assertEqual(replace_segment_repetition(r"r'(.+)'", 0, '*?'), r"r'.*?'")
+
+    def _open_on_middle_segment(self, search):
+        model = init_model("hello world")
+        model['search'] = search
+        model['hoverIdx'] = 6
+        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
+        return visualize("hello world", model, None, None)
+
+    def test_lazy_star_is_the_selected_option_and_the_label(self):
+        html = self._open_on_middle_segment(r"r'hello.*?world'")
+        self.assertRegex(html, r'snc-dropdown-option selected"[^>]*>\*\?</div>')
+        self.assertNotRegex(html, r'snc-dropdown-option selected"[^>]*>\*</div>')
+        self.assertRegex(html, r'class="segment-label repetition[^"]*"[^>]*>\*\?</span>')
+
+    def test_lazy_plus_is_the_selected_option_and_the_label(self):
+        html = self._open_on_middle_segment(r"r'hello.+?world'")
+        self.assertRegex(html, r'snc-dropdown-option selected"[^>]*>\+\?</div>')
+        self.assertNotRegex(html, r'snc-dropdown-option selected"[^>]*>\+</div>')
+        self.assertRegex(html, r'class="segment-label repetition[^"]*"[^>]*>\+\?</span>')
+
+    def test_greedy_star_is_still_the_selected_option(self):
+        html = self._open_on_middle_segment(r"r'hello.*world'")
+        self.assertRegex(html, r'snc-dropdown-option selected"[^>]*>\*</div>')
+        self.assertNotRegex(html, r'snc-dropdown-option selected"[^>]*>\*\?</div>')
+
+
+class TestRepetitionOptionTooltips(unittest.TestCase):
+    """Each repetition option explains itself on hover."""
+
+    def test_every_option_has_a_tooltip(self):
+        model = init_model("hello world")
+        model['search'] = r"r'hello.*world'"
+        model['hoverIdx'] = 6
+        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
+        html = visualize("hello world", model, None, None)
+        for value, label in REPETITION_OPTIONS:
+            with self.subTest(option=value):
+                self.assertRegex(
+                    html,
+                    r'snc-dropdown-option[^>]*data-tooltip="[^"]+"[^>]*>' + re.escape(label) + '</div>')
+
+    def test_tooltips_say_what_the_options_do(self):
+        tips = dict(REPETITION_TOOLTIPS)
+        self.assertIn('exactly', tips['1'].lower())
+        self.assertIn('fewest', tips['*?'].lower())
+        self.assertIn('fewest', tips['+?'].lower())
+        self.assertIn('one or more', tips['+'].lower())

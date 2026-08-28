@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
@@ -110,6 +111,25 @@ def nerd_font_icon(glyph: str, size: int = 12) -> str:
     return f'<span style="font-family:Pragmasevka;font-size:{size}px">{glyph}</span>'
 
 
+# The editor runs where this does, so the platform Python sees is the one the
+# user's keyboard belongs to.
+_IS_MAC = sys.platform == 'darwin'
+
+_MODIFIER_LABELS = {
+    'shift': ('\u21e7', 'Shift'),
+    'alt': ('\u2325', 'Alt'),
+    'ctrl': ('\u2303', 'Ctrl'),
+    'cmd': ('\u2318', 'Ctrl'),
+}
+
+
+def modifier_key_label(modifier: str) -> str:
+    """How the user's OS names a modifier key: `alt` is \u2325 on a Mac, `Alt`
+    elsewhere. For tooltips and shortcut hints."""
+    mac, other = _MODIFIER_LABELS[modifier]
+    return mac if _IS_MAC else other
+
+
 def render_tool_toolbar(tools, current: str, make_event, *, disabled=(), is_compact=False) -> str:
     """Render the upper-right tool toolbar shared by the visualizers.
 
@@ -117,9 +137,10 @@ def render_tool_toolbar(tools, current: str, make_event, *, disabled=(), is_comp
     offers normal/pick. Only the tool list differs, so the markup lives here.
 
     Args:
-      tools: sequence of (tool_id, icon_html, display_name). icon_html is
-        emitted verbatim -- callers escape their own labels, because some are
-        plain text ('ab') and some are pre-rendered icon spans.
+      tools: sequence of (tool_id, icon_html, display_name[, tooltip]).
+        icon_html is emitted verbatim -- callers escape their own labels,
+        because some are plain text ('ab') and some are pre-rendered icon
+        spans. The tooltip defaults to the display name.
       current: the active tool id, which gets the .active class.
       make_event: tool_id -> the repr'd event string for snc-mouse-down. Taken
         as a callback because each visualizer defines its own ToolSelect type,
@@ -127,7 +148,8 @@ def render_tool_toolbar(tools, current: str, make_event, *, disabled=(), is_comp
       disabled: tool ids to render dimmed and click-inert (no handler at all).
     """
     btns = []
-    for tool, icon_html, name in tools:
+    for tool, icon_html, name, *rest in tools:
+        tooltip = rest[0] if rest else name
         cls = 'tool-button'
         if tool == current:
             cls += ' active'
@@ -137,7 +159,7 @@ def render_tool_toolbar(tools, current: str, make_event, *, disabled=(), is_comp
         # Right-aligned tooltip: the toolbar sits in the upper-right corner,
         # where there is empty editor space to the right.
         attrs = (f'class="{cls}" data-tool="{tool}" '
-                 f'data-tooltip="{html.escape(name)}" data-tooltip-align="right"')
+                 f'data-tooltip="{html.escape(tooltip)}" data-tooltip-align="right"')
         if is_disabled:
             btns.append(f'<span {attrs}>{icon_html}</span>')
         else:
