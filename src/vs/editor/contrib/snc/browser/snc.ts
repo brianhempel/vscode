@@ -6412,10 +6412,21 @@ export class SNCController extends Disposable implements IEditorContribution {
 					// them are for something that is gone. (A superseded run
 					// never gets here -- it is disowned above, so its events
 					// survive for the run that replaced it.)
+					// Nothing drawn reads `unhandledEvents`, so this sweep is not a
+					// render anything should wait for -- but it is an assignment,
+					// and it lands after the render above, so left alone it ends
+					// every run one version ahead of the DOM and `pythonStatus`
+					// reports 'un-rendered' forever. Carry the mark across when
+					// the DOM was already caught up; when it was not, a real
+					// render is still owed and the status should keep saying so.
+					const wasRendered = this.renderedVersion === this.itemsVersion;
 					this.visualizationItems = this.visualizationItems.map(v =>
 						v.unhandledEvents?.length && !this.itemsThisRun.has(widgetKey(v.line, v.visIndex))
 							? { ...v, unhandledEvents: [] }
 							: v);
+					if (wasRendered) {
+						this.renderedVersion = this.itemsVersion;
+					}
 
 					this.currentRunId = null;
 					this.resumedFromStep = null;
