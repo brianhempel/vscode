@@ -7294,6 +7294,49 @@ def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
     return None
 
 
+def _table_rows_exps(model: dict, source_expr: 'str | None') -> list:
+    """Every row read across the columns -- the table on screen, as code.
+
+    The column twin of _row_tuple_expr: that one is one row across the columns,
+    this is all of them, one tuple per row. Assembled out of the pick builders
+    because Pick already writes exactly this expression when every column's
+    full-height band is selected -- there is one right answer here and it is
+    already written.
+
+    Whatever the columns say is what comes out, so a column the user computed
+    reads the same here as it does down the table. A search is not part of it:
+    this is the table, not the matches.
+
+    Nothing to offer in three cases, each because something else already says
+    it better. A DICT's is `list(d.items())`, which its column header hands
+    over. ONE column is that column, which its own header hands over -- the
+    same reason _drop_repeats stops a row handle naming one expression twice.
+    And a SPLAT column contributes no single value per row, so it is not among
+    the ids _pick_column_ids offers; a table of nothing else falls under the
+    one-column case and offers nothing.
+    """
+    columns = model.get('columns', [])
+    if source_expr is None or model.get('_is_dict'):
+        return []
+    col_ids = [col_id for col_id in _pick_column_ids(columns)
+               if col_id != PICK_IDX_COLUMN]
+    if len(col_ids) < 2:
+        return []
+    binds = _model_binds(model)
+    # The index column contributes `i`, which is what tips _pick_comprehension
+    # into the enumerate form -- so the numbered reading is the same call.
+    readings = [
+        ("Every row's cells", col_ids),
+        ('With row numbers', [PICK_IDX_COLUMN] + col_ids),
+    ]
+    exps = []
+    for label, ids in readings:
+        expr = _pick_zip_expr(ids, columns, source_expr, None, None, binds)
+        if expr:
+            exps.append(PyExp(expr, label=label))
+    return exps
+
+
 def _pick_needs_index(pick_expr: str) -> bool:
     """Whether an assembled expression refers to the matched row's index.
 

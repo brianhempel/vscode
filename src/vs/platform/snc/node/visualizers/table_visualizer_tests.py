@@ -17734,6 +17734,92 @@ class TestTinyLen(unittest.TestCase):
         self.assertLess(output.index('search-div'), output.index('tiny-len'))
 
 
+from table_visualizer import _table_rows_exps
+
+
+class TestTableRowsExps(unittest.TestCase):
+    """The table itself, as code, on the handle the count already carries.
+
+    A row's grip hands over that row read across the columns; the count hands
+    over every row -- one tuple per row, computed columns and all. The count
+    stays first, so what the chip DRAGS is what it always dragged.
+    """
+
+    PEOPLE = [{'name': 'ada', 'age': 36}, {'name': 'grace', 'age': 45}]
+    COLUMNS = ["$['name']", "$['age'] * 2"]
+
+    def table(self, lst=None, columns=None, var_and_exp=('people', 'people'),
+              **kwargs):
+        lst = self.PEOPLE if lst is None else lst
+        model = init_model(lst, mock_get_visualizer)
+        if columns is not None:
+            model['columns'] = list(columns)
+        return visualize(lst, model, mock_get_visualizer, None,
+                         var_and_exp=var_and_exp, **kwargs)
+
+    def test_the_count_hands_over_the_table_beside_it(self):
+        out = self.table(columns=self.COLUMNS)
+        self.assertEqual(handles_in(_tiny_len(out)), [[
+            {'expr': 'len(people)', 'label': 'Count'},
+            {'expr': "[(x['name'], x['age'] * 2) for x in people]",
+             'label': "Every row's cells"},
+            {'expr': "[(i, x['name'], x['age'] * 2) "
+                     'for i, x in enumerate(people)]',
+             'label': 'With row numbers'},
+        ]])
+
+    def test_the_stack_is_offered_beside_the_widget(self):
+        # The bar is the widget's bottom edge, so above it is the table this
+        # is about. Beside it is empty editor.
+        self.assertIn('snc-py-exp-align="right"',
+                      _tiny_len(self.table(columns=self.COLUMNS)))
+
+    def test_a_computed_column_is_one_of_the_cells(self):
+        # The whole point: a column the user wrote reads the same here as it
+        # does down the table.
+        out = self.table(columns=["$['name']", "len($['name'])"])
+        self.assertEqual(exps_in(_tiny_len(out))[0][1],
+                         "[(x['name'], len(x['name'])) for x in people]")
+
+    def test_one_column_is_what_the_header_already_hands_over(self):
+        # Nothing to make a tuple out of, and the column header says it better.
+        out = self.table(columns=["$['name']"])
+        self.assertEqual(exps_in(_tiny_len(out)), [['len(people)']])
+
+    def test_a_dict_table_offers_the_count_alone(self):
+        d = {'ada': 36, 'grace': 45}
+        out = self.table(d, var_and_exp=('d', 'd'))
+        self.assertEqual(exps_in(_tiny_len(out)), [['len(d)']])
+
+    def test_nothing_without_a_source_expression(self):
+        out = self.table(columns=self.COLUMNS, var_and_exp=None)
+        self.assertNotIn('snc-py-exps', _tiny_len(out))
+
+    def test_the_preview_carries_them_too(self):
+        out = self.table(columns=self.COLUMNS, small=True)
+        self.assertEqual(exps_in(_tiny_len(out)),
+                         [['len(people)',
+                           "[(x['name'], x['age'] * 2) for x in people]",
+                           "[(i, x['name'], x['age'] * 2) "
+                           'for i, x in enumerate(people)]']])
+
+    def test_the_builder_reads_the_columns_it_is_given(self):
+        model = make_pick_model(columns=PICK_COLUMNS, search=None,
+                                tool='normal')
+        self.assertEqual([exp.expr for exp in _table_rows_exps(model, 'strs')],
+                         ['[(x, len(x)) for x in strs]',
+                          '[(i, x, len(x)) for i, x in enumerate(strs)]'])
+
+    def test_the_builder_declines_what_it_has_nothing_to_say_about(self):
+        model = make_pick_model(columns=PICK_COLUMNS, search=None,
+                                tool='normal')
+        self.assertEqual(_table_rows_exps(model, None), [])
+        self.assertEqual(_table_rows_exps(dict(model, columns=['$']), 'strs'),
+                         [])
+        self.assertEqual(_table_rows_exps(dict(model, _is_dict=True), 'strs'),
+                         [])
+
+
 # === Paging: the first page, the last few rows, and the row between ==========
 
 from table_visualizer import LoadMoreRows, ROWS_PER_PAGE, TAIL_ROWS
