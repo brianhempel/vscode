@@ -646,6 +646,7 @@
 
 .visualizer-container .visualizer-container > .snc-tool-and-visualizer > .tool-toolbar {
 	right: calc(100% + 5px);
+	left: auto;
 }
 
 .visualizer-container .snc-generic-visualizer {
