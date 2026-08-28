@@ -8684,7 +8684,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
             f'<th class="{" ".join(th_classes)}"{span_attrs}>'
             f'<span class="col-header-inner">'
             f'<span class="col-name">'
-            f'{html.escape(col if label is None else label)}</span>'
+            f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
             f'</span>'
             f'</th>'
         )
@@ -8737,7 +8737,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
-        f'{html.escape(col if label is None else label)}</span>'
+        f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
         f'class="col-handle snc-hover-hidden full-opacity-on-hover">⣿</span>'
