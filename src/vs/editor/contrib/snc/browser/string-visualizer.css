@@ -1,12 +1,12 @@
 .string-visualizer {
 	line-height: 20px;
-	max-height: 80px;
+	max-height: 100px;
 	max-width: 800px;
 	overflow: auto;
 	scrollbar-width: var(--snc-scrollbar-width);
 	scrollbar-color: var(--snc-scrollbar-color);
 	/* right padding leaves room for the .tool-toolbar so characters don't get stuck under it */
-	padding: 0px 34px 0px 4px;
+ 	padding: 2px 0px 2px 4px;
 	white-space: pre;
 	display: flex; /* this removes the few extra vertical pixels added by overflow auto, even when scrollbar is not visible. stops the computation from saving space for descenders. but also need ANOTHER div just inside to break out of flex and do white-space:pre formatting */
 }
@@ -15,6 +15,7 @@
 	scrollbar-width: none;
 	padding-right: 4px;
 }
+
 .small.expanded .string-visualizer {
 	scrollbar-width: var(--snc-scrollbar-width);
 }
@@ -392,7 +393,27 @@ body.snc-shift-down .tool-button[data-tool="index"] {
 
 .tool-toolbar.tool-toolbar-compact {
 	flex-direction: row;
-	align-items: center;
+  align-items: center;
+  outline: none;
+  background: none;
+  padding: 0px;
+  position: initial;
+  background: #f5f5f5;
+  border: 1px solid var(--snc-border-color);
+  position: absolute;
+  left: 0px;
+  transform: translateX(calc(-100% - 5px));
+
+  & > .snc-dropdown-trigger > .tool-button {
+	  outline: none;
+	  padding: 0px 2px;
+	  padding-left: 3px;
+	  background: none;
+  }
+
+  &:hover > .snc-dropdown-trigger > .tool-button {
+  	background: var(--snc-hover-bg);
+  }
 }
 
 .tool-button.tool-dropdown-trigger-button {
@@ -406,6 +427,10 @@ body.snc-shift-down .tool-button[data-tool="index"] {
 .tool-icon {
 	display: none;
 	font-family: var(--snc-code-font-family);
+}
+
+.tool-toolbar.tool-toolbar-compact-alt {
+    flex-direction: row;
 }
 
 .tool-toolbar-compact[data-active-tool="literal"] .tool-icon[data-tool="literal"],
@@ -470,10 +495,13 @@ body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
 	padding: 2px 6px 2px 4px;
 }
 
-.tool-dropdown-option.active .tool-dropdown-name,
-.tool-dropdown-option.active .tool-dropdown-icon {
-	color: var(--snc-accent);
-	font-weight: 600;
+.tool-dropdown-option.active {
+	background: var(--snc-hover-bg);
+
+	& .tool-dropdown-name,
+	& .tool-dropdown-icon {
+		color: var(--snc-accent);
+	}
 }
 
 .tool-dropdown-icon {
@@ -494,7 +522,7 @@ body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
    22px-wide icon buttons; the compact trigger (icon + chevron) is slightly
    wider so bump the right padding by a few extra pixels. */
 .visualizer-container.tool-toolbar-compact-container .string-visualizer {
-	padding-right: 50px;
+	padding-right: 5px;
 }
 
 /* In effective index mode, hide regex anchors (^, $) - both the string-boundary

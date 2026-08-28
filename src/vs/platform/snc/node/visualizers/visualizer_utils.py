@@ -46,7 +46,7 @@ _STYLE_RE = re.compile(r'\bstyle="([^"]+)"', flags=re.M)
 _ICON_NAMES = [
     "bin", "caps", "boolean-any", "boolean-all", "exists", "filter",
     "match-first", "regex-group", "split", "loop", "replace", "search",
-    "search-str", "search-idx", "search-match",
+    "search-str", "search-idx", "search-match", "pick-tool"
 ]
 for _icon in _ICON_NAMES:
     with open(os.path.join(os.path.dirname(__file__), f'icons/{_icon}.svg'), 'r') as _f:
@@ -110,7 +110,7 @@ def nerd_font_icon(glyph: str, size: int = 12) -> str:
     return f'<span style="font-family:Pragmasevka;font-size:{size}px">{glyph}</span>'
 
 
-def render_tool_toolbar(tools, current: str, make_event, *, disabled=()) -> str:
+def render_tool_toolbar(tools, current: str, make_event, *, disabled=(), is_compact=False) -> str:
     """Render the upper-right tool toolbar shared by the visualizers.
 
     The string visualizer offers literal/fuzzy/index/pick; the list visualizer
@@ -143,7 +143,9 @@ def render_tool_toolbar(tools, current: str, make_event, *, disabled=()) -> str:
         else:
             event = html.escape(make_event(tool))
             btns.append(f'<span {attrs} snc-mouse-down="{event}">{icon_html}</span>')
-    return f'<div class="tool-toolbar">{"".join(btns)}</div>'
+
+    is_compact_class = ' tool-toolbar-compact-alt' if is_compact else ''
+    return f'<div class="tool-toolbar{is_compact_class}">{"".join(btns)}</div>'
 
 
 # How tall a pane opened by the expand toggle is allowed to get. The string

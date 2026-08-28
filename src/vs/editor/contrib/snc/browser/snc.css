@@ -7,7 +7,8 @@
 
 .editor-instance {
 	--snc-bg: #fcfcfc;
-	--snc-table-header-bg: #eee;
+	--snc-data-bg: #fffdf9;
+	--snc-table-header-bg: #fff5df;
 	--snc-border-color: #c0c0c0;
 	--snc-table-cell-border-color: #dedede;
 	--snc-text-color: #4A4A4A;
@@ -20,6 +21,8 @@
 		0.7px 0.9px 1.3px -0.8px hsl(0deg 0% 63% / 0.36),
 		1.8px 2.3px 3.3px -1.7px hsl(0deg 0% 63% / 0.36),
 		4.4px 5.7px 8.1px -2.5px hsl(0deg 0% 63% / 0.36);
+
+
 	--snc-ui-widget-font-family: -apple-system, system-ui, sans-serif;
 	--snc-code-font-family: Pragmasevka, monospace;
 
@@ -74,9 +77,9 @@
 	z-index: 1000;
 	user-select: text;
 
-	background: var(--snc-bg);
+	/*background: var(--snc-bg);
 	border-radius: 5px;
-	border: 1px solid var(--snc-border-color);
+	border: 1px solid var(--snc-border-color);*/
 
 	/* Common case: when we are not inline to the right of the text  */
 	&.snc-visualization-widget-block-layout {
@@ -90,7 +93,9 @@
 	}
 
 	&:has(> .visualizer-container:not(.small)) {
-		border-color: var(--vscode-focusBorder);
+		> .snc-tool-and-visualizer > .snc-base-visualizer {
+			border-color: var(--vscode-focusBorder);
+		}
 	}
 
 	&:has(> .list-visualizer.small) { /* rounded corners and table borders */
@@ -130,11 +135,20 @@
 
 .search-div {
 	white-space: normal;
-	display: flex;
-	flex-direction: column;
-	padding: 5px;
-	border-top: 1px solid var(--snc-border-color);
-	gap: 5px;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--snc-border-color);
+  gap: 5px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  margin-top: 18px;
+}
+
+.has-focused-child > .search-div,
+.has-focused-child > .snc-tool-and-visualizer > .tool-toolbar {
+	opacity: 0;
+	pointer-events: none;
 }
 
 .search-div-row {
@@ -142,6 +156,7 @@
 	align-items: center;
 	gap: 5px;
 }
+
 
 .visualizer-container {
 	user-select: none;
@@ -161,18 +176,19 @@
 
 .tool-toolbar {
 	position: absolute;
-	top: 1px;
-	right: 1px;
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-	z-index: 50;
-	user-select: none;
-	/* Opaque background so the toolbar doesn't visually merge with content that
-	   scrolls under it. */
-	background: var(--snc-bg);
-	border-radius: 4px;
-	outline: 1px solid var(--snc-bg); /* in case it's over the content itself */
+  top: 1px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 50;
+  user-select: none;
+  background: #f0f0f0;
+  border-radius: 4px;
+  padding: 3px;
+  outline: 1px solid var(--snc-border-color);
+
+  left: calc(100% + 5px);
+  width: fit-content;
 }
 
 .tool-button {
@@ -197,8 +213,9 @@
 }
 
 .tool-button.active {
-	background: var(--snc-hover-bg);
-	color: var(--snc-accent);
+	background: white;
+  color: var(--snc-accent);
+  outline: 1px solid var(--snc-border-color);
 }
 
 /* Dimmed tool buttons (e.g. pick tool with no current search) - visibly
@@ -227,17 +244,33 @@
 
 .expand-and-len {
 	display: flex;
-	height: 10px;
+	height: 8px;
 	line-height: 10px;
-	border-top: 1px solid var(--snc-border-color);
 	/* avoid a thin sliver of scrolling table content showing up at certain zoom levels. because we have negative margin on the table scroller to hide the bottom table borders */
-	background-color: var(--snc-bg);
 	z-index: 1;
 	user-select: none;
 	color: var(--snc-text-dimmed);
+
+	position: absolute;
+  left: 0px;
+  width: 100%;
+  bottom: -8px;
+
+
+  background: #f8f5f0;
+  border-radius: 0px 0px 4px 4px;
+
+  border: 1px solid var(--snc-border-color);
+  border-top: none;
+  box-sizing: border-box;
+
 	&:last-child {
 		/* make bg not cut off the corners of the visualizer */
 		border-radius: 0 0 4px 4px;
+	}
+
+	&:hover {
+		background: #e2e2e2;
 	}
 }
 
@@ -254,16 +287,45 @@
 	overflow: clip;
 }
 
+.auxiliary-attributes {
+	display: flex;
+	width: fit-content;
+	border: 1px solid var(--snc-border-color);
+	position: absolute;
+	/*padding: 0px 2px;*/
+	transform: translateY(calc(-100% - 5px));
+	background: #f5f5f5;
+	border-bottom: none;
+	border-radius: 4px 4px 0px 0px;
+	left: 8px;
+
+	&:after {
+		content: "";
+		position: absolute;
+		bottom: -1px;
+		left: 0;
+		width: 100%;
+		height: 2px;
+		background: #f5f5f5;
+	}
+}
+
 .tiny-len {
 	font-size: 8px;
-	padding: 0 5px;
-	border-left: 1px solid var(--snc-border-color);
-	font-family: var(--snc-ui-widget-font-family);
-	letter-spacing: -0.025em;
-	/* a string's bar carries two of these (lines, then chars): let the toggle
-	   give up the room rather than wrapping a count onto a second line */
-	white-space: nowrap;
-	flex-shrink: 0;
+  padding: 3px 2px;
+  font-family: var(--snc-ui-widget-font-family);
+  white-space: nowrap;
+  flex-shrink: 0;
+  line-height: 1em;
+  border-radius: 4px;
+
+  &:first-child {
+  	padding-left: 4px;
+  }
+
+  &:last-child {
+  	padding-right: 4px;
+  }
 }
 
 /* The counts are drag handles only while they carry an expression: under
@@ -275,6 +337,10 @@
 
 .expand-toggle:hover,
 .tiny-len[snc-py-exps]:hover {
+	cursor: grab;
+}
+
+.tiny-len:hover {
 	background: var(--snc-hover-bg);
 	color: black;
 }
@@ -285,12 +351,12 @@
 	position: absolute;
 	pointer-events: none;
 	transition: transform 0.1s ease;
-	transform: translateY(-2.5px);
+	transform: translateY(-3.5px);
 }
 
 /* Point the chevron up once the pane is open (collapse affordance). */
 .expand-toggle.expanded .chevron {
-	transform: translateY(3px) rotate(180deg);
+	transform: translateY(1px) rotate(180deg);
 }
 
 .search-toggles-container {
@@ -306,7 +372,7 @@
 	flex-grow: 1;
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
+	gap: 0px;
 }
 
 .search-div.expanded {
@@ -343,7 +409,7 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	border-radius: 3px;
+	border-radius: 4px;
 
 	&:hover {
 		color: black;
@@ -384,7 +450,7 @@
 }
 
 .action-button {
-	padding: 3px 6px;
+	padding: 4px 6px;
 
 	white-space: nowrap;
 
@@ -401,7 +467,7 @@
 
 .disclosure-button {
 	width: 14px;
-	padding: 5px 3px;
+	padding: 5px 0px;
 }
 
 .disclosure-button-spacer {
@@ -421,7 +487,11 @@
   display: flex;
   gap: 2px;
 	flex-grow: 1;
-	margin-left: -2px;
+
+	.action-button > :not(.text) {
+		display: none; /*Hide icons*/
+	}
+
 	/* justify-content: space-between;
 
 	> .action-button,
@@ -525,6 +595,84 @@
   &.categorized {
   	padding: 0px;
   }
+}
+
+.snc-base-visualizer {
+	border: 1px solid var(--snc-border-color);
+	background: var(--snc-data-bg);
+  border-radius: 4px;
+  width: fit-content;
+}
+
+.search-div.toolbar-anchor.toolbar-anchor-hoisted {
+	position: absolute;
+	box-shadow: var(--snc-panel-shadow);
+	z-index: 2;
+ 	margin-top: 10px;
+  margin-left: -12px;
+
+	& .action-buttons {
+		max-width: 300px;
+		min-width: 300px;
+		flex-wrap: wrap;
+		justify-content: space-between;
+	}
+
+	& .auxiliary-attributes {
+		/*flex-direction: column;*/
+	}
+}
+
+.search-div.toolbar-anchor.has-focused-child-search-box.toolbar-anchor-hoisted {
+	display: none;
+}
+
+.visualizer-container .visualizer-container.small > .snc-tool-and-visualizer > .snc-base-visualizer {
+	background: none;
+	padding: 0px;
+	display: block;
+
+	&:not(.list-table-scroll) {
+		border: none;
+	}
+}
+
+.visualizer-container .visualizer-container > .snc-tool-and-visualizer > .snc-base-visualizer {
+	padding: 0px;
+}
+
+.visualizer-container .snc-generic-visualizer {
+	padding: 0px;
+}
+
+.visualizer-container.is-expandable > .snc-tool-and-visualizer {
+	margin-bottom: 8px;
+}
+
+.visualizer-container.is-expandable > .snc-tool-and-visualizer > .snc-base-visualizer {
+	border-radius: 4px 4px 0px 0px;
+}
+
+.visualizer-container:not(.small):not(:has(.visualizer-container:not(.small))) {
+	& > .snc-tool-and-visualizer > .snc-base-visualizer {
+		border-color: #286bcb;
+	}
+
+	&.is-expandable > .snc-tool-and-visualizer > .expand-and-len {
+		border: 1px solid #286bcb;
+    border-top: none;
+    box-sizing: border-box;
+	}
+
+	&.is-expandable > .snc-tool-and-visualizer > .snc-base-visualizer {
+		border-bottom-color: var(--snc-border-color);
+	}
+}
+
+.snc-tool-and-visualizer {
+  width: fit-content;
+  position: relative;
+  display: flex;
 }
 
 .snc-dropdown-trigger {
@@ -727,7 +875,9 @@
 
 /* Linked state for action buttons */
 .action-button.linked {
-	color: #e0a060;
+	color: var(--snc-accent);
+  background: #ffffff;
+  outline: 1px solid var(--snc-border-color);
 }
 
 /* === Link chain icon (lower-left chrome of a linkable visualizer) === */
@@ -747,8 +897,12 @@
 	user-select: none;
 	border-radius: 5px;
 	/* border: 1px solid var(--snc-border-color); */
-	background-color: var(--snc-bg);
+	/*background-color: var(--snc-bg);*/
 	color: var(--snc-text-dimmed);
+}
+
+.has-focused-child + .snc-link-chain {
+	display: none;
 }
 
 /* The iteration picker on a loop (or def) header line; see LoopSliderWidget. */
@@ -811,7 +965,7 @@
 
 /* Linked: accent-colored chain; hovering it (or the arrow) swaps to an ✕. */
 .snc-link-chain.linked {
-	color: var(--snc-text-muted);
+	color: #464646;
 }
 
 .snc-link-chain.linked:hover {
@@ -830,7 +984,7 @@
 
 /* Unlinked: dimmed chain that persists so the user can re-link. */
 .snc-link-chain.unlinked {
-	color: var(--snc-text-dimmed);
+	color: #838383;
 }
 
 .snc-link-chain.unlinked:hover {
@@ -1032,10 +1186,11 @@
 
 .list-visualizer th,
 .list-visualizer td {
-	padding: 0 2px;
+	padding: 2px 3px;
 	border: solid 0px var(--snc-table-cell-border-color);
 	border-bottom-width: 1px;
 	border-right-width: 1px;
+	vertical-align: top;
 }
 /* Last row, whether or not aggregations are present. Avoid double-borders */
 .small > .list-table-scroll > table:not(:has(> tfoot > tr)) > tbody > tr:last-child > td,
@@ -1048,6 +1203,10 @@
 .small > .list-table-scroll > table > tbody > tr > td:last-child,
 .small > .list-table-scroll > table > tfoot > tr > td:last-child {
   border-right-width: 0;
+}
+
+.list-visualizer:not(.small) > .snc-tool-and-visualizer > .expand-and-len {
+	width: calc(100% - 11px);
 }
 
 /* .list-table-scroll > table > tbody > tr:first-child > th,
@@ -1067,7 +1226,8 @@
 	font-family: var(--snc-code-font-family);
 }
 :not(.small) > .list-table-scroll {
-	margin-bottom: -1px; /* overlap/hide bottom table border so it doesn't double-up with the search area border */
+	/*margin-bottom: -1px; */
+	/* overlap/hide bottom table border so it doesn't double-up with the search area border */
 }
 
 /* Keep column headers visible while scrolling the table body.
@@ -1080,7 +1240,7 @@
 
    Nested lists opt out: their overflow:auto often doesn't overflow, so sticky
    would stick to the parent's scrollport and float over it. */
-.list-visualizer > .list-table-scroll > table > thead.col-header-rows {
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows {
 	position: sticky;
 	top: 0;
 	z-index: 1;
@@ -1095,11 +1255,12 @@
    box-shadow doesn't accumulate across rules, so a second one would otherwise
    have to restate this and the two would drift apart. Nested lists blank the
    variable rather than the shadow, for the same reason. */
-.list-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th {
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th {
 	--snc-col-header-edge: inset 0 -1px 0 var(--snc-table-cell-border-color);
 	background: var(--snc-table-header-bg);
 	border-bottom-width: 0;
 	box-shadow: var(--snc-col-header-edge);
+	padding: 5px 3px;
 
 	/* a column actively filtering rows */
 	&.col-filtered {
@@ -1121,16 +1282,19 @@
 	}
 }
 
-.list-visualizer > .list-table-scroll > table > thead.col-header-rows > tr:first-child > th:first-child {
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr:first-child > th:first-child {
 	border-radius: 4px 0 0 0; /* don't overlap the rounded upper-left border corner of .snc-visualization-widget */
+ 	min-width: 20px;
+  text-align: center;
+  padding-right: 7px;
 }
 
-.list-visualizer .list-visualizer > .list-table-scroll > table > thead.col-header-rows {
+.list-visualizer > .snc-tool-and-visualizer > .list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows {
 	position: static;
 	z-index: auto;
 }
 
-.list-visualizer .list-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th {
+.list-visualizer > .snc-tool-and-visualizer > .list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th {
 	--snc-col-header-edge: 0 0 0 transparent; /* the real border is back, below */
 	border-bottom-width: 1px;
 }
@@ -1192,10 +1356,10 @@
 }
 
 .list-visualizer .col-name {
-	color: var(--snc-string-color);
-	cursor: pointer;
-	flex-grow: 1;
-	text-align: center;
+	color: #645d4d;
+  cursor: pointer;
+  padding-left: 1px;
+  font-weight: 400;
 }
 
 .editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.active {
@@ -1712,14 +1876,14 @@
    wants. Nothing here fixes a row's height, and nothing should -- the cells
    size themselves and the row follows. */
 /* to get this to look good with scrolling (table cell borders don't stick!) there are a lot of funky -1px margins, borders, and backgrounds between .search-div, .col-agg, .agg-cell, and the list scroller */
-.list-visualizer > .list-table-scroll > table > tfoot.col-agg-rows {
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > tfoot.col-agg-rows {
 	position: sticky;
 	bottom: 0;
 	z-index: 1;
 }
 
 /* .col-agg wrapper just inside has most of the styles */
-.list-visualizer > .list-table-scroll > table > tfoot.col-agg-rows > tr > td.col-agg-cell {
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > tfoot.col-agg-rows > tr > td.col-agg-cell {
 	background: var(--snc-table-header-bg);
 	padding: 0; /* wrapper re-adds padding */
 	vertical-align: top;
@@ -1728,7 +1892,7 @@
 
 /* Nested lists opt out, like the sticky header: their scrollport often doesn't
    overflow, and the foot would stick to the parent's and float over it. */
-.list-visualizer .list-visualizer > .list-table-scroll > table > tfoot.col-agg-rows {
+.list-visualizer .list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > tfoot.col-agg-rows {
 	position: static;
 	z-index: auto;
 }
@@ -1923,21 +2087,29 @@
 	min-width: 150px;
 }
 
+.snc-dropdown-trigger.col-add-trigger {
+	background: #f0f0f0;
+	border-radius: 4px;
+	margin-left: 4px;
+}
+
 .list-visualizer .col-add {
 	cursor: pointer;
 	vertical-align: middle;
+	cursor: pointer;
 }
 
 .list-visualizer .col-add-icon {
 	color: var(--snc-text-muted);
-	opacity: 0.5;
-	font-size: 17px;
-	font-style: normal;
-	padding: 0 4px;
-	font-weight: 100;
-	margin: 0 2px;
-	border-radius: 3px;
-	user-select: none;
+  opacity: 0.5;
+  font-size: 10px;
+  font-style: normal;
+  padding: 0 1px;
+  font-weight: 100;
+  border-radius: 3px;
+  user-select: none;
+  display: flex;
+  align-items: center;
 }
 
 /* The (+)'s menu is hoisted out of the <th>, so the header stops being hovered
@@ -1953,6 +2125,7 @@
 	text-align: right;
 	/* Anchors the pick overlay, which covers the whole cell. */
 	position: relative;
+	padding-right: 7px;
 }
 
 /* The number and the two controls that hang off it. Flex lives on this wrapper
@@ -2006,7 +2179,7 @@
 	visibility: hidden;
 	position: absolute;
 	left: 100%;
-	margin-left: 2px;
+	margin-left: 7px;
 	/* top: 50%; */
 	/* transform: translateY(-50%); */
 	cursor: pointer;
@@ -2069,6 +2242,10 @@
 	color: var(--snc-text-muted);
 	font-weight: normal;
 	text-align: right;
+}
+
+.list-visualizer th {
+	padding: 4px 3px;
 }
 
 .list-visualizer tr.row-match {
@@ -2307,10 +2484,21 @@
 }
 
 .match-object-preview {
-	padding: 0px 4px;
-	font-size: 11px;
-	opacity: 0.85;
-	line-height: 16px;
+	padding: 1px 4px;
+  font-size: 10px;
+  opacity: 0.85;
+  line-height: 16px;
+  background: #f5f5f5;
+  border: 1px solid var(--snc-border-color);
+  width: fit-content;
+  border-radius: 0px 0px 0px 4px;
+  margin-left: 8px;
+  border-top: none;
+  border-right-color: #f5f5f5;
+}
+
+.search-box-wrapper.replace-box-wrapper {
+	margin-top: 5px;
 }
 
 /* The JSON of a `#%click` config comment, folded to a token that reads like a

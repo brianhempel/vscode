@@ -1874,6 +1874,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// Hoist segment labels out of the scrollable string container so they
 		// aren't clipped by its overflow.
 		this.hoistSegmentLabels();
+		this.hoistNestedToolbars();
 		this.updateLayoutMode();
 
 		// Scroll any element marked for scroll-into-view (e.g. selected autocomplete item)
@@ -2466,6 +2467,66 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			});
 			scrollers.add(scroller);
 		}
+
+		// Keep labels glued to their characters as the string scrolls, and hide
+		// any that scroll outside their container's visible box.
+		this.repositionHoistedSegmentLabels();
+		for (const scroller of scrollers) {
+			this.hoistedSegmentLabelListeners.push(
+				dom.addDisposableListener(scroller, 'scroll', () => this.repositionHoistedSegmentLabels())
+			);
+		}
+	}
+
+	private hoistNestedToolbars(): void {
+		const anchors = Array.from(this.domNode.querySelectorAll('.visualizer-container .visualizer-container > .toolbar-anchor'))
+			.filter(dom.isHTMLElement)
+			// Skip anything already at the widget root (defensive; shouldn't happen).
+			.filter((a) => a.parentElement !== this.domNode);
+		if (anchors.length === 0) { return; }
+
+		const widgetRect = this.domNode.getBoundingClientRect();
+		const scrollers = new Set<HTMLElement>();
+
+		for (const anchor of anchors) {
+			const scroller = anchor.closest('.list-table-scroll') as HTMLElement | null;
+			if (!scroller) { continue; }
+
+			// Capture position + child-key chain BEFORE detaching (ancestors are
+			// lost once removed from the DOM).
+			const anchorRect = anchor.getBoundingClientRect();
+			const childKeyChain: string[] = [];
+			let ancestor = anchor.parentElement;
+			while (ancestor && ancestor !== this.domNode) {
+				const ck = ancestor.getAttribute('snc-child-key');
+				if (ck) { childKeyChain.push(ck); }
+				ancestor = ancestor.parentElement;
+			}
+			if (childKeyChain.length > 0) {
+				anchor.setAttribute('snc-child-key-chain', JSON.stringify(childKeyChain));
+			}
+
+			const baseLeft = anchorRect.left - widgetRect.left;
+			const baseTop = anchorRect.top - widgetRect.top - 10;
+
+			anchor.remove();
+			anchor.style.left = `${baseLeft}px`;
+			anchor.style.top = `${baseTop}px`;
+			anchor.classList.add('toolbar-anchor-hoisted');
+			this.domNode.appendChild(anchor);
+
+			this.hoistedSegmentLabels.push({
+				anchor,
+				scroller,
+				baseLeft,
+				baseTop,
+				baseScrollLeft: scroller.scrollLeft,
+				baseScrollTop: scroller.scrollTop,
+			});
+			scrollers.add(scroller);
+		}
+
+
 
 		// Keep labels glued to their characters as the string scrolls, and hide
 		// any that scroll outside their container's visible box.

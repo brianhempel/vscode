@@ -3279,14 +3279,12 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
                              also=also('count') if has_search else ()))
     # parts.append('<div class="action-button-divider"></div>')
 
-    magnifying_glass_icon = '<span class="search-icon" style="width:10px;font-family:Pragmasevka;font-size:12px"></span>' # Pragmasevka's Nerf Font regions have the glyph
+    find_or_map_label = 'Map Matches' if replace_visible else 'Match Objects'
+    parts.append(btn(f'''<span class="text">{find_or_map_label}</span>''', 'find_or_map', has_search))
 
-    find_or_map_label = 'Map Matches' if replace_visible else 'Match Objs'
-    parts.append(btn(f'''{magnifying_glass_icon}<span class="text">{find_or_map_label}<span class="shortcut" style="font-family: 'Courier New', monospace; font-size: 15px; margin: -4px 0 -5px 3px; vertical-align: middle;">⏎</span></span>''', 'find_or_map', has_search))
+    parts.append(btn(f'<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace))
 
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace))
-
-    parts.append(btn(f'{magnifying_glass_icon}<span class="text">Idxs</span>', 'find_indices', has_search))
+    parts.append(btn(f'<span class="text">Indexes</span>', 'find_indices', has_search))
 
     # Loop dropdown (shown on hover via CSS)
     loop_enabled = has_search and not first
@@ -3374,7 +3372,7 @@ _TOOL_TOOLBAR_TOOLS = [
 ]
 
 
-def _render_tool_toolbar(model, value: str = '') -> str:
+def _render_tool_toolbar(model, value: str = '', compact: bool = False) -> str:
     """Render the tool toolbar (literal/fuzzy/index/pick) for the upper-right corner.
 
     Two layouts:
@@ -3403,8 +3401,8 @@ def _render_tool_toolbar(model, value: str = '') -> str:
 
     # Compact when the string fits in fewer than 4 lines vertically.
     # An empty string counts as 1 line.
-    line_count = (value.count('\n') + 1) if value else 1
-    compact = line_count < 4
+    # line_count = (value.count('\n') + 1) if value else 1
+    # compact = line_count < 4
 
     if not compact:
         return _render_tool_toolbar_vertical(current, has_search)
@@ -3413,7 +3411,7 @@ def _render_tool_toolbar(model, value: str = '') -> str:
 
 def _tool_icon_html(tool: str, label: str) -> str:
     """Pre-rendered icon for the pick tool is HTML; raw text labels need escaping."""
-    return label if tool == 'pick' else html.escape(label)
+    return ICONS['pick-tool'] if tool == 'pick' else html.escape(label)
 
 
 def _render_tool_toolbar_vertical(current: str, has_search: bool) -> str:
@@ -3426,6 +3424,16 @@ def _render_tool_toolbar_vertical(current: str, has_search: bool) -> str:
         lambda tool: repr(ToolSelect(tool=tool)),
         disabled=() if has_search else ('pick',))
 
+# def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
+#     # Shared with the list visualizer's Normal/Pick toolbar; only the tool list
+#     # differs. Labels are escaped here because most are plain text.
+#     tools = [(tool, _tool_icon_html(tool, label), name)
+#              for tool, label, name in _TOOL_TOOLBAR_TOOLS]
+#     return render_tool_toolbar(
+#         tools, current,
+#         lambda tool: repr(ToolSelect(tool=tool)),
+#         disabled=() if has_search else ('pick',),
+#         is_compact=True)
 
 def _render_tool_toolbar_compact(current: str, has_search: bool) -> str:
     # Trigger: shows the active tool's ICON + a chevron. All 4 icons are
@@ -3497,6 +3505,13 @@ def _render_expand_bar(expanded: bool, value: str, model, *,
     The list visualizer draws the same bar (see _visualize_table); the two
     share the CSS but not the wording, one counting items and one characters.
     """
+    return (
+        f'<div class="expand-and-len">'
+        f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
+        f'</div>'
+    )
+
+def _render_auxiliary_attributes(value: str, model, *, small: bool = False):
     source_expr = model.get('_source_expr') if model else None
     if source_expr:
         len_exp = f'len({source_expr})'
@@ -3509,9 +3524,9 @@ def _render_expand_bar(expanded: bool, value: str, model, *,
         lines_exps = None
     len_n = len(value)
     lines_n = value.count('\n') + 1
+
     return (
-        f'<div class="expand-and-len">'
-        f'{render_expand_toggle(expanded, repr(ExpandToggle()), small=small)}'
+        f'<div class="auxiliary-attributes">'
         f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(lines_exps)}>{lines_n} line{"s" if lines_n != 1 else ""}</div>'
         f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} char{"s" if len_n != 1 else ""}</div>'
         f'</div>'
@@ -3583,6 +3598,10 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             expand_toggle_html = _render_expand_bar(
                 expanded, value, model, small=True)
 
+        expandable_class = ' is-expandable' if expand_toggle_html else ''
+
+
+
         # One mousedown for the whole preview, standing in for the per-character
         # ones the focused render has. A nested preview is focused by clicking
         # it, and that is all this has to carry. The expand toggle sits inside
@@ -3594,9 +3613,9 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
                     f'snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" ')
         small_class = ' small' if small else ''
         small_html = (
-            f'<div tabindex="0" {handlers}class="visualizer-container literal-tool-selected{small_class}{expanded_class}"><div class="string-visualizer"{size_styling}><div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+            f'<div tabindex="0" {handlers}class="visualizer-container literal-tool-selected{small_class}{expanded_class}{expandable_class}"><div class="snc-tool-and-visualizer"><div class="string-visualizer snc-base-visualizer"{size_styling}><div></div>'  # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
             f'{display_html}'
-            f'</div></div>{expand_toggle_html}</div>'
+            f'</div>{expand_toggle_html}</div></div>'
         )
         return [wrap_drag_grab(small_html, var_and_exp)]
 
@@ -3701,6 +3720,16 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
     # chars_html = ''.join(char_els)
 
+    # The tool toolbar (literal/fuzzy/index/pick) is only useful when this is
+    # the focused visualizer; in small mode there's no room for it and it
+    # would just compete with the user's actual focus elsewhere.
+    line_count = ((value or '').count('\n') + 1) if value else 1
+    compact = line_count < 4
+    tool_toolbar_html = '' if small else _render_tool_toolbar(model, value or '', compact)
+    active_tool = (model or {}).get('tool', 'literal')
+    if active_tool not in ('literal', 'fuzzy', 'index', 'pick'):
+        active_tool = 'literal'
+
     # Build the search box at the bottom (hidden when small)
     if small:
         search_box_html = ""
@@ -3741,6 +3770,10 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         fm_tooltip = 'data-tooltip="First match only"'
         first_match_toggle_html = f'<span class="search-button {"active" if first_match else "inactive"}" {fm_tooltip} snc-mouse-down="{html.escape(fm_event)}">{ICONS["match-first"]}</span>'
 
+        # compact_toolbar = tool_toolbar_html if compact else ''
+        # if compact:
+        #     tool_toolbar_html = ''
+
         toggles_html = (
             f'<span class="search-toggles-container">'
             f"{cap_groups_toggle_html}"
@@ -3767,7 +3800,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             match_preview_html = _render_match_object_preview(model, value, eval_in_scope)
             replace_tooltip = replace_scope(idx_slice).legend
             replace_box_html = (
-                f'<div class="search-box-wrapper">'
+                f'<div class="search-box-wrapper replace-box-wrapper">'
                 f'<input type="text" tabindex="0"'
                 f' snc-input="{html.escape(replace_input_event)}"'
                 f' value="{html.escape(replace_text_value)}"'
@@ -3794,44 +3827,40 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f" </div>"
         )
 
+
+
         # Action buttons bar (hidden when small)
         action_buttons_html = (
             "" if small else _render_action_buttons(model, value, eval_in_scope,
                                                     max_width, every_row_exps)
         )
 
+        auxiliary_html = _render_auxiliary_attributes(value, model, small=small)
+
         search_box_html = (
-            f'<div class="search-div {"expanded" if replace_visible else ""}">'
+            f'<div class="search-div toolbar-anchor {"expanded" if replace_visible else ""}">'
             f'<div class="search-div-row">'
             f"{discolure_button}"
             f'<div class="search-replace-container">'
             f"{search_input_html}"
-            f"{match_preview_html}"
             f"{replace_box_html}"
+            f"{match_preview_html}"
             f"</div>"
             f"</div>"
             f'<div class="search-div-row">'
             f'<div class="disclosure-button-spacer"></div>'
             f'{action_buttons_html}'
             f"</div>"
+            f'{auxiliary_html}'
             f"</div>"
             f"</div>"
         )
-
-    # The tool toolbar (literal/fuzzy/index/pick) is only useful when this is
-    # the focused visualizer; in small mode there's no room for it and it
-    # would just compete with the user's actual focus elsewhere.
-    tool_toolbar_html = '' if small else _render_tool_toolbar(model, value or '')
-    active_tool = (model or {}).get('tool', 'literal')
-    if active_tool not in ('literal', 'fuzzy', 'index', 'pick'):
-        active_tool = 'literal'
 
     # Compact (dropdown) toolbar is used when the string is < 4 lines tall.
     # The visualizer container gets a class so CSS can add a few extra
     # right-padding pixels to keep characters from overlapping the wider
     # dropdown trigger. No need for that padding when the toolbar isn't there.
-    line_count = (value.count('\n') + 1) if value else 1
-    compact_class = ' tool-toolbar-compact-container' if line_count < 4 else ''
+    compact_class = ' tool-toolbar-compact-container' if compact else ''
 
     # Expand/collapse toggle: only offered for tall strings (>4 lines), where the
     # 80px-tall pane clips the content. Clicking it expands the pane to its
@@ -3844,14 +3873,16 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     if line_count > 4:
         expand_toggle_html = _render_expand_bar(expanded, value, model)
 
+    is_expandable_class = ' is-expandable' if expand_toggle_html else ''
+
     # Add tabindex to make div focusable for keyboard events, and snc-key-down handler
     # doing it like this to try to make less string garbage. Small mode returned
     # early above (self-wrapped for drag), so this is always the full/interactive
     # path - it keeps its mouse events and is not a drag handle.
     return [
-        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}">{tool_toolbar_html}<div class="string-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}{is_expandable_class}"><div class="snc-tool-and-visualizer">{tool_toolbar_html}<div class="string-visualizer snc-base-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
         *char_els,
-        f"""</div></div>{expand_toggle_html}{search_box_html}</div>""",
+        f"""</div></div>{expand_toggle_html}</div>{search_box_html}</div>""",
     ]
 
 

@@ -528,6 +528,11 @@ class PickToggle:
     """
     region_id: str
 
+@dataclass(frozen=True, slots=True)
+class DeselectChildren:
+    """User deselected all children of table."""
+    pass
+
 # === Command types ===
 
 @dataclass(frozen=True, slots=True)
@@ -8729,13 +8734,13 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'{track_move}'
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span class="col-header-inner">'
-        f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
-        f'data-tooltip="Drag to reorder" '
-        f'class="col-handle snc-hover-hidden full-opacity-on-hover">⣿</span>'
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
         f'{html.escape(col if label is None else label)}</span>'
+        f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
+        f'data-tooltip="Drag to reorder" '
+        f'class="col-handle snc-hover-hidden full-opacity-on-hover">⣿</span>'
         f'{menu_html}'
         f'</span>'
         f'</th>'
@@ -8776,14 +8781,12 @@ def _render_add_column_header(lst, model, get_visualizer,
     if menu_open:
         icon_classes.append('open')
     return (
-        f'<th class="col-add"{span_attrs}>'
-        f'<span class="snc-dropdown-trigger col-add-trigger">'
+        f'<div class="snc-dropdown-trigger col-add-trigger">'
         f'<span class="{" ".join(icon_classes)}" '
         f'snc-mouse-down="{html.escape(toggle_event)}" '
         f'data-tooltip="Add or remove columns">+</span>'
         f'{_render_add_column_panel(lst, model, get_visualizer) if menu_open else ""}'
-        f'</span>'
-        f'</th>'
+        f'</div>'
     )
 
 
@@ -8862,8 +8865,8 @@ def _render_add_column_panel(lst, model, get_visualizer) -> str:
     # panel is a click away from whichever of them is open, and this is one of
     # them -- it is held open by the same slot and closed by the same call.
     dismiss = repr(ColumnMenuDismiss())
-    return (f'<div class="snc-dropdown-panel right col-compute-panel '
-            f'col-add-panel" snc-dropdown-align="right" '
+    return (f'<div class="snc-dropdown-panel left col-compute-panel '
+            f'col-add-panel" snc-dropdown-align="left" '
             f'snc-dismiss="{html.escape(dismiss)}">{"".join(rows)}</div>')
 
 
@@ -9549,7 +9552,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
 # uses for its own pick tool.
 _TOOL_TOOLBAR_TOOLS = [
     ('normal', nerd_font_icon('\U000F01C0'), 'Normal'),
-    ('pick', nerd_font_icon('\U000F01BD'), 'Pick'),
+    ('pick', ICONS['pick-tool'], 'Pick'),
 ]
 
 
@@ -9719,10 +9722,21 @@ def _render_pick_preview(model: dict, eval_in_scope) -> str:
         f'</div>'
     )
 
+def _render_auxiliary_attributes(model, lst):
+    source_expr = model.get('_source_expr') if model else None
+    len_exp = f'len({source_expr})' if source_expr else None
+    len_n = len(lst)
+    return (
+        f'<div class="auxiliary-attributes">'
+        f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} {'entries' if len_n != 1 else 'entry' if model['_is_dict'] else 'items' if len_n != 1 else 'item'}</div>'
+        f'</div>'
+    )
 
-def _render_search_box(model, lst, eval_in_scope=None, small=False):
+def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_child=None):
     """Render the full .search-div (search input row + action buttons row)."""
     input_html = _render_search_box_input(model, eval_in_scope)
+    has_focused_child_class = ' has-focused-child-search-box' if focused_child else ''
+
     if small:
         action_buttons_html = ''
     else:
@@ -9730,8 +9744,11 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False):
     preview_html = '' if small else _render_pick_preview(model, eval_in_scope)
     preview_row = (f'<div class="search-div-row">{preview_html}</div>'
                    if preview_html else '')
+
+    auxiliary_html = _render_auxiliary_attributes(model, lst)
+
     return (
-        f'<div class="search-div">'
+        f'<div class="search-div toolbar-anchor{has_focused_child_class}">'
         f'<div class="search-div-row">'
         f'<div class="search-replace-container">{input_html}</div>'
         f'</div>'
@@ -9739,6 +9756,7 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False):
         f'<div class="search-div-row">'
         f'{action_buttons_html}'
         f'</div>'
+        f'{auxiliary_html}'
         f'</div>'
     )
 
@@ -10276,20 +10294,26 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     # The keys commit and cancel the column box, which read-only never opens.
     key_handler = ('' if read_only else
-                   f'snc-key-down="{html.escape(repr(ColumnKeyDown()))}" ')
+                   f'snc-key-down="{html.escape(repr(ColumnKeyDown()))}" snc-mouse-down="{html.escape(repr(DeselectChildren()))}"')
     small_class = ' small' if small else ''
+    expandable_class = ' is-expandable' if can_expand else ''
+    has_focused_child_class = ' has-focused-child' if focused_child else ''
     # Driven by pick_mode, not the raw model value: the pick styling strips the
     # cell borders, so it must only apply when regions are actually drawn.
     tool_class = f' {"pick" if pick_mode else "normal"}-tool-selected' if not small else ''
     strs = [
-        f'<div tabindex="0" {key_handler}'
-        f'class="visualizer-container list-visualizer{small_class}{tool_class}">'
+        f'<div tabindex="0" {key_handler} '
+        f'class="visualizer-container list-visualizer{small_class}{tool_class}{expandable_class}{has_focused_child_class}">'
     ]
+
+    strs.append(f'<div class="snc-tool-and-visualizer">')
+
     # The tool toolbar only makes sense on the focused visualizer; in small mode
     # there is no room for it and it would compete with the real focus.
     if not small and not read_only:
         strs.append(_render_tool_toolbar(model))
-    strs.append(f'<div class="list-table-scroll" style="{table_div_style}">')
+
+    strs.append(f'<div class="list-table-scroll snc-base-visualizer" style="{table_div_style}">')
     leaves = _leaf_columns(columns)
     header_rows = _header_cells(columns)
     # A splat carrying sub-columns spans them, and they get a header row of
@@ -10362,9 +10386,6 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 strs.append(_render_column_input(lst, model, get_visualizer,
                                                  is_editing=False,
                                                  span_attrs=full_span))
-            if not small and not read_only:
-                strs.append(_render_add_column_header(
-                    lst, model, get_visualizer, span_attrs=full_span))
         strs.append('</tr>')
     strs.append('</thead>')
 
@@ -10386,8 +10407,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
 
     scroll_to = model.get('_scroll_to_match', False)
-    first_match_row = min(matched_indices) if matched_indices else None
 
+    first_match_row = min(matched_indices) if matched_indices else None
     # Pick mode replaces the row-match / row-dim striping with a grid of
     # pickable regions: three row bands (before the match, the match, after)
     # crossed with the row-index column and every configured column -- or, with
@@ -10607,6 +10628,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                  eval_in_scope, source_expr, max_column_width))
 
     strs.append('</table>')
+
     strs.append('</div>')
 
     # Under the pane and above the search area, where the string visualizer
@@ -10617,22 +10639,23 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         # the source are the same reading, so hovering it offers the code. It
         # renders bare where there is no access path -- the number still says
         # how much is being clipped.
-        len_exp = f'len({source_expr})' if source_expr else None
-        len_n = len(lst)
         strs.append(f'<div class="expand-and-len">')
         strs.append(render_expand_toggle(expanded, repr(ExpandToggle()), small=small))
-        strs.append(f'<div class="tiny-len" snc-unfocused-clickable{py_exp_attrs(len_exp)}>{len_n} ')
-        if model['_is_dict']:
-            strs.append('entries' if len_n != 1 else 'entry')
-        else:
-            strs.append('items' if len_n != 1 else 'item')
-        strs.append(f'</div></div>')
+        strs.append(f'</div>')
+
 
     if not small and not read_only:
-        strs.append(_render_search_box(model, lst, eval_in_scope, small=False))
+        strs.append(_render_add_column_header(
+            lst, model, get_visualizer))
+
+    strs.append('</div>')
+
+    if not small and not read_only:
+        strs.append(_render_search_box(model, lst, eval_in_scope, small=False, focused_child=focused_child))
 
     strs.append('</div>')
     return ''.join(strs)
+
 
 
 def _adopt_source(model: dict, var_and_exp=None, source_span=None) -> None:
@@ -11664,6 +11687,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case Relink(mode=mode, text=text):
             handle_relink(_LINK_CONFIG, mode, text, var_and_exp, model, commands,
                           eval_in_scope=eval_in_scope)
+
+        case DeselectChildren():
+            model['focused_child'] = None
 
     if is_nested(var_and_exp):
         return (model, commands)
