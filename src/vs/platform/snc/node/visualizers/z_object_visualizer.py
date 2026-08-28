@@ -118,6 +118,22 @@ DEFAULT_FIELDS_FOR_TYPE = {
 }
 
 
+def _default_fields_for(obj, default: list) -> list:
+    """The type's default fields, extended by what this value offers.
+
+    A match's capture groups are what its pattern was written to pull out, so
+    each gets a field. They go right after the whole match, ahead of start/end:
+    a table spreads a row into only its first few fields, and the groups must
+    not be the ones past that cut. Counted off the pattern rather than the
+    match (`lastindex` stops at the last group that took part), so every match
+    of one pattern spreads into the same columns.
+    """
+    if get_full_class_name(obj) == 're.Match':
+        groups = [f'$[{i}]' for i in range(1, obj.re.groups + 1)]
+        return default[:1] + groups + default[1:]
+    return default
+
+
 _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 
 
@@ -182,7 +198,8 @@ def _resolve_fields_and_children(obj, slots_config):
 
     default = DEFAULT_FIELDS_FOR_TYPE.get(full_class_name)
     if default is not None:
-        return parse_slots(default, expr_transform=_ensure_dollar_prefix)
+        return parse_slots(_default_fields_for(obj, default),
+                           expr_transform=_ensure_dollar_prefix)
 
     return list(_get_non_trivial_names(obj)), {}
 

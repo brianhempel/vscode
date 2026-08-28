@@ -1590,6 +1590,19 @@ class TestDefaultColumns(unittest.TestCase):
         # fields away from all of them -- the rule that predates this.
         self.assertEqual(self.cols(['hello', 42]), ['$'])
 
+    def test_a_list_of_matches_spreads_into_its_capture_groups(self):
+        import re
+        import z_object_visualizer
+
+        def get_visualizer(value):
+            if isinstance(value, re.Match):
+                return z_object_visualizer
+            return mock_get_visualizer_dict_tables(value)
+
+        matches = list(re.finditer(r'(\w)(\w+)', 'hello world'))
+        self.assertEqual(list(init_model(matches, get_visualizer)['columns']),
+                         ['$', '$[0]', '$[1]', '$[2]', '$.start(0)', '$.end(0)'])
+
     def test_a_list_of_records_shows_the_row_and_its_fields(self):
         self.assertEqual(self.cols([{'b': 3, 'c': 'x'}, {'b': 1, 'c': 'y'}]),
                          ['$', "$['b']", "$['c']"])

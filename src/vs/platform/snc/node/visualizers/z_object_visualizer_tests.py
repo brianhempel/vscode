@@ -256,6 +256,29 @@ class TestResolveFields(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(_resolve_fields(match), DEFAULT_FIELDS_FOR_TYPE['re.Match'])
 
+    def test_a_match_gets_a_field_per_capture_group(self):
+        # The groups sit right after the whole match, ahead of start/end: they
+        # are what the pattern was written to pull out, and a table shows only
+        # the first few fields, so they must not be the ones past the cut.
+        import re
+        match = re.search(r'(hel)(lo)', 'hello world')
+        self.assertEqual(_resolve_fields(match),
+                         ['$[0]', '$[1]', '$[2]', '$.start(0)', '$.end(0)'])
+
+    def test_a_group_that_did_not_participate_still_gets_a_field(self):
+        # By the pattern's group count, not the match's lastindex: every match
+        # of one pattern must spread into the same columns.
+        import re
+        match = re.search(r'(a)|(b)', 'b')
+        self.assertEqual(_resolve_fields(match),
+                         ['$[0]', '$[1]', '$[2]', '$.start(0)', '$.end(0)'])
+
+    def test_saved_config_beats_group_defaults(self):
+        import re
+        match = re.search(r'(hel)(lo)', 'hello world')
+        fields, _ = _resolve_fields_and_children(match, ['$[2]'])
+        self.assertEqual(fields, ['$[2]'])
+
     def test_resolve_fields_falls_back_to_non_trivial_names(self):
         obj = TestObj()
         resolved = _resolve_fields(obj)
