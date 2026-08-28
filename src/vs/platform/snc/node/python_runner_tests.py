@@ -1594,6 +1594,13 @@ class TestReadOnly(unittest.TestCase):
 
     SRC = "x = 5\n"
 
+    def setUp(self):
+        # The flag is process-wide and these tests end on a read-only run, so
+        # without this every visualizer test that runs after them in the same
+        # pytest process renders with its affordances suppressed.
+        from visualizer_utils import set_read_only
+        self.addCleanup(set_read_only, False)
+
     def _run(self, read_only, visualizers=None):
         import_code, body_code = split_leading_imports(self.SRC)
         saved = python_runner._visualizers
