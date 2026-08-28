@@ -35,7 +35,7 @@ The system is split across three layers:
 │  Main Process Service (TypeScript, Node.js)              │
 │  src/vs/platform/snc/node/sncProcessService.ts           │
 │  - SNCProcessService: spawns & manages Python processes  │
-│  - Checkpointed process pools (CP1/CP2 workers)          │
+│  - Checkpointed process pools (CP1/CP2/CP3 workers)      │
 │  - Streams NDJSON from Python stdout → onStream event    │
 │  - Timing instrumentation (spawn → stdout → render)      │
 └────────────────────┬─────────────────────────────────────┘
@@ -48,7 +48,9 @@ The system is split across three layers:
 │    optionally warm to checkpoint_ready(2) by pre-running │
 │    leading imports; a warmed worker then serves any code │
 │    with those same imports, compiling whatever body it   │
-│    is handed                                             │
+│    is handed. It can warm further to checkpoint_ready(3) │
+│    by running the program up to one widget's log site    │
+│    and pausing there, holding its live state             │
 │  - Per-run visualizer reload by file mtime; pluggable    │
 │    visualizer system loaded from disk                    │
 │                                                          │
@@ -64,9 +66,11 @@ Node.js and Python communicate over stdio using **newline-delimited JSON (NDJSON
 | Message Type | Direction | Purpose |
 |---|---|---|
 | `init_imports` | Node → Python | Warm this worker to checkpoint 2 by pre-running the code's leading imports |
-| `run` | Node → Python | Execute this code; carries `models_and_events`, `stdin`, `loop_selections`, the focused line |
+| `init_run` | Node → Python | Warm this worker to checkpoint 3: run the program up to `checkpoint3: {line, visIndex}` and pause there. Carries the same run inputs as `run` (minus a run id, since there is no run yet) |
+| `run` | Node → Python | Execute this code; carries `models_and_events`, `stdin`, `loop_selections`, the focused line. A checkpoint 3 worker reads it at its pause and takes only the run's identity from it — see below |
 | `events` | Node → Python | Events for a run already under way, for a widget it hasn't reached yet |
-| `checkpoint_ready` | Python → Node | Worker reached checkpoint 1 or 2 and is ready |
+| `checkpoint_ready` | Python → Node | Worker reached checkpoint 1, 2 or 3 and is ready. At checkpoint 3 it also reports `line`, `visIndex` and the `step` (`execution_step`) it paused at |
+| `resumed` | Python → Node → Renderer | A paused worker accepted this run and is resuming from `step`; the widgets before it produced no item this run |
 | `item` | Python → Node → Renderer | A single visualization item (line, visIndex, html, model, handledEventIds) |
 | `command` | Python → Node → Renderer | An Elm-style command for VS Code (e.g. `NewCode`) |
 | `loop` | Python → Node → Renderer | A loop/function finished: `{line, path, count}`; sizes its slider (see Loops below) |
@@ -158,16 +162,29 @@ To minimize latency between a keystroke and seeing updated visualizations, SNC u
 
 - **Checkpoint 1 (CP1)**: Pool workers start with visualizers loaded and emit `checkpoint_ready(1)`. CP1 workers run full transform+compile+exec and then exit.
 - **Checkpoint 2 (CP2)**: Workers can be warmed with `init_imports`, pre-running the leading imports and emitting `checkpoint_ready(2)`. A CP2 worker compiles the body of whatever run it is handed and executes it against those warmed globals.
+- **Checkpoint 3 (CP3)**: A CP2 worker can be warmed further with `init_run`, which runs the program up to the log site of the widget the user last interacted with and **stops there**, holding all its live state, and emits `checkpoint_ready(3)` with the `execution_step` it paused at. When a run arrives, that worker only has to run the visualizer's `update`/`visualize` and the tail of the program — everything above it (reading the CSV, fitting the model, building the DataFrame) is already done and off the critical path.
 
 Every worker handles exactly one run and exits.
 
+**Checkpoint 3, in more detail.** A warm has no run to attribute anything to, and the service drops messages it can't attribute, so everything the prefix writes is held (`_emit` in `python_runner.py`) and released under the arriving run's id. Items are the exception: they are *dropped*, because the editor already holds byte-identical ones from the run that warmed the worker — the same premise that makes CP3 valid at all — except an item that answered queued events, which is the only thing that tells the editor which events were handled. Output, loop counts, commands and warnings are all replayed, because the front-end rebuilds each of those from scratch on every run.
+
+`execution_step` is the ordering that makes this work. The renderer keeps a widget whose step is below the pause (it will not be re-emitted this run), and the service gives a run a worker whose `pauseStep <= checkpoint3ResumeAtStep` — a worker paused at W can serve anything at or after W by running forward. The counter is incremented *above* the `_path_selected` guard in `log_value`, so unselected loop iterations still advance it; that is what makes the count reproducible between the warm and the run that measured it, and moving the increment below the guard would silently break CP3.
+
+CP3 is valid only while everything that determines what the prefix does or emits is unchanged: the code, the file path, the focused line (which changes every widget's HTML via `small=`), the loop pins, the console document, read-only mode, and which widget to stop at. Any change kills the pool. Cursor movement alone therefore invalidates it, which is why CP2 gives up half its workers rather than the pool being bigger: dragging a visualizer below an expensive line gets much faster, and opening a file and typing gets somewhat slower.
+
+A target the program never reaches — an untaken branch, an exception above it, a read that starves — means the widget doesn't render under inputs the key has pinned, so the user cannot be interacting with it. The worker discards the hold and exits rather than serving a run whose gesture would be applied to a program that has already finished.
+
+**Known limitation:** a warmed worker holds the visualizer modules it loaded. `_visualizers()` reloads by mtime only at warm time, and no visualizer file is part of the CP3 key, so editing a `*_visualizer.py` doesn't take effect on a paused worker. Touching the Python file (type and delete a space) changes the code, kills the pool, and forces a full reload — which is the usual workflow anyway.
+
 **A warmed worker is matched on the leading imports, not the whole file.** That is all it has executed, so a warmed worker serves any program with the same imports -- which is nearly every keystroke, since editing the body doesn't touch them. `importPrefixOf` (Node) and `_leading_import_stmts` (Python) compute that key on their respective sides; the Node one is a line scanner rather than a parser, so it can disagree on exotic input. That only ever costs a warmed worker: the run message carries the current code, and the worker re-checks with a real AST (`imports_match`). If the imports turn out to differ it executes them itself, degrading to the checkpoint 1 path in place, so a worker can always serve the run it is handed.
 
-The service prefers a ready CP2 worker, falls back to CP1, and otherwise waits for the next worker to become ready. Some consequences worth knowing, each of which was a real source of lag:
+The service prefers a ready CP3 worker whose pause this run can start from, then a ready CP2 worker, falls back to CP1, and otherwise waits for the next worker to become ready. Some consequences worth knowing, each of which was a real source of lag:
 
-- **A run waiting for a worker outranks warming one.** A worker that reaches checkpoint 1 while a run has nothing to run on is handed over immediately rather than being sent off to import; queueing a keystroke behind someone else's `import pandas` is how a run ends up waiting seconds for a worker that was ready.
+- **A run waiting for a worker outranks warming one.** A worker that reaches checkpoint 1 while a run has nothing to run on is handed over immediately rather than being sent off to import; queueing a keystroke behind someone else's `import pandas` is how a run ends up waiting seconds for a worker that was ready. The same rule applies one rung up: a CP3 worker reaching checkpoint 2 with a run waiting is handed over instead of warming, and moves to the CP2 pool so it can be reached at all.
+- **A paused worker is only ever chosen by `takeReadyWorker`.** A waiter carries no resume step, so handing it one would resume the program from someone else's pause point. `resolveNextWaiter` deliberately cannot see the CP3 pool.
 - **Queued runs are dropped, not served.** A new run supersedes the one in flight (its worker is killed), and equally supersedes any run still waiting for a worker -- their output would be discarded on arrival. Without this a burst of N events costs N worker acquisitions, and the queue itself becomes the latency.
-- **CP2 refills as workers are taken**, not only when a run completes. A burst of runs never reaches `end` (each kills the one before it), so waiting for completion lets the pool drain to empty and dumps the whole burst onto CP1. The one exception is the run that invalidated the pool: respawning a poolful of workers about to be killed again is what makes typing out an `import` expensive.
+- **CP2 refills as workers are taken**, not only when a run completes. A burst of runs never reaches `end` (each kills the one before it), so waiting for completion lets the pool drain to empty and dumps the whole burst onto CP1. The one exception is the run that invalidated the pool: respawning a poolful of workers about to be killed again is what makes typing out an `import` expensive. CP3 follows the same rule and needs it more — a drag consumes one CP3 worker per event and never reaches `end`, so refilling only at run end would give five fast events and then today's speed for the rest of the gesture.
+- **A warm is bounded by a timer.** Nothing else covers it — the run timeout only starts once a run is dispatched — so a prefix with a `sleep`, an uncached network read or a non-terminating loop would leave five workers spinning with no signal while the service silently fell back forever. On expiry the worker is killed and further CP3 spawns are suppressed until the key changes, so a slow program costs one round of warms rather than a permanent spawn treadmill.
 
 ### Visualizer Discovery
 

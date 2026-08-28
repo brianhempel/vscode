@@ -97,6 +97,51 @@ except Exception:
     _stream_out = sys.stdout  # type: ignore[assignment]
 
 
+# ---- Checkpoint 3: warming past the program's prefix ----
+#
+# A checkpoint 3 worker runs the program up to the log site of the widget the
+# user is interacting with and stops there holding its live state, so the run
+# that arrives pays only for that visualizer and the tail of the program. See
+# `_pause_at_checkpoint3`.
+#
+# While warming there is no run to attribute anything to -- and the editor
+# drops what it can't attribute -- so everything the prefix would have written
+# is held here instead, and released under the arriving run's id.
+_held: Optional[List[Dict[str, Any]]] = None
+# (line, site) of the widget to stop before. Cleared at the pause, so a second
+# logging of the same site is an ordinary one.
+_checkpoint3_target: Optional[Tuple[int, int]] = None
+
+
+def _write_message(msg: Dict[str, Any]) -> None:
+    """Write one message to the editor.
+
+    Reads `_stream_out` at call time rather than binding it: the tests swap it
+    for a buffer.
+    """
+    try:
+        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        _stream_out.flush()
+    except Exception:
+        # Never let a reporting failure break the user's program.
+        pass
+
+
+def _emit(msg: Dict[str, Any]) -> None:
+    """Send one message to the editor, or hold it if this is a warm.
+
+    Stamping the run id happens on release rather than here: `_current_run_id`
+    is empty while warming, and the run these messages belong to is the one
+    that arrives at the pause.
+    """
+    if _held is not None:
+        _held.append(msg)
+        return
+    if _current_run_id:
+        msg["run_id"] = _current_run_id
+    _write_message(msg)
+
+
 # list of:
 # {
 # 	"lineNumber": int,
@@ -450,6 +495,19 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     if not _path_selected(path):
         return
 
+    # A warm worker stops here: this is the widget the user is interacting with,
+    # and everything it needs has just been computed. The first selected
+    # occurrence is the right one -- the editor pins every unpinned loop to its
+    # last iteration, so the selected one is the iteration on screen.
+    #
+    # Not for an error, though: `execute_code` reports a crash with
+    # `log_value(error_line, UncaughtError(e))` at the default site 0, and a
+    # target that happens to be (error_line, 0) would otherwise pause inside the
+    # error handler and hand back a worker whose only remaining work is to
+    # finish erroring. Fall through to the never-reached path instead.
+    if _checkpoint3_target == (line, site) and not isinstance(value, UncaughtError):
+        _pause_at_checkpoint3(line, site)
+
     visualizers = _visualizers()
     def get_visualizer(value):
         return next(v for v in visualizers if v.can_visualize(value))
@@ -591,26 +649,11 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         item["model"] = model
 
     # Stream this item immediately to stdout (bypassing redirected stdout)
-    try:
-        msg: Dict[str, Any] = {"type": "item", "item": item}
-        if _current_run_id:
-            msg["run_id"] = _current_run_id
-        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        _stream_out.flush()
-    except Exception:
-        # Never let streaming failure break user program execution
-        pass
+    _emit({"type": "item", "item": item})
 
     # Stream any commands from the visualizer
     for cmd_dict in cmd_dicts:
-        try:
-            cmd_msg: Dict[str, Any] = {"type": "command", "command": cmd_dict}
-            if _current_run_id:
-                cmd_msg["run_id"] = _current_run_id
-            _stream_out.write(json.dumps(cmd_msg, ensure_ascii=False) + "\n")
-            _stream_out.flush()
-        except Exception:
-            pass
+        _emit({"type": "command", "command": cmd_dict})
 
 def log_and_return(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_exp=None) -> Any:
     """
@@ -716,14 +759,7 @@ def ctx_exit(id_line: int, kind: str = 'loop') -> None:
     path = _current_path()
     if not _path_selected(path):
         return
-    try:
-        msg: Dict[str, Any] = {"type": "loop", "loop": {"line": id_line, "path": path, "count": count, "kind": kind}}
-        if _current_run_id:
-            msg["run_id"] = _current_run_id
-        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        _stream_out.flush()
-    except Exception:
-        pass
+    _emit({"type": "loop", "loop": {"line": id_line, "path": path, "count": count, "kind": kind}})
 
 
 def _runtime_hooks() -> Dict[str, Any]:
@@ -760,14 +796,11 @@ def _reset_run_state(loop_selections: Optional[Dict[str, int]] = None) -> None:
 
 
 def _emit_vis_load_warning(warning_msg: str) -> None:
-    try:
-        msg: Dict[str, Any] = {"type": "warning", "warning": warning_msg}
-        if _current_run_id:
-            msg["run_id"] = _current_run_id
-        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        _stream_out.flush()
-    except Exception:
-        pass
+    # Held on a warm like everything else: a warning with no run id is routed
+    # to the main process console, where nobody sees it -- so a broken
+    # visualizer would report itself on checkpoint 2 runs and go quiet on
+    # checkpoint 3 ones.
+    _emit({"type": "warning", "warning": warning_msg})
 
 def _visualizer_from_file(filepath: str) -> Optional[Visualizer]:
     """Load a visualizer module from a Python file."""
@@ -848,11 +881,7 @@ def _reload_stale_visualizers() -> None:
 
 def emit_meta(meta: str) -> None:
     """Emit a meta message for debugging/timing."""
-    try:
-        _stream_out.write(json.dumps({"type": "meta", "meta": meta, "t": time.time()}, ensure_ascii=False) + "\n")
-        _stream_out.flush()
-    except Exception:
-        pass
+    _write_message({"type": "meta", "meta": meta, "t": time.time()})
 
 
 def emit_output(stream: str, text: str, stdin_offset: int) -> None:
@@ -862,33 +891,130 @@ def emit_output(stream: str, text: str, stdin_offset: int) -> None:
     text was written, which is what places the chunk between the right two lines
     of the console.
     """
-    try:
-        msg: Dict[str, Any] = {
-            "type": "output",
-            "stream": stream,
-            "text": text,
-            "stdin_offset": stdin_offset,
-        }
-        if _current_run_id:
-            msg["run_id"] = _current_run_id
-        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        _stream_out.flush()
-    except Exception:
-        pass
+    _emit({
+        "type": "output",
+        "stream": stream,
+        "text": text,
+        "stdin_offset": stdin_offset,
+    })
 
 
-def emit_checkpoint_ready(checkpoint: int) -> None:
-    """Emit a message indicating a checkpoint is ready."""
+def emit_checkpoint_ready(checkpoint: int, **detail: Any) -> None:
+    """Emit a message indicating a checkpoint is ready.
+
+    Never held: a checkpoint report is how the worker offers itself to the
+    editor, so it belongs to no run. Checkpoint 3 reports the widget it paused
+    before and the `step` it paused at -- which is how the editor knows which of
+    its widgets this run will not re-emit, and which runs this worker can serve.
+    """
+    _write_message({
+        "type": "checkpoint_ready",
+        "checkpoint": checkpoint,
+        "pid": os.getpid(),
+        **detail,
+    })
+
+
+def _parse_models_and_events(models_and_events_json: str) -> List[Dict[str, Any]]:
+    """The editor's snapshot of every widget's model and queued events."""
+    if not models_and_events_json or not models_and_events_json.strip():
+        return []
     try:
-        msg = {
-            "type": "checkpoint_ready",
-            "checkpoint": checkpoint,
-            "pid": os.getpid(),
-        }
-        _stream_out.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        _stream_out.flush()
+        return json.loads(models_and_events_json)
     except Exception:
-        pass
+        return []
+
+
+def _install_run(cmd: Dict[str, Any]) -> None:
+    """Adopt the arriving run's identity at the checkpoint 3 pause.
+
+    Deliberately not `_reset_run_state`, and deliberately not the rest of
+    `_execute_run`'s preamble: the interpreter is parked inside the user's live
+    loops, and zeroing `execution_step`, `_ctx_stack`, `_ctx_counts` or
+    `_run_models` under it would renumber every step the editor matched this
+    worker on and throw away the models a site logged more than once carries
+    forward. Everything else -- the code, the globals, the loop selections, the
+    installed streams -- is identical by construction, because every input that
+    determines it is part of the key the pool was warmed under.
+    """
+    global models_and_events, _current_run_id, _focused_line
+
+    _current_run_id = cmd.get('run_id', '')
+    _focused_line = cmd.get('focused_line')
+    set_read_only(bool(cmd.get('read_only', False)))
+    models_and_events = _parse_models_and_events(cmd.get('models_and_events', ''))
+
+
+def _release_hold() -> None:
+    """Write everything the warm held, under the run that just arrived.
+
+    Items are dropped. The editor already holds byte-identical ones from the run
+    that warmed this worker -- that is the same premise that makes the warm
+    valid at all -- so re-sending them is IPC and a re-render for nothing. An
+    item that answered queued events is the exception: it is the only thing that
+    tells the editor which events were handled, so dropping it would strand them
+    in its queue forever.
+    """
+    global _held
+
+    held, _held = _held or [], None
+    for msg in held:
+        if msg.get("type") == "item" and not msg["item"].get("handledEventIds"):
+            continue
+        # Assigned, not filled in: these were captured with no run id at all.
+        msg["run_id"] = _current_run_id
+        _write_message(msg)
+
+
+def _pause_at_checkpoint3(line: int, site: int) -> None:
+    """Stop just before visualizing this widget and wait for a run to resume.
+
+    This is the whole point of checkpoint 3. Everything above this log site --
+    reading the CSV, fitting the model, building the DataFrame -- has already
+    run, and its result is live on the stack. The run that arrives gets all of
+    it for free and pays only for this visualizer and the tail of the program.
+
+    Either a run arrives and this returns -- and `log_value` carries on
+    visualizing the widget as any run would -- or the worker exits here.
+    """
+    global _checkpoint3_target
+
+    step = execution_step
+    _checkpoint3_target = None  # a second logging of this site is an ordinary one
+
+    emit_checkpoint_ready(3, line=line, visIndex=site, step=step)
+
+    # Blocking on purpose: the protocol fd is still in blocking mode on this
+    # path (see `_warm_to_checkpoint3`), so this waits rather than spins.
+    text = read_stdin_line()
+    cmd = None
+    if text is not None:
+        try:
+            cmd = json.loads(text.strip())
+        except ValueError:
+            cmd = None
+
+    if not isinstance(cmd, dict) or cmd.get('type') != 'run':
+        # The editor killed us, or said something we don't understand. Nothing
+        # has been written, so nothing is owed to anyone and there is nothing to
+        # flush. `os._exit` rather than `sys.exit`: we are inside the user's call
+        # stack, where a bare `except:` around the visualized expression would
+        # swallow SystemExit and carry on running a program nobody is watching.
+        os._exit(0)
+
+    _install_run(cmd)
+    emit_meta(f'checkpoint3-run-{_current_run_id}')
+    # In-band and ahead of everything else this run will write, so the editor
+    # learns which of its widgets this run will not re-emit before any of them
+    # could arrive. The service doesn't synthesize this: on the same stream
+    # there is no ordering left to argue about.
+    _write_message({"type": "resumed", "run_id": _current_run_id,
+                    "line": line, "visIndex": site, "step": step})
+    _release_hold()
+
+    # Only now: from here the fd carries events for a run already under way,
+    # drained when a visualizer is reached.
+    unblock_stdin()
 
 
 
@@ -2188,7 +2314,7 @@ def execute_code(
     return result
 
 
-def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None, loop_selections: Optional[Dict[str, int]] = None, read_only: bool = False) -> None:
+def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None, loop_selections: Optional[Dict[str, int]] = None, read_only: bool = False, checkpoint3_target: Optional[Tuple[int, int]] = None) -> None:
     """Execute a run with the given code object and models/events.
 
     If globals_dict is provided (e.g. pre-populated with imports for checkpoint 2),
@@ -2207,21 +2333,29 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
     `read_only` is the editor's clickacode.readOnlyVisualizers setting: visualizers
     render without any affordance that would change the file, and no command
     that would change it is sent. See visualizer_utils.set_read_only.
+
+    `checkpoint3_target` makes this a warm: run with `run_id` empty, holding
+    everything, and stop at that widget's log site to wait for a run. See
+    `_pause_at_checkpoint3`.
     """
-    global models_and_events, _current_run_id, _focused_line
+    global models_and_events, _current_run_id, _focused_line, _checkpoint3_target, _held
 
     _reset_run_state(loop_selections)
+    # After the reset, not before: `_reset_run_state` is the first thing that
+    # happens here, so a caller that set these itself would find them wiped.
+    _checkpoint3_target = checkpoint3_target
+    if checkpoint3_target is None:
+        _held = None
+    elif _held is None:
+        # Usually the warm is already holding -- it starts before reloading the
+        # visualizers, so a broken one is reported to the run that arrives
+        # rather than to nobody.
+        _held = []
     _current_run_id = run_id
     _focused_line = focused_line
     set_read_only(read_only)
 
-    if models_and_events_json and models_and_events_json.strip():
-        try:
-            models_and_events = json.loads(models_and_events_json)
-        except Exception:
-            models_and_events = []
-    else:
-        models_and_events = []
+    models_and_events = _parse_models_and_events(models_and_events_json)
 
     if globals_dict is None:
         globals_dict = runtime_globals()
@@ -2229,8 +2363,10 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
 
     result = execute_code(code_object, globals_dict, import_code=import_code,
                           stdin_text=stdin_text, stdin_eof=stdin_eof, replay_output=replay_output)
-    _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")
-    _stream_out.flush()
+    # `_current_run_id`, not `run_id`: a warm is handed an empty one and adopts
+    # the arriving run's at the pause. An `end` with no run id is dropped by the
+    # editor, and the worker would die unaccounted for.
+    _emit({"type": "end", "result": result})
 
 
 def install_url_cache() -> Callable[[], None]:
@@ -2358,6 +2494,71 @@ def merge_queued_events() -> None:
             entry.setdefault('events', []).append(ev)
 
 
+def _warm_to_checkpoint3(cmd: Dict[str, Any], code: str, body_code: Any,
+                         import_globals: Dict[str, Any],
+                         import_output: List[Tuple[str, str, int]]) -> None:
+    """Run the program up to one widget's log site and stop there.
+
+    Everything the prefix writes is held (see `_emit`), and the run that arrives
+    at the pause resumes from it and runs on to the end of the program.
+
+    The target may never log at all -- an untaken branch, an exception above it,
+    a read that starved. Then the widget does not render under this code, loop
+    selection and stdin, all of which the pool's key pins, so the user cannot be
+    interacting with it: a resumed worker would be a finished program applying
+    their gesture to nothing, and swallowing it. Nothing was ever written, so the
+    worker discards the hold and exits owing no one an item.
+
+    `code` is the program this worker warmed its imports on, and is what runs:
+    the key pins it, so there is no edited-code case to handle. That is also why
+    this doesn't reuse the checkpoint 2 run path -- one of its arms reports a
+    SyntaxError by writing an `end` with an empty run id, which the editor drops,
+    leaving the worker to die unaccounted for.
+    """
+    global _source_code, _file_path, _held
+
+    target = cmd.get('checkpoint3') or {}
+    target_line, target_site = target.get('line'), target.get('visIndex')
+    if not isinstance(target_line, int) or not isinstance(target_site, int):
+        # Nothing to warm towards. Better to exit than to execute the whole
+        # program speculatively and stop nowhere.
+        sys.exit(1)
+
+    _source_code = code
+    # Not optional: `install_url_cache` reads `_file_path` at fetch time, so a
+    # warm that never learned it would cache the program's network reads in a
+    # directory no real run looks in.
+    _file_path = cmd.get('file_path') or ''
+    # Hold from here rather than from inside `_execute_run`: reloading can
+    # report a visualizer that no longer imports, and that warning belongs to
+    # the run that arrives -- one with no run id goes to the main process
+    # console, where nobody sees it.
+    _held = []
+    _reload_stale_visualizers()
+
+    emit_meta('checkpoint3-warm-start')
+
+    # NO `unblock_stdin()` here, unlike the run paths below. `read_stdin_line()`
+    # at the pause needs a blocking fd: on a non-blocking one it raises
+    # BlockingIOError, which it cannot tell from a killed worker, so every warm
+    # would exit the instant it paused. The pause unblocks the fd itself once it
+    # has its run.
+    globals_dict = dict(import_globals)
+    globals_dict.update(_runtime_hooks())
+
+    _execute_run(body_code, cmd.get('models_and_events', ''), '',
+                 focused_line=cmd.get('focused_line'), globals_dict=globals_dict,
+                 stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
+                 replay_output=import_output, loop_selections=cmd.get('loop_selections'),
+                 read_only=bool(cmd.get('read_only', False)),
+                 checkpoint3_target=(target_line, target_site))
+
+    if _held is not None:
+        # Still holding, so the pause never happened. Drop it all.
+        emit_meta('checkpoint3-target-never-reached')
+    sys.exit(0)
+
+
 def run_pool_worker_mode(working_directory: str) -> None:
     """
     Run as a pool worker process (cross-platform, no os.fork).
@@ -2373,6 +2574,10 @@ def run_pool_worker_mode(working_directory: str) -> None:
         wait for a {"type": "run", ...} message.  Execute that run's body with the
         pre-loaded import globals, emit results, and exit.  (Checkpoint 2 path —
         used when the imports are already loaded.)
+    3c. If the message waited for in 3b is {"type": "init_run", ...} instead:
+        run the body up to one widget's log site and pause there holding
+        everything, then serve the run that arrives at the pause.  (Checkpoint 3
+        path — see `_warm_to_checkpoint3`.)
 
     The run that reaches a checkpoint 2 worker need not be the code it warmed on:
     the user keeps typing. The warmed globals are reused whenever the edit left
@@ -2451,6 +2656,13 @@ def run_pool_worker_mode(working_directory: str) -> None:
             cmd = json.loads(line.strip())
         except json.JSONDecodeError:
             sys.exit(1)
+
+        if cmd.get('type') == 'init_run':
+            # Advance to checkpoint 3 instead: run the program up to one
+            # widget and stop there holding everything. Either a run arrives
+            # at the pause and is served from inside `_execute_run`, or the
+            # target never logs and this exits.
+            _warm_to_checkpoint3(cmd, code, body_code, import_globals, import_output)
 
         if cmd.get('type') != 'run':
             sys.exit(1)

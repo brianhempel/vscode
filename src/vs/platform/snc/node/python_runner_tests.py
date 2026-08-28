@@ -1391,6 +1391,360 @@ class TestPoolWorkerCheckpoint2(unittest.TestCase):
         self.assertEqual(result['exitCode'], 1)
 
 
+PROBE_VISUALIZER = '''\
+"""A visualizer for the checkpoint 3 tests: claims {"kind": "probe"} values,
+counts the events replayed onto it, and emits a command for each one."""
+from dataclasses import dataclass
+
+
+@dataclass
+class ProbeCommand:
+    note: str
+
+
+def can_visualize(value):
+    return isinstance(value, dict) and value.get("kind") == "probe"
+
+
+def init_model(value, get_visualizer):
+    return {"clicks": 0}
+
+
+def update(ui_event, var_and_exp, model, value, get_visualizer):
+    return {"clicks": model["clicks"] + 1}, [ProbeCommand(value.get("name", ""))]
+
+
+def visualize(value, model, get_visualizer):
+    return '<div class="probe">%s:%d</div>' % (value.get("name", ""), model["clicks"])
+'''
+
+
+class TestPoolWorkerCheckpoint3(unittest.TestCase):
+    """A checkpoint 3 worker runs the program up to one widget's log site and
+    stops there holding its live state, so the run that arrives pays only for
+    that visualizer and the tail of the program.
+
+    Pre-pause items are dropped -- the editor already holds identical ones from
+    the run that warmed this worker -- but output, loop counts, commands and
+    warnings are held and replayed under the arriving run's id, because the
+    front-end rebuilds all of those from scratch on every run.
+    """
+
+    _RUNNER = os.path.join(os.path.dirname(os.path.abspath(python_runner.__file__)), 'python_runner.py')
+
+    # Five log sites, one per line; (3, 0) is the widget being interacted with.
+    PROGRAM = (
+        "print('prefix', flush=True)\n"                 # 1
+        "a = {'kind': 'probe', 'name': 'a'}\n"          # 2
+        "b = {'kind': 'probe', 'name': 'b'}\n"          # 3  <- the target
+        "print('tail', flush=True)\n"                   # 4
+        "c = {'kind': 'probe', 'name': 'c'}\n"          # 5
+    )
+    TARGET = (3, 0)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        vis_dir = pathlib.Path(self.dir, '.snc_visualizers')
+        vis_dir.mkdir()
+        (vis_dir / 'probe_visualizer.py').write_text(PROBE_VISUALIZER)
+
+    # ---- talking to a worker ----------------------------------------------
+
+    def _worker(self):
+        """A pool worker whose cwd is this test's directory, so it finds the
+        probe visualizer in `.snc_visualizers` and nothing else."""
+        env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8', 'PYTHONHASHSEED': '1234567'}
+        proc = subprocess.Popen(
+            [sys.executable, self._RUNNER, '--pool-worker', self.dir],
+            cwd=self.dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=env, text=True)
+        self.addCleanup(self._stop, proc)
+        return proc
+
+    @staticmethod
+    def _stop(proc):
+        proc.kill()
+        proc.wait()
+
+    @staticmethod
+    def _send(proc, msg):
+        proc.stdin.write(json.dumps(msg) + '\n')
+        proc.stdin.flush()
+
+    @staticmethod
+    def _messages_until(proc, done):
+        """Every message the worker writes up to the one `done` accepts, or up
+        to its exit if it never writes one."""
+        collected = []
+        for line in proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            collected.append(msg)
+            if done(msg):
+                break
+        return collected
+
+    def _expect(self, proc, done, what):
+        msgs = self._messages_until(proc, done)
+        if not msgs or not done(msgs[-1]):
+            self.fail(f'worker exited before the {what}; got {msgs}')
+        return msgs
+
+    @staticmethod
+    def _checkpoint(n):
+        return lambda m: m.get('type') == 'checkpoint_ready' and m.get('checkpoint') == n
+
+    def _paused(self, msgs):
+        return bool(msgs) and self._checkpoint(3)(msgs[-1])
+
+    # ---- the checkpoint 3 handshake ---------------------------------------
+
+    def _warm(self, proc, code, target, before_run=None, **extra):
+        """Take a fresh worker to the pause before `target`, and return
+        everything it wrote getting there -- which ends in checkpoint_ready(3)
+        only if it got there at all."""
+        self._expect(proc, self._checkpoint(1), 'first checkpoint')
+        if before_run is not None:
+            before_run()
+        self._send(proc, {'type': 'init_imports', 'code': code})
+        self._expect(proc, self._checkpoint(2), 'second checkpoint')
+        self._send(proc, {'type': 'init_run', 'code': code, 'file_path': '',
+                          'models_and_events': '', 'stdin': '', 'stdin_eof': True,
+                          'checkpoint3': {'line': target[0], 'visIndex': target[1]},
+                          **extra})
+        return self._messages_until(proc, self._checkpoint(3))
+
+    def _warm_then_run(self, code, target, warm=None, **run_extra):
+        """Warm to the pause, then hand the paused worker a run.
+
+        Returns (what it wrote while warming, what it wrote for the run).
+        """
+        proc = self._worker()
+        warm_msgs = self._warm(proc, code, target, **(warm or {}))
+        if not self._paused(warm_msgs):
+            self.fail(f'worker never paused at checkpoint 3; got {warm_msgs}')
+        self._send(proc, {'type': 'run', 'run_id': 'r1', 'models_and_events': '', **run_extra})
+        return warm_msgs, self._expect(proc, lambda m: m.get('type') == 'end', 'end of the run')
+
+    def _run_at_checkpoint1(self, code):
+        """A plain run on a fresh worker -- what the editor does before any
+        interaction, and where the models a warm is seeded with come from."""
+        proc = self._worker()
+        self._expect(proc, self._checkpoint(1), 'first checkpoint')
+        self._send(proc, {'type': 'run', 'run_id': 'r0', 'code': code,
+                          'models_and_events': '', 'stdin': '', 'stdin_eof': True})
+        return self._expect(proc, lambda m: m.get('type') == 'end', 'end of the run')
+
+    @staticmethod
+    def _items(msgs):
+        return [m['item'] for m in msgs if m.get('type') == 'item']
+
+    @staticmethod
+    def _of_type(msgs, kind):
+        return [m for m in msgs if m.get('type') == kind]
+
+    def _models_with_event(self, code, widget, event_id):
+        """The editor's `models_and_events` after a run, with one event queued
+        on `widget`. Real models, so the fingerprint matches and it replays."""
+        entries = [{'line': it['line'], 'visIndex': it['visIndex'], 'model': it['model']}
+                   for it in self._items(self._run_at_checkpoint1(code)) if 'model' in it]
+        entry = next(e for e in entries if (e['line'], e['visIndex']) == widget)
+        entry['events'] = [{'id': event_id, 'type': 'click'}]
+        return json.dumps(entries)
+
+    # ---- the prefix ------------------------------------------------------
+
+    def test_the_prefix_runs_once_and_its_output_is_replayed_under_the_run_id(self):
+        warm, run = self._warm_then_run(self.PROGRAM, self.TARGET)
+        # Nothing goes out while warming: there is no run to attribute it to,
+        # and the service drops what it can't attribute.
+        self.assertEqual(self._of_type(warm, 'output'), [])
+        chunks = self._of_type(run, 'output')
+        self.assertEqual(''.join(c['text'] for c in chunks), 'prefix\ntail\n')
+        self.assertEqual({c.get('run_id') for c in chunks}, {'r1'})
+
+    def test_a_pre_pause_widget_emits_no_item(self):
+        # The editor already holds an identical one from the run that warmed
+        # this worker; re-sending it is IPC and a re-render for nothing.
+        _, run = self._warm_then_run(self.PROGRAM, self.TARGET)
+        self.assertEqual([it['line'] for it in self._items(run)], [3, 4, 5])
+
+    def test_a_loop_that_closed_before_the_pause_is_replayed(self):
+        # The editor rebuilds every slider from what this run reported, so a
+        # loop that finished during the warm still has to be reported. The loop
+        # *enclosing* the target isn't held at all -- it exits after the resume.
+        code = ("for i in range(2):\n"                          # 1
+                "    x = i\n"                                   # 2
+                "for j in range(2):\n"                          # 3
+                "    y = {'kind': 'probe', 'name': 'y'}\n")     # 4  <- target
+        warm, run = self._warm_then_run(code, (4, 0), warm={'loop_selections': {'3': 0}})
+        self.assertEqual(self._of_type(warm, 'loop'), [])
+        self.assertEqual([(m['loop']['line'], m['loop']['count'], m.get('run_id'))
+                          for m in self._of_type(run, 'loop')],
+                         [(1, 2, 'r1'), (3, 2, 'r1')])
+
+    def test_a_warning_from_the_warm_is_replayed_under_the_runs_id(self):
+        # A warning with no run id is routed to the main process console, where
+        # nobody sees it: a broken visualizer would report itself on checkpoint
+        # 2 runs and go quiet on checkpoint 3 ones.
+        broken = pathlib.Path(self.dir, '.snc_visualizers', 'aa_broken_visualizer.py')
+        proc = self._worker()
+        warm = self._warm(proc, self.PROGRAM, self.TARGET,
+                          before_run=lambda: broken.write_text('raise RuntimeError("boom")\n'))
+        self.assertTrue(self._paused(warm))
+        self.assertEqual(self._of_type(warm, 'warning'), [])
+        self._send(proc, {'type': 'run', 'run_id': 'r1', 'models_and_events': ''})
+        run = self._expect(proc, lambda m: m.get('type') == 'end', 'end of the run')
+        warnings = self._of_type(run, 'warning')
+        self.assertEqual([w.get('run_id') for w in warnings], ['r1'])
+        self.assertIn('aa_broken_visualizer.py', warnings[0]['warning'])
+
+    def test_the_url_cache_lands_beside_the_file_path_given_to_the_warm(self):
+        # cache_dir_for(_file_path, os.getcwd()) is read at fetch time, so a
+        # warm that never learned the file path caches the program's network
+        # reads where no real run will look for them.
+        beside = tempfile.TemporaryDirectory()
+        self.addCleanup(beside.cleanup)
+        code = ("import urllib.request\n"                                   # 1
+                "try:\n"                                                    # 2
+                "    urllib.request.urlopen('http://127.0.0.1:9/none')\n"   # 3
+                "except Exception:\n"                                       # 4
+                "    pass\n"                                                # 5
+                "x = {'kind': 'probe', 'name': 'x'}\n")                     # 6  <- target
+        self._warm_then_run(code, (6, 0),
+                            warm={'file_path': os.path.join(beside.name, 'program.py')})
+        self.assertTrue(os.path.isdir(os.path.join(beside.name, url_cache.CACHE_DIR_NAME)))
+        self.assertFalse(os.path.isdir(os.path.join(self.dir, url_cache.CACHE_DIR_NAME)))
+
+    # ---- events ----------------------------------------------------------
+
+    def test_the_target_renders_with_the_event_that_arrived_with_the_run(self):
+        _, run = self._warm_then_run(
+            self.PROGRAM, self.TARGET,
+            models_and_events=self._models_with_event(self.PROGRAM, self.TARGET, 'e1'))
+        target = next(it for it in self._items(run) if (it['line'], it['visIndex']) == self.TARGET)
+        self.assertEqual(target['handledEventIds'], ['e1'])
+        self.assertIn('b:1', target['html'])
+
+    def test_a_worker_paused_early_serves_a_target_further_on(self):
+        # A worker paused at W serves any widget at or after W by running
+        # forward. Matching on the exact widget instead would drop everything
+        # below the warmed one back to checkpoint 2.
+        _, run = self._warm_then_run(
+            self.PROGRAM, self.TARGET,
+            models_and_events=self._models_with_event(self.PROGRAM, (5, 0), 'e5'))
+        by_line = {it['line']: it for it in self._items(run)}
+        self.assertEqual(by_line[5]['handledEventIds'], ['e5'])
+        self.assertIn('c:1', by_line[5]['html'])
+        self.assertIn('b:0', by_line[3]['html'])
+
+    def _warm_having_handled_a_pre_pause_event(self):
+        return self._warm_then_run(
+            self.PROGRAM, self.TARGET,
+            warm={'models_and_events': self._models_with_event(self.PROGRAM, (2, 0), 'e0')})
+
+    def test_a_held_item_is_replayed_when_it_handled_events(self):
+        # Dropping this one would strand 'e0' in the editor's queue: the item
+        # is the only thing that tells it which events were answered.
+        _, run = self._warm_having_handled_a_pre_pause_event()
+        item = next((it for it in self._items(run) if it['line'] == 2), None)
+        self.assertIsNotNone(item, 'a pre-pause item that handled events was dropped')
+        self.assertEqual(item['handledEventIds'], ['e0'])
+        self.assertIn('a:1', item['html'])
+
+    def test_a_held_command_is_replayed_under_the_run_id(self):
+        # Every run today re-renders every widget and re-emits its commands;
+        # replaying is what keeps the stream the editor sees unchanged.
+        warm, run = self._warm_having_handled_a_pre_pause_event()
+        self.assertEqual(self._of_type(warm, 'command'), [])
+        self.assertEqual([(m['command']['type'], m['command']['triggerLine'], m.get('run_id'))
+                          for m in self._of_type(run, 'command')],
+                         [('ProbeCommand', 2, 'r1')])
+
+    # ---- the step counter ------------------------------------------------
+
+    def test_the_pause_step_is_the_targets_own_step(self):
+        warm, run = self._warm_then_run(self.PROGRAM, self.TARGET)
+        target = next(it for it in self._items(run) if (it['line'], it['visIndex']) == self.TARGET)
+        self.assertEqual(warm[-1]['step'], target['execution_step'])
+        self.assertEqual((warm[-1]['line'], warm[-1]['visIndex']), self.TARGET)
+
+    def test_unselected_iterations_still_advance_the_step_counter(self):
+        # The count has to mean the same thing here as on the run that measured
+        # it, so it counts the iterations the editor isn't showing too. Move the
+        # increment below the `_path_selected` guard and this reports 2.
+        code = ("for i in range(3):\n"                          # 1
+                "    x = {'kind': 'probe', 'name': 'x'}\n")     # 2  <- target
+        proc = self._worker()
+        warm = self._warm(proc, code, (2, 0), loop_selections={'1': 2})
+        self.assertTrue(self._paused(warm))
+        # Six logged values: the loop variable and x, three times over.
+        self.assertEqual(warm[-1]['step'], 6)
+
+    def test_a_widget_hit_before_and_after_the_pause_reports_the_later_step(self):
+        # The editor keeps the last emission's step, so this widget lands on
+        # the far side of `execution_step < pauseStep` and is not carried.
+        code = ("def f(v):\n"                                   # 1
+                "    return v\n"                                # 2  hit either side
+                "f(1)\n"                                        # 3
+                "t = {'kind': 'probe', 'name': 't'}\n"          # 4  <- target
+                "f(2)\n")                                       # 5
+        warm, run = self._warm_then_run(code, (4, 0))
+        emitted = [it for it in self._items(run) if (it['line'], it['visIndex']) == (2, 0)]
+        self.assertEqual(len(emitted), 1)
+        self.assertGreater(emitted[0]['execution_step'], warm[-1]['step'])
+
+    def test_the_end_message_carries_the_runs_id(self):
+        # _execute_run was handed an empty run id at warm time; the end has to
+        # report the id of the run that actually arrived, or the service drops
+        # it and the worker dies unaccounted for.
+        _, run = self._warm_then_run(self.PROGRAM, self.TARGET)
+        self.assertEqual(run[-1]['run_id'], 'r1')
+        self.assertEqual(run[-1]['result']['exitCode'], 0)
+
+    # ---- targets that never arrive ---------------------------------------
+
+    def test_a_target_that_is_never_reached_discards_the_hold_and_exits(self):
+        # Never reached means the widget doesn't render under this code and
+        # loop selection -- both pinned by the pool's key -- so the user cannot
+        # be interacting with it, and resuming would apply their gesture to a
+        # program that has already finished and swallow it.
+        code = ("print('before', flush=True)\n"                 # 1
+                "if False:\n"                                   # 2
+                "    x = {'kind': 'probe', 'name': 'x'}\n")     # 3  <- never runs
+        proc = self._worker()
+        msgs = self._warm(proc, code, (3, 0))
+        self.assertFalse(self._paused(msgs), 'a worker that never reached the target offered itself')
+        # Nothing was ever written, so nothing is owed to anyone.
+        self.assertEqual([m for m in msgs if m.get('type') != 'meta'], [])
+        self.assertEqual(proc.wait(timeout=10), 0)
+
+    def test_an_uncaught_error_before_the_target_takes_the_same_exit(self):
+        code = ("raise ValueError('boom')\n"                    # 1
+                "x = {'kind': 'probe', 'name': 'x'}\n")         # 2  <- never runs
+        proc = self._worker()
+        msgs = self._warm(proc, code, (2, 0))
+        self.assertFalse(self._paused(msgs))
+        self.assertEqual([m for m in msgs if m.get('type') != 'meta'], [])
+        self.assertEqual(proc.wait(timeout=10), 0)
+
+    def test_the_error_handler_does_not_hijack_the_pause(self):
+        # A crash is reported with log_value(error_line, UncaughtError(...)) at
+        # site 0. Pausing there would hand back a worker whose only remaining
+        # work is to finish erroring, while the editor carried its pre-pause
+        # items forward on the strength of the step it reported.
+        code = ("x = 1\n"                                       # 1
+                "raise ValueError('boom')\n")                   # 2  <- reported at (2, 0)
+        proc = self._worker()
+        msgs = self._warm(proc, code, (2, 0))
+        self.assertFalse(self._paused(msgs))
+        self.assertEqual(proc.wait(timeout=10), 0)
+
+
 class TestLoopIterations(unittest.TestCase):
     """A line inside a loop runs once per iteration. Each logged item carries
     the dynamic `path` it was logged under -- `[[loop_line, iteration], ...]`

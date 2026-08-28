@@ -2847,6 +2847,47 @@ function widgetKey(line: number, visIndex: number): string {
 	return `${line}:${visIndex}`;
 }
 
+/**
+ * How far into the program a run may start -- the `execution_step` of the
+ * earliest widget it has to render itself, or undefined when it has to start
+ * from the top. A warm worker paused at or before this can serve the run by
+ * running forward; see `IProcessOptions.checkpoint3ResumeAtStep`.
+ *
+ * Every widget with events still queued counts, not just the one being
+ * dispatched -- which is already among them, since `runProgram` queues the
+ * event before it gets here. Nothing else stops a pre-checkpoint widget's
+ * events from sitting out a run that starts past them and then being swept at
+ * run end with no run scheduled to answer them: `scheduleQueuedEventRun` fires
+ * only when an item arrives, and no item arrives for a widget behind the pause.
+ */
+export function resumeAtStepFor(items: readonly IVisualizationItem[]): number | undefined {
+	let earliest: number | undefined;
+	for (const item of items) {
+		if (item.unhandledEvents?.length && (earliest === undefined || item.execution_step < earliest)) {
+			earliest = item.execution_step;
+		}
+	}
+	return earliest;
+}
+
+/**
+ * The items to keep when a run ends. Ordinarily just the run's own: anything
+ * older would show a visualizer for a line whose content has changed.
+ *
+ * A run served by a checkpoint 3 worker emits no item for the widgets behind
+ * its pause -- they ran during the warm, and the copies already on screen are
+ * the ones that run produced. Those are kept, and re-stamped with this run's id
+ * so the *next* run's filter still passes them.
+ */
+export function carryForwardItems(items: readonly IVisualizationItem[], currentRunId: string, resumedFromStep: number | null): IVisualizationItem[] {
+	if (resumedFromStep === null) {
+		return items.filter(item => item.runId === currentRunId);
+	}
+	return items
+		.filter(item => item.runId === currentRunId || item.execution_step < resumedFromStep)
+		.map(item => item.runId === currentRunId ? item : { ...item, runId: currentRunId });
+}
+
 function configCommentLineAbove(model: ITextModel, line: number): number {
 	for (let ln = Math.min(line, model.getLineCount()) - 1; ln >= 1; ln--) {
 		const text = model.getLineContent(ln).trim();
@@ -3242,6 +3283,21 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private readonly itemsThisRun = new Set<string>();
 
+	/**
+	 * The widget the user last interacted with, and so the one worth warming a
+	 * worker up to -- see `IProcessOptions.checkpoint3WarmAt`. Cleared on a
+	 * model change and on any edit: it holds a raw line number, and an edit
+	 * above it moves the widget without moving this.
+	 */
+	private lastInteractedWidget: { line: number; visIndex: number } | null = null;
+
+	/**
+	 * The `execution_step` the current run resumed from, when a warm worker
+	 * served it; null on every other run. Widgets before it produce no item this
+	 * run, so the copies already on screen are carried forward at run end.
+	 */
+	private resumedFromStep: number | null = null;
+
 	/** Pending `queued-events` rerun, so a burst of items only schedules one. */
 	private requeuedRunTimer: any = null;
 
@@ -3408,6 +3464,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.visualizationItems = [];
 			this.clearVisualizationWidgets();
 			this.loopSelections = [];
+			this.lastInteractedWidget = null;
 			this.updateToggleWidgetsButton();
 			// Set up language change listener for the new model
 			this.setupLanguageChangeListener();
@@ -3675,6 +3732,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 		this.updateConfigCommentFolding();
+
+		// An edit above it shifts the widget without shifting the raw line
+		// number stored here -- including a NewCode edit the visualizer itself
+		// just asked for. A target nothing logs at makes every warm worker
+		// execute the whole program speculatively and exit with nothing, so
+		// forget it and let the next interaction re-establish it. Costs one
+		// checkpoint-2-served run, which is what an edit costs anyway.
+		this.lastInteractedWidget = null;
 
 		// Immediately adjust visualization items for line changes (deletions/insertions)
 		// so stale visualizers don't linger on deleted or shifted lines.
@@ -4919,6 +4984,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// The runner echoes the ids it applied back on the item, which is how a
 		// queued event is retired -- see IVisualizationItem.handledEventIds.
 		const queued: UiEvent = { ...event, id: ++this.lastEventId };
+		// The same funnel is where we learn which widget is worth warming to.
+		this.lastInteractedWidget = { line: event.line, visIndex: event.visIndex };
 		this.runProgram(this.getProgram(), queued, `widget:${queued.eventJSON?.type ?? 'event'}`);
 	}
 
@@ -6106,6 +6173,34 @@ export class SNCController extends Disposable implements IEditorContribution {
 							stdinOffset: msg.stdinOffset
 						});
 					}
+				} else if (msg.type === 'resumed') {
+					// A warm worker took this run at its pause, so the program is
+					// already past every widget behind `msg.step` and will emit
+					// no item for any of them.
+					this.resumedFromStep = msg.step;
+					// Seed them as already-seen. Load-bearing twice over: the
+					// mid-run gate must refuse to hand one of them an event to a
+					// run that is past it (and start a fresh run instead), and
+					// the sweep at the end of this handler must not read "no item
+					// arrived" as "this widget isn't part of the execution" and
+					// throw its queued events away.
+					let strandedBehindThePause = false;
+					for (const item of this.visualizationItems) {
+						if (item.execution_step < msg.step) {
+							this.itemsThisRun.add(widgetKey(item.line, item.visIndex));
+							strandedBehindThePause ||= !!item.unhandledEvents?.length;
+						}
+					}
+					// `resumeAtStepFor` keeps a run that owes a widget behind the
+					// pause off a warm worker, so anything queued there now was
+					// handed over in the moment between this run being dispatched
+					// and this message arriving. No item will arrive for it, so
+					// the usual retry (on item arrival) never fires -- schedule
+					// the run here instead of leaving the event to wait for the
+					// user's next gesture.
+					if (strandedBehindThePause) {
+						this.scheduleQueuedEventRun();
+					}
 				} else if (msg.type === 'item') {
 					// console.log(msg.item.model)
 					// Timing: first item arrival for this run
@@ -6244,9 +6339,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 					} else {
 						// Only keep items from the current run. Prior-run items are stale
 						// and would show visualizers on lines whose content has changed.
-						this.visualizationItems = this.visualizationItems.filter(visItem =>
-							visItem.runId === this.currentRunId
-						);
+						// Except the ones a warm worker ran through before this run
+						// took it over: those ARE this run's, they just went out
+						// under the id of the run that warmed it.
+						this.visualizationItems = carryForwardItems(
+							this.visualizationItems, this.currentRunId!, this.resumedFromStep);
 						this.setSyntaxErrorState(false);
 						// Every model is fresh now: reconcile front-end links against
 						// the models so the chain icon and decorations can't drift.
@@ -6284,6 +6381,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							: v);
 
 					this.currentRunId = null;
+					this.resumedFromStep = null;
 					// Counted after the widgets are updated above, so a waiter
 					// that sees this can already read the new DOM.
 					sncRunsSettled++;
@@ -6344,8 +6442,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.currentRunId = runId;
 		// No widget has been reached yet, so the run can be handed events
-		// for any of them (see the gate above).
+		// for any of them (see the gate above). A warm worker taking this run
+		// says otherwise, and seeds the set -- see the 'resumed' handler.
 		this.itemsThisRun.clear();
+		this.resumedFromStep = null;
 		this.consoleFilePath = filePath;
 		if (filePath) {
 			this.consoleService.runStarted(filePath);
@@ -6375,6 +6475,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// with an unterminated empty stream: a read starves rather than
 			// seeing a spurious EOF.
 			const { stdin, stdinEof } = filePath ? this.consoleService.stdinFor(filePath) : { stdin: '', stdinEof: false };
+			// Where to warm the next workers, and how far into the program this
+			// run may start. Both absent when nothing has been interacted with,
+			// which is when there is no prefix worth skipping and the backend
+			// leaves the checkpoint 3 pool empty.
+			const resumeAtStep = resumeAtStepFor(this.visualizationItems);
 			const options: IProcessOptions = {
 				modelsAndEventsJson: JSON.stringify(models_and_events),
 				timeout: 60_000,
@@ -6384,7 +6489,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 				stdinEof,
 				loopSelections: this.loopSelectionsByLine(),
 				readOnly: this.isReadOnly(),
-				...(focusedLine !== null ? { focusedLine } : {})
+				...(focusedLine !== null ? { focusedLine } : {}),
+				...(this.lastInteractedWidget ? { checkpoint3WarmAt: this.lastInteractedWidget } : {}),
+				...(resumeAtStep !== undefined ? { checkpoint3ResumeAtStep: resumeAtStep } : {})
 			};
 			this.loopCountsThisRun = new Map();
 			await channel.call('startProgram', [content, options, runId]);

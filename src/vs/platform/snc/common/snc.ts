@@ -89,6 +89,25 @@ export interface IProcessOptions {
 	stdin?: string; // The console document, replayed through the program's stdin
 	stdinEof?: boolean; // Whether the document ends the stream; false makes a read past its end starve rather than see EOF
 	readOnly?: boolean; // Render visualizers without any code-writing affordance and send no code-changing command; see SNC_READ_ONLY_VISUALIZERS_SETTING
+	/**
+	 * The widget newly warmed workers should pause just before -- the one the
+	 * user last interacted with. Absent means don't warm any: with nothing being
+	 * interacted with there is no prefix worth skipping, and the checkpoint 3
+	 * pool stays empty.
+	 */
+	checkpoint3WarmAt?: { line: number; visIndex: number };
+	/**
+	 * The `execution_step` of the earliest widget this run has to render itself.
+	 * A worker paused at or before it can serve this run by running forward; one
+	 * paused after it cannot, because the widget's log site is already behind it.
+	 *
+	 * Separate from `checkpoint3WarmAt` because they answer different questions:
+	 * where to warm the next workers, versus how far into the program this run
+	 * may start. They differ exactly when the user has just moved to a different
+	 * widget, and keeping them apart is what lets that run take a checkpoint 2
+	 * worker immediately instead of waiting for the pool to re-warm.
+	 */
+	checkpoint3ResumeAtStep?: number;
 }
 
 /**
@@ -185,6 +204,13 @@ export type SNCStreamMessage =
 	| { runId: string; type: 'spawn'; timing: SNCTimingData }
 	| { runId: string; type: 'error'; error: string }
 	| { runId: string; type: 'warning'; warning: string }
+	/**
+	 * A worker warmed to checkpoint 3 accepted this run at its pause, and the
+	 * program is resuming from `step`. Every widget the editor holds from before
+	 * `step` has already run and will not be re-emitted, so this run's items are
+	 * only part of the picture -- see SNCController's handling.
+	 */
+	| { runId: string; type: 'resumed'; line: number; visIndex: number; step: number }
 	/**
 	 * A chunk of the program's stdout/stderr. `stdinOffset` is how much of the
 	 * stdin document had been consumed when it was written, which is what

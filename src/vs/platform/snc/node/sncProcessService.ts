@@ -12,17 +12,25 @@ const __dirname = path.dirname(__filename);
 /**
  * A pool worker process. Each worker starts in --pool-worker mode, loads
  * visualizers, and reaches checkpoint 1. It can optionally be advanced to
- * checkpoint 2 by sending an init_imports message. Each worker handles
- * exactly one run then exits.
+ * checkpoint 2 by sending an init_imports message, and from there to
+ * checkpoint 3 by sending an init_run. Each worker handles exactly one run
+ * then exits.
  */
 interface PoolWorker {
 	child: ChildProcess;
 	buffer: string;
-	checkpoint: 1 | 2;
+	checkpoint: 1 | 2 | 3;
 	ready: boolean;
 	workingDirectory: string;
 	/** For checkpoint 2 workers: the code whose imports are pre-loaded */
 	code?: string;
+	/**
+	 * For checkpoint 3 workers: the `execution_step` the program is paused at.
+	 * This worker can serve any run that need not render anything before it.
+	 */
+	pauseStep?: number;
+	/** Cleared when the warm reports checkpoint 3, or the worker goes away. */
+	warmTimeoutId?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -46,9 +54,30 @@ interface RunState {
  * Sized to absorb a burst: a run only ends up here once checkpoint 2 is empty,
  * and a burst of runs (each killing the one before it) can empty it, so this
  * pool is what stands between a burst and a run waiting on a cold spawn.
+ *
+ * Checkpoint 3 takes its five from checkpoint 2, which used to have ten. That
+ * is a real trade, not bookkeeping: moving to another widget changes the
+ * checkpoint 3 key and kills all five mid-prefix, and so does a bare cursor
+ * move (`focusedLine` is in the key because it changes what every widget
+ * renders). Until the user has interacted with something there is no checkpoint
+ * 3 pool at all, so opening a file and typing runs on half the checkpoint 2
+ * pool it used to have. Dragging a visualizer below an expensive line gets much
+ * faster in exchange. `CP2_POOL_SIZE` is the first thing to revisit if the cold
+ * phase regresses.
  */
 const CP1_POOL_SIZE = 5;
-const CP2_POOL_SIZE = 10;
+const CP2_POOL_SIZE = 5;
+const CP3_POOL_SIZE = 5;
+
+/**
+ * How long a warm to checkpoint 3 may take before the worker is presumed stuck.
+ *
+ * Nothing else bounds it: `RunState.timeoutId` covers dispatched runs only, so
+ * a prefix with a `sleep`, an uncached network read or a non-terminating loop
+ * would leave five workers spinning with no recovery and no signal, while
+ * `takeReadyWorker` silently fell back to checkpoint 2 forever.
+ */
+const CP3_WARM_TIMEOUT_MS = 10_000;
 
 /**
  * The leading imports of a program, as a key for matching it to a warmed worker.
@@ -143,9 +172,30 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 	private checkpoint1Pool: PoolWorker[] = [];
 	private checkpoint2Pool: PoolWorker[] = [];
+	private checkpoint3Pool: PoolWorker[] = [];
 
 	/** The code checkpoint 2 workers are warmed with (the newest we've seen) */
 	private checkpoint2Code: string = '';
+
+	/**
+	 * Everything a checkpoint 3 warm depends on, as a key. A warmed worker has
+	 * executed the program up to one widget, so anything that changes what the
+	 * prefix does or emits — the code, the file it caches network reads beside,
+	 * the focused line (which changes every widget's HTML), the loop pins, the
+	 * console document, read-only mode, and which widget to stop at — has to
+	 * match for the worker to be usable at all.
+	 */
+	private checkpoint3Key: string = '';
+
+	/** The init_run message that takes a checkpoint 2 worker to checkpoint 3. */
+	private checkpoint3WarmCmd: string | null = null;
+
+	/**
+	 * Set when a warm hit `CP3_WARM_TIMEOUT_MS`. Suppresses further checkpoint 3
+	 * spawns until the key changes, so a program whose prefix doesn't terminate
+	 * costs one round of five warms rather than a permanent spawn treadmill.
+	 */
+	private checkpoint3WarmFailed: boolean = false;
 
 	/**
 	 * The leading imports of `checkpoint2Code`. This, not the whole file, is what
@@ -198,7 +248,12 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 	private _disposed = false;
 
-	constructor() {
+	/**
+	 * How a worker process is started. Injectable so the pool policy — which
+	 * worker is picked, when a pool refills, what a waiter can reach — can be
+	 * tested without a Python interpreter.
+	 */
+	constructor(private readonly spawnProcess: typeof spawn = spawn) {
 		super();
 	}
 
@@ -223,7 +278,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			// `set(words)` reshuffles on each keystroke — the same instability
 			// python_runner's reseed() fixes for random numbers, but it can only
 			// be set at interpreter start, not from inside the runner.
-			const child = spawn(this.pythonExecutable, [this.runnerPath, '--pool-worker', workingDirectory], {
+			const child = this.spawnProcess(this.pythonExecutable, [this.runnerPath, '--pool-worker', workingDirectory], {
 				env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONHASHSEED: '1234567' }
 			});
 
@@ -300,9 +355,10 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 *
 	 * `includeCheckpoint2` is false while a run is being dispatched: spawning ten
 	 * workers there would undo the deferral in `invalidateCheckpoint2Pool`. They
-	 * are spawned when the run ends instead.
+	 * are spawned when the run ends instead. `includeCheckpoint3` works the same
+	 * way, for the same reason.
 	 */
-	private ensurePoolFilled(workingDirectory: string, includeCheckpoint2: boolean = true): void {
+	private ensurePoolFilled(workingDirectory: string, includeCheckpoint2: boolean = true, includeCheckpoint3: boolean = true): void {
 		if (this._disposed) { return; }
 		// While the python executable is known to be broken, don't keep
 		// retrying — that would just spin a spawn-error storm. The flag is
@@ -334,6 +390,21 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				this.checkpoint2Pool.push(worker);
 			}
 		}
+
+		// Fill checkpoint 3 pool. Not until the user has interacted with a
+		// visualizer: with nothing to warm towards there is no prefix worth
+		// skipping, and the pool stays empty and costs nothing.
+		if (includeCheckpoint3 && this.checkpoint3WarmCmd && this.checkpoint2Code && !this.checkpoint3WarmFailed) {
+			while (this.checkpoint3Pool.length < CP3_POOL_SIZE) {
+				const worker = this.spawnWorker(workingDirectory);
+				if (!worker) { break; }
+				// Same ladder as above, one rung further: processWorkerBuffer
+				// sends init_imports at checkpoint 1 and init_run at
+				// checkpoint 2, because the worker is in this pool.
+				worker.code = this.checkpoint2Code;
+				this.checkpoint3Pool.push(worker);
+			}
+		}
 	}
 
 	/**
@@ -359,7 +430,8 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 * character at a time would spawn and kill ten processes per keystroke.
 	 */
 	private invalidateCheckpoint2Pool(newCode: string, newImportPrefix: string): void {
-		for (const worker of this.checkpoint2Pool) {
+		// Over a copy: killing a worker can remove it from this array.
+		for (const worker of [...this.checkpoint2Pool]) {
 			try { worker.child.kill(); } catch { /* ignore */ }
 		}
 		this.checkpoint2Pool = [];
@@ -368,10 +440,70 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	}
 
 	/**
+	 * Send init_run to advance a checkpoint-2-ready worker to checkpoint 3.
+	 */
+	private warmToCheckpoint3(worker: PoolWorker): void {
+		if (!this.checkpoint3WarmCmd) { return; }
+		try {
+			worker.child.stdin?.write(this.checkpoint3WarmCmd);
+			worker.ready = false; // ready again when checkpoint_ready(3) arrives
+			worker.warmTimeoutId = setTimeout(() => {
+				// The prefix is taking longer than a warm can be worth. Give up
+				// on this program rather than respawn into the same wall.
+				this.checkpoint3WarmFailed = true;
+				try { worker.child.kill(); } catch { /* ignore */ }
+			}, CP3_WARM_TIMEOUT_MS);
+		} catch {
+			this.removeWorkerFromPool(worker);
+		}
+	}
+
+	/**
+	 * Kill every checkpoint 3 worker, whose paused program is no longer the one
+	 * the user is looking at, and adopt the new key.
+	 *
+	 * Replacements are NOT spawned here, for the reason they aren't for
+	 * checkpoint 2: this is the typing case, and re-running a prefix we are
+	 * about to discard once per keystroke is pure churn. A run whose key still
+	 * matches tops the pool up at dispatch instead.
+	 */
+	private invalidateCheckpoint3Pool(newKey: string, newWarmCmd: string | null): void {
+		// Over a copy: killing a worker can remove it from this array.
+		for (const worker of [...this.checkpoint3Pool]) {
+			if (worker.warmTimeoutId) { clearTimeout(worker.warmTimeoutId); }
+			try { worker.child.kill(); } catch { /* ignore */ }
+		}
+		this.checkpoint3Pool = [];
+		this.checkpoint3Key = newKey;
+		this.checkpoint3WarmCmd = newWarmCmd;
+		// A new key is a new program to warm on, so whatever wedged the last one
+		// is no longer a reason not to try.
+		this.checkpoint3WarmFailed = false;
+	}
+
+	/**
 	 * Take a ready worker for a program with the given leading imports. If no
 	 * worker is ready, returns a Promise that resolves when one becomes available.
+	 *
+	 * `resumeAtStep` is the `execution_step` of the earliest widget the run has
+	 * to render itself; undefined means it must start from the top.
 	 */
-	private takeReadyWorker(importPrefix: string): PoolWorker | Promise<PoolWorker> {
+	private takeReadyWorker(importPrefix: string, resumeAtStep?: number): PoolWorker | Promise<PoolWorker> {
+		// Prefer a checkpoint 3 worker, which has already run the program up to
+		// its pause. Any pause at or before what this run must render will do:
+		// the worker just runs forward from there, which is still strictly ahead
+		// of checkpoint 2. Insisting on the exact widget instead would drop
+		// every widget below the warmed one back to checkpoint 2.
+		//
+		// The caller has already reconciled `checkpoint3Key`, so every worker
+		// still in this pool was warmed under the run's own key.
+		if (typeof resumeAtStep === 'number') {
+			const idx = this.checkpoint3Pool.findIndex(w => w.ready && w.pauseStep !== undefined && w.pauseStep <= resumeAtStep);
+			if (idx !== -1) {
+				return this.checkpoint3Pool.splice(idx, 1)[0];
+			}
+		}
+
 		// Prefer a checkpoint 2 worker whose warmed imports are this program's
 		if (importPrefix === this.checkpoint2ImportPrefix) {
 			const idx = this.checkpoint2Pool.findIndex(w => w.ready);
@@ -411,26 +543,46 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 * Remove a worker from whichever pool it belongs to.
 	 */
 	private removeWorkerFromPool(worker: PoolWorker): void {
-		let idx = this.checkpoint1Pool.indexOf(worker);
-		if (idx !== -1) {
-			this.checkpoint1Pool.splice(idx, 1);
-			return;
+		if (worker.warmTimeoutId) {
+			clearTimeout(worker.warmTimeoutId);
+			worker.warmTimeoutId = undefined;
 		}
-		idx = this.checkpoint2Pool.indexOf(worker);
-		if (idx !== -1) {
-			this.checkpoint2Pool.splice(idx, 1);
+		for (const pool of [this.checkpoint1Pool, this.checkpoint2Pool, this.checkpoint3Pool]) {
+			const idx = pool.indexOf(worker);
+			if (idx !== -1) {
+				pool.splice(idx, 1);
+				return;
+			}
 		}
 	}
 
 	/**
-	 * Kill all workers in both pools.
+	 * A checkpoint 3 worker stopped short of its pause -- a waiting run
+	 * outranked the rest of its climb -- so put it in the checkpoint 2 pool
+	 * where it can still be used.
+	 *
+	 * Without this it would be stranded: `resolveNextWaiter` deliberately can't
+	 * see the checkpoint 3 pool, and `takeReadyWorker` only picks from it by
+	 * `pauseStep`, which a worker that never paused doesn't have. It would sit
+	 * ready forever, holding a pool slot that `ensurePoolFilled` counts.
+	 */
+	private demoteToCheckpoint2Pool(worker: PoolWorker): void {
+		if (!this.checkpoint3Pool.includes(worker)) { return; }
+		this.removeWorkerFromPool(worker);
+		this.checkpoint2Pool.push(worker);
+	}
+
+	/**
+	 * Kill all workers in every pool.
 	 */
 	private drainAllPools(): void {
-		for (const worker of [...this.checkpoint1Pool, ...this.checkpoint2Pool]) {
+		for (const worker of [...this.checkpoint1Pool, ...this.checkpoint2Pool, ...this.checkpoint3Pool]) {
+			if (worker.warmTimeoutId) { clearTimeout(worker.warmTimeoutId); }
 			try { worker.child.kill(); } catch { /* ignore */ }
 		}
 		this.checkpoint1Pool = [];
 		this.checkpoint2Pool = [];
+		this.checkpoint3Pool = [];
 	}
 
 	// -------------------------------------------------------------------
@@ -457,17 +609,40 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 						// run outranks warming for some future one: queueing it
 						// behind someone else's imports is how a keystroke ends
 						// up waiting seconds for a worker that was ready.
-						if (this.checkpoint2Pool.includes(worker) && worker.code && this.workerWaiters.length === 0) {
+						const climbing = this.checkpoint2Pool.includes(worker) || this.checkpoint3Pool.includes(worker);
+						if (climbing && worker.code && this.workerWaiters.length === 0) {
 							this.warmToCheckpoint2(worker, worker.code);
 						} else {
+							this.demoteToCheckpoint2Pool(worker);
 							worker.ready = true;
 							worker.checkpoint = 1;
 							this.resolveNextWaiter(worker);
 						}
 					} else if (msg.checkpoint === 2) {
+						// Same rule one rung up: a checkpoint 3 worker has one
+						// more hop to climb, and a waiting run still outranks it.
+						if (this.checkpoint3Pool.includes(worker) && this.checkpoint3WarmCmd && this.workerWaiters.length === 0) {
+							worker.checkpoint = 2;
+							this.warmToCheckpoint3(worker);
+						} else {
+							this.demoteToCheckpoint2Pool(worker);
+							worker.ready = true;
+							worker.checkpoint = 2;
+							this.resolveNextWaiter(worker);
+						}
+					} else if (msg.checkpoint === 3) {
+						if (worker.warmTimeoutId) {
+							clearTimeout(worker.warmTimeoutId);
+							worker.warmTimeoutId = undefined;
+						}
 						worker.ready = true;
-						worker.checkpoint = 2;
-						this.resolveNextWaiter(worker);
+						worker.checkpoint = 3;
+						worker.pauseStep = msg.step;
+						// Deliberately no `resolveNextWaiter`: a waiter carries
+						// no `resumeAtStep`, so handing it a worker paused
+						// somewhere in the middle of the program would resume it
+						// from a pause that isn't its own. `takeReadyWorker` is
+						// the only place a paused worker may be chosen.
 					}
 				} else if (msg.type === 'warning' && msg.warning) {
 					const runId = msg.run_id;
@@ -476,7 +651,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 					} else {
 						console.warn('[SNC] Visualizer load warning (no active run):', msg.warning);
 					}
-				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'loop' || msg.type === 'end' || msg.type === 'output') {
+				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'loop' || msg.type === 'end' || msg.type === 'output' || msg.type === 'resumed') {
 					const runId = msg.run_id || (msg.item && msg.item.runId);
 					if (runId) {
 						this.handleRunMessage(runId, msg);
@@ -505,9 +680,11 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 
 		this.workerWaiters.shift()!.resolve(worker);
 
-		// Replenish the pool after handing out a worker
+		// Replenish the pool after handing out a worker. Not checkpoint 3: this
+		// fires mid-burst for a run that was already waiting on a worker, and
+		// the dispatch path tops that pool up anyway.
 		if (this.poolWorkingDirectory) {
-			this.ensurePoolFilled(this.poolWorkingDirectory);
+			this.ensurePoolFilled(this.poolWorkingDirectory, true, false);
 		}
 	}
 
@@ -522,7 +699,18 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		const state = this.runs.get(runId);
 		if (!state) { return; }
 
-		if (msg.type === 'item' && msg.item) {
+		if (msg.type === 'resumed') {
+			// Forwarded verbatim, ahead of every item, exactly as the runner
+			// wrote it. The service doesn't synthesize this: on the same stream
+			// there is no ordering left to argue about.
+			this._onStream.fire({
+				runId,
+				type: 'resumed',
+				line: msg.line,
+				visIndex: msg.visIndex,
+				step: msg.step
+			});
+		} else if (msg.type === 'item' && msg.item) {
 			if (!state.tFirstItem) {
 				state.tFirstItem = Date.now();
 			}
@@ -669,10 +857,10 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		// events the queue is the lag. Only the newest run is worth running.
 		this.abandonQueuedRuns();
 
-		// Ensure pool is seeded for this working directory. Checkpoint 2 is left
-		// to the end of the run: warming it with code we may be about to
-		// invalidate two lines below would just burn processes.
-		this.ensurePoolFilled(options.workingDirectory, false);
+		// Ensure pool is seeded for this working directory. Checkpoints 2 and 3
+		// are left to the end of the run: warming them with code we may be about
+		// to invalidate a few lines below would just burn processes.
+		this.ensurePoolFilled(options.workingDirectory, false, false);
 
 		// A warmed worker has executed this program's imports and nothing else, so
 		// only an edit that reaches the imports invalidates the pool. A body edit
@@ -686,6 +874,45 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.checkpoint2Code = content;
 		}
 
+		// A checkpoint 3 worker has run the program up to one widget, so far more
+		// has to match for it to be usable — everything that changes what the
+		// prefix does or emits. Checked here, before a worker is taken, so every
+		// worker still in that pool was warmed under this run's own key and
+		// `takeReadyWorker` is left with nothing to check but the step.
+		const warmAt = options.checkpoint3WarmAt;
+		const cp3Key = JSON.stringify({
+			code: content,
+			filePath: options.filePath ?? null,
+			focusedLine: options.focusedLine ?? null,
+			loopSelections: options.loopSelections ?? {},
+			readOnly: options.readOnly ?? false,
+			stdin: options.stdin ?? '',
+			stdinEof: options.stdinEof ?? false,
+			warmAt: warmAt ?? null,
+		});
+		const cp3Invalidated = cp3Key !== this.checkpoint3Key;
+		const cp3WarmCmd = warmAt ? JSON.stringify({
+			type: 'init_run',
+			file_path: options.filePath ?? null,
+			models_and_events: options.modelsAndEventsJson || '',
+			focused_line: options.focusedLine ?? null,
+			loop_selections: options.loopSelections ?? {},
+			read_only: options.readOnly ?? false,
+			stdin: options.stdin ?? '',
+			stdin_eof: options.stdinEof ?? false,
+			checkpoint3: { line: warmAt.line, visIndex: warmAt.visIndex },
+		}) + '\n' : null;
+		if (cp3Invalidated) {
+			this.invalidateCheckpoint3Pool(cp3Key, cp3WarmCmd);
+		} else {
+			// Freshen what new warms are seeded with, as checkpoint2Code is
+			// freshened above. Workers already warming keep the snapshot they
+			// started with, which is sound: it only ever feeds widgets before
+			// the pause, and one of those can't take a mid-run hand-over — the
+			// editor starts a fresh run for it instead.
+			this.checkpoint3WarmCmd = cp3WarmCmd;
+		}
+
 		// Drop a cache left over from before this app session started, before any
 		// worker can read through it.
 		await this.clearUrlCacheOnce(options);
@@ -696,7 +923,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		// message and cleaned up `this.runs`, so we just return.
 		let worker: PoolWorker;
 		try {
-			const workerOrPromise = this.takeReadyWorker(importPrefix);
+			const workerOrPromise = this.takeReadyWorker(importPrefix, options.checkpoint3ResumeAtStep);
 			worker = workerOrPromise instanceof Promise ? await workerOrPromise : workerOrPromise;
 		} catch {
 			// Either the python executable is broken — handleSpawnFailure has
@@ -737,7 +964,14 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		// a burst of runs never reaches `run end` (each kills the one before it),
 		// so leaving the refill to run-end alone lets the pool drain to empty and
 		// dumps the whole burst onto checkpoint 1.
-		this.ensurePoolFilled(options.workingDirectory, !invalidated);
+		//
+		// Checkpoint 3 follows exactly the same rule, and needs it more. A drag
+		// consumes one checkpoint 3 worker per event — each event lands past the
+		// pause, so the editor starts a new run rather than handing it to the one
+		// in flight — and no run during a drag ever reaches `end`. Refilling only
+		// at run end would give five fast events and then today's speed for the
+		// rest of the gesture.
+		this.ensurePoolFilled(options.workingDirectory, !invalidated, !cp3Invalidated);
 	}
 
 	async setPythonExecutable(executable: string): Promise<void> {
