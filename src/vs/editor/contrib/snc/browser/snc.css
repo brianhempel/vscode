@@ -1325,6 +1325,7 @@
 	border-bottom-width: 0;
 	box-shadow: var(--snc-col-header-edge);
 	padding: 5px 3px;
+	position: relative;
 
 	/* a column actively filtering rows */
 	&.col-filtered {
@@ -1370,13 +1371,32 @@
 .list-visualizer .col-handle {
 	color: var(--snc-text-muted);
 	cursor: grab;
-	opacity: 0.5;
 	user-select: none;
 	font-size: 10px;
 	/* Give it a bit more clickable area */
 	line-height: 16px;
-	padding: 0 1px;
-	margin-left: -1px;
+	padding: 0 2px;
+
+	opacity: 0;
+	pointer-events: none;
+}
+
+.col-header:hover > .col-header-inner > .col-handle {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.list-visualizer .col-drag-handle {
+	position: absolute;
+  font-family: var(--snc-code-font-family);
+  border: 1px solid var(--snc-border-color);
+  background: var(--snc-table-header-bg);
+
+ 	border-right-color: var(--snc-bg);
+  margin-right: -1px;
+  right: 100%;
+  border-radius: 3px 0 0 3px;
+  cursor: grab;
 }
 
 /* Flex lives on an inner wrapper, never on the <th> itself: display:flex on a
@@ -1424,6 +1444,7 @@
   cursor: pointer;
   padding-left: 1px;
   font-weight: 400;
+  flex-grow: 1;
 }
 
 .editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.active {

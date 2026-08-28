@@ -8740,7 +8740,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
-        f'class="col-handle snc-hover-hidden full-opacity-on-hover">⣿</span>'
+        f'class="col-handle col-drag-handle">⣿</span>'
         f'{menu_html}'
         f'</span>'
         f'</th>'
