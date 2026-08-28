@@ -5888,11 +5888,11 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     _commit_open_dropdown_edit(model)
                     model['openDropdown'] = None
                 elif model.get('linked_action'):
-                    model['linked_action'] = 'find_or_map'
+                    model['linked_action'] = _default_action(model, eval_in_scope)
                 else:
                     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
-                        result = generate_action('find_or_map', ctx)
+                        _, result = _generate_default_action(model, ctx, eval_in_scope)
                         if result:
                             commands.append(new_code_command(result, code_imports))
 
@@ -6254,6 +6254,13 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
         return (model, commands)
 
     if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, FetchClick, Unlink, Relink)):
+        # A map expression has just appeared (typed, or composed from chips):
+        # the substring actions ignore it, so the line becomes the one that
+        # consumes it. Its disappearing does not switch back -- the user may
+        # be mid-edit, and the map form still reads correctly empty.
+        if _has_map(model):
+            model['linked_action'] = _MAP_CONSUMING_ACTION.get(
+                model['linked_action'], model['linked_action'])
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -6274,9 +6281,41 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     return (model, commands)
 
 
-# Default actions used when auto-linking on the first interaction (mirroring
-# the Enter-key behavior, find or map), or when relinking to a line whose shape
-# rules out the previously stashed action.
+# What the substring actions become once there is a map expression to consume.
+_MAP_CONSUMING_ACTION = {
+    'match_strings': 'find_or_map',
+    'loop_match_strings': 'loop',
+}
+
+
+def _has_map(model: dict) -> bool:
+    """Whether the replace box holds a map expression."""
+    return bool(model.get('replace_visible') and model.get('replace_text'))
+
+
+def _default_action(model: dict, eval_in_scope=None) -> str:
+    """The action a first interaction (or Enter) links: the matched substrings,
+    or Map Matches once there is a map expression for it to apply. An index or
+    slice search has no substrings to speak of, so it links find-or-map."""
+    if _has_map(model) or is_index_or_slice_search(model.get('search'), eval_in_scope):
+        return 'find_or_map'
+    return 'match_strings'
+
+
+def _generate_default_action(model: dict, ctx: dict, eval_in_scope=None):
+    """(action, generated) for the default action -- falling back to
+    find-or-map where substrings generate nothing (an index search whose
+    kind could not be told without a scope to evaluate it in)."""
+    action = _default_action(model, eval_in_scope)
+    result = generate_action(action, ctx)
+    if result is None and action != 'find_or_map':
+        action, result = 'find_or_map', generate_action('find_or_map', ctx)
+    return action, result
+
+
+# The relink fallback, for a line whose shape rules out the previously stashed
+# action. Find-or-map rather than substrings: it is the one that reads right
+# with or without a map.
 _AUTO_LINK_ACTION = 'find_or_map'
 _AUTO_LINK_STATEMENT_ACTION = 'loop'
 
@@ -6303,7 +6342,7 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
     if not ctx:
         return
-    result = generate_action(_AUTO_LINK_ACTION, ctx)
+    action, result = _generate_default_action(model, ctx, eval_in_scope)
     if not result:
         return
     suggest_name, expr = result
@@ -6314,7 +6353,7 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
         return
     # Mirror how _get_search_context derives source_expr so the linked-update
     # block (which re-resolves via source_expr) rebuilds the same context.
-    model['linked_action'] = _AUTO_LINK_ACTION
+    model['linked_action'] = action
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
