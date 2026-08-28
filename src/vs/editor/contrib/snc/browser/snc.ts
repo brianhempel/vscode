@@ -1532,6 +1532,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						'snc-mouse-up': `MouseUp(${el.getAttribute(`snc-mouse`)})`,
 					}[attr_name] ?? '';
 				}
+				// The shorthand covers move/down/up only. A mouseout over it is
+				// nothing the visualizer asked to hear about -- and it fires at
+				// every element boundary the pointer crosses. Sent anyway (as an
+				// empty event string) it was a no-op in Python that still cost a
+				// full run, superseding the run for the event before it: a
+				// mouseup's run killed just after its item retired the mouseup
+				// from the queue, and with it the line of code the visualizer
+				// was about to write. So: no event, keep looking upward.
+				if (pythonEventStr === '') {
+					el = el.parentElement;
+					continue;
+				}
 				pythonEventStr = this.wrapWithChildKeys(pythonEventStr, el.parentElement, this.domNode);
 				this.onPointerEvent(pythonEventStr, ev);
 				return;
@@ -1554,6 +1566,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						'snc-mouse-down': `MouseDown(${charIndex})`,
 						'snc-mouse-up': `MouseUp(${charIndex})`,
 					}[attr_name] ?? '';
+					// As above: nothing to say for a mouseout, so say nothing.
+					if (pythonEventStr === '') {
+						return;
+					}
 					pythonEventStr = this.wrapWithChildKeys(pythonEventStr, groupEl.parentElement, this.domNode);
 					// Build a per-character rect for accurate offsetY/elementHeight
 					const charRange = document.createRange();
@@ -6283,24 +6299,30 @@ export class SNCController extends Disposable implements IEditorContribution {
 						this.runEventTargetItemReceivedMsById.set(msg.runId, now());
 					}
 
+					// The commands ride on the item so a kill between the two can't
+					// split them (see IVisualizationItem.commands). They are for
+					// the editor, not for the model, so the stored item goes
+					// without them; they are applied once, below.
+					const { commands: itemCommands, ...item } = msg.item;
+
 					// replace prior items as new ones come in
 					let found = false;
 					this.visualizationItems = this.visualizationItems.map(visItem => {
-						if (visItem.line == msg.item.line && visItem.visIndex == msg.item.visIndex) {
+						if (visItem.line == item.line && visItem.visIndex == item.visIndex) {
 							found = true;
 							// What the runner says it applied, not what we sent it:
 							// it declines to replay onto a rebuilt model, and it
 							// may have picked up events queued after dispatch.
-							const handled = new Set(msg.item.handledEventIds ?? []);
+							const handled = new Set(item.handledEventIds ?? []);
 							return {
-								...msg.item,
+								...item,
 								unhandledEvents: (visItem.unhandledEvents || []).filter(ev => !handled.has(ev.id))
 							};
 						}
 						return visItem;
 					});
 					if (!found) {
-						this.visualizationItems = [...this.visualizationItems, msg.item];
+						this.visualizationItems = [...this.visualizationItems, item];
 					}
 
 					// This run is past that widget now, so whatever it didn't
@@ -6350,6 +6372,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 						this.streamUpdateTimer = setTimeout(() => {
 							this.streamUpdateTimer = null;
 						}, 16);
+					}
+
+					// Now that the item is taken -- and its events retired -- what
+					// it asked for. Same order as when these were messages of
+					// their own, just no longer separable from the item.
+					for (const command of itemCommands ?? []) {
+						this.handleCommand(command);
 					}
 				} else if (msg.type === 'command') {
 					// Handle commands from visualizers

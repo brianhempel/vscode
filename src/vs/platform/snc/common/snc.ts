@@ -21,6 +21,15 @@ export interface IVisualizationItem {
 	 */
 	handledEventIds?: number[];
 	/**
+	 * What the visualizer asked the editor to do while producing this item
+	 * (a NewCode line, a linked-line update, ...). Carried on the item, not
+	 * sent after it: the item retires the events it answered from the queue,
+	 * and a superseded run is killed mid-stream, so a command that trailed by
+	 * one message could be lost with its event already retired. Applied in the
+	 * same step the item is taken, so both land or neither does.
+	 */
+	commands?: SNCCommand[];
+	/**
 	 * Which iteration of which loops the value was produced under: one
 	 * `[headerLine, iteration]` per enclosing loop, outermost first. A function
 	 * body counts as a loop over its calls (`[defLine, callNumber]`).

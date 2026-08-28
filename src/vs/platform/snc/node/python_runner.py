@@ -647,13 +647,17 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     }
     if model is not None:
         item["model"] = model
+    # The commands ride on the item rather than following it as messages of
+    # their own. The item is what retires the events it answered from the
+    # editor's queue, and a run can be superseded (killed) at any instant: a
+    # command that arrived a message later would then be lost, with the event
+    # that produced it already retired -- a drag's new line of code silently
+    # never written. On one message, the editor either applies both or neither.
+    if cmd_dicts:
+        item["commands"] = cmd_dicts
 
     # Stream this item immediately to stdout (bypassing redirected stdout)
     _emit({"type": "item", "item": item})
-
-    # Stream any commands from the visualizer
-    for cmd_dict in cmd_dicts:
-        _emit({"type": "command", "command": cmd_dict})
 
 def log_and_return(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_exp=None) -> Any:
     """
@@ -953,13 +957,15 @@ def _release_hold() -> None:
     valid at all -- so re-sending them is IPC and a re-render for nothing. An
     item that answered queued events is the exception: it is the only thing that
     tells the editor which events were handled, so dropping it would strand them
-    in its queue forever.
+    in its queue forever. So is one carrying commands, which travel on the item
+    (see `log_value`) and are owed to the run that arrives.
     """
     global _held
 
     held, _held = _held or [], None
     for msg in held:
-        if msg.get("type") == "item" and not msg["item"].get("handledEventIds"):
+        if (msg.get("type") == "item" and not msg["item"].get("handledEventIds")
+                and not msg["item"].get("commands")):
             continue
         # Assigned, not filled in: these were captured with no run id at all.
         msg["run_id"] = _current_run_id

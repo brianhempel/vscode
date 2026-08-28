@@ -988,8 +988,9 @@ class TestConfigComment(unittest.TestCase):
              python_runner.models_and_events, python_runner._source_code,
              python_runner._visualizers) = saved
         msgs = [json.loads(l) for l in buf.getvalue().splitlines() if l.strip()]
+        self._last_msgs = msgs
         item = next(m['item'] for m in msgs if m.get('type') == 'item')
-        cmds = [m['command'] for m in msgs if m.get('type') == 'command']
+        cmds = item.get('commands', [])
         return item, cmds
 
     SRC = '#%click ["$.a"]\nxs = [1]\n'
@@ -1019,6 +1020,18 @@ class TestConfigComment(unittest.TestCase):
             'triggerLine': 2, 'triggerVisIndex': 0}])
         # The model already reflects what the comment will say.
         self.assertEqual(item['model']['_config_sig'], config_sig(expected))
+
+    def test_commands_ride_on_the_item_that_answered_the_event(self):
+        # One message, not two: the item retires the event from the editor's
+        # queue, and a run superseded between an item and a trailing command
+        # message would lose the command with the event already retired.
+        item, _ = self._log(self.SRC, 2)
+        cached = {'line': 2, 'visIndex': 0, 'model': item['model'],
+                  'events': [{'id': 7, 'pythonEventStr': 'X', 'eventJSON': {}}]}
+        item, cmds = self._log(self.SRC, 2, [cached])
+        self.assertEqual([m['type'] for m in self._last_msgs], ['item'])
+        self.assertEqual(item['handledEventIds'], [7])
+        self.assertEqual([c['type'] for c in cmds], ['SetConfigComment'])
 
     def test_a_model_survives_a_rerun_while_the_comment_is_what_it_reflects(self):
         item, _ = self._log(self.SRC, 2)
@@ -1662,9 +1675,10 @@ class TestPoolWorkerCheckpoint3(unittest.TestCase):
         # Every run today re-renders every widget and re-emits its commands;
         # replaying is what keeps the stream the editor sees unchanged.
         warm, run = self._warm_having_handled_a_pre_pause_event()
-        self.assertEqual(self._of_type(warm, 'command'), [])
-        self.assertEqual([(m['command']['type'], m['command']['triggerLine'], m.get('run_id'))
-                          for m in self._of_type(run, 'command')],
+        self.assertEqual([it for it in self._items(warm) if it.get('commands')], [])
+        self.assertEqual([(c['type'], c['triggerLine'], m.get('run_id'))
+                          for m in self._of_type(run, 'item')
+                          for c in m['item'].get('commands', [])],
                          [('ProbeCommand', 2, 'r1')])
 
     # ---- the step counter ------------------------------------------------
@@ -2151,6 +2165,7 @@ class TestReadOnly(unittest.TestCase):
             def update(event, var_and_exp, model, value, get_visualizer):
                 return (model, [])
         def commands(msgs):
-            return [m['command']['type'] for m in msgs if m.get('type') == 'command']
+            return [c['type'] for m in msgs if m.get('type') == 'item'
+                    for c in m['item'].get('commands', [])]
         self.assertEqual(commands(self._run(False, [SavingVis])), ['SetConfigComment'])
         self.assertEqual(commands(self._run(True, [SavingVis])), [])
