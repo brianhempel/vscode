@@ -644,6 +644,10 @@
 	padding: 0px;
 }
 
+.visualizer-container .visualizer-container > .snc-tool-and-visualizer > .tool-toolbar {
+	right: calc(100% + 5px);
+}
+
 .visualizer-container .snc-generic-visualizer {
 	padding: 0px;
 }
@@ -1917,6 +1921,11 @@
 		/*flex-direction: row-reverse;*/
 	}
 
+	.col-add-row > span.col-compute-toggle {
+    width: -webkit-fill-available;
+    padding: 4px 0px;
+	}
+
 	.col-compute-row.unselectable .col-compute-toggle {
 		cursor: default;
 	}
@@ -2036,6 +2045,7 @@
 
 	.col-compute-row {
 		padding: 1px 4px;
+    width: -webkit-fill-available;
 	}
 }
 
