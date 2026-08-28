@@ -47,7 +47,7 @@ _STYLE_RE = re.compile(r'\bstyle="([^"]+)"', flags=re.M)
 _ICON_NAMES = [
     "bin", "caps", "boolean-any", "boolean-all", "exists", "filter",
     "match-first", "regex-group", "split", "loop", "replace", "search",
-    "search-str", "search-idx", "search-match", "pick-tool"
+    "search-str", "search-idx", "search-match", "pick-tool", "sort"
 ]
 for _icon in _ICON_NAMES:
     with open(os.path.join(os.path.dirname(__file__), f'icons/{_icon}.svg'), 'r') as _f:

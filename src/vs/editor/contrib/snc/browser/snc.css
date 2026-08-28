@@ -592,6 +592,7 @@
   	top: 0;
   	left: 100%;
   	margin-top: 0;
+    max-height: fit-content;
   }
 
   &.categorized {
@@ -1412,9 +1413,8 @@
   font-family: var(--snc-code-font-family);
   border: 1px solid var(--snc-border-color);
   background: var(--snc-table-header-bg);
-
- 	border-right-color: var(--snc-bg);
-  margin-right: -1px;
+  border-right-color: var(--snc-table-header-bg);
+  margin-right: 0px;
   right: 100%;
   border-radius: 3px 0 0 3px;
   cursor: grab;
@@ -1485,11 +1485,21 @@
    chip menus are hoisted a second time, out of the panel. */
 
 .col-menu-panel {
+	max-height: fit-content;
+
+	&.flyout {
+		padding-top: 34px;
+	}
+
 	/* Separates the search from the action rows above it. */
 	.col-search-area {
-		padding: 4px;
-		margin-top: 3px;
-		border-top: 1px solid var(--snc-border-color);
+    background: var(--snc-menu-bg);
+    padding: 4px;
+    border-bottom: 1px solid var(--snc-border-color);
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    width: -webkit-fill-available;
 	}
 
 	.col-search-chips, .col-search-chips-right {
@@ -1503,6 +1513,7 @@
 	}
 	.col-search-chips-right {
 		right: 2px;
+		gap: 2px;
 	}
 
 	.col-search-chip {
@@ -1519,6 +1530,10 @@
 			color: var(--snc-text-color);
 			background: var(--snc-hover-bg);
 		}
+	}
+
+	.col-tally .col-search-chip {
+		background: none;
 	}
 
 	.col-search-chip-arrow {
@@ -1539,79 +1554,135 @@
 		padding-left: calc(2.5ch);
 	}
 	.search-box-wrapper:has(*[data-charlen="2"]) .col-search-input {
-		padding-left: calc(3.5ch);
+		padding-left: 6px;
 	}
 
 	/* --- The tally: each of the column's values and how many rows have it ---
 	   Another way of writing the search row above, so it's separated from it the
 	   same way that row is separated from the actions above it. */
 	.col-tally {
-		font-size: 9px;
-		padding: 7px 2px 0;
-		margin-top: 6px;
-		border-top: 1px solid var(--snc-border-color);
-		line-height: 1.5;
-		position: relative;
+		border: 1px solid var(--snc-border-color);
+    position: relative;
+    border-radius: 4px;
+    background: var(--snc-data-bg);
+    line-height: 2em;
+    margin: 4px;
 	}
 
 	/* "Tally", straddling the border that separates this section from the
 	   search row above it. */
 	.col-tally-title {
-		position: absolute;
-		font-weight: bold;
-		font-size: 10px;
-		top: -8px;
-		text-align: center;
-		width: 100%;
 		color: var(--snc-text-muted);
+    /*background: var(--snc-table-header-bg);*/
+    /*border-bottom-width: 0;*/
+    /*padding: 3px 6px;*/
+    position: relative;
+    /*border-bottom: 1px solid var(--snc-border-color);*/
+    display: none;
 
 		/* the title itself, so its background can mask the border it sits on */
 		.col-tally-title-text {
-			background-color: var(--snc-bg);
-			padding: 1px 5px;
+			font-weight: 400;
+      /*color: var(--snc-table-header-fg);*/
 		}
 	}
 
+	.col-tally-filter-wrapper {
+    background-color: var(--snc-menu-bg);
+    padding: 4px;
+    padding-bottom: 2px;
+    border-top: 1px solid var(--snc-border-color);
+	}
+
 	.col-tally-filter {
-		font-size: 9px;
-		box-sizing: border-box;
 		border-color: transparent;
-		margin: 0 2px 2px;
-		padding: 2px;
-		border-radius: 3px;
+    border-radius: 3px;
+    border: 1px solid var(--snc-border-color);
+    /* border-radius: 0px; */
+    padding: 0px;
+    height: 20px;
+    padding-left: 4px;
 	}
 	.col-tally-filter:focus,
 	.col-tally-filter:hover {
 		border-color: var(--snc-border-color);
 	}
 
-	.col-tally-sort-box,
-	.col-tally-controls,
 	.col-tally-list-header {
 		display: flex;
-		align-items: center;
-		padding: 0 2px;
-		color: var(--snc-text-muted);
+    align-items: center;
+    padding: 0 6px;
+    background: var(--snc-table-header-bg);
+    border-bottom: 1px solid var(--snc-border-color);
+    border-radius: 4px 4px 0px 0px;
 	}
 	/* "Sort:" and the chip that follows it, the way .col-tally-count-box holds
 	   the count box and its chip. */
 	.col-tally-sort-box {
-		gap: 1px;
+    padding: 0px !important;
+    position: relative;
 	}
 
+	.col-tally-sort-icon {
+    display: inline-flex;
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(calc(-50% - 0.5px));
+	}
+
+	.col-tally-sort-icon > svg {
+		width: 10px;
+    height: 8px;
+    fill: currentColor;
+    opacity: 0.7;
+	}
+
+	.col-tally-sort-box > .snc-dropdown-trigger > .col-search-chip {
+    padding: 3px 4px;
+    padding-left: 14px;
+    border-radius: 4px;
+	}
+
+
 	.col-tally-controls {
-		gap: 6px;
-		margin-bottom: 2px;
 		justify-content: space-between;
+    display: flex;
+    border-radius: 0px 0px 4px 4px;
+    background: var(--snc-menu-bg);
+    line-height: 1em;
+    display: flex;
+    padding: 2px 3px;
+    width: -webkit-fill-available;
+
+    > * {
+	    padding: 3px 4px;
+	    border-radius: 4px;
+	    color: var(--snc-text-color);
+	    cursor: pointer;
+	    user-select: none;
+	    white-space: nowrap;
+
+			&:hover {
+				color: var(--snc-text-color);
+				background: var(--snc-hover-bg);
+			}
+    }
 	}
 
 	.col-tally-count-filter {
-		font-size: 9px;
 		box-sizing: border-box;
-		width: 9.5ch;
-		border-color: transparent;
-		padding: 2px 2px 2px 3.5ch;
-		border-radius: 3px;
+    width: 6ch;
+    border-color: transparent;
+    padding: 0px 2px;
+    margin: 2px 0px;
+    padding-left: 14px;
+    border-radius: 3px;
+    border: 1px solid var(--snc-border-color);
+
+    .col-search-chip-arrow {
+    	font-size: 14px;
+    }
 	}
 	.col-tally-count-filter:focus,
 	.col-tally-count-filter:hover {
@@ -1628,40 +1699,46 @@
 	/* The hoisted panel is slid up to fit the viewport but never shortened, so
 	   the value list is what has to agree to be scrolled. */
 	.col-tally-list {
-		max-height: 222px;
-		overflow-y: auto;
-		scrollbar-width: var(--snc-scrollbar-width);
-		scrollbar-color: var(--snc-scrollbar-color);
+		max-height: 120px;
+    overflow-y: auto;
+    scrollbar-width: var(--snc-scrollbar-width);
+    scrollbar-color: var(--snc-scrollbar-color);
 	}
 
 	.col-tally-exclude {
 		display: flex;
 		align-items: center;
 		gap: 1px;
-		border-radius: 3px;
-		padding: 0 2px;
 		cursor: pointer;
 		user-select: none;
-		margin: 0 -3px 0 -1px; /* looks better *shrug* */
 
 		&:hover {
 			color: var(--snc-text-color);
 			background: var(--snc-hover-bg);
 		}
+
+		&.checked {
+			background-color: var(--snc-hover-bg);
+      outline: 1px solid var(--snc-border-color);
+		}
 	}
 
 	.col-tally-count-box {
-		margin-left: -1px; /* looks better *shrugh* */
+		padding: 0px;
+		/*margin-left: -1px; looks better *shrugh* */
 	}
 
 	.col-tally-row {
 		display: flex;
-		align-items: center;
-		gap: 3px;
-		padding: 0 4px 0 2px;
-		border-radius: 3px;
-		cursor: pointer;
-		user-select: none;
+    align-items: center;
+    gap: 3px;
+    padding: 0px 6px;
+    /* padding-right: 2px; */
+    /* border-radius: 3px; */
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid var(--snc-border-color);
+    border-right: 1px solid var(--snc-border-color);
 
 		&:hover {
 			background: var(--snc-hover-bg);
@@ -1669,6 +1746,10 @@
 
 		&:active {
 			background: var(--snc-active-bg);
+		}
+
+		&:last-child {
+			border-bottom: none;
 		}
 
 		/* A value whose repr isn't a literal has nothing to compare against, so
@@ -1687,13 +1768,20 @@
 	/* Names the two columns of .col-tally-list below, so each heading is laid
 	   out like the cell it heads. */
 	.col-tally-list-header {
-		font-weight: bold;
+		/*font-weight: bold;*/
 	}
+
 	.col-tally-item-header {
 		flex: 1;
+		/*border-right: 1px solid var(--snc-border-color);*/
 	}
+
 	.col-tally-count-header {
-		flex: none;
+		width: fit-content;
+    overflow: hidden;
+    opacity: 0.8;
+    display: flex;
+    gap: 4px;
 	}
 
 	.col-tally-item {
@@ -1705,13 +1793,14 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		color: var(--snc-string-color);
+		/*border-right: 1px solid var(--snc-border-color);*/
 	}
 
 	.col-tally-count {
 		flex: none;
-		padding-left: 6px;
-		color: var(--snc-text-muted);
-		font-variant-numeric: tabular-nums;
+    padding-left: 6px;
+    color: var(--snc-text-muted);
+    font-variant-numeric: tabular-nums;
 	}
 
 	.col-tally-note {
@@ -1791,9 +1880,9 @@
 }
 
 .col-compute-panel {
-	font-size: 9px;
+	/*font-size: 9px;
 	line-height: 1.5;
-	padding: 2px;
+	padding: 2px;*/
 
 	.col-compute-row {
 		display: flex;
@@ -1822,9 +1911,10 @@
 		display: flex;
 		align-items: center;
 		gap: 3px;
-		flex: 1;
+		/*flex: 1;*/
 		cursor: pointer;
 		user-select: none;
+		/*flex-direction: row-reverse;*/
 	}
 
 	.col-compute-row.unselectable .col-compute-toggle {
@@ -1851,20 +1941,21 @@
 
 	.col-compute-name {
 		white-space: nowrap;
+		flex-grow: 1;
 	}
 
 	/* The level of a percentile, sized for three digits and no more: it is part
 	   of the row's name rather than a box to write in. */
 	.col-compute-hole {
 		flex: none;
-		box-sizing: border-box;
-		width: 4ch;
-		font-size: 9px;
-		padding: 0 2px;
-		border-color: transparent;
-		border-radius: 3px;
-		text-align: right;
-		font-variant-numeric: tabular-nums;
+    box-sizing: border-box;
+    width: 4ch;
+    /* font-size: 9px; */
+    padding: 0 2px;
+    /* border-color: transparent; */
+    border-radius: 3px;
+    text-align: left;
+    font-variant-numeric: tabular-nums;
 
 		&:hover,
 		&:focus {
@@ -1889,6 +1980,7 @@
 	.col-compute-nocheck {
 		flex: none;
 		width: 12px;
+		display: none;
 	}
 
 	/* The user's own rows do have one, but the box beside it is what takes the
@@ -1909,24 +2001,25 @@
 	.col-compute-expr {
 		flex: 1;
 		min-width: 0;
-		width: 12ch;
+		height: 1.5em;
+		max-width: 15ch;
 		box-sizing: border-box;
-		font-size: 9px;
-		padding: 0 2px;
-		border-color: transparent;
-		border-radius: 3px;
+		/*font-size: 9px;
+		padding: 0 2px;*/
+		/*border-color: transparent;*/
+		/*border-radius: 3px;*/
 
 		&:hover,
 		&:focus {
 			border-color: var(--snc-border-color);
 		}
 	}
+}
 
-	.col-compute-sep {
-		margin: 2px 0;
+.col-compute-sep {
+		margin: 4px 0;
 		border-top: 1px solid var(--snc-border-color);
 	}
-}
 
 /* The (+)'s menu borrows those rows -- a checkbox, a name -- but is not one of
    those submenus: it hangs off the table header rather than out of a column's

@@ -108,6 +108,10 @@ class KeyDown:
     """Keyboard event (Enter to commit, Escape to cancel)."""
     pass
 
+@dataclass(frozen=True, slots=True)
+class DeselectChildren:
+    """User deselected all children of table."""
+    pass
 
 # === Constants ===
 
@@ -571,6 +575,10 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                 model['editing_index'] = None
                 model['input_value'] = ''
                 model['selected_suggestion_index'] = None
+                model['focused_child'] = None
+
+        case DeselectChildren():
+            model['focused_child'] = None
 
     return (model, commands)
 
@@ -869,7 +877,7 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
     key_handler = repr(KeyDown())
     # {html.escape(repr(obj))} ?
     return (
-        f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" class="visualizer-container">'
+        f'<div tabindex="0" snc-key-down="{html.escape(key_handler)}" snc-mouse-down="{html.escape(repr(DeselectChildren()))}" class="visualizer-container">'
         f'<div class="snc-tool-and-visualizer">'
         f'<div class="obj-visualizer snc-base-visualizer">'
         f'<div class="obj-header">{html.escape(full_class_name)}</div>'

@@ -7699,12 +7699,11 @@ def _render_column_search_row(col, model) -> str:
         f'<input type="text" snc-input="{html.escape(input_event)}" '
         f'value="{html.escape(row["text"])}" '
         f'{focus_attrs}'
-        f'placeholder="Column Search" '
+        f'placeholder="Search" '
         f'data-tooltip="{html.escape(_column_search_scope(_model_binds(model)).legend)}" '
         f'spellcheck="false" '
         f'class="col-search-input search-box" />'
-        f'<span class="col-search-chips">{op_html}</span>'
-        f'<span class="col-search-chips-right">{compose_html}</span>'
+        f'<span class="col-search-chips-right">{op_html}{compose_html}</span>'
         f'</div>'
         f'</div>'
     )
@@ -7757,8 +7756,9 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         # The three headers are the section's grab handles: each hands over the
         # code for what it names, so what the user reads is what they can drag
         # into the file.
-        return (f'<div class="col-tally-title"><span class="col-tally-title-text"'
-                f'{py_exp_attrs(PyExp(expr, TALLY_IMPORTS))}>Tally</span></div>')
+        return ''
+        # return (f'<div class="col-tally-title"><span class="col-tally-title-text"'
+                # f'{py_exp_attrs(PyExp(expr, TALLY_IMPORTS))}>Tally</span></div>')
 
     source_expr = model.get('_source_expr')
     # The two chips the tally opens itself: resting on the tally is not a way
@@ -7834,12 +7834,14 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
     filter_event = (f"lambda e: TallyFilterInput(col={col!r}, "
                     f"value=e.get('value', ''))")
     filter_html = (
+        f'<div class="col-tally-filter-wrapper">'
         f'<input type="text" class="col-tally-filter search-box" '
         f'snc-input="{html.escape(filter_event)}" '
         f'value="{html.escape(filter_text)}" '
-        f'placeholder="Find a value below" '
+        f'placeholder="Search tally" '
         f'data-tooltip="Show only values containing this text" '
         f'spellcheck="false" />'
+        f'</div>'
     )
     # A second way of reaching a value: how often it occurs rather than how it
     # reads. The chip sits on top of the box the way the column search's
@@ -7851,7 +7853,7 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         f'<input type="text" class="col-tally-count-filter search-box" '
         f'snc-input="{html.escape(count_event)}" '
         f'value="{html.escape(count_text)}" '
-        f'placeholder="{"" if extreme_op else "Count"}" '
+        f'placeholder="{"" if extreme_op else "N"}" '
         + ('' if extreme_op
            else 'data-tooltip="Show only values with this many rows" ')
         + f'spellcheck="false"{" disabled" if extreme_op else ""} />'
@@ -7886,34 +7888,36 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
         f'data-tooltip="Filter to everything but the selected values" '
         f'snc-mouse-down="{html.escape(repr(TallyExcludeToggle(col=col)))}">'
-        f'{_render_tally_check(exclude)} Exclude</span>')
+        f'Exclude</span>')
     controls_html = (
         f'<div class="col-tally-controls">'
         f'{select_html}'
-        f'<div class="col-tally-sort-box">Sort:'
+        f'<div class="col-tally-sort-box"><div class="col-tally-sort-icon">{ICONS["sort"]}</div>'
         f'{sort_html}'
-        f'</div>{count_html}'
+        f'</div>'
         f'</div>'
     )
     # The filter box stays even when it has hidden everything: it's the way
     # back to the values.
-    if rows:
-        body = (
-            f'<div class="col-tally-list-header">'
-            f'<span class="col-tally-item-header"'
-            f'{py_exp_attrs(PyExp(items_expr, TALLY_IMPORTS))}>Items</span>'
-            # Counts sits at the panel's right edge, so its tooltip reads
-            # leftwards rather than off the side of the menu.
-            f'<span class="col-tally-count-header"'
-            f'{py_exp_attrs(PyExp(counts_expr, TALLY_IMPORTS), align="right")}'
-            f'>Counts</span>'
-            f'</div>'
-            f'<div class="col-tally-list">{"".join(rows)}</div>'
-        )
-    else:
-        body = '<div class="col-tally-note">No values match</div>'
+    # if rows:
+    body = (
+        f'<div class="col-tally-list-header">'
+        f'<span class="col-tally-item-header"'
+        f'{py_exp_attrs(PyExp(items_expr, TALLY_IMPORTS))}>Tally</span>'
+        # Counts sits at the panel's right edge, so its tooltip reads
+        # leftwards rather than off the side of the menu.
+        f'<span class="col-tally-count-header"'
+        f'{py_exp_attrs(PyExp(counts_expr, TALLY_IMPORTS), align="right")}'
+        f'>Counts {count_html}</span>'
+        f'</div>'
+        f'<div class="col-tally-list">'
+        f'{"".join(rows)}'
+        f'</div>'
+    )
+    # else:
+    #     body = '<div class="col-tally-note">No values match</div>'
     return (f'<div class="col-tally"{dwell}>{title_html(tally_expr)}'
-            f'{filter_html}{controls_html}{body}'
+            f'{body}{filter_html}{controls_html}'
             f'</div>')
 
 
@@ -8048,7 +8052,7 @@ def _render_column_group_by(col, model) -> str:
         f'<div class="snc-dropdown-option col-group-by'
         f'{"" if code else " unselectable"}"'
         f'{_column_dwell_attr(model)}{py_exp_attrs(code, align="right")}>'
-        f'<span class="snc-dropdown-option-label"{click_attr}>Group By This Column</span>'
+        f'<span class="snc-dropdown-option-label"{click_attr}>Group By</span>'
         f'</div>'
     )
 
@@ -8246,7 +8250,7 @@ def _render_subcol_panel(col, model, lst, get_visualizer=None,
             f'snc-focus-key="subcol-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(SubcolExprKeyDown()))}" '
             f'data-tooltip="{html.escape(_subcol_scope(col, _model_binds(model)).legend)}" '
-            f'value="{html.escape(expr)}" placeholder="Add subcolumn" '
+            f'value="{html.escape(expr)}" placeholder="Subcolumn" '
             f'spellcheck="false" />'
             f'</div>')
 
@@ -8285,7 +8289,7 @@ def _render_column_convert(col, model) -> str:
         f'data-tooltip="Read this column\'s values as another type" '
         f'snc-mouse-down="{html.escape(toggle_event)}">'
         f'<span class="snc-dropdown-option-label col-compute-title">'
-        f'Convert Type</span>'
+        f'Change Type</span>'
         f'<span class="submenu-right-arrow">▸</span>'
         f'</div>{panel_html}</div>'
     )
@@ -8589,22 +8593,23 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
     """
     remove_event = repr(RemoveColumnClick(col=col))
     rows = [
+        _render_column_search_row(col, model),
         f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
-        f'class="snc-dropdown-option-label">Remove Column</span>'
+        f'class="snc-dropdown-option-label">Delete</span>'
         f'</div>',
         *(f'<div class="snc-dropdown-option col-add-beside"'
           f'{_column_dwell_attr(model)}>'
           f'<span snc-mouse-down="'
           f'{html.escape(repr(AddColumnAtClick(col=col, after=after)))}" '
-          f'class="snc-dropdown-option-label">Add Column {side}</span>'
+          f'class="snc-dropdown-option-label">Insert {side}</span>'
           f'</div>'
-          for side, after in (('Before', False), ('After', True))),
+          for side, after in (('Left', False), ('Right', True))),
+        '<div class="col-compute-sep"></div>',
         # Beside Remove Column: the rows that decide which columns exist,
         # ahead of the three that ask questions about the rows. Expand comes
         # first of them, because it decides what a sub-column would even be
-        # read against -- the whole list, or one element of it.
-        _render_column_restar(col, model, lst, eval_in_scope),
+        # read against -- the whole list, or one element of it.        _render_column_restar(col, model, lst, eval_in_scope),
         _render_column_subcols(col, model, lst, get_visualizer,
                                eval_in_scope),
         _render_column_sort(col, model),
@@ -8614,7 +8619,7 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
         # searched and tallied on -- then asks of the converted values.
         _render_column_convert(col, model),
         _render_column_compute(col, model, lst, eval_in_scope),
-        _render_column_search_row(col, model),
+        '<div class="col-compute-sep"></div>',
         _render_column_tally(col, model, lst, eval_in_scope),
     ]
     # Says what a click outside the menu means, so the front end doesn't have to
