@@ -22,6 +22,8 @@ import { ILanguageFeaturesService } from '../../../common/services/languageFeatu
 import { studyLog } from '../../../../platform/snc/common/sncStudyLog.js';
 
 const urllibImport = 'import urllib.request';
+const csvImport = 'import csv';
+const pandasImport = 'import pandas as pd';
 
 /** Kind of the "read this into a string" drop edit, shared with its callers. */
 export const pythonReadDropEditKind = HierarchicalKind.Empty.append('uri', 'python', 'openRead');
@@ -29,13 +31,55 @@ export const pythonReadDropEditKind = HierarchicalKind.Empty.append('uri', 'pyth
 /** Kind of the "drop an expression dragged out of a visualizer" edit. */
 export const sncPyExpDropEditKind = HierarchicalKind.Empty.append('text', 'python', 'sncPyExp');
 
-/** A file to read from disk, or a URL to read over the network. */
+/**
+ * A file to read from disk, or a URL to read over the network. A spreadsheet is
+ * worth reading as the table it is rather than as its bytes, so the tabular
+ * formats get their own reads; everything else is text.
+ */
 type ReadSource =
-	| { readonly type: 'file'; readonly path: string }
+	| { readonly type: 'text'; readonly path: string }
+	| { readonly type: 'csv'; readonly path: string }
+	| { readonly type: 'excel'; readonly path: string }
 	| { readonly type: 'url'; readonly url: string };
+
+/** Everything about a source that depends on which kind of read it gets. */
+const readKinds = {
+	text: { variablePrefix: 'str', importStatement: undefined, phrase: 'open().read()' },
+	csv: { variablePrefix: 'rows', importStatement: csvImport, phrase: 'csv.reader()' },
+	excel: { variablePrefix: 'sheets', importStatement: pandasImport, phrase: 'read_excel()' },
+	url: { variablePrefix: 'str', importStatement: urllibImport, phrase: 'urlopen().read()' },
+} as const satisfies Record<ReadSource['type'], { variablePrefix: string; importStatement: string | undefined; phrase: string }>;
+
+const excelExtensions = ['.xlsx', '.xlsm', '.xlsb', '.xls'];
+
+/** Which read a dropped file's name asks for. */
+function fileReadType(path: string): 'text' | 'csv' | 'excel' {
+	const lower = path.toLowerCase();
+	if (excelExtensions.some(extension => lower.endsWith(extension))) {
+		return 'excel';
+	}
+	return lower.endsWith('.csv') ? 'csv' : 'text';
+}
 
 function pythonStringLiteral(value: string): string {
 	return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** The expression that reads a source, as the value of the dropped assignment. */
+function readExpression(source: ReadSource): string {
+	switch (source.type) {
+		case 'text':
+			return `open(${pythonStringLiteral(source.path)}).read()`;
+		case 'csv':
+			return `list(csv.reader(open(${pythonStringLiteral(source.path)}, newline='')))`;
+		case 'excel': {
+			// Every sheet, because which one holds the data isn't ours to guess.
+			const path = pythonStringLiteral(source.path);
+			return `{sheet_name: pd.read_excel(${path}, sheet_name=sheet_name).to_dict('records') for sheet_name in pd.ExcelFile(${path}).sheet_names}`;
+		}
+		case 'url':
+			return `urllib.request.urlopen(${pythonStringLiteral(source.url)}).read().decode()`;
+	}
 }
 
 /**
@@ -79,10 +123,33 @@ function importPlacement(model: ITextModel, importStatement: string, position: I
 }
 
 /**
- * Drops a file or a URL into Python as a line that reads it into a string.
+ * The placements for everything a drop needs imported, ready to go into one edit.
  *
- * URLs are read with `urllib.request`; the runner caches the response so a
- * rerun on every keystroke doesn't refetch. See `url_cache.py`.
+ * Several imports stacking at the same anchor is fine: they all ride in the same
+ * edit, so they land in the order they were declared rather than racing.
+ */
+function importPlacements(model: ITextModel, importStatements: readonly string[], position: IPosition): { readonly inlineText: string; readonly separateEdits: { range: Range; text: string }[] } {
+	const inline: string[] = [];
+	const separateEdits: { range: Range; text: string }[] = [];
+	for (const importStatement of new Set(importStatements)) {
+		const placement = importPlacement(model, importStatement, position);
+		if (placement?.kind === 'inline') {
+			// Only the first inline import needs the break off the drop position.
+			inline.push(inline.length ? placement.text.replace(/^\n/, '') : placement.text);
+		} else if (placement?.kind === 'separateEdit') {
+			separateEdits.push(placement);
+		}
+	}
+	return { inlineText: inline.join(''), separateEdits };
+}
+
+/**
+ * Drops a file or a URL into Python as a line that reads it.
+ *
+ * A `.csv` comes in as its rows and a spreadsheet as its sheets, since that is
+ * what the file is; anything else is read as text. URLs are read with
+ * `urllib.request`; the runner caches the response so a rerun on every keystroke
+ * doesn't refetch. See `url_cache.py`.
  */
 export class PythonReadDropProvider implements DocumentDropEditProvider {
 
@@ -112,7 +179,7 @@ export class PythonReadDropProvider implements DocumentDropEditProvider {
 				if (uri.scheme === Schemas.file) {
 					const root = this._workspaceContextService.getWorkspaceFolder(uri);
 					const relPath = root ? relativePath(root.uri, uri) : undefined;
-					sources.push({ type: 'file', path: relPath ?? uri.fsPath });
+					sources.push({ type: fileReadType(uri.path), path: relPath ?? uri.fsPath });
 				} else if (uri.scheme === Schemas.http || uri.scheme === Schemas.https) {
 					// Keep the text as dragged; re-serializing a URI can re-encode it.
 					sources.push({ type: 'url', url: entry.trim() });
@@ -126,48 +193,61 @@ export class PythonReadDropProvider implements DocumentDropEditProvider {
 			return;
 		}
 
+		// Each kind of read names its variables after what it produces, so the
+		// numbering runs per prefix rather than across the whole drop.
 		const text = model.getValue();
-		const usedNumbers = new Set<number>();
-		const re = /\bstr(\d+)\b/g;
-		let match;
-		while ((match = re.exec(text)) !== null) {
-			usedNumbers.add(parseInt(match[1], 10));
-		}
-
-		const lines: string[] = [];
-		for (const source of sources) {
+		const usedNumbers = new Map<string, Set<number>>();
+		const takeNumber = (prefix: string): number => {
+			let used = usedNumbers.get(prefix);
+			if (!used) {
+				used = new Set<number>();
+				const re = new RegExp(`\\b${prefix}(\\d+)\\b`, 'g');
+				let match;
+				while ((match = re.exec(text)) !== null) {
+					used.add(parseInt(match[1], 10));
+				}
+				usedNumbers.set(prefix, used);
+			}
 			let n = 1;
-			while (usedNumbers.has(n)) {
+			while (used.has(n)) {
 				n++;
 			}
-			usedNumbers.add(n);
-			lines.push(source.type === 'file'
-				? `str${n} = open(${pythonStringLiteral(source.path)}).read()`
-				: `str${n} = urllib.request.urlopen(${pythonStringLiteral(source.url)}).read().decode()`);
+			used.add(n);
+			return n;
+		};
+
+		const lines: string[] = [];
+		const imports: string[] = [];
+		for (const source of sources) {
+			const { variablePrefix, importStatement } = readKinds[source.type];
+			lines.push(`${variablePrefix}${takeNumber(variablePrefix)} = ${readExpression(source)}`);
+			if (importStatement) {
+				imports.push(importStatement);
+			}
 		}
 
-		const readsUrl = sources.some(source => source.type === 'url');
-		const placement = readsUrl ? importPlacement(model, urllibImport, position) : undefined;
+		const { inlineText, separateEdits } = importPlacements(model, imports, position);
 
 		return {
 			edits: [{
-				insertText: (placement?.kind === 'inline' ? placement.text : '') + lines.join('\n'),
-				title: this.title(sources.length > 1, readsUrl),
+				insertText: inlineText + lines.join('\n'),
+				title: this.title(sources),
 				kind: this.kind,
 				handledMimeType: Mimes.uriList,
-				additionalEdit: placement?.kind === 'separateEdit'
-					? { edits: [{ resource: model.uri, versionId: undefined, textEdit: { range: placement.range, text: placement.text } }] }
+				additionalEdit: separateEdits.length
+					? { edits: separateEdits.map(edit => ({ resource: model.uri, versionId: undefined, textEdit: edit })) }
 					: undefined,
 			}],
 			dispose() { },
 		};
 	}
 
-	private title(plural: boolean, readsUrl: boolean): string {
-		if (readsUrl) {
-			return plural ? 'Insert as Python urlopen().read() calls' : 'Insert as Python urlopen().read()';
-		}
-		return plural ? 'Insert as Python open().read() calls' : 'Insert as Python open().read()';
+	private title(sources: readonly ReadSource[]): string {
+		const types = new Set(sources.map(source => source.type));
+		const suffix = sources.length > 1 ? ' calls' : '';
+		// Mixed kinds have no one call to name.
+		const phrase = types.size === 1 ? readKinds[sources[0].type].phrase : 'read';
+		return `Insert as Python ${phrase}${suffix}`;
 	}
 }
 
@@ -210,28 +290,17 @@ export class SncPyExpDropProvider implements DocumentDropEditProvider {
 		}
 		studyLog.log('editor.pyExpDrop', { expr, imports: payload.imports, position: [position.lineNumber, position.column] }, model.uri.toString());
 
-		// Every import that isn't there yet, in declaration order. Two of them
-		// stacking at the same anchor is fine: each rides in the same edit, so
-		// they land in the order they were declared rather than racing.
-		const inline: string[] = [];
-		const separate: { range: Range; text: string }[] = [];
-		for (const importStatement of payload.imports ?? []) {
-			const placement = importPlacement(model, importStatement, position);
-			if (placement?.kind === 'inline') {
-				inline.push(placement.text);
-			} else if (placement?.kind === 'separateEdit') {
-				separate.push({ range: placement.range, text: placement.text });
-			}
-		}
+		// Every import that isn't there yet, in declaration order.
+		const { inlineText, separateEdits } = importPlacements(model, payload.imports ?? [], position);
 
 		return {
 			edits: [{
-				insertText: inline.join('') + expr,
+				insertText: inlineText + expr,
 				title: 'Insert Python expression',
 				kind: this.kind,
 				handledMimeType: SNC_PY_EXP_MIME,
-				additionalEdit: separate.length
-					? { edits: separate.map(edit => ({ resource: model.uri, versionId: undefined, textEdit: edit })) }
+				additionalEdit: separateEdits.length
+					? { edits: separateEdits.map(edit => ({ resource: model.uri, versionId: undefined, textEdit: edit })) }
 					: undefined,
 			}],
 			dispose() { },

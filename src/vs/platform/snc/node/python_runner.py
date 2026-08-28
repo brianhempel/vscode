@@ -1977,6 +1977,13 @@ def reseed(seed: int = SEED) -> None:
     Nothing here is a promise of unpredictability: `os.urandom`, `secrets`,
     `uuid.uuid4` and `random.SystemRandom` don't route through these generators
     and are deliberately left alone.
+
+    These generators are the user's. A visualizer that wants randomness (row
+    sampling does) must make its own `random.Random(...)` rather than call
+    `random.sample` and friends: visualizers run in between the user's
+    statements, so a draw from the module generator lands in the middle of
+    their stream and shifts every value after it -- by an amount that depends
+    on what is on screen. See table_visualizer._sample_indices.
     """
     random.seed(seed)
 

@@ -9,6 +9,7 @@ import ast
 import copy
 import json
 import math
+import random
 import unittest
 import html
 import os
@@ -75,7 +76,7 @@ from table_visualizer import (
     CopyToClipboard, ChangeSelectedText,
     save_columns_config,
     _get_column_suggestions, _get_all_possible_columns,
-    Row, _rows, _row_at, _split_splat, _is_valid_python_expression,
+    Row, _rows, _row_at, _sample_indices, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _leaf_for, _column_groups,
     _col_add, _col_at, _col_rename_at, _col_remove_at,
     _leaf_values_expr, _menu_targets, _named_column, _col_subs,
@@ -1345,6 +1346,74 @@ class TestRowAt(unittest.TestCase):
         d = {10: 'x', 11: 'y'}
         self.assertEqual(_row_at(d, 0).item, (10, 'x'))
         self.assertEqual(_row_at(d, 1).item, (11, 'y'))
+
+
+class TestSamplingLeavesTheGlobalStreamAlone(unittest.TestCase):
+    """Row sampling must not draw from the `random` module's own generator.
+
+    The runner seeds it once, before the user's body, so that running their
+    file under Sculpt-n-Code gives what plain python does after a
+    `random.seed(1234567)`. Visualizers run in between the user's statements,
+    so a draw taken here lands in the middle of that stream: it shifts every
+    later value in their program, by an amount that depends on how big the
+    table is, on whether a cached model let init_model be skipped, and on
+    whether a menu happens to be open."""
+
+    def _global_stream(self, work):
+        """The user's next few draws, taken across `work`."""
+        random.seed(1234567)
+        work()
+        return [random.random() for _ in range(3)]
+
+    def _undisturbed(self):
+        return self._global_stream(lambda: None)
+
+    def test_sample_indices_does_not_touch_it(self):
+        lst = list(range(100))
+        self.assertEqual(self._global_stream(lambda: _sample_indices(lst)),
+                         self._undisturbed())
+
+    def test_init_model_does_not_touch_it(self):
+        lst = [{'a': i, 'b': i * 2} for i in range(100)]
+        self.assertEqual(
+            self._global_stream(lambda: init_model(lst, mock_get_visualizer)),
+            self._undisturbed())
+
+    def test_rendering_an_open_column_menu_does_not_touch_it(self):
+        """The (+) menu asks what columns it could offer, which samples rows.
+        Opening it must not change the numbers in the user's program."""
+        lst = [{'a': i, 'b': i * 2} for i in range(100)]
+        model = init_model(lst, mock_get_visualizer)
+        model['adding_column'] = True
+        self.assertEqual(
+            self._global_stream(lambda: visualize(lst, model, mock_get_visualizer, None)),
+            self._undisturbed())
+
+    def test_it_samples_the_same_rows_however_the_stream_is_placed(self):
+        """Same list, same positions -- whatever the user's program drew
+        before it, and however many times the visualizer has run already."""
+        lst = list(range(100))
+        random.seed(1)
+        first = _sample_indices(lst)
+        _sample_indices(lst)
+        random.seed(2)
+        random.random()
+        self.assertEqual(_sample_indices(lst), first)
+
+    def test_it_still_names_the_ends_and_a_spread_of_the_middle(self):
+        lst = list(range(100))
+        indices = _sample_indices(lst)
+        self.assertEqual(indices, sorted(set(indices)))
+        self.assertEqual(indices[0], 0)
+        self.assertEqual(indices[-1], 99)
+        self.assertEqual(len(indices), 12)
+        self.assertTrue(all(0 <= i < 100 for i in indices))
+
+    def test_short_lists_are_named_whole(self):
+        self.assertEqual(_sample_indices([]), [0])  # len 0: no last, no middle
+        self.assertEqual(_sample_indices([1]), [0])
+        self.assertEqual(_sample_indices([1, 2]), [0, 1])
+        self.assertEqual(_sample_indices([1, 2, 3]), [0, 1, 2])
 
 
 class TestCanVisualizeClaimsDicts(unittest.TestCase):

@@ -1664,13 +1664,24 @@ def _sample_indices(lst):
     """Return a sorted set of representative row positions for sampling.
 
     The one caller that cares what _row_at costs: its whole job is to name at
-    most ~12 rows, so an O(i) islice per row is not worth memoizing away."""
+    most ~12 rows, so an O(i) islice per row is not worth memoizing away.
+
+    Drawn from a generator made here rather than from `random`'s own, and
+    seeded from the length so that the same list always samples the same rows.
+    The module-level generator belongs to the user: the runner seeds it once
+    before their body so that their file gives under Sculpt-n-Code what plain
+    python gives after a `random.seed(...)`, and visualizers run in between
+    their statements -- so a draw taken from it here would land in the middle
+    of their stream and shift every value after it. By an amount that moves,
+    too: how many rows get sampled depends on the size of the table, on
+    whether a cached model let init_model be skipped this run, and on whether
+    a menu that asks what columns it could offer happens to be open."""
     indices = {0}
     if len(lst) > 1:
         indices.add(len(lst) - 1)
     if len(lst) > 2:
         middle = list(range(1, len(lst) - 1))
-        indices.update(random.sample(middle, min(10, len(middle))))
+        indices.update(random.Random(len(lst)).sample(middle, min(10, len(middle))))
     return sorted(indices)
 
 
