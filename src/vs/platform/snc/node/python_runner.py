@@ -1828,6 +1828,59 @@ for _feature_name in __future__.all_feature_names:
     _ALL_FUTURE_FLAGS |= getattr(__future__, _feature_name).compiler_flag
 
 
+def _leading_import_stmts(tree: ast.Module) -> Tuple[List[ast.stmt], List[ast.stmt]]:
+    """
+    Partition top-level statements into the leading imports and the rest.
+
+    Collects contiguous Import/ImportFrom statements from the top of the module,
+    plus the module docstring if there is one. A bare string *after* imports is
+    executable code and must remain in the body so reruns still emit a
+    visualization item for that line.
+    """
+    split_idx = 0
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            split_idx += 1
+        elif (
+            split_idx == 0
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            # Only the very first top-level string literal is a module docstring.
+            split_idx += 1
+        else:
+            break
+
+    return tree.body[:split_idx], tree.body[split_idx:]
+
+
+def imports_match(code_a: str, code_b: str) -> bool:
+    """
+    Whether two programs' leading imports are the same ones.
+
+    A checkpoint 2 worker has already executed one program's imports into its
+    globals. It can serve a different program only if that program's imports are
+    identical -- otherwise the globals are missing names the body needs, or hold
+    stale ones it doesn't.
+
+    Comparison is on the unparsed AST, so reformatting, comments, and blank
+    lines between the imports don't read as a change: only what would actually
+    be executed counts. Code that doesn't parse never matches -- the caller
+    should go report the syntax error rather than reuse anything.
+    """
+    try:
+        return _leading_import_source(code_a) == _leading_import_source(code_b)
+    except SyntaxError:
+        return False
+
+
+def _leading_import_source(source_code: str) -> str:
+    """The canonical source of a program's leading imports, for comparison."""
+    import_stmts, _ = _leading_import_stmts(ast.parse(source_code))
+    return ast.unparse(ast.Module(body=import_stmts, type_ignores=[]))
+
+
 def split_leading_imports(source_code: str):
     """
     Split source code into leading import statements and the remaining body.
@@ -1846,27 +1899,7 @@ def split_leading_imports(source_code: str):
         body_code_object: compiled transformed body (with logging).
     """
     tree = ast.parse(source_code)
-
-    # Walk top-level statements; collect leading imports and the true module docstring.
-    # A bare string after imports is executable code and must remain in the body so
-    # reruns still emit a visualization item for that line.
-    split_idx = 0
-    for stmt in tree.body:
-        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-            split_idx += 1
-        elif (
-            split_idx == 0
-            and isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and isinstance(stmt.value.value, str)
-        ):
-            # Only the very first top-level string literal is a module docstring.
-            split_idx += 1
-        else:
-            break
-
-    import_stmts = tree.body[:split_idx]
-    body_stmts = tree.body[split_idx:]
+    import_stmts, body_stmts = _leading_import_stmts(tree)
 
     # Compile raw imports (no transformation — no logging side effects)
     import_module = ast.Module(body=import_stmts, type_ignores=[])
@@ -2211,9 +2244,16 @@ def run_pool_worker_mode(working_directory: str) -> None:
         results, and exit.  (Checkpoint 1 path — used when code has changed.)
     3b. If the message is {"type": "init_imports", "code": "..."}: split imports
         from body, execute imports, cache globals, emit checkpoint_ready(2), then
-        wait for a {"type": "run", ...} message.  Execute the cached body with the
+        wait for a {"type": "run", ...} message.  Execute that run's body with the
         pre-loaded import globals, emit results, and exit.  (Checkpoint 2 path —
-        used when code is unchanged and imports are already loaded.)
+        used when the imports are already loaded.)
+
+    The run that reaches a checkpoint 2 worker need not be the code it warmed on:
+    the user keeps typing. The warmed globals are reused whenever the edit left
+    the leading imports alone (`imports_match`), which is nearly every keystroke,
+    and the edited body is compiled here. An edit that does reach the imports
+    falls back to the checkpoint 1 behaviour in place, so a worker can always
+    serve the run it is handed.
     """
     global models_and_events, _source_code, _file_path, _current_run_id
 
@@ -2292,18 +2332,49 @@ def run_pool_worker_mode(working_directory: str) -> None:
         run_id = cmd.get('run_id', '')
         m_and_e_json = cmd.get('models_and_events', '')
         focused_line = cmd.get('focused_line')
-        _source_code = code
+        # The editor keeps typing while a worker warms, so the code that arrives
+        # to be run is not always the code we warmed on.
+        run_code = cmd.get('code') or code
+        _source_code = run_code
         _file_path = cmd.get('file_path') or ''
         _current_run_id = run_id
         _reload_stale_visualizers()
 
         emit_meta(f'checkpoint2-run-{run_id}')
 
-        globals_dict: Dict[str, Any] = dict(import_globals)
-        globals_dict.update(_runtime_hooks())
-        _execute_run(body_code, m_and_e_json, run_id, focused_line=focused_line, globals_dict=globals_dict,
+        globals_dict: Optional[Dict[str, Any]] = None
+        run_import_code: Any = None
+        replay_output: Optional[List[Tuple[str, str, int]]] = None
+
+        if run_code == code:
+            body_to_run = body_code
+        else:
+            try:
+                edited_import_code, body_to_run = split_leading_imports(run_code)
+            except SyntaxError as e:
+                result = {"stdout": "", "stderr": str(e), "exitCode": 1, "syntaxError": True}
+                _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")
+                _stream_out.flush()
+                sys.exit(0)
+            if not imports_match(run_code, code):
+                # The edit reached the imports, so the warmed globals are the
+                # wrong ones. Run as checkpoint 1 would: fresh globals, and let
+                # `execute_code` run these imports so their output is this run's.
+                # The warmed import output stays held — it isn't this program's.
+                emit_meta('checkpoint2-imports-stale')
+                run_import_code = edited_import_code
+
+        if run_import_code is None:
+            # Reusing the warmed imports: the body still needs the names they
+            # bound, and their output still belongs at the top of the transcript.
+            globals_dict = dict(import_globals)
+            globals_dict.update(_runtime_hooks())
+            replay_output = import_output
+
+        _execute_run(body_to_run, m_and_e_json, run_id, focused_line=focused_line, globals_dict=globals_dict,
+                     import_code=run_import_code,
                      stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
-                     replay_output=import_output, loop_selections=cmd.get('loop_selections'),
+                     replay_output=replay_output, loop_selections=cmd.get('loop_selections'),
                      read_only=bool(cmd.get('read_only', False)))
         sys.exit(0)
 

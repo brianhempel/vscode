@@ -41,8 +41,97 @@ interface RunState {
 	tEnd?: number;
 }
 
-const CP1_POOL_SIZE = 5;
+/**
+ * Checkpoint 1 workers are the cold-start reserve: they serve the first run in a
+ * directory and the runs whose imports a warmed worker can't cover. Typing is
+ * served by checkpoint 2, so this doesn't need to absorb a keystroke burst —
+ * two covers a run plus the ~100ms it takes to replace the one it consumed.
+ */
+const CP1_POOL_SIZE = 2;
 const CP2_POOL_SIZE = 10;
+
+/**
+ * The leading imports of a program, as a key for matching it to a warmed worker.
+ *
+ * A checkpoint 2 worker has executed exactly these statements into its globals,
+ * so two programs sharing a key can share a worker — which is what lets a warmed
+ * worker survive an ordinary keystroke, since editing the body leaves the key
+ * alone. Mirrors `_leading_import_stmts` in python_runner.py: contiguous
+ * `import`/`from` statements from the top of the file, plus a module docstring
+ * if there is one. Comments and blank lines among the imports are skipped —
+ * nothing they change is executed.
+ *
+ * This is a line scanner, not a Python parser, so it can disagree with the
+ * runner on exotic input. That only ever costs a warmed worker: the worker
+ * re-checks with a real AST and executes the imports itself when they don't
+ * match, so a wrong answer here makes a run slow, never wrong.
+ */
+export function importPrefixOf(code: string): string {
+	const lines = code.split('\n');
+	const prefix: string[] = [];
+	let i = 0;
+	let seenStatement = false;
+
+	while (i < lines.length) {
+		const trimmed = lines[i].trim();
+
+		// Not statements: they can sit among the imports without changing what runs.
+		if (trimmed === '' || trimmed.startsWith('#')) { i++; continue; }
+
+		// Only the very first statement can be the module docstring, and the
+		// runner executes it in the import half — so it belongs to the key.
+		if (!seenStatement && (trimmed.startsWith('"') || trimmed.startsWith('\''))) {
+			const end = endOfStringLiteral(lines, i);
+			if (end === -1) { break; }
+			for (let j = i; j <= end; j++) { prefix.push(lines[j].trimEnd()); }
+			i = end + 1;
+			seenStatement = true;
+			continue;
+		}
+
+		if (!/^(import|from)\s/.test(trimmed)) { break; }
+
+		// An import can span lines, via parentheses or a trailing backslash. It
+		// can't contain a string literal, so a `#` is always the start of a
+		// comment and a paren is always real punctuation.
+		const parts: string[] = [];
+		let depth = 0;
+		while (i < lines.length) {
+			const text = lines[i].split('#')[0].trimEnd();
+			for (const ch of text) {
+				if (ch === '(') { depth++; } else if (ch === ')') { depth--; }
+			}
+			const continued = depth > 0 || text.endsWith('\\');
+			parts.push(text.endsWith('\\') ? text.slice(0, -1) : text);
+			i++;
+			if (!continued) { break; }
+		}
+		// Reformatting an import — a comment on the end, a reindented
+		// continuation line — doesn't change what it binds.
+		prefix.push(parts.join(' ').replace(/\s+/g, ' ').trim());
+		seenStatement = true;
+	}
+
+	return prefix.join('\n');
+}
+
+/**
+ * Index of the line where a string literal starting at `start` ends, or -1 if
+ * it is never closed.
+ */
+function endOfStringLiteral(lines: string[], start: number): number {
+	const text = lines[start].trim();
+	const triple = ['"""', '\'\'\''].find(q => text.startsWith(q));
+	if (!triple) {
+		return start; // a single-line 'str' or "str"
+	}
+	// A triple-quoted string may also close on the line that opens it.
+	if (text.length >= 6 && text.slice(3).includes(triple)) { return start; }
+	for (let j = start + 1; j < lines.length; j++) {
+		if (lines[j].includes(triple)) { return j; }
+	}
+	return -1;
+}
 
 /**
  * Directory the Python runner caches network reads in, beside the file being
@@ -55,8 +144,15 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	private checkpoint1Pool: PoolWorker[] = [];
 	private checkpoint2Pool: PoolWorker[] = [];
 
-	/** The code for which checkpoint 2 workers have pre-loaded imports */
+	/** The code checkpoint 2 workers are warmed with (the newest we've seen) */
 	private checkpoint2Code: string = '';
+
+	/**
+	 * The leading imports of `checkpoint2Code`. This, not the whole file, is what
+	 * a warmed worker has actually executed, so it is what has to match for one
+	 * to be reusable — a body edit leaves the pool intact.
+	 */
+	private checkpoint2ImportPrefix: string = '';
 
 	/** The working directory for the current pool */
 	private poolWorkingDirectory: string = '';
@@ -200,9 +296,13 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	}
 
 	/**
-	 * Ensure both pools are filled to their target sizes.
+	 * Ensure the pools are filled to their target sizes.
+	 *
+	 * `includeCheckpoint2` is false while a run is being dispatched: spawning ten
+	 * workers there would undo the deferral in `invalidateCheckpoint2Pool`. They
+	 * are spawned when the run ends instead.
 	 */
-	private ensurePoolFilled(workingDirectory: string): void {
+	private ensurePoolFilled(workingDirectory: string, includeCheckpoint2: boolean = true): void {
 		if (this._disposed) { return; }
 		// While the python executable is known to be broken, don't keep
 		// retrying — that would just spin a spawn-error storm. The flag is
@@ -223,7 +323,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		}
 
 		// Fill checkpoint 2 pool (only if we have code to warm with)
-		if (this.checkpoint2Code) {
+		if (includeCheckpoint2 && this.checkpoint2Code) {
 			while (this.checkpoint2Pool.length < CP2_POOL_SIZE) {
 				const worker = this.spawnWorker(workingDirectory);
 				if (!worker) { break; }
@@ -251,27 +351,29 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	}
 
 	/**
-	 * Kill all checkpoint 2 workers with stale code and refill with new code.
+	 * Kill all checkpoint 2 workers, whose pre-executed imports are no longer the
+	 * ones the user's program wants, and adopt the new code to warm with.
+	 *
+	 * Replacements are NOT spawned here — they are spawned once the current run
+	 * completes (in handleRunMessage). Otherwise typing out `import pandas` one
+	 * character at a time would spawn and kill ten processes per keystroke.
 	 */
-	private invalidateCheckpoint2Pool(newCode: string): void {
-		// Kill all existing CP2 workers (their imports are stale).
-		// Do NOT spawn replacements here — they will be spawned lazily
-		// after the current run completes (in handleRunMessage).
-		// This prevents a spawn storm during rapid code changes.
+	private invalidateCheckpoint2Pool(newCode: string, newImportPrefix: string): void {
 		for (const worker of this.checkpoint2Pool) {
 			try { worker.child.kill(); } catch { /* ignore */ }
 		}
 		this.checkpoint2Pool = [];
 		this.checkpoint2Code = newCode;
+		this.checkpoint2ImportPrefix = newImportPrefix;
 	}
 
 	/**
-	 * Take a ready worker for the given code. If no worker is ready,
-	 * returns a Promise that resolves when one becomes available.
+	 * Take a ready worker for a program with the given leading imports. If no
+	 * worker is ready, returns a Promise that resolves when one becomes available.
 	 */
-	private takeReadyWorker(code: string): PoolWorker | Promise<PoolWorker> {
-		// Prefer a checkpoint 2 worker with matching code
-		if (code === this.checkpoint2Code) {
+	private takeReadyWorker(importPrefix: string): PoolWorker | Promise<PoolWorker> {
+		// Prefer a checkpoint 2 worker whose warmed imports are this program's
+		if (importPrefix === this.checkpoint2ImportPrefix) {
 			const idx = this.checkpoint2Pool.findIndex(w => w.ready);
 			if (idx !== -1) {
 				return this.checkpoint2Pool.splice(idx, 1)[0];
@@ -542,12 +644,20 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.activeWorker = null;
 		}
 
-		// Ensure pool is seeded for this working directory
-		this.ensurePoolFilled(options.workingDirectory);
+		// Ensure pool is seeded for this working directory. Checkpoint 2 is left
+		// to the end of the run: warming it with code we may be about to
+		// invalidate two lines below would just burn processes.
+		this.ensurePoolFilled(options.workingDirectory, false);
 
-		// If code changed, invalidate checkpoint 2 workers and warm new ones
-		if (content !== this.checkpoint2Code) {
-			this.invalidateCheckpoint2Pool(content);
+		// A warmed worker has executed this program's imports and nothing else, so
+		// only an edit that reaches the imports invalidates the pool. A body edit
+		// — nearly every keystroke — keeps it, and just freshens the code new
+		// workers warm on so they can skip compiling the body too.
+		const importPrefix = importPrefixOf(content);
+		if (importPrefix !== this.checkpoint2ImportPrefix) {
+			this.invalidateCheckpoint2Pool(content, importPrefix);
+		} else {
+			this.checkpoint2Code = content;
 		}
 
 		// Drop a cache left over from before this app session started, before any
@@ -560,7 +670,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 		// message and cleaned up `this.runs`, so we just return.
 		let worker: PoolWorker;
 		try {
-			const workerOrPromise = this.takeReadyWorker(content);
+			const workerOrPromise = this.takeReadyWorker(importPrefix);
 			worker = workerOrPromise instanceof Promise ? await workerOrPromise : workerOrPromise;
 		} catch {
 			return;
@@ -590,8 +700,8 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			this.runs.delete(runId);
 		}
 
-		// Replenish the pool
-		this.ensurePoolFilled(options.workingDirectory);
+		// Replenish checkpoint 1 only; checkpoint 2 waits for the run to end.
+		this.ensurePoolFilled(options.workingDirectory, false);
 	}
 
 	async setPythonExecutable(executable: string): Promise<void> {

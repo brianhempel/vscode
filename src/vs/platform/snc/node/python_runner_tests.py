@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ from python_runner import (
     _build_new_code_edits,
     _commands_to_dicts,
     execute_code,
+    imports_match,
     install_url_cache,
     log_value,
     reseed,
@@ -1242,6 +1244,149 @@ class TestCheckpointsAgreeOnOutput(unittest.TestCase):
         first = ''.join(t for _, t, _ in self._checkpoint1())
         self.setUp()
         self.assertEqual(first, ''.join(t for _, t, _ in self._checkpoint2()))
+
+
+class TestImportsMatch(unittest.TestCase):
+    """Whether a worker warmed with one program's imports may serve another.
+    Editing a line of the body is the common case and must stay a match --
+    that is the whole reason a warmed worker survives a keystroke."""
+
+    def test_a_body_edit_is_a_match(self):
+        self.assertTrue(imports_match("import re\nx = 1\n", "import re\nx = 2\n"))
+
+    def test_a_body_edit_that_adds_lines_is_a_match(self):
+        self.assertTrue(imports_match("import re\nx = 1\n", "import re\nx = 1\ny = x + 1\n"))
+
+    def test_an_added_import_is_not_a_match(self):
+        self.assertFalse(imports_match("import re\nx = 1\n", "import re\nimport os\nx = 1\n"))
+
+    def test_a_removed_import_is_not_a_match(self):
+        self.assertFalse(imports_match("import re\nimport os\nx = 1\n", "import re\nx = 1\n"))
+
+    def test_a_renamed_alias_is_not_a_match(self):
+        self.assertFalse(imports_match("import re as r\nx = 1\n", "import re as e\nx = 1\n"))
+
+    def test_a_from_import_is_compared_by_what_it_binds(self):
+        self.assertFalse(imports_match("from os import path\n", "from os import sep\n"))
+        self.assertTrue(imports_match("from os import path\nx = 1\n", "from os import path\nx = 2\n"))
+
+    def test_comments_and_blank_lines_among_the_imports_do_not_count(self):
+        # Nothing executable changed, so the warmed globals are still correct.
+        self.assertTrue(imports_match(
+            "import re\nimport os\nx = 1\n",
+            "import re\n# pull in the os module\n\nimport os\nx = 1\n"))
+
+    def test_an_import_below_the_body_is_not_part_of_the_prefix(self):
+        # Only leading imports are pre-executed, so a later one is body code
+        # and editing around it must not invalidate the worker.
+        self.assertTrue(imports_match(
+            "import re\nx = 1\nimport os\n", "import re\nx = 2\nimport os\n"))
+
+    def test_a_changed_module_docstring_is_not_a_match(self):
+        # The docstring is executed in the import half, so it has to agree.
+        self.assertFalse(imports_match('"""one"""\nimport re\n', '"""two"""\nimport re\n'))
+
+    def test_unparseable_code_never_matches(self):
+        # The caller should go report the syntax error, not reuse globals.
+        self.assertFalse(imports_match("import re\nx = 1\n", "import re\nx = (\n"))
+        self.assertFalse(imports_match("import re\nx = (\n", "import re\nx = (\n"))
+
+
+class TestPoolWorkerCheckpoint2(unittest.TestCase):
+    """A checkpoint 2 worker pre-executes one program's imports, then is asked
+    to run whatever the editor has by the time a run arrives. It may reuse the
+    warmed globals only when the edit left the leading imports alone."""
+
+    _RUNNER = os.path.join(os.path.dirname(os.path.abspath(python_runner.__file__)), 'python_runner.py')
+
+    @classmethod
+    def setUpClass(cls):
+        cls._dir = tempfile.mkdtemp()
+        pathlib.Path(cls._dir, 'snc_chatty_import.py').write_text("print('from imports')\n")
+
+    def _worker(self):
+        env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8', 'PYTHONHASHSEED': '1234567'}
+        env['PYTHONPATH'] = self._dir + os.pathsep + env.get('PYTHONPATH', '')
+        return subprocess.Popen(
+            [sys.executable, self._RUNNER, '--pool-worker', os.getcwd()],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=env, text=True)
+
+    def _messages_until(self, proc, done):
+        """Yield the worker's messages until `done` says one ends the phase."""
+        collected = []
+        for line in proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            collected.append(msg)
+            if done(msg):
+                return collected
+        self.fail(f'worker exited early; got {collected}')
+
+    def _warm_then_run(self, warm_code, run_code):
+        """Warm a worker on warm_code's imports, then hand it run_code.
+
+        Returns (stdout_text, end_result).
+        """
+        proc = self._worker()
+        try:
+            self._messages_until(proc, lambda m: m.get('type') == 'checkpoint_ready' and m.get('checkpoint') == 1)
+            proc.stdin.write(json.dumps({'type': 'init_imports', 'code': warm_code}) + '\n')
+            proc.stdin.flush()
+            self._messages_until(proc, lambda m: m.get('type') == 'checkpoint_ready' and m.get('checkpoint') == 2)
+            proc.stdin.write(json.dumps({
+                'type': 'run', 'run_id': 'r1', 'code': run_code,
+                'models_and_events': '', 'stdin': '', 'stdin_eof': True,
+            }) + '\n')
+            proc.stdin.flush()
+            msgs = self._messages_until(proc, lambda m: m.get('type') == 'end')
+            text = ''.join(m.get('text', '') for m in msgs if m.get('type') == 'output')
+            return text, msgs[-1].get('result')
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_unedited_code_still_runs(self):
+        text, result = self._warm_then_run("import re\nprint('hello')\n", "import re\nprint('hello')\n")
+        self.assertIn('hello', text)
+        self.assertEqual(result['exitCode'], 0)
+
+    def test_a_body_edit_runs_the_edited_body(self):
+        text, result = self._warm_then_run("import re\nprint('old')\n", "import re\nprint('new')\n")
+        self.assertIn('new', text)
+        self.assertNotIn('old', text)
+        self.assertEqual(result['exitCode'], 0)
+
+    def test_a_body_edit_replays_the_warmed_import_output(self):
+        # The import already ran and printed before this run existed; its output
+        # still belongs at the top of the transcript.
+        text, _ = self._warm_then_run(
+            "import snc_chatty_import\nprint('old')\n",
+            "import snc_chatty_import\nprint('new')\n")
+        self.assertEqual(text, 'from imports\nnew\n')
+
+    def test_an_edited_import_is_executed_for_real(self):
+        # `json` is bound by nothing the worker warmed with, so output at all
+        # proves the new import ran.
+        text, result = self._warm_then_run(
+            "import re\nprint('old')\n",
+            "import json\nprint(json.dumps([1, 2]))\n")
+        self.assertIn('[1, 2]', text)
+        self.assertEqual(result['exitCode'], 0)
+
+    def test_an_edited_import_does_not_replay_the_stale_import_output(self):
+        # The warmed import printed, but it is not this program's import.
+        text, _ = self._warm_then_run(
+            "import snc_chatty_import\nprint('a')\n",
+            "import os\nprint('b')\n")
+        self.assertEqual(text, 'b\n')
+
+    def test_an_edit_that_breaks_the_syntax_reports_it(self):
+        _, result = self._warm_then_run("import re\nx = 1\n", "import re\nx = (\n")
+        self.assertTrue(result['syntaxError'])
+        self.assertEqual(result['exitCode'], 1)
 
 
 class TestLoopIterations(unittest.TestCase):
