@@ -22,6 +22,7 @@ import ast
 import html
 import traceback
 import os
+import re
 
 import __future__  # the module, for its flag table — not a future statement
 import importlib.util
@@ -1969,6 +1970,74 @@ def extract_error_line_from_traceback(tb_str: str) -> int:
     return 1
 
 
+# A traceback frame header: `  File "somewhere.py", line 12, in f`.
+_TRACEBACK_FRAME_RE = re.compile(r'^(?P<indent>\s*)File "(?P<file>.*)", (?P<where>line \d+.*)$')
+
+# Everything of ours the user's stack can pass through: the runner, the stream
+# shims, the visualizers beside them.
+_RUNNER_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def user_facing_traceback(tb_str: str) -> str:
+    """Strip our scaffolding out of a traceback before the user reads it.
+
+    A traceback from a run starts with the frames that got us into the user's
+    code -- `exec(code_object, globals_dict)` inside this file -- and names
+    every frame of theirs `File "<string>"`, because the body is exec'd rather
+    than imported. None of that is a place they can go look, and the runner's
+    own path is long enough to bury the part that matters. So: drop the frames
+    that live in our directory, along with the source and caret lines that hang
+    off them, and reduce `File "<string>", line 9, in f` to `line 9, in f`.
+
+    Frames in files the user actually has (a module they imported) are left
+    exactly as Python wrote them. A stack with nothing of theirs in it is left
+    alone too -- that is a bug in our code, and it should be reported in full
+    rather than as a traceback with no frames.
+    """
+    lines = tb_str.splitlines(keepends=True)
+    kept: List[str] = []
+    frames_kept = 0
+    frames_seen = 0
+    i = 0
+    while i < len(lines):
+        frame = _TRACEBACK_FRAME_RE.match(lines[i].rstrip('\n'))
+        if frame is None:
+            kept.append(lines[i])
+            i += 1
+            continue
+        frames_seen += 1
+        indent = frame.group('indent')
+        # The source line, the carets under it and any note Python added are
+        # indented past the header, and belong to the frame it opened.
+        end = i + 1
+        while end < len(lines) and lines[end].strip() and _leading_spaces(lines[end]) > len(indent):
+            end += 1
+        path = frame.group('file')
+        if not _is_ours(path):
+            frames_kept += 1
+            if path == '<string>':
+                # Same frame, minus a filename that names our exec rather than
+                # anything the user wrote.
+                kept.append(f"{indent}{frame.group('where')}\n")
+                kept.extend(lines[i + 1:end])
+            else:
+                kept.extend(lines[i:end])
+        i = end
+    if frames_seen and not frames_kept:
+        return tb_str
+    return ''.join(kept)
+
+
+def _is_ours(path: str) -> bool:
+    """Whether a traceback frame's file is Sculpt-n-Code's rather than the
+    user's -- this runner, the stream shims, the visualizers beside them."""
+    return os.path.abspath(path).startswith(_RUNNER_DIR + os.sep) if os.sep in path else False
+
+
+def _leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
 # Every `from __future__ import ...` flag, so the body can be compiled with
 # whichever ones the user declared. A future statement applies to one
 # compilation unit, and the split puts it in a different unit than the code it
@@ -2305,7 +2374,7 @@ def execute_code(
             # wrapper is also what keeps this red while an exception the
             # program caught stays an ordinary value.
             log_value(error_line, UncaughtError(e), path=getattr(e, '_snc_path', None))
-            print(tb_str, file=sys.stderr)
+            print(user_facing_traceback(tb_str), file=sys.stderr)
             exit_code = 1
 
     result: Dict[str, Any] = {

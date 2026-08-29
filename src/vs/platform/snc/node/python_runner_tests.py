@@ -40,6 +40,7 @@ from python_runner import (
     reseed,
     split_leading_imports,
     transform_code_to_ast,
+    user_facing_traceback,
 )
 # python_runner puts the built-in visualizers on the path.
 from visualizer_utils import (py_exp_attrs, AddImports, UncaughtError,
@@ -264,6 +265,158 @@ class TestUncaughtErrorItems(unittest.TestCase):
         self.assertIsInstance(value, ZeroDivisionError)
         self.assertNotIsInstance(value, UncaughtError)
         self.assertNotIn("snc-error-visualizer", self._visualize(value))
+
+
+class TestUserFacingTraceback(unittest.TestCase):
+    """The traceback printed to stderr is the user's program's, not ours. The
+    frames that got us into their code, and the `<string>` the exec'd body is
+    named after, are scaffolding they never wrote and can't act on."""
+
+    _RUNNER_FRAME = (
+        f'  File "{os.path.join(os.path.dirname(python_runner.__file__), "python_runner.py")}", '
+        'line 2292, in execute_code\n'
+        '    exec(code_object, globals_dict)\n'
+        '    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n')
+
+    def test_the_runner_frame_goes_with_its_source_and_caret_lines(self):
+        cleaned = user_facing_traceback(
+            'Traceback (most recent call last):\n'
+            + self._RUNNER_FRAME +
+            '  File "<string>", line 9, in <module>\n'
+            'NameError: name \'r\' is not defined\n')
+
+        self.assertEqual(cleaned,
+                         'Traceback (most recent call last):\n'
+                         '  line 9, in <module>\n'
+                         'NameError: name \'r\' is not defined\n')
+
+    def test_every_frame_of_the_user_program_survives(self):
+        cleaned = user_facing_traceback(
+            'Traceback (most recent call last):\n'
+            + self._RUNNER_FRAME +
+            '  File "<string>", line 9, in <module>\n'
+            '  File "<string>", line 6, in f\n'
+            'NameError: name \'r\' is not defined. Did you mean: \'re\'?\n')
+
+        self.assertEqual(cleaned,
+                         'Traceback (most recent call last):\n'
+                         '  line 9, in <module>\n'
+                         '  line 6, in f\n'
+                         'NameError: name \'r\' is not defined. Did you mean: \'re\'?\n')
+
+    def test_a_frame_in_a_real_file_keeps_its_path_and_source(self):
+        """Only `<string>` is a name the user can't act on. A module they
+        imported is a place they can go look."""
+        cleaned = user_facing_traceback(
+            'Traceback (most recent call last):\n'
+            '  File "<string>", line 3, in <module>\n'
+            '  File "/Users/brian/proj/helpers.py", line 12, in go\n'
+            '    return 1 / 0\n'
+            'ZeroDivisionError: division by zero\n')
+
+        self.assertEqual(cleaned,
+                         'Traceback (most recent call last):\n'
+                         '  line 3, in <module>\n'
+                         '  File "/Users/brian/proj/helpers.py", line 12, in go\n'
+                         '    return 1 / 0\n'
+                         'ZeroDivisionError: division by zero\n')
+
+    def test_a_frame_in_our_own_directory_goes_too(self):
+        """std_streams is as much ours as the runner is; the user's `input()`
+        call is the only part of that stack they wrote."""
+        cleaned = user_facing_traceback(
+            'Traceback (most recent call last):\n'
+            '  File "<string>", line 1, in <module>\n'
+            f'  File "{os.path.join(os.path.dirname(python_runner.__file__), "std_streams.py")}", '
+            'line 40, in readline\n'
+            'RuntimeError: boom\n')
+
+        self.assertEqual(cleaned,
+                         'Traceback (most recent call last):\n'
+                         '  line 1, in <module>\n'
+                         'RuntimeError: boom\n')
+
+    def test_a_chained_traceback_is_cleaned_on_both_sides(self):
+        cleaned = user_facing_traceback(
+            'Traceback (most recent call last):\n'
+            + self._RUNNER_FRAME +
+            '  File "<string>", line 2, in <module>\n'
+            'ValueError: first\n'
+            '\n'
+            'During handling of the above exception, another exception occurred:\n'
+            '\n'
+            'Traceback (most recent call last):\n'
+            + self._RUNNER_FRAME +
+            '  File "<string>", line 4, in <module>\n'
+            'RuntimeError: second\n')
+
+        self.assertEqual(cleaned,
+                         'Traceback (most recent call last):\n'
+                         '  line 2, in <module>\n'
+                         'ValueError: first\n'
+                         '\n'
+                         'During handling of the above exception, another exception occurred:\n'
+                         '\n'
+                         'Traceback (most recent call last):\n'
+                         '  line 4, in <module>\n'
+                         'RuntimeError: second\n')
+
+    def test_a_stack_that_is_all_ours_is_left_alone(self):
+        """Nothing of the user's to show, so a bug in our own code stays
+        reported in full rather than as a traceback with no frames."""
+        original = ('Traceback (most recent call last):\n'
+                    + self._RUNNER_FRAME +
+                    'RuntimeError: boom\n')
+
+        self.assertEqual(user_facing_traceback(original), original)
+
+    def test_text_with_no_traceback_in_it_is_unchanged(self):
+        self.assertEqual(user_facing_traceback('just a message\n'), 'just a message\n')
+
+
+class TestTracebackReachesTheEditorCleaned(unittest.TestCase):
+    """End to end: what a failing program actually writes to stderr."""
+
+    def _stderr(self, source_code):
+        logged = []
+        import_code, body_code = split_leading_imports(source_code)
+        globals_dict = {
+            "__name__": "__main__",
+            "__file__": "<string>",
+            "_log_value": lambda line, value, *a, **k: logged.append((line, value)),
+            "_log_and_return": lambda line, value, *a, **k: value,
+        }
+        real_log_value = python_runner.log_value
+        python_runner.log_value = lambda line, value, *a, **k: logged.append((line, value))
+        try:
+            with capture_stream_messages() as msgs:
+                execute_code(body_code, globals_dict, import_code=import_code)
+        finally:
+            python_runner.log_value = real_log_value
+        return msgs.text_of('stderr')
+
+    _SOURCE = ("import re\n"
+               "\n"
+               "def f():\n"
+               "    s = \"abc\"\n"
+               "    s_strings = re.findall(re.escape(r), s)\n"
+               "\n"
+               "f()\n")
+
+    def test_the_runner_is_nowhere_in_it(self):
+        stderr = self._stderr(self._SOURCE)
+        self.assertNotIn('python_runner.py', stderr)
+        self.assertNotIn('exec(code_object', stderr)
+
+    def test_the_users_own_frames_are_still_there(self):
+        stderr = self._stderr(self._SOURCE)
+        self.assertIn('Traceback (most recent call last):', stderr)
+        self.assertIn('line 7, in <module>', stderr)
+        self.assertIn('line 5, in f', stderr)
+        self.assertIn("NameError: name 'r' is not defined", stderr)
+
+    def test_the_exec_scaffolding_name_is_gone(self):
+        self.assertNotIn('<string>', self._stderr(self._SOURCE))
 
 
 class TestFutureFlags(unittest.TestCase):
