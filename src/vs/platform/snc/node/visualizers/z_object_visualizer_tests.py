@@ -325,6 +325,24 @@ class TestVisualize(unittest.TestCase):
         self.assertIn('>$.x<', html_output)
         self.assertIn('>$.name<', html_output)
 
+    def test_rows_only_listen_for_mouse_moves_during_a_drag(self):
+        """Every mouse move over a row costs a full re-run of the user's
+        program, and DragOver does nothing unless a drag is in progress, so
+        rows only ask for moves while one is (same gating as the table's
+        column headers)."""
+        obj = TestObj()
+        model = init_model(obj)
+        model['fields'] = ['$.x', '$.name']
+        html_output = visualize(obj, model, _get_visualizer, None)
+
+        self.assertNotIn('snc-mouse-move', html_output)
+
+        model['drag_from_index'] = 0
+        html_output = visualize(obj, model, _get_visualizer, None)
+
+        self.assertIn('snc-mouse-move', html_output)
+        self.assertIn('DragOver', html_output)
+
     def test_visualize_shows_add_button(self):
         """HTML should contain a (+) button with snc-mouse-down for AddFieldClick."""
         obj = TestObj()
@@ -1098,10 +1116,13 @@ class TestDragReorder(unittest.TestCase):
         self.assertIn('DragStart(index=1)', html_output)
 
     def test_visualize_shows_drag_target_indicators(self):
-        """Each field row should have DragOver and DragEnd handlers."""
+        """During a drag, each field row has DragOver and DragEnd handlers.
+        (Outside one, DragOver is omitted — see
+        test_rows_only_listen_for_mouse_moves_during_a_drag.)"""
         obj = TestObj()
         model = init_model(obj)
         model['fields'] = ['$.x', '$.name']
+        model['drag_from_index'] = 1
         html_output = visualize(obj, model, _get_visualizer, None)
 
         self.assertIn('DragOver(index=0)', html_output)

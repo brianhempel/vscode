@@ -206,8 +206,10 @@ export interface SNCTimingData {
 }
 
 export type SNCStreamMessage =
+	// A command is not a message of its own: it rides on the item that produced
+	// it, so a run killed between the two can't lose it. See
+	// `IVisualizationItem.commands`.
 	| { runId: string; type: 'item'; item: IVisualizationItem }
-	| { runId: string; type: 'command'; command: SNCCommand }
 	| { runId: string; type: 'loop'; loop: ILoopReport }
 	| { runId: string; type: 'end'; result: IProcessResult; timing?: SNCTimingData }
 	| { runId: string; type: 'spawn'; timing: SNCTimingData }

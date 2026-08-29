@@ -83,7 +83,7 @@ Only Python files, untitled buffers and SNC stdin documents (`*.snc*`) get file 
 | `editor.pyExpDrop` | A py-exp dragged from a visualizer was dropped into the editor: `expr`, `imports`, `position`. (The edit itself follows as `file.userEdit` — the drop provider's edit is applied by the editor, not SNC.) |
 
 ### Visualizer widgets
-`line`/`visIndex` identify the widget; `visType` (e.g. `string-visualizer`, `list-visualizer`) is read from the rendered HTML's container class; `focused` says whether that line was the focused (full-size) one. `target` describes the DOM element hit: `tag`, `classes`, `text`, `depth`, `attrs` (`data-action-expr`, `snc-py-exps`, `snc-mouse*`, ...), plus the nearest ancestor `actionExpr`/`pyExps`.
+`line`/`visIndex` identify the widget; `visType` (e.g. `string-visualizer`, `list-visualizer`) is read from the rendered HTML's container class; `focused` says whether that line was the focused (full-size) one. `target` describes the DOM element hit: `tag`, `classes`, `text`, `depth`, `attrs` (`data-action-expr`, `snc-py-exps`, `snc-mouse*`, `snc-idx*`, ...), plus the nearest ancestor `actionExpr`/`pyExps`.
 
 | type | payload |
 |---|---|

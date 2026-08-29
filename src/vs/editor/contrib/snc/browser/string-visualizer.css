@@ -63,15 +63,15 @@
 	}
 }
 
-.char-span {
-	&.is-special {
+.chr {
+	&.special {
 		color: #a5a5a5;
 	}
 
 	/* A highlighted special char becomes dark. Shared by every
 	   highlight variant (literal, fuzzy, slice, segment-group, segment-region) -
 	   `highlight` is always emitted together with one of those variant classes. */
-	&.highlight.is-special {
+	&.highlight.special {
 		color: rgba(0, 0, 0, 0.8);
 	}
 
@@ -185,7 +185,7 @@ span.overlay-content {
   }
 }
 
-.char-span-start-handle-container {
+.chr-start-handle-container {
 	position: relative;
   display: inline-block;
   width: 0;
@@ -193,7 +193,7 @@ span.overlay-content {
   vertical-align: text-top;
 }
 
-.char-span-resize-handle {
+.chr-resize-handle {
 	position: absolute;
 	top: 0px;
 	width: 2px;
@@ -206,12 +206,6 @@ span.overlay-content {
 		border-right: 1px solid #00000073;
 		background: rgba(0,0,0,0.06);
 	}
-}
-
-.char-span-anchor-container {
-	position: relative;
-	display: inline-block;
-	vertical-align: text-top;
 }
 
 .segment-label-anchor {
@@ -531,28 +525,31 @@ body.snc-shift-down .tool-toolbar-compact .tool-icon[data-tool="index"] {
    differently:
      - END ($) anchors collapse with display:none so the \n display sits flush
        with the end of its line.
-     - START (^) anchors keep visibility:hidden (still take a glyph slot) so
+     - START (^) anchors are made transparent (still take a glyph slot) so
        the rest of the string doesn't shift left when ctrl is held / index
-       tool engaged.
+       tool engaged. Transparent rather than visibility:hidden because the
+       char span is also the snc-idx target and hidden elements don't
+       receive pointer events.
    Real characters like \n and \t stay VISIBLE: they're part of the string and
    indices line up with their visible escape display.
    Effective index mode means EITHER:
      - ctrl is held (transient override), OR
      - the visualizer's persistent tool is 'index' AND no other modifier overrides it.
    The visibility rules on anchors and escape displays use !important to
-   override the default .is-special / hover-reveal rules. */
-body.snc-ctrl-down .visualizer-container .char-span-container.is-anchor-end,
-body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .char-span-container.is-anchor-end {
+   override the default .special / hover-reveal rules. */
+body.snc-ctrl-down .visualizer-container .chr.anchor-end,
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .chr.anchor-end {
 	display: none !important;
 }
 
-body.snc-ctrl-down .visualizer-container .char-span.is-anchor-start,
-body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .char-span.is-anchor-start {
-	visibility: hidden !important;
+body.snc-ctrl-down .visualizer-container .chr.anchor-start,
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .chr.anchor-start {
+	color: transparent !important;
+	background: transparent !important;
 }
 
-body.snc-ctrl-down .visualizer-container .char-span.is-special:not(.is-regex-anchor),
-body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .char-span.is-special:not(.is-regex-anchor) {
+body.snc-ctrl-down .visualizer-container .chr.special:not(.regex-anchor),
+body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-selected .chr.special:not(.regex-anchor) {
 	visibility: visible !important;
 }
 
@@ -570,32 +567,32 @@ body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-se
 
 /* Prefix/suffix regions: lighter background than the match itself so the
    match still reads as the focus; brightens on hover and when selected. */
-.char-span.segment-region.highlight {
+.chr.segment-region.highlight {
 	background: var(--snc-hl-fuzzy-soft);
 	cursor: pointer;
 }
 
-.char-span.segment-region.highlight:hover {
+.chr.segment-region.highlight:hover {
 	background: var(--snc-hl-fuzzy-soft-hover);
 }
 
 /* The match itself (capture groups OR whole match in pick mode). */
-.char-span.segment-group.highlight {
+.chr.segment-group.highlight {
 	background: var(--snc-hl-literal-strong);
 	cursor: pointer;
 }
 
-.char-span.segment-group.highlight:hover {
+.chr.segment-group.highlight:hover {
 	background: var(--snc-hl-literal-hover-strong);
 }
 
 /* Selected segments use a brighter, saturated background so it's obvious which
    chips are active. Wins over the base highlight background. */
-.char-span.highlight.segment-selected {
+.chr.highlight.segment-selected {
 	background: var(--snc-hl-selected-alt);
 }
 
-.char-span.highlight.segment-selected:hover {
+.chr.highlight.segment-selected:hover {
 	background: var(--snc-hl-selected-alt-hover);
 }
 
@@ -642,7 +639,7 @@ body:not(.snc-shift-down):not(.snc-alt-down) .visualizer-container.index-tool-se
 }
 
 /* In pick-tool mode, suppress the resize handles - the only interaction in this mode is chip-click. */
-.visualizer-container.pick-tool-selected .char-span-resize-handle {
+.visualizer-container.pick-tool-selected .chr-resize-handle {
 	display: none;
 }
 
@@ -656,14 +653,14 @@ body.snc-ctrl-down .visualizer-container.pick-tool-selected .segment-chip {
 	display: none;
 }
 
-body.snc-shift-down .visualizer-container.pick-tool-selected .char-span.segment-region.highlight,
-body.snc-alt-down .visualizer-container.pick-tool-selected .char-span.segment-region.highlight,
-body.snc-ctrl-down .visualizer-container.pick-tool-selected .char-span.segment-region.highlight,
-body.snc-shift-down .visualizer-container.pick-tool-selected .char-span.segment-group.highlight,
-body.snc-alt-down .visualizer-container.pick-tool-selected .char-span.segment-group.highlight,
-body.snc-ctrl-down .visualizer-container.pick-tool-selected .char-span.segment-group.highlight,
-body.snc-shift-down .visualizer-container.pick-tool-selected .char-span.segment-selected,
-body.snc-alt-down .visualizer-container.pick-tool-selected .char-span.segment-selected,
-body.snc-ctrl-down .visualizer-container.pick-tool-selected .char-span.segment-selected {
+body.snc-shift-down .visualizer-container.pick-tool-selected .chr.segment-region.highlight,
+body.snc-alt-down .visualizer-container.pick-tool-selected .chr.segment-region.highlight,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .chr.segment-region.highlight,
+body.snc-shift-down .visualizer-container.pick-tool-selected .chr.segment-group.highlight,
+body.snc-alt-down .visualizer-container.pick-tool-selected .chr.segment-group.highlight,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .chr.segment-group.highlight,
+body.snc-shift-down .visualizer-container.pick-tool-selected .chr.segment-selected,
+body.snc-alt-down .visualizer-container.pick-tool-selected .chr.segment-selected,
+body.snc-ctrl-down .visualizer-container.pick-tool-selected .chr.segment-selected {
 	background: transparent;
 }

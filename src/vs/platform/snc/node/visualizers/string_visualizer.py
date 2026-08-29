@@ -187,6 +187,14 @@ class MouseUp:
     index: int
 
 @dataclass(frozen=True, slots=True)
+class NotifyMouseIsUp:
+    """The mouse came up somewhere no listener heard it (outside the widget,
+    or over chrome with no mouse-up handler) during a drag. Rendered on the
+    container only while a drag is in progress; the front-end fires it at most
+    once per rendered HTML, on a mouseup or a no-buttons move."""
+    pass
+
+@dataclass(frozen=True, slots=True)
 class KeyDown:
     pass
 
@@ -218,6 +226,7 @@ class MouseOut:
 class HandleMouseDown:
     segment_index: int
     side: str  # 'left' or 'right'
+    match_index: int = 0  # which occurrence of the pattern the handle sits on
 
 @dataclass(frozen=True, slots=True)
 class SearchBoxInput:
@@ -328,6 +337,40 @@ FUZZY_PATTERN_OPTIONS = [
     (r"[\S\s]", r"[\S\s]"),
 ]
 
+# The two options above that say nothing about what the text IS, only that
+# there is some of it. Inference reaches for them last (see
+# synthesize_fuzzy_pattern).
+_UNIVERSAL_PATTERNS = {r".", r"[\S\s]"}
+
+
+def negated_class_option(next_char: str | None) -> tuple[str, str] | None:
+    """The dynamic `[^N]` option for a segment that stops at *next_char*.
+
+    Unlike everything in FUZZY_PATTERN_OPTIONS this one depends on the string,
+    so it is generated rather than listed. Returns None when there is nothing
+    to stop at: '' is the end of the string, None means the segment abuts
+    another one, and the sentinels are the ^/$ anchor markers.
+    """
+    if not next_char or next_char in _SENTINEL_CHARS:
+        return None
+    pattern = '[^' + _char_to_class_literal(next_char) + ']'
+    return (pattern, pattern)
+
+
+def fuzzy_pattern_options(next_char: str | None = None) -> list:
+    """The pattern dropdown's options for a segment followed by *next_char*.
+
+    `[^N]` sits directly after `.`: both are catch-alls, and `[^N]` is the
+    narrower of the two.
+    """
+    option = negated_class_option(next_char)
+    if option is None:
+        return list(FUZZY_PATTERN_OPTIONS)
+    options = list(FUZZY_PATTERN_OPTIONS)
+    dot_idx = next(i for i, (value, _) in enumerate(options) if value == r".")
+    options.insert(dot_idx + 1, option)
+    return options
+
 # Sentinel characters for visible regex anchors (ASCII Device Control chars)
 # These are inserted into an "augmented string" to enable 1:1 mapping
 # between string positions and visual display indices.
@@ -383,6 +426,9 @@ def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_
     one that matches the dragged text, so the highlighted fuzzy segment
     corresponds precisely to the user's mouse drag distance.
 
+    A class describing the CONTENT beats one describing only where the drag
+    STOPS, which beats one giving only its LENGTH -- so the four steps are:
+
     Step 1: Try each pattern with an open-ended quantifier:
             - For a fresh selection (both prev_char and next_char are strings),
               use + (one or more) so the regex won't match zero characters.
@@ -391,7 +437,12 @@ def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_
               already anchors the match.
             Skip if a non-None boundary character matches the pattern
             (the quantifier would overshoot that edge).
-    Step 2: If none matched, try each with {n} repetition (e.g. \\d{3}).
+    Step 2: Try the content-describing patterns with {n} repetition (\\d{3}).
+    Step 3: Try [^N], N being next_char, under the same boundary rules. The
+            left-edge rule is what keeps this honest: [^,] matches nearly any
+            preceding character, so an unanchored [^,]+ would run leftward past
+            the drag -- exactly the jump this option exists to remove.
+    Step 4: Fall back to the universal patterns with {n}, which fix the length.
 
     Args:
         actual_text: The actual string characters under the drag range
@@ -416,32 +467,80 @@ def synthesize_fuzzy_pattern(actual_text: str, prev_char: str | None = '', next_
     is_fresh = prev_char is not None and next_char is not None
     quantifier = '+' if is_fresh else '*'
 
+    def covers_open_ended(pattern_str: str) -> bool:
+        """Does pattern_str + quantifier cover the drag without running past
+        either edge of it?"""
+        try:
+            if not re.fullmatch(pattern_str + quantifier, actual_text):
+                return False
+            # Check right boundary (only when next_char is a string)
+            if next_char and re.fullmatch(pattern_str, next_char):
+                return False
+            # Check left boundary (only when prev_char is a string)
+            if prev_char and re.fullmatch(pattern_str, prev_char):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def covers_exactly_n(pattern_str: str) -> bool:
+        try:
+            return bool(re.fullmatch(pattern_str + '{' + str(n) + '}', actual_text))
+        except Exception:
+            return False
+
     # Step 1: Try open-ended quantifier (+ or *).
     # Prefer more specific character classes first.
     # Skip if a non-None boundary character matches (would overshoot).
     for pattern_str, _ in FUZZY_PATTERN_OPTIONS:
-        try:
-            if re.fullmatch(pattern_str + quantifier, actual_text):
-                # Check right boundary (only when next_char is a string)
-                if next_char and re.fullmatch(pattern_str, next_char):
-                    continue
-                # Check left boundary (only when prev_char is a string)
-                if prev_char and re.fullmatch(pattern_str, prev_char):
-                    continue
-                return pattern_str + quantifier
-        except Exception:
-            continue
+        if covers_open_ended(pattern_str):
+            return pattern_str + quantifier
 
-    # Step 2: Try {n} repetition
+    # Step 2: {n} over the classes that describe the content
     for pattern_str, _ in FUZZY_PATTERN_OPTIONS:
-        try:
-            if re.fullmatch(pattern_str + '{' + str(n) + '}', actual_text):
-                return pattern_str + '{' + str(n) + '}'
-        except Exception:
-            continue
+        if pattern_str not in _UNIVERSAL_PATTERNS and covers_exactly_n(pattern_str):
+            return pattern_str + '{' + str(n) + '}'
+
+    # Step 3: [^N] -- says where the drag stops, which beats fixing its length
+    negated = negated_class_option(next_char)
+    if negated is not None and covers_open_ended(negated[0]):
+        return negated[0] + quantifier
+
+    # Step 4: {n} over the universal classes
+    for pattern_str, _ in FUZZY_PATTERN_OPTIONS:
+        if pattern_str in _UNIVERSAL_PATTERNS and covers_exactly_n(pattern_str):
+            return pattern_str + '{' + str(n) + '}'
 
     # Fallback (should be unreachable since [\S\s]{n} matches everything)
     return r"[\S\s]" + quantifier
+
+
+def _char_to_class_literal(char: str) -> str:
+    """How one character is spelled INSIDE a [...] character class.
+
+    Shared by the class builder (_char_class_to_string) and the [^N] option
+    generator, because what we write and what we read back have to agree --
+    otherwise the dropdown trigger would show something other than what it
+    stored.
+
+    `(` and `)` are escaped past what the regex engine needs:
+    parse_top_level_segments counts parens without skipping character classes,
+    so a bare one would split the segment in the wrong place.
+
+    Note this is NOT char_to_regex_literal, which escapes `'` for the enclosing
+    string literal and would not round-trip through the parser.
+    """
+    if char in r'\]-^()':
+        return '\\' + char
+    if char == '\n':
+        return r'\n'
+    if char == '\t':
+        return r'\t'
+    if char == '\r':
+        return r'\r'
+    if not char.isprintable():
+        return f'\\x{ord(char):02x}'
+    return char
 
 
 def char_to_regex_literal(char: str) -> str:
@@ -575,8 +674,12 @@ def _format_repetition(min_count, max_count) -> str:
     else:
         return f'{min_count}-{max_count}'
 
-def _segment_pattern_label(pat_str: str, segment_index: int, model: dict, seg_len: int = 1) -> str:
-    dropdown_id = f'fuzzy-pattern-{segment_index}'
+def _segment_pattern_label(pat_str: str, segment_index: int, match_index: int,
+                           model: dict, seg_len: int = 1) -> str:
+    # The dropdown edits a pattern segment, but it is opened on one occurrence
+    # of it, so the id names both -- otherwise the panel would be rendered over
+    # every match at once. DropdownToggle reads the segment back off the tail.
+    dropdown_id = f'fuzzy-pattern-{match_index}-{segment_index}'
     open_dropdown = model.get('openDropdown') if model else None
     is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
 
@@ -589,8 +692,12 @@ def _segment_pattern_label(pat_str: str, segment_index: int, model: dict, seg_le
 
     dropdown_panel = ''
     if is_open:
+        # What this occurrence of the segment stops at, so [^N] can be offered
+        # for it. Different matches legitimately stop at different characters.
+        next_chars = (model.get('_segmentNextChars') or {}) if model else {}
+        next_char = next_chars.get(f'{match_index}-{segment_index}')
         options_html = []
-        for value, label in FUZZY_PATTERN_OPTIONS:
+        for value, label in fuzzy_pattern_options(next_char):
             select_event = repr(DropdownSelect(dropdown_id, value))
             options_html.append(
                 f'<div class="snc-dropdown-option" snc-mouse-down="{html.escape(select_event)}">'
@@ -640,9 +747,10 @@ def _quantifier_to_prefill(min_count, max_count) -> tuple[str, str, str]:
     return ('', str(min_count), range_max)
 
 
-def _segment_repetition_label(rep_str: str, segment_index: int, seg_type: str, model: dict,
+def _segment_repetition_label(rep_str: str, segment_index: int, match_index: int,
+                              seg_type: str, model: dict,
                               seg_len: int = 1, min_count=None, max_count=None) -> str:
-    dropdown_id = f'repetition-{segment_index}'
+    dropdown_id = f'repetition-{match_index}-{segment_index}'
     open_dropdown = model.get('openDropdown') if model else None
     is_open = open_dropdown is not None and open_dropdown.get('id') == dropdown_id
 
@@ -807,7 +915,40 @@ HTML_ESCAPE_CHARS = '<>&\'"'
 
 def text_group_span(chars: list, start_index: int) -> str:
     text = ''.join(html.escape(c) if c in HTML_ESCAPE_CHARS else c for c in chars)
-    return f'<span class="string-visualizer-text-group" snc-text-start="{start_index}">{text}</span>'
+    return f'<span snc-idx-start="{start_index}">{text}</span>'
+
+
+def highlight_group_span(chars: list, start_index: int, h, model=None) -> str:
+    """Interior chars of a segment, grouped into one span like plain text but
+    carrying the segment's highlight classes. Boundary chars stay individual --
+    they hold the start/end rounding, labels, and handles. The front-end
+    derives exact indices from snc-idx-start; snc-hover-moves marks
+    interactive interiors as wanting idle hover moves (hovering a match is how
+    its labels appear -- slices and pick-mode regions have no hover-driven UI,
+    so they don't ask). Pick-mode regions carry their click target and drag
+    expression once here instead of on every char -- their regions span the
+    whole string, and per-char listeners made tool switching take seconds."""
+    seg_type = h[2]
+    classes = ['chr', 'highlight', seg_type]
+    hover_attr = ''
+    listeners = ''
+    if seg_type in ('segment-region', 'segment-group'):
+        # Mirrors the segment-mode branch of char_span_els: pat_str packs
+        # 'seg_id|expr|label'.
+        if isinstance(h[3], str):
+            parts = h[3].split('|', 2)
+            if model is not None and parts[0] in (model.get('selectedSegments') or []):
+                classes.append('segment-selected')
+            seg_event = repr(SegmentToggle(segment_id=parts[0]))
+            seg_expr = parts[1] if len(parts) >= 2 else ''
+            listeners = (f' snc-mouse-down="{html.escape(seg_event)}"'
+                         f'{py_exp_attrs(seg_expr)}')
+    elif h[5] is not None:
+        classes.append('is-interactive')
+        if seg_type in ('literal', 'fuzzy'):
+            hover_attr = ' snc-hover-moves'
+    text = ''.join(html.escape(c) if c in HTML_ESCAPE_CHARS else c for c in chars)
+    return f'<span class="{" ".join(classes)}" snc-idx-start="{start_index}"{hover_attr}{listeners}>{text}</span>'
 
 def char_span(string, index, is_special, highlight=None, model=None, scroll_to=False, is_regex_anchor=False):
     return ''.join(char_span_els(string, index, is_special, highlight, model, scroll_to, is_regex_anchor))
@@ -830,22 +971,21 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
     # styles = f'color:{GRAY};' if is_special else ''
     pat_html = ''
     repetition_html = ''
-    classes = ['char-span']
+    classes = ['chr']
     dropdown_id = None
 
     if (is_special):
-        classes.append('is-special')
+        classes.append('special')
     if is_regex_anchor:
-        classes.append('is-regex-anchor')
+        classes.append('regex-anchor')
         # Differentiate start vs end anchors so CSS can collapse only the END
         # ($) anchors in index mode (so \n displays sit flush at line end),
         # while START (^) anchors stay invisible-but-space-occupying so the
         # rest of the string doesn't shift left.
-        anchor_side = 'end' if string == '$' else 'start'
-        classes.append(f'is-anchor-{anchor_side}')
+        classes.append('anchor-end' if string == '$' else 'anchor-start')
 
     if highlight is not None:
-        start, end, seg_type, pat_str, (min_count, max_count), segment_index = highlight
+        start, end, seg_type, pat_str, (min_count, max_count), segment_index, match_index = highlight
         color = '#00aeff' if seg_type in ('literal', 'slice') else '#868686'
         classes.append('highlight')
         classes.append(f'{seg_type}')
@@ -883,28 +1023,34 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 slice_center_label = pat_str
 
         # Segment-mode highlights: NO floating chip above. The snc-py-exps,
-        # draggable, and SegmentToggle handler all live on the wrapper itself
+        # draggable, and SegmentToggle handler all live on the char span itself
         # (added below alongside mouse_listener) so the highlighted chars BECOME
         # the clickable/draggable element. Only the match-start / match-end
         # index labels (which aren't on a single char) stay as floating chips.
         # No-op here.
 
+        # Every match is interactive and looks the same. The small pattern /
+        # repetition labels, though, belong to ONE occurrence at a time -- the
+        # one the user is pointing at -- or they would be printed over every
+        # match at once.
         segment_active = False
         if is_interactive:
             classes.append('is-interactive')
             if model is not None:
                 h = model.get('hoverIdx')
+                active_match = model.get('_activeMatchIdx')
                 if model.get('dragging'):
-                    segment_active = True
+                    segment_active = (active_match is None or active_match == match_index)
                 elif h is not None and start <= h < end:
                     segment_active = True
                 hd = model.get('handleDrag')
-                if hd is not None and hd.get('segmentIndex') == segment_index:
+                if (hd is not None and hd.get('segmentIndex') == segment_index
+                        and hd.get('matchIndex', 0) == match_index):
                     segment_active = True
                 od = model.get('openDropdown')
                 if od is not None and od.get('id') in (
-                    f'repetition-{segment_index}',
-                    f'fuzzy-pattern-{segment_index}',
+                    f'repetition-{match_index}-{segment_index}',
+                    f'fuzzy-pattern-{match_index}-{segment_index}',
                     'slice-label-start',
                     'slice-label-end',
                     'slice-label-center',
@@ -912,13 +1058,13 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                     segment_active = True
 
         # Fuzzy segments only get a resize handle on an OPEN end (one that does
-        # not abut a neighbor segment). Primary segments have contiguous
-        # left-to-right indices, so a segment has a left/right neighbor iff it
+        # not abut a neighbor segment). Segment indices are pattern positions
+        # running left to right, so a segment has a left/right neighbor iff it
         # is not the first/last. Literal segments always get both handles.
-        primary_count = (model or {}).get('_primarySegmentCount')
+        seg_count = (model or {}).get('_patternSegmentCount')
         has_left_neighbor = segment_index is not None and segment_index > 0
-        has_right_neighbor = (segment_index is not None and primary_count is not None
-                              and segment_index < primary_count - 1)
+        has_right_neighbor = (segment_index is not None and seg_count is not None
+                              and segment_index < seg_count - 1)
         fuzzy_open_left = seg_type == 'fuzzy' and not has_left_neighbor
         fuzzy_open_right = seg_type == 'fuzzy' and not has_right_neighbor
 
@@ -933,51 +1079,62 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 # resize handle (parallel to literal-segment handles).
                 seg_len = end - start
                 pat_html = _segment_index_label(slice_start_label, position='start', seg_len=seg_len, model=model)
-                left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left'))
+                left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left', match_index=match_index))
                 pat_html += (
-                    '<span class="char-span-start-handle-container">'
-                    f'<span class="char-span-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
+                    '<span class="chr-start-handle-container">'
+                    f'<span class="chr-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
                 )
             elif is_interactive:
                 seg_len = end - start
                 if segment_active and seg_type == 'fuzzy':
-                    pat_html = _segment_pattern_label(pat_str, segment_index, model, seg_len)
-                if seg_type != 'fuzzy' or fuzzy_open_left:
-                    left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left'))
+                    pat_html = _segment_pattern_label(pat_str, segment_index, match_index, model, seg_len)
+                # Handles gate on segment_active like the labels: rendered on
+                # every occurrence, two handle spans per match dwarfed the
+                # string itself once a dense pattern had thousands of them.
+                if segment_active and (seg_type != 'fuzzy' or fuzzy_open_left):
+                    left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left', match_index=match_index))
                     pat_html += (
-                        '<span class="char-span-start-handle-container">'
-                        f'<span class="char-span-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
+                        '<span class="chr-start-handle-container">'
+                        f'<span class="chr-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
                     )
         if end - 1 == index:
             classes.append('end')
             if slice_end_label is not None:
                 seg_len = end - start
                 repetition_html = _segment_index_label(slice_end_label, position='end', seg_len=seg_len, model=model)
-                right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right'))
+                right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right', match_index=match_index))
                 repetition_html += (
-                    '<span class="char-span-start-handle-container">'
-                    f'<span class="char-span-resize-handle right" snc-mouse-down="{html.escape(right_handle_event)}"></span></span>'
+                    '<span class="chr-start-handle-container">'
+                    f'<span class="chr-resize-handle right" snc-mouse-down="{html.escape(right_handle_event)}"></span></span>'
                 )
             elif is_interactive:
                 show_rep = segment_active and not (model.get('dragging') and seg_type == 'literal')
                 if show_rep:
                     rep_str = _format_repetition(min_count, max_count)
                     seg_len = end - start
-                    repetition_html = _segment_repetition_label(rep_str, segment_index, seg_type, model, seg_len, min_count, max_count)
-                if seg_type == 'literal' or fuzzy_open_right:
-                    right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right'))
+                    repetition_html = _segment_repetition_label(rep_str, segment_index, match_index, seg_type, model, seg_len, min_count, max_count)
+                # Same active-only gate as the left handle above.
+                if segment_active and (seg_type == 'literal' or fuzzy_open_right):
+                    right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right', match_index=match_index))
                     repetition_html += (
-                        '<span class="char-span-start-handle-container">'
-                        f'<span class="char-span-resize-handle right" snc-mouse-down="{html.escape(right_handle_event)}"></span></span>'
+                        '<span class="chr-start-handle-container">'
+                        f'<span class="chr-resize-handle right" snc-mouse-down="{html.escape(right_handle_event)}"></span></span>'
                     )
-    elif model is not None and model.get('hoverIdx') == index and not model.get('dragging'):
-        classes.append('hover')
+    # Idle mouse moves each cost a full program run, so only match chars ask
+    # for them: hovering one reveals that occurrence's labels. The front-end
+    # expands the snc-idx shorthand's move only while a drag is in progress
+    # (signalled by the container's snc-notify-mouse-is-up), so plain chars
+    # stay silent when the mouse is just passing over. Pick-mode segment
+    # chars stay silent too -- their hover styling is pure CSS.
+    move_attr = (f' snc-mouse-move="MouseMove({index})"'
+                 if highlight is not None
+                 and highlight[2] not in ('segment-region', 'segment-group')
+                 else '')
+    mouse_listener = f'snc-idx="{str(index)}"{move_attr}'
 
-    mouse_listener = f'snc-mouse="{str(index)}"'
-
-    # In segment mode, override the wrapper's mouse-down to toggle the segment
-    # selection instead of starting a literal/fuzzy drag. snc-mouse-down beats
-    # snc-mouse in the dispatcher's attribute lookup, so we just append it.
+    # In segment mode, override the char span's mouse-down to toggle the
+    # segment selection instead of starting a literal/fuzzy drag. snc-mouse-down
+    # beats snc-idx in the dispatcher's attribute lookup, so we just append it.
     # We also attach snc-py-exps + draggable so the highlighted char itself is
     # the hover-tooltip / drag-source for the segment's expression.
     if (highlight is not None
@@ -987,29 +1144,21 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
         seg_id_for_listener = parts[0]
         seg_expr = parts[1] if len(parts) >= 2 else ''
         seg_event = repr(SegmentToggle(segment_id=seg_id_for_listener))
-        mouse_listener = (f'snc-mouse="{str(index)}" '
+        mouse_listener = (f'snc-idx="{str(index)}"{move_attr} '
                           f'snc-mouse-down="{html.escape(seg_event)}"'
                           f'{py_exp_attrs(seg_expr)}')
 
-    # snc-mouse="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
+    # snc-idx="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
     # (this abbreviation speeds up the string visualization quite a bit)
     scroll_attr = ' snc-scroll-to-match' if scroll_to else ''
-    # Mirror anchor classes onto the container so CSS can collapse the entire
-    # wrapper (display:none) in index mode - hiding only the inner char-span
-    # would leave the container's padding/whitespace and the \n display would
-    # not sit flush with the end of its line. Only END ($) anchors collapse;
-    # START (^) anchors keep their slot so the string doesn't shift left.
-    container_classes = 'char-span-container'
-    if is_regex_anchor:
-        anchor_side = 'end' if string == '$' else 'start'
-        container_classes += f' is-regex-anchor is-anchor-{anchor_side}'
+    open_tag = f'<span class="{" ".join(classes)}" {mouse_listener}{scroll_attr}>'
     if pat_html or repetition_html:
-        return [pat_html, f'<span class="{container_classes}" {mouse_listener}{scroll_attr}><span class="{" ".join(classes)}">', html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span></span>', repetition_html]
+        return [pat_html, open_tag, html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span>', repetition_html]
     else:
-        return [f'<span class="{container_classes}" {mouse_listener}{scroll_attr}><span class="{" ".join(classes)}">', html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span></span>']
+        return [open_tag, html.escape(string) if string in HTML_ESCAPE_CHARS else string, '</span>']
 
 
-    # return f'{pat_html}<span snc-mouse="{index}" style="padding-right:1px;{styles}">{html.escape(string) if string in HTML_ESCAPE_CHARS else string}</span>{repetition_html}'
+    # return f'{pat_html}<span snc-idx="{index}" style="padding-right:1px;{styles}">{html.escape(string) if string in HTML_ESCAPE_CHARS else string}</span>{repetition_html}'
     # index_str = str(index)
     # return f'{pat_html}<span snc-mouse-move="MouseMove({index_str})" snc-mouse-down="MouseDown({index_str})" snc-mouse-up="MouseUp({index_str})" style="color:{GRAY if is_special else STRING};padding-right:1px;{styles}">{html.escape(string) if string in HTML_ESCAPE_CHARS else string}</span>{repetition_html}'
 
@@ -1084,6 +1233,25 @@ def extract_by_internal_indices(string_value: str, start: int, end: int) -> str:
     return ''.join(result)
 
 
+def _real_char_before_internal_idx(string_value: str, idx: int) -> str:
+    """The nearest real character before internal index idx, looking through
+    ^/$ anchor sentinels; '' if only the start of the string precedes it.
+
+    A window of 3 suffices: the longest run of consecutive sentinels is 2
+    (the ^$ of an empty line), so 3 consecutive internal positions always
+    contain a real character unless the string boundary cuts them off.
+    """
+    text = extract_by_internal_indices(string_value, max(idx - 3, 0), idx)
+    return ''.join(c for c in text if c not in _SENTINEL_CHARS)[-1:]
+
+
+def _real_char_after_internal_idx(string_value: str, idx: int) -> str:
+    """The nearest real character at/after internal index idx, looking through
+    ^/$ anchor sentinels; '' if only the end of the string follows."""
+    text = extract_by_internal_indices(string_value, idx, idx + 3)
+    return ''.join(c for c in text if c not in _SENTINEL_CHARS)[:1]
+
+
 def build_internal_to_string_mapping(string_value: str) -> List[int]:
     """
     Build a mapping from internal visualizer indices to actual string character indices.
@@ -1154,6 +1322,31 @@ def build_string_to_internal_mapping(string_value: str) -> List[int]:
     return mapping
 
 
+def _caret_marker_internal_idx(string_value: str, str_start: int, str_to_internal: List[int]) -> int:
+    """Internal index of the visible ^ marker for the line starting at str_start.
+
+    str_start must be a line-start position (0 or just past a \\n). The ^
+    marker sits one before the character's internal position -- two before
+    when that character is itself a \\n, whose internal position is the middle
+    of its $ \\n ^ triple (the line is empty).
+    """
+    if str_start < len(string_value) and string_value[str_start] == '\n':
+        return str_to_internal[str_start] - 2
+    return str_to_internal[str_start] - 1
+
+
+def _dollar_marker_internal_idx(string_value: str, str_end: int, str_to_internal: List[int]) -> int:
+    """Internal index of the visible $ marker for the line ending at str_end.
+
+    str_end must be a line-end position (len(string_value) or the index of a
+    \\n). At the string end that is the trailing $ itself; at a \\n it is one
+    before the \\n's internal position (the $ of its $ \\n ^ triple).
+    """
+    if str_end == len(string_value):
+        return str_to_internal[str_end]
+    return str_to_internal[str_end] - 1
+
+
 def internal_range_to_string_slice(internal_start: int, internal_end: int, string_value: str) -> Tuple[int, int]:
     """
     Convert internal visualizer index range to actual string slice indices.
@@ -1196,6 +1389,76 @@ def internal_range_to_string_slice(internal_start: int, internal_end: int, strin
 
 # === Regex building and parsing functions ===
 
+def _first_literal_char(pattern: str) -> str:
+    """The first character *pattern* matches literally, or '' if it doesn't
+    start with a literal (a class, a group, a backreference).
+
+    Anchors are skipped: they consume nothing, so `^world` still starts at 'w'.
+    """
+    try:
+        parsed = list(regex_parser.parse(pattern))
+    except Exception:
+        return ''
+    for item in parsed:
+        op_name = str(item[0])
+        av = item[1] if len(item) > 1 else None
+        if op_name == 'AT':
+            continue
+        if op_name == 'LITERAL':
+            return chr(av)
+        if op_name == 'SUBPATTERN':
+            return _first_literal_char(_subpattern_to_string(list(av[3])))
+        return ''
+    return ''
+
+
+def _lazify_overshooting_fuzzy(text: str, next_text: str) -> str:
+    """Make an open-ended fuzzy lazy when it can swallow what follows it.
+
+    A greedy `.*` in front of a literal binds that literal to its LAST
+    occurrence, so the segment the user just dragged appears to jump down the
+    string; lazy keeps it on the first one. Only fires where the overshoot is
+    real -- `\\s+` in front of `world` cannot cross the 'w', and `[^,]+` in
+    front of `, ` already stops itself, so both are left alone.
+
+    Correct only when something actually follows: a lazy quantifier at the tail
+    has nothing to stop at and collapses to the shortest possible match.
+    """
+    base, quantifier = extract_quantifier(text)
+    if quantifier not in ('*', '+'):
+        return text
+    if _is_fuzzy_start(base, 0) != len(base):
+        return text
+    stop_char = _first_literal_char(next_text)
+    if not stop_char:
+        return text
+    try:
+        if not re.fullmatch(base, stop_char):
+            return text
+    except Exception:
+        return text
+    return base + quantifier + '?'
+
+
+def _lazify_segment_in_inner(inner: str, index: int) -> str:
+    """Apply _lazify_overshooting_fuzzy to segment *index* of an inner pattern.
+
+    Grouping is preserved verbatim and the string is only rebuilt when
+    something actually changed, so this is a no-op on patterns it doesn't
+    apply to.
+    """
+    segments = parse_all_segments(inner)
+    if not (0 <= index < len(segments) - 1):
+        return inner
+    lazified = _lazify_overshooting_fuzzy(segments[index]['text'],
+                                          segments[index + 1]['text'])
+    if lazified == segments[index]['text']:
+        return inner
+    segments[index]['text'] = lazified
+    return ''.join(f"({seg['text']})" if seg['is_grouped'] else seg['text']
+                   for seg in segments)
+
+
 def append_segment_to_regex(current_regex: str | None, segment_type: str, text: str) -> str:
     """
     Append a new segment to the regex pattern.
@@ -1225,7 +1488,12 @@ def append_segment_to_regex(current_regex: str | None, segment_type: str, text: 
     else:  # fuzzy
         new_segment = f"({text})" if text else "(.*)"
 
-    canonical_inner = _canonicalize_inner(f"{inner_pattern}{new_segment}")
+    # The previously-last segment has just gained a follower, so a greedy
+    # fuzzy there would now bind the new segment to its last occurrence.
+    combined = f"{inner_pattern}{new_segment}"
+    combined = _lazify_segment_in_inner(combined, len(parse_all_segments(combined)) - 2)
+
+    canonical_inner = _canonicalize_inner(combined)
     result = make_regex_search(canonical_inner, flags)
     if 'c' in flags:
         result = ensure_all_groups(result)
@@ -1261,7 +1529,10 @@ def prepend_segment_to_regex(current_regex: str | None, segment_type: str, text:
     else:  # fuzzy
         new_segment = f"({text})" if text else "(.*)"
 
-    canonical_inner = _canonicalize_inner(f"{new_segment}{inner_pattern}")
+    # The new segment is the one that gained a follower.
+    combined = _lazify_segment_in_inner(f"{new_segment}{inner_pattern}", 0)
+
+    canonical_inner = _canonicalize_inner(combined)
     result = make_regex_search(canonical_inner, flags)
     if 'c' in flags:
         result = ensure_all_groups(result)
@@ -1301,11 +1572,19 @@ def insert_segment_at_position(current_regex: str | None, position: int, segment
     new_seg = {'text': new_segment_text, 'is_grouped': True}
 
     if position <= 0:
-        segments.insert(0, new_seg)
+        insert_index = 0
     elif position >= len(segments):
-        segments.append(new_seg)
+        insert_index = len(segments)
     else:
-        segments.insert(position, new_seg)
+        insert_index = position
+    segments.insert(insert_index, new_seg)
+
+    # The inserted segment gained a follower, and so did the one before it --
+    # a different follower than it had a moment ago.
+    for i in (insert_index - 1, insert_index):
+        if 0 <= i < len(segments) - 1:
+            segments[i]['text'] = _lazify_overshooting_fuzzy(
+                segments[i]['text'], segments[i + 1]['text'])
 
     fully_grouped_inner = ''.join(f"({s['text']})" for s in segments)
     canonical_inner = _canonicalize_inner(fully_grouped_inner)
@@ -1523,6 +1802,13 @@ def _replace_segment_content(selection_regex: str, segment_index: int, new_conte
     if not segments or segment_index >= len(segments):
         return selection_regex
 
+    # Only the replaced segment is reconsidered: re-inferring a resized fuzzy
+    # yields a greedy '*' (resize_fuzzy_segment passes next_char=None), and it
+    # must not silently lose the laziness that keeps its neighbour in place.
+    # Resizing a literal leaves the segments around it alone.
+    if segment_index + 1 < len(segments):
+        new_content = _lazify_overshooting_fuzzy(
+            new_content, segments[segment_index + 1]['text'])
     segments[segment_index]['text'] = new_content
 
     parts = []
@@ -1916,20 +2202,7 @@ def _char_class_to_string(items: list) -> str:
             parts.append(f'{start_char}-{end_char}')
 
         elif item_op == 'LITERAL':
-            char = chr(item_av)
-            # Escape special chars inside character class
-            if char in r'\]-^':
-                parts.append('\\' + char)
-            elif char == '\n':
-                parts.append(r'\n')
-            elif char == '\t':
-                parts.append(r'\t')
-            elif char == '\r':
-                parts.append(r'\r')
-            elif not char.isprintable():
-                parts.append(f'\\x{item_av:02x}')
-            else:
-                parts.append(char)
+            parts.append(_char_to_class_literal(chr(item_av)))
 
     prefix = '[^' if negated else '['
     return prefix + ''.join(parts) + ']'
@@ -1965,6 +2238,12 @@ def _subpattern_to_string(subpattern: list, include_repetition: bool = True) -> 
                 result.append(f'\\x{av:02x}')
             else:
                 result.append(char)
+
+        elif op_name == 'NOT_LITERAL':
+            # A one-character negated class: the parser optimizes [^,] into
+            # this rather than IN [NEGATE, LITERAL], so without this branch it
+            # would read back as an empty literal.
+            result.append('[^' + _char_to_class_literal(chr(av)) + ']')
 
         elif op_name == 'ANY':
             result.append('.')
@@ -2053,6 +2332,10 @@ def _is_wildcard_pattern(pattern_item) -> bool:
     # IN is a character class like [a-z], \d, \s, \w, etc.
     if op_name == 'IN':
         return True
+    # NOT_LITERAL is a one-character negated class, [^,] -- the parser writes
+    # those without an IN wrapper.
+    if op_name == 'NOT_LITERAL':
+        return True
     return False
 
 
@@ -2092,9 +2375,9 @@ def _analyze_group(subpattern: list) -> Tuple[List[str], bool, Tuple[int, int | 
             # Single . (any character) is fuzzy
             is_fuzzy = True
 
-        elif op_name == 'IN':
-            # Character class like [a-z], \d, \s, \w, etc. without repetition
-            # These are fuzzy since they match variable characters
+        elif op_name in ('IN', 'NOT_LITERAL'):
+            # Character class like [a-z], \d, \s, \w, [^,] etc. without
+            # repetition. These are fuzzy since they match variable characters
             is_fuzzy = True
 
         elif op_name in ('MAX_REPEAT', 'MIN_REPEAT'):
@@ -2462,7 +2745,7 @@ def _literal_match_highlights(search_text: str, string_value: str,
     str_to_internal = build_string_to_internal_mapping(string_value)
     highlights = []
 
-    for match in matches:
+    for match_idx, match in enumerate(matches):
         str_start, str_end = match.span()
         if str_start == str_end:
             continue
@@ -2473,7 +2756,7 @@ def _literal_match_highlights(search_text: str, string_value: str,
                 internal_end += 1
         else:
             internal_end = str_to_internal[-1] if str_to_internal else 1
-        highlights.append((internal_start, internal_end, 'literal', search_text, (1, 1), None))
+        highlights.append((internal_start, internal_end, 'literal', search_text, (1, 1), None, match_idx))
 
     return highlights
 
@@ -2533,7 +2816,8 @@ def _format_index_expr(idx: int, n: int) -> str:
     return neg if neg is not None else str(idx)
 
 
-def _index_highlight(index_val: int, string_value: str, label: str | None = None) -> list:
+def _index_highlight(index_val: int, string_value: str, label: str | None = None,
+                     match_index: int = 0) -> list:
     """Produce a single highlight tuple for str[index_val].
 
     The static label rendered at the segment shows *label* if provided
@@ -2553,7 +2837,7 @@ def _index_highlight(index_val: int, string_value: str, label: str | None = None
     if string_value[normalized] == '\n':
         internal_end += 1
     pat_str = label if label is not None else str(index_val)
-    return [(internal_start, internal_end, 'slice', pat_str, (1, 1), None)]
+    return [(internal_start, internal_end, 'slice', pat_str, (1, 1), None, match_index)]
 
 
 def _slice_search_highlights(search: str, string_value: str, eval_in_scope) -> list:
@@ -2582,20 +2866,20 @@ def _slice_search_highlights(search: str, string_value: str, eval_in_scope) -> l
         str_to_internal = build_string_to_internal_mapping(string_value)
         highlights = []
         if start_is_list and stop_is_list:
-            for s, e in zip(start, stop):
-                h = _slice_range_highlight(s, e, string_value, str_to_internal, str(s), str(e))
+            for i, (s, e) in enumerate(zip(start, stop)):
+                h = _slice_range_highlight(s, e, string_value, str_to_internal, str(s), str(e), i)
                 if h:
                     highlights.append(h)
         elif start_is_list:
-            for s in start:
+            for i, s in enumerate(start):
                 a_stop = stop if stop is not None else n
-                h = _slice_range_highlight(s, a_stop, string_value, str_to_internal, str(s), right)
+                h = _slice_range_highlight(s, a_stop, string_value, str_to_internal, str(s), right, i)
                 if h:
                     highlights.append(h)
         else:
-            for e in stop:
+            for i, e in enumerate(stop):
                 a_start = start if start is not None else 0
-                h = _slice_range_highlight(a_start, e, string_value, str_to_internal, left, str(e))
+                h = _slice_range_highlight(a_start, e, string_value, str_to_internal, left, str(e), i)
                 if h:
                     highlights.append(h)
         return highlights
@@ -2633,7 +2917,7 @@ def _is_list_of_int_pairs(val) -> bool:
 
 def _slice_range_highlight(actual_start: int, actual_stop: int, string_value: str,
                            str_to_internal: list, left_label: str = '',
-                           right_label: str = '') -> tuple | None:
+                           right_label: str = '', match_index: int = 0) -> tuple | None:
     """Produce a highlight tuple for a string slice.
 
     *left_label* / *right_label* are the raw expression parts the slice was
@@ -2666,7 +2950,7 @@ def _slice_range_highlight(actual_start: int, actual_stop: int, string_value: st
     left = left_label or '·'
     right = right_label or '·'
     pat_str = f'{left}|{right}'
-    return (internal_start, internal_end, 'slice', pat_str, (1, 1), 0)
+    return (internal_start, internal_end, 'slice', pat_str, (1, 1), 0, match_index)
 
 
 def _expression_search_highlights(search: str, string_value: str, eval_in_scope) -> list:
@@ -2691,19 +2975,19 @@ def _expression_search_highlights(search: str, string_value: str, eval_in_scope)
         return _index_highlight(result, string_value, label=p[1])
     if _is_list_of_ints(result):
         highlights = []
-        for idx in result:
-            highlights.extend(_index_highlight(idx, string_value))
+        for i, idx in enumerate(result):
+            highlights.extend(_index_highlight(idx, string_value, match_index=i))
         return highlights
     if _is_list_of_int_pairs(result):
         if not string_value:
             return []
         str_to_internal = build_string_to_internal_mapping(string_value)
         highlights = []
-        for s, e in result:
+        for i, (s, e) in enumerate(result):
             n = len(string_value)
             a_start = s if s >= 0 else max(s + n, 0)
             a_stop = e if e >= 0 else max(e + n, 0)
-            h = _slice_range_highlight(a_start, a_stop, string_value, str_to_internal, str(s), str(e))
+            h = _slice_range_highlight(a_start, a_stop, string_value, str_to_internal, str(s), str(e), i)
             if h:
                 highlights.append(h)
         return highlights
@@ -2717,7 +3001,7 @@ def _expression_search_highlights(search: str, string_value: str, eval_in_scope)
         re.I if is_case_insensitive(search) else 0)
 
 
-def parse_regex_for_highlighting(selection_regex: str | None, string_value: str, eval_in_scope=lambda _c: eval(_c)) -> List[Tuple[int, int, str, str, Tuple[int, int | float]]]:
+def parse_regex_for_highlighting(selection_regex: str | None, string_value: str, eval_in_scope=lambda _c: eval(_c)) -> List[Tuple[int, int, str, str, Tuple[int, int | float], int | None, int]]:
     """
     Parse the search and run it against the ORIGINAL string to get highlight ranges.
 
@@ -2725,7 +3009,15 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
     expressions (`expr`), and bare expressions.
 
     Returns:
-        List of (internal_start, internal_end, type, pattern_display, repetition, segment_index) tuples.
+        List of (internal_start, internal_end, type, pattern_display, repetition,
+        segment_index, match_index) tuples.
+
+    *segment_index* is a position in the PATTERN, so the same segment carries
+    the same index in every match; it is None for searches that have no
+    interactive segments at all (a literal string search, a bare index). What
+    tells two occurrences of a segment apart is *match_index*, the 0-based
+    ordinal of the match it belongs to. Every match is interactive -- the user
+    can extend, resize, and re-quantify from whichever one they are looking at.
     """
     parsed = parse_search_term(selection_regex)
     if not parsed:
@@ -2791,10 +3083,6 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
     highlights = []
 
     for match_idx, match in enumerate(matches):
-        # First match gets real segment indices (for interactive widgets);
-        # additional matches get None (highlight-only, no dropdowns/handles)
-        is_primary = (match_idx == 0)
-
         num_groups = match.lastindex or 0
 
         for group_num in range(1, num_groups + 1):
@@ -2807,10 +3095,10 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
             anchors, is_fuzzy, repetition, pattern_display = group_info[group_idx] if group_idx < len(group_info) else ([], False, (1, 1), '')
             seg_type = 'fuzzy' if is_fuzzy else 'literal'
 
-            if is_primary:
-                segment_index = len(highlights)
-            else:
-                segment_index = None
+            # The group's position in the fully-grouped pattern IS the segment
+            # index the resize/dropdown machinery edits, so every match names
+            # its segments the same way. match_idx is what distinguishes them.
+            segment_index = group_idx
 
             # Translate string positions to internal indices
             # Handle edge case: empty match (e.g., anchor-only groups or .* matching nothing)
@@ -2845,9 +3133,8 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                 # Expand based on which anchors are present
                 if 'AT_BEGINNING_STRING' in anchors:
                     internal_start = 0
-                if 'AT_BEGINNING' in anchors:
-                    if str_start == 0:
-                        internal_start = 0
+                if 'AT_BEGINNING' in anchors and (str_start == 0 or string_value[str_start - 1] == '\n'):
+                    internal_start = _caret_marker_internal_idx(string_value, str_start, str_to_internal)
                 if 'AT_END' in anchors:
                     internal_end = max(internal_end, internal_start + 1)
                 if 'AT_END_STRING' in anchors:
@@ -2855,7 +3142,7 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
 
                 if internal_end <= internal_start:
                     internal_end = internal_start + 1
-                highlights.append((internal_start, internal_end, seg_type, pattern_display, repetition, segment_index))
+                highlights.append((internal_start, internal_end, seg_type, pattern_display, repetition, segment_index, match_idx))
             else:
                 # Normal match with content
                 internal_start = str_to_internal[str_start] if str_start < len(str_to_internal) else 1
@@ -2872,65 +3159,137 @@ def parse_regex_for_highlighting(selection_regex: str | None, string_value: str,
                 # Extend for leading anchors
                 if 'AT_BEGINNING_STRING' in anchors:
                     internal_start = 0
-                if 'AT_BEGINNING' in anchors and str_start == 0:
-                    internal_start = 0
+                if 'AT_BEGINNING' in anchors and (str_start == 0 or string_value[str_start - 1] == '\n'):
+                    internal_start = _caret_marker_internal_idx(string_value, str_start, str_to_internal)
 
                 # Extend for trailing anchors
                 if 'AT_END_STRING' in anchors:
                     internal_end = compute_internal_length(string_value)
-                if 'AT_END' in anchors:
-                    # $ anchor - extend to include the $ marker
-                    # For end of string, $ is at augmented_len - 1
-                    # For end of line, $ is right before the \n
-                    pass  # The current end should already be correct
+                if 'AT_END' in anchors and (str_end == len(string_value) or string_value[str_end] == '\n'):
+                    internal_end = max(internal_end, _dollar_marker_internal_idx(string_value, str_end, str_to_internal) + 1)
 
-                highlights.append((internal_start, internal_end, seg_type, pattern_display, repetition, segment_index))
+                highlights.append((internal_start, internal_end, seg_type, pattern_display, repetition, segment_index, match_idx))
 
     return highlights
 
 
+def group_highlights_by_match(highlights: list) -> list:
+    """Split highlights into one list of segments per match, in string order.
+
+    Highlights with no segment index (a literal string search, a bare index)
+    carry no editable segments, so they are dropped: nothing here can be
+    extended or resized.
+    """
+    by_match: dict = {}
+    for h in highlights:
+        if h[5] is None:
+            continue
+        by_match.setdefault(h[6], []).append(h)
+    return [by_match[k] for k in sorted(by_match)]
+
+
+def pattern_segment_count(highlights: list) -> int:
+    """How many segments the pattern has, read off any match's highlights.
+
+    Segment indices are pattern positions, so the highest one seen plus one is
+    the count however many times the pattern matched.
+    """
+    indices = [h[5] for h in highlights if h[5] is not None]
+    return max(indices) + 1 if indices else 0
+
+
+def match_spans(selection_regex: str | None, string_value: str) -> list:
+    """The (first_start, last_end) internal span of each match, in order."""
+    matches = group_highlights_by_match(
+        parse_regex_for_highlighting(selection_regex, string_value))
+    return [(min(h[0] for h in segs), max(h[1] for h in segs)) for segs in matches]
+
+
 def get_last_segment_end_internal_idx(selection_regex: str | None, string_value: str) -> int | None:
     """
-    Get the internal index where the last segment ends.
+    Get the internal index where the FIRST match's last segment ends.
 
-    Used to determine if a new selection is extending from the previous one.
-    Only considers primary match segments (segment_index is not None).
+    Extension works from any match (see find_extension_at_index); this stays
+    around as the plain way to name where the first one stops.
     """
-    highlights = parse_regex_for_highlighting(selection_regex, string_value)
-    primary = [h for h in highlights if h[5] is not None]
-    if not primary:
-        return None
-    last_start, last_end, _, _, _, _ = primary[-1]
-    return last_end
+    spans = match_spans(selection_regex, string_value)
+    return spans[0][1] if spans else None
 
 
 def get_first_segment_start_internal_idx(selection_regex: str | None, string_value: str) -> int | None:
     """
-    Get the internal index where the first segment starts.
-
-    Used to determine if a new selection is extending from the left side.
-    Only considers primary match segments (segment_index is not None).
+    Get the internal index where the FIRST match's first segment starts.
     """
-    highlights = parse_regex_for_highlighting(selection_regex, string_value)
-    primary = [h for h in highlights if h[5] is not None]
-    if not primary:
-        return None
-    first_start, first_end, _, _, _, _ = primary[0]
-    return first_start
+    spans = match_spans(selection_regex, string_value)
+    return spans[0][0] if spans else None
 
 
 def find_fuzzy_segment_at_index(selection_regex: str | None, string_value: str, idx: int) -> dict | None:
     """
-    Find a fuzzy segment that contains the given internal index.
+    Find a fuzzy segment that contains the given internal index, in ANY match.
 
-    Returns dict with 'start', 'end', 'segment_index' if found, None otherwise.
-    Used to detect clicks inside realized fuzzy regions.
-    Only considers primary match segments (segment_index is not None).
+    Returns dict with 'start', 'end', 'segment_index', 'match_index' if found,
+    None otherwise. Used to detect clicks inside realized fuzzy regions.
     """
     highlights = parse_regex_for_highlighting(selection_regex, string_value)
-    for i, (start, end, seg_type, _, _, seg_idx) in enumerate(highlights):
+    for start, end, seg_type, _, _, seg_idx, match_idx in highlights:
         if seg_idx is not None and seg_type == 'fuzzy' and start <= idx < end:
-            return {'start': start, 'end': end, 'segment_index': seg_idx}
+            return {'start': start, 'end': end, 'segment_index': seg_idx,
+                    'match_index': match_idx}
+    return None
+
+
+def find_extension_at_index(selection_regex: str | None, string_value: str,
+                            idx: int) -> dict | None:
+    """What a click at *idx* extends, considering every match -- not just the first.
+
+    Working in a long string means working next to whichever occurrence is on
+    screen, so a click beside any of them continues the pattern rather than
+    throwing it away. Returns one of:
+
+        {'direction': 'right', 'match_index': n}
+        {'direction': 'left',  'match_index': n, 'first_start': i}
+        {'direction': None,    'match_index': n, 'segment_index': s}   (fuzzy split)
+
+    or None when the click abuts nothing and the selection should start over.
+
+    Right-extension wins over left, matching the old single-match order; among
+    equally valid matches the nearest one to the click is taken.
+    """
+    if not selection_regex or not isinstance(idx, int):
+        return None
+
+    spans = match_spans(selection_regex, string_value)
+    if not spans:
+        return None
+
+    # Right: the closest match ending at or before the click.
+    right = [(last_end, n) for n, (_first, last_end) in enumerate(spans)
+             if is_adjacent_right(idx, last_end, string_value)]
+    if right:
+        _end, n = max(right)
+        return {'direction': 'right', 'match_index': n}
+
+    # Left: the closest match starting after the click.
+    left = [(first_start, n) for n, (first_start, _end) in enumerate(spans)
+            if is_adjacent_left(idx, first_start, string_value)]
+    if left:
+        first_start, n = min(left)
+        # The click may have reached across the visible ^ / $ markers to get
+        # here. They are positions, not characters, so the new segment starts
+        # after them -- otherwise it would spell out an anchor the match it is
+        # joining already asserts.
+        while first_start - 1 > idx and all(
+                c in _SENTINEL_CHARS for c in extract_by_internal_indices(
+                    string_value, first_start - 1, first_start)):
+            first_start -= 1
+        return {'direction': 'left', 'match_index': n, 'first_start': first_start}
+
+    fuzzy = find_fuzzy_segment_at_index(selection_regex, string_value, idx)
+    if fuzzy is not None:
+        return {'direction': None, 'match_index': fuzzy['match_index'],
+                'segment_index': fuzzy['segment_index']}
+
     return None
 
 
@@ -2956,6 +3315,13 @@ def is_adjacent_right(idx: int, last_end: int, string_value: str) -> bool:
         return False
     if idx == last_end:
         return True
+    # The longest run of consecutive sentinels is 2 (the ^$ of an empty
+    # line -- \n itself is a real char that breaks any longer run), so a
+    # wider gap can't be all-sentinel. Deciding that before extracting
+    # matters: extraction walks the whole string, and a click checks
+    # adjacency against every match of a possibly-dense pattern.
+    if idx - last_end > 2:
+        return False
     # Don't consider out-of-bounds indices as adjacent
     if idx >= compute_internal_length(string_value):
         return False
@@ -2980,6 +3346,11 @@ def is_adjacent_left(idx: int, first_start: int, string_value: str) -> bool:
         return False
     if idx == first_start - 1:
         return True
+    # Same bound as is_adjacent_right: a gap wider than 2 can't be
+    # all-sentinel, and answering that without extracting keeps a click
+    # cheap across thousands of matches.
+    if first_start - idx - 1 > 2:
+        return False
     # Don't consider out-of-bounds indices as adjacent
     if idx < 0:
         return False
@@ -3064,6 +3435,7 @@ def _compute_handle_drag_regex(model: dict, string_value: str) -> str | None:
     """
     handle_drag = model['handleDrag']
     segment_index = handle_drag['segmentIndex']
+    match_index = handle_drag.get('matchIndex', 0)
     side = handle_drag['side']
     cursor_idx = handle_drag['cursorIdx']
     selection_regex = model.get('search')
@@ -3072,12 +3444,15 @@ def _compute_handle_drag_regex(model: dict, string_value: str) -> str | None:
         return None
 
     # Get current highlights to find segment boundaries. Use a callable for
-    # eval_in_scope so slice/index expressions resolve correctly.
+    # eval_in_scope so slice/index expressions resolve correctly. The handle
+    # belongs to one occurrence, and it is that occurrence's span the drag
+    # resizes -- the pattern segment it rewrites is the same either way.
     highlights = parse_regex_for_highlighting(selection_regex, string_value, eval_in_scope=lambda c: eval(c))
-    if segment_index >= len(highlights):
+    grabbed = [h for h in highlights if h[5] == segment_index and h[6] == match_index]
+    if not grabbed:
         return selection_regex
 
-    current_start, current_end, seg_type, _, _, _ = highlights[segment_index]
+    current_start, current_end, seg_type, _, _, _, _ = grabbed[0]
 
     if side == 'right':
         new_start = current_start
@@ -3104,26 +3479,44 @@ def _compute_handle_drag_regex(model: dict, string_value: str) -> str | None:
         # Boundary context depends on whether each edge abuts a neighbor
         # segment: a neighbor anchors that side (None -> *), otherwise use the
         # adjacent string character (or '' at the string boundary).
-        primary_count = sum(1 for h in highlights if h[5] is not None)
+        seg_count = pattern_segment_count(highlights)
         has_left_neighbor = segment_index > 0
-        has_right_neighbor = segment_index < primary_count - 1
+        has_right_neighbor = segment_index < seg_count - 1
 
         if has_left_neighbor:
             prev_char: str | None = None
         else:
-            prev_text = extract_by_internal_indices(string_value, new_start - 1, new_start) if new_start > 0 else ''
-            prev_char = ''.join(c for c in prev_text if c not in _SENTINEL_CHARS)
+            prev_char = _real_char_before_internal_idx(string_value, new_start)
 
         if has_right_neighbor:
             next_char: str | None = None
         else:
-            next_text = extract_by_internal_indices(string_value, new_end, new_end + 1)
-            next_char = ''.join(c for c in next_text if c not in _SENTINEL_CHARS)
+            next_char = _real_char_after_internal_idx(string_value, new_end)
 
         return resize_fuzzy_segment(selection_regex, segment_index, string_value,
                                     new_start, new_end, prev_char, next_char)
 
     return resize_literal_segment(selection_regex, segment_index, string_value, new_start, new_end)
+
+
+def _active_match_index(model: dict, highlight_by_index: dict) -> int | None:
+    """Which occurrence the user is currently working in, if any.
+
+    Every match is interactive, so a drag has to say which one it is happening
+    in -- otherwise the labels it turns on would be turned on in all of them.
+    The answer is wherever the pointer is: the handle being dragged, or the
+    character under the cursor.
+    """
+    hd = model.get('handleDrag')
+    if hd is not None:
+        return hd.get('matchIndex', 0)
+    for key in ('cursorIdx', 'anchorIdx'):
+        idx = model.get(key)
+        if isinstance(idx, int):
+            h = highlight_by_index.get(idx)
+            if h is not None:
+                return h[6]
+    return None
 
 
 def build_preview_regex(model, string_value: str) -> str | None:
@@ -3196,20 +3589,16 @@ def build_preview_regex(model, string_value: str) -> str | None:
 
         if is_fresh:
             # New selection: check both edges
-            prev_text = extract_by_internal_indices(string_value, start - 1, start) if start > 0 else ''
-            prev_char = ''.join(c for c in prev_text if c not in _SENTINEL_CHARS)
-            next_text = extract_by_internal_indices(string_value, end, end + 1)
-            next_char = ''.join(c for c in next_text if c not in _SENTINEL_CHARS)
+            prev_char: str | None = _real_char_before_internal_idx(string_value, start)
+            next_char: str | None = _real_char_after_internal_idx(string_value, end)
         elif extend_direction == 'left':
             # Prepending to existing regex: literal on the right
-            prev_text = extract_by_internal_indices(string_value, start - 1, start) if start > 0 else ''
-            prev_char = ''.join(c for c in prev_text if c not in _SENTINEL_CHARS)
+            prev_char = _real_char_before_internal_idx(string_value, start)
             next_char = None
         elif extend_direction == 'right':
             # Appending to existing regex: literal on the left
             prev_char = None
-            next_text = extract_by_internal_indices(string_value, end, end + 1)
-            next_char = ''.join(c for c in next_text if c not in _SENTINEL_CHARS)
+            next_char = _real_char_after_internal_idx(string_value, end)
         elif insert_after_segment is not None:
             # Inserting between existing segments: literals on both sides
             prev_char = None
@@ -3217,8 +3606,7 @@ def build_preview_regex(model, string_value: str) -> str | None:
         else:
             # Fallback: treat as adjacent
             prev_char = None
-            next_text = extract_by_internal_indices(string_value, end, end + 1)
-            next_char = ''.join(c for c in next_text if c not in _SENTINEL_CHARS)
+            next_char = _real_char_after_internal_idx(string_value, end)
 
         fuzzy_pattern = synthesize_fuzzy_pattern(actual_text, prev_char, next_char)
         if extend_direction == 'left':
@@ -3863,7 +4251,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         display = "'" + raw.replace("\n", "\n ") + "'"
         size_styling = f'style="max-width:{max_width}px"' if max_width is not None else ''
 
-        # Plain text, no per-character addressing. snc-text-start would let the
+        # Plain text, no per-character addressing. snc-idx-start would let the
         # front-end turn a caret offset into an internal index, but the preview
         # cannot honour it: a newline prints one character while spending three
         # internal indices ($, the \n display, ^), so everything past one would
@@ -3921,16 +4309,28 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
     highlight_by_index = {}
     for highlight in highlights:
-        start, end, _, _, _, _ = highlight
+        start, end, _, _, _, _, _ = highlight
         for i in range(start, end):
             highlight_by_index[i] = highlight
 
-    # Count of primary (interactive) segments, used by char_span_els to decide
+    # Number of segments in the pattern, used by char_span_els to decide
     # whether a fuzzy segment has an open end (and thus a resize handle) on a
-    # given side. Primary segments have contiguous left-to-right indices, so a
-    # segment has a left/right neighbor iff its index isn't the first/last.
+    # given side: segment indices are pattern positions running left to right,
+    # so a segment has a left/right neighbor iff it isn't the first/last.
     if model is not None:
-        model['_primarySegmentCount'] = sum(1 for h in highlights if h[5] is not None)
+        model['_patternSegmentCount'] = pattern_segment_count(highlights)
+        # Which occurrence the user is working in, so the pattern / repetition
+        # labels of a drag land on that one rather than on all of them at once.
+        model['_activeMatchIdx'] = _active_match_index(model, highlight_by_index)
+        # What each segment stops at, keyed the way the dropdown ids are, so
+        # the pattern dropdown can offer [^N]. Reading the character through
+        # _real_char_after_internal_idx rather than the one position past the
+        # end matters: a segment ending at a line break stops on the `$`
+        # sentinel, which would otherwise read as nothing to stop at.
+        model['_segmentNextChars'] = {
+            f'{h[6]}-{h[5]}': _real_char_after_internal_idx(value, h[1])
+            for h in highlights if h[5] is not None
+        }
 
     # Inline chips (start/end index labels in segment mode) are rendered as
     # extra HTML inserted before / after the corresponding char's wrapper.
@@ -3939,8 +4339,19 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     extra_chips_after_by_index = (segment_overlays.get('chips_after_by_index', {})
                                    if segment_overlays else {})
 
+    # A search the user typed, or the pick tool they just picked up, points at
+    # the first match without them having found it -- so scroll it into view.
+    # A click doesn't: they are already looking at the place they clicked.
     scroll_to_match = model.get('_scroll_to_match', False) if model else False
-    first_match_index = highlights[0][0] if (scroll_to_match and highlights) else None
+    if not scroll_to_match or not highlights:
+        first_match_index = None
+    elif segment_overlays:
+        # Pick mode's first highlight is the prefix region, which starts at the
+        # top of the string; the match itself is what's worth scrolling to.
+        first_match_index = min((h[0] for h in highlights
+                                 if h[2] == 'segment-group'), default=highlights[0][0])
+    else:
+        first_match_index = highlights[0][0]
 
     # Build character sequence with highlighting
     char_els = []
@@ -3948,16 +4359,20 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # Visible start anchor is selectable at internal index 0
     char_els.append(char_span('^', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index), is_regex_anchor=True))
 
-    hover_idx = model.get('hoverIdx') if model and not model.get('dragging') else None
     group_chars = []
     group_start = None
+    group_hl = None  # None = plain text group; else the segment's highlight tuple
 
     def flush_group():
-        nonlocal group_chars, group_start
+        nonlocal group_chars, group_start, group_hl
         if group_chars and group_start is not None:
-            char_els.append(text_group_span(group_chars, group_start))
-            group_chars = []
-            group_start = None
+            if group_hl is None:
+                char_els.append(text_group_span(group_chars, group_start))
+            else:
+                char_els.append(highlight_group_span(group_chars, group_start, group_hl, model))
+        group_chars = []
+        group_start = None
+        group_hl = None
 
     index = 1
     for char in value:
@@ -3969,15 +4384,20 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             flush_group()
             for chip_html in chips_here:
                 char_els.append(chip_html)
-        is_plain = (
-            char != '\n' and char != '\t'
-            and highlight_by_index.get(index) is None
-            and index != hover_idx
+        h = highlight_by_index.get(index)
+        # A char rides in a group when it has nothing of its own to carry:
+        # plain text, or the interior of any segment (its boundary chars keep
+        # individual spans for the rounding, labels, and handles).
+        groupable = char != '\n' and char != '\t' and (
+            h is None or (h[0] != index and h[1] - 1 != index)
         )
         index_before_char = index
-        if is_plain:
+        if groupable:
+            if group_chars and h is not group_hl:
+                flush_group()
             if group_start is None:
                 group_start = index
+                group_hl = h
             group_chars.append(char)
             index += 1
         else:
@@ -4161,12 +4581,22 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
 
     is_expandable_class = ' is-expandable' if expand_toggle_html else ''
 
+    # While a drag is in progress the container asks to hear that the mouse is
+    # up: the release can land outside the widget (or on chrome with no mouse-up
+    # handler), and this is how the stuck drag gets finalized. The front-end
+    # fires it at most once per rendered HTML and removes the attribute; the
+    # same attribute is its cue to expand the snc-idx shorthand's move (and
+    # synthesize moves over grouped text), so drags track everywhere while
+    # idle hovers stay free.
+    in_drag = model is not None and (model.get('dragging') or model.get('handleDrag') is not None)
+    notify_attr = f' snc-notify-mouse-is-up="{html.escape(repr(NotifyMouseIsUp()))}"' if in_drag else ''
+
     # Add tabindex to make div focusable for keyboard events, and snc-key-down handler
     # doing it like this to try to make less string garbage. Small mode returned
     # early above (self-wrapped for drag), so this is always the full/interactive
     # path - it keeps its mouse events and is not a drag handle.
     return [
-        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}" class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}{is_expandable_class}"><div class="snc-tool-and-visualizer">{tool_toolbar_html}<div class="string-visualizer snc-base-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}"{notify_attr} class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}{is_expandable_class}"><div class="snc-tool-and-visualizer">{tool_toolbar_html}<div class="string-visualizer snc-base-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
         *char_els,
         f"""</div></div>{expand_toggle_html}</div>{search_box_html}</div>""",
     ]
@@ -4546,8 +4976,9 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "dragging": False,
         "extendDirection": None,  # "left", "right", or None - which side we're extending from
         "insertAfterSegment": None,  # Segment index to insert after (for clicking inside fuzzy)
-        "openDropdown": None,     # {"id": "fuzzy-pattern-0", "segmentIndex": 0} when dropdown is open
-        "handleDrag": None,       # {"segmentIndex": int, "side": "left"|"right", "cursorIdx": int} when dragging a handle
+        "openDropdown": None,     # {"id": "fuzzy-pattern-0-0", "segmentIndex": 0, "matchIndex": 0} when dropdown is open
+        "handleDrag": None,       # {"segmentIndex": int, "matchIndex": int, "side": "left"|"right", "cursorIdx": int} when dragging a handle
+        "_scroll_to_match": False,  # Set for one render when the first match should be scrolled to
         "undoHistory": [],        # Stack of previous search states
         "redoHistory": [],        # Stack for redo
         "handledKeys": ["Escape", "Enter", "cmd Backspace", "cmd r", "cmd z", "cmd shift z"],  # Keys to intercept from VS Code
@@ -4568,13 +4999,6 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
                                        # ('start', 'end', 'prefix', 'group_0', 'group_N', 'suffix')
                                        # in canonical order, used to drive the Replace box.
     }
-
-
-def is_top_half(event_json):
-    """Determine if mouse click was in top half of the target element."""
-    offset_y = event_json.get('offsetY', 0)
-    height = event_json.get('elementHeight', 1)
-    return offset_y <= height / 2
 
 
 def _resolve_selection_type(model, event_json):
@@ -5435,8 +5859,9 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
     """Compute the segment-mode rendering plan for the FIRST match.
 
     Returns a dict with:
-      - 'highlights': list of (start, end, seg_type, pat_str, rep, seg_idx)
-                      tuples replacing the normal highlights. seg_type is one
+      - 'highlights': list of (start, end, seg_type, pat_str, rep, seg_idx,
+                      match_idx) tuples replacing the normal highlights.
+                      match_idx is always 0 here. seg_type is one
                       of 'segment-region' (prefix/suffix) or 'segment-group'
                       (capture group / whole match). pat_str carries the
                       segment_id so char_span_els can attach the right
@@ -5469,7 +5894,10 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
         # mode (see fix Q1 in plan).
         primary = highlights[:1] if highlights else []
     else:
-        primary = [h for h in highlights if h[5] is not None]
+        # Pick mode is the one tool that still singles out the first match:
+        # the chips it offers ($.start(), the prefix, the groups) are readings
+        # of one match, so it shows one.
+        primary = [h for h in highlights if h[5] is not None and h[6] == 0]
     if not primary:
         return None
 
@@ -5519,24 +5947,24 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
         new_highlights.append((
             string_start_internal, match_start_internal,
             'segment-region', f"{prefix_seg_id}|{_chip_expr_for(prefix_seg_id)}|pre",
-            (1, 1), -1))
+            (1, 1), -1, 0))
 
     # Match: either each capture group (per_group_mode) or the whole match.
     if per_group_mode:
         for h in primary:
-            start, end, seg_type, _pat, _rep, seg_idx = h
+            start, end, seg_type, _pat, _rep, seg_idx, _match_idx = h
             seg_id = f'group_{seg_idx + 1}'  # segment_index is 0-based, group_N is 1-based
             new_highlights.append((
                 start, end, 'segment-group',
                 f"{seg_id}|{_chip_expr_for(seg_id)}|$[{seg_idx + 1}]",
-                (1, 1), seg_idx))
+                (1, 1), seg_idx, 0))
     else:
         seg_id = 'group_0'
         new_highlights.append((
             match_start_internal, match_end_internal,
             'segment-group',
             f"{seg_id}|{_chip_expr_for(seg_id)}|$[0]",
-            (1, 1), 0))
+            (1, 1), 0, 0))
 
     # Suffix region (match end to string end). Empty if match ends at string end.
     if suffix_end_internal > match_end_internal:
@@ -5544,7 +5972,7 @@ def _compute_segment_overlays(value: str, model: dict, eval_in_scope) -> dict | 
         new_highlights.append((
             match_end_internal, suffix_end_internal,
             'segment-region', f"{seg_id}|{_chip_expr_for(seg_id)}|post",
-            (1, 1), -1))
+            (1, 1), -1, 0))
 
     # start/end index chips: rendered as standalone inline chips at the match
     # boundaries. Chip LABELS show the numeric position of the first match
@@ -5737,10 +6165,11 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     model['_scroll_to_match'] = False
 
     match msg:
-        case HandleMouseDown(segment_index=seg_idx, side=side):
+        case HandleMouseDown(segment_index=seg_idx, side=side, match_index=match_idx):
             # Start a handle drag on a literal segment edge
             model['handleDrag'] = {
                 'segmentIndex': seg_idx,
+                'matchIndex': match_idx,
                 'side': side,
                 'cursorIdx': None,  # Will be set on first MouseMove
             }
@@ -5789,45 +6218,35 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
 
             selection_regex = model.get('search')
 
-            # Check extension points if we have an existing selection
-            last_end: int | None = None
-            first_start: int | None = None
-            fuzzy_info: dict | None = None
-            if selection_regex and isinstance(idx, int):
-                last_end = get_last_segment_end_internal_idx(selection_regex, value)
-                first_start = get_first_segment_start_internal_idx(selection_regex, value)
-                fuzzy_info = find_fuzzy_segment_at_index(selection_regex, value, idx)
+            # Where does this click continue the pattern? Any match will do --
+            # the user works next to whichever occurrence they can see.
+            extension = find_extension_at_index(selection_regex, value, idx)
 
-            # Check if extending from the right (end of last segment)
-            # Uses broader adjacency: allows skipping over visible anchor chars ($, ^)
-            if last_end is not None and isinstance(idx, int) and is_adjacent_right(idx, last_end, value):
+            if extension is not None and extension['direction'] == 'right':
                 # Keep existing regex, start new segment from where user clicked
-                # (not from last_end, to avoid including skipped anchors in the segment)
+                # (not from the match's end, to avoid including skipped anchors)
                 model['anchorIdx'] = idx
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = 'right'
                 model['insertAfterSegment'] = None  # Not inserting at specific position
-            # Check if extending from the left (near the start of first segment)
-            # Uses broader adjacency: allows skipping over anchor chars
-            elif first_start is not None and isinstance(idx, int) and is_adjacent_left(idx, first_start, value):
-                # Keep existing regex, start new segment extending left from first
-                # Anchor at first_start so the selection can span from cursor (first_start-1) to anchor
-                model['anchorIdx'] = first_start
+            elif extension is not None and extension['direction'] == 'left':
+                # Keep existing regex, start new segment extending left from the
+                # match's start, so the selection spans from cursor to anchor.
+                model['anchorIdx'] = extension['first_start']
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = 'left'
                 model['insertAfterSegment'] = None  # Not inserting at specific position
-            # Check if clicking inside a fuzzy segment (to split it)
-            elif fuzzy_info is not None and isinstance(idx, int):
-                # Allow starting a new segment inside the fuzzy region
-                # This will constrain/split the fuzzy match
-                # Track which segment we clicked inside so we can insert after it
+            elif extension is not None:
+                # Clicked inside a realized fuzzy region: start a new segment
+                # there, which constrains/splits the fuzzy match. Track which
+                # segment we clicked inside so we can insert after it.
                 model['anchorIdx'] = idx
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = None  # Not a simple left/right extend
-                model['insertAfterSegment'] = fuzzy_info['segment_index']  # Insert after this segment
+                model['insertAfterSegment'] = extension['segment_index']
             else:
                 # Fresh start: reset selection, preserving linked-editing state,
                 # search flags, active tool, and expand/collapse chrome.
@@ -5875,6 +6294,14 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model = finalize_handle_drag(model, value)
             elif model.get('dragging'):
                 model['cursorIdx'] = idx
+                model = finalize_segment(model, value)
+
+        case NotifyMouseIsUp():
+            # No index: the release happened where nothing was listening, so
+            # finalize from wherever the drag last was.
+            if model.get('handleDrag') is not None:
+                model = finalize_handle_drag(model, value)
+            elif model.get('dragging'):
                 model = finalize_segment(model, value)
 
         case KeyDown():
@@ -5981,12 +6408,15 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             else:
                 if open_dropdown:
                     _commit_open_dropdown_edit(model)
-                # Open this dropdown, extract segment index from ID
-                # ID format: "fuzzy-pattern-{segment_index}", "repetition-{segment_index}"
-                # or "slice-label-{start|end|center}".
+                # Open this dropdown, extract match + segment index from ID.
+                # ID format: "fuzzy-pattern-{match_index}-{segment_index}",
+                # "repetition-{match_index}-{segment_index}", or
+                # "slice-label-{start|end|center}".
                 parts = did.split('-')
                 segment_index = int(parts[-1]) if parts[-1].isdigit() else 0
-                dropdown_state = {'id': did, 'segmentIndex': segment_index}
+                match_index = int(parts[-2]) if len(parts) >= 2 and parts[-2].isdigit() else 0
+                dropdown_state = {'id': did, 'segmentIndex': segment_index,
+                                  'matchIndex': match_index}
 
                 # For repetition dropdowns, seed text field values from the
                 # segment's current quantifier so the dropdown opens prefilled
@@ -5997,8 +6427,10 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     exact_n, range_min, range_max = '', '', ''
                     try:
                         highlights = parse_regex_for_highlighting(model.get('search'), value)
-                        if 0 <= segment_index < len(highlights):
-                            _, _, _, _, (mn, mx), _ = highlights[segment_index]
+                        seg = next((h for h in highlights
+                                    if h[5] == segment_index and h[6] == match_index), None)
+                        if seg is not None:
+                            mn, mx = seg[4]
                             exact_n, range_min, range_max = _quantifier_to_prefill(mn, mx)
                     except Exception:
                         pass
@@ -6179,6 +6611,10 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     # Auto-open the Replace box so the user sees the expression
                     # they're building as they click chips.
                     model['replace_visible'] = True
+                    # Pick works on the first match, which in a long string may
+                    # be nowhere near what the user is looking at. Bring it to
+                    # them -- they didn't point at it themselves.
+                    model['_scroll_to_match'] = True
                     # Pick composes a map expression via segment chips; Map
                     # Matches (find_or_map with replace open) is the only
                     # action that consumes that expression. Mirror Enter.

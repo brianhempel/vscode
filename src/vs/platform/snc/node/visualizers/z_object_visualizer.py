@@ -838,9 +838,18 @@ def visualize(obj, model, get_visualizer, eval_in_scope, max_width=None, max_hei
                 f'</div>'
             )
 
+            # Only while a field is actually being dragged. Every mouse move
+            # over a row is a full re-run of the user's program -- one per 16ms
+            # of movement -- and DragOver does nothing at all unless a drag is
+            # in progress, so outside one they are asked for, paid for, and
+            # thrown away. mouseup stays: it isn't continuous, and a release
+            # that lands here has to end the drag.
+            track_move = ('' if drag_from is None else
+                          f'snc-mouse-move="{html.escape(drag_over_event)}" ')
+
             field_trs.append(
                 f'<tr class="snc-hover-hidden-parent{drag_cls} obj-tr" '
-                f'snc-mouse-move="{html.escape(drag_over_event)}" '
+                f'{track_move}'
                 f'snc-mouse-up="{html.escape(drag_end_event)}">'
                 f'<td snc-mouse-down="{html.escape(click_event)}" class="obj-td field-name">'
                 f'{drag_hover_html}{html.escape(accessor_code)}<span class="field-args">{html.escape(placeholder_args)}</span></td>'

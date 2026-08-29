@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Promises } from '../../../base/node/pfs.js';
-import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCCommand, SNCStreamMessage, SNCTimingData, ILoopReport, UiEvent } from '../common/snc.js';
+import { IProcessOptions, IProcessResult, ISNCProcessService, IVisualizationItem, SNCStreamMessage, SNCTimingData, ILoopReport, UiEvent } from '../common/snc.js';
 import { Emitter } from '../../../base/common/event.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -690,7 +690,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 					} else {
 						console.warn('[SNC] Visualizer load warning (no active run):', msg.warning);
 					}
-				} else if (msg.type === 'item' || msg.type === 'command' || msg.type === 'loop' || msg.type === 'end' || msg.type === 'output' || msg.type === 'resumed') {
+				} else if (msg.type === 'item' || msg.type === 'loop' || msg.type === 'end' || msg.type === 'output' || msg.type === 'resumed') {
 					const runId = msg.run_id || (msg.item && msg.item.runId);
 					if (runId) {
 						this.handleRunMessage(runId, msg);
@@ -757,12 +757,6 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				runId,
 				type: 'item',
 				item: { ...msg.item, runId } as IVisualizationItem
-			});
-		} else if (msg.type === 'command' && msg.command) {
-			this._onStream.fire({
-				runId,
-				type: 'command',
-				command: msg.command as SNCCommand
 			});
 		} else if (msg.type === 'loop' && msg.loop) {
 			this._onStream.fire({

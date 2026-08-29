@@ -13,12 +13,14 @@ Or use pytest with verbose output:
 No arguments are required; all tests should pass.
 """
 
+import time
 import unittest
 from unittest.mock import patch
 import re
 from string_visualizer import (
     update, init_model, visualize,
     MouseDown, MouseMove, MouseUp, KeyDown,
+    NotifyMouseIsUp,
     HandleMouseDown,
     DropdownToggle, DropdownSelect,
     SearchBoxInput,
@@ -57,7 +59,14 @@ from string_visualizer import (
     is_case_insensitive,
     is_capture_groups_mode,
     ensure_all_groups,
+    make_regex_search,
     append_segment_to_regex,
+    prepend_segment_to_regex,
+    insert_segment_at_position,
+    parse_all_segments,
+    FUZZY_PATTERN_OPTIONS,
+    negated_class_option,
+    fuzzy_pattern_options,
     canonicalize_regex,
     is_regex_search,
     is_slice_search,
@@ -574,6 +583,91 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         self.assertEqual(model['search'], r"r'hello.*\n'")
 
 
+class TestFuzzyDragEndingAtLineBoundary(unittest.TestCase):
+    r"""A fuzzy drag whose edge abuts a ^/$ anchor marker must look through the
+    marker to the real neighboring character. Treating the marker as
+    end-of-string skipped the overshoot check, so [\S\s]* leaked past the
+    dragged range instead of stopping at that neighbor ([^g], [^c]).
+
+    Finding no neighbor still shows up plainly here: it would put an unbounded
+    [\S\s]* back in each of these."""
+
+    def setUp(self):
+        self.value = "abcdef\nghijk"
+        # Internal: ^=0, a=1, b=2, c=3, d=4, e=5, f=6, $=7, \n=8, ^=9, g=10 ... k=14, $=15
+        self.var_and_exp = ('x', 'x')
+
+    def _select_cd(self):
+        model = init_model(self.value)
+        model, _ = update(make_mouse_down_event(3, top_half=True, legacy_index=False),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(4, legacy_index=False),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(4, legacy_index=False),
+                          self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'cd'")
+        return model
+
+    def _fuzzy_drag(self, model, start_idx, end_idx):
+        model, _ = update(make_mouse_down_event(start_idx, top_half=False, legacy_index=False),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(end_idx, legacy_index=False),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+                          self.var_and_exp, model, self.value)
+        return model
+
+    def test_fuzzy_drag_ending_on_newline_stays_counted(self):
+        r"""Dragging e f \n (ending ON the \n) selects 3 chars; 'g' follows, so
+        [\S\s]* would overshoot and the pattern must stop at the 'g'."""
+        model = self._select_cd()
+        model = self._fuzzy_drag(model, 5, 8)
+        self.assertEqual(model['search'], r"r'cd[^g]*'")
+
+    def test_fuzzy_drag_ending_on_next_line_caret_stays_counted(self):
+        r"""Same drag but ending on the next line's ^ marker: still 3 real chars."""
+        model = self._select_cd()
+        model = self._fuzzy_drag(model, 5, 9)
+        self.assertEqual(model['search'], r"r'cd[^g]*'")
+
+    def test_fuzzy_drag_ending_on_dollar_excludes_newline(self):
+        r"""Ending on the $ marker before the \n does not pull in the \n."""
+        model = self._select_cd()
+        model = self._fuzzy_drag(model, 5, 7)
+        self.assertEqual(model['search'], r"r'cd[a-z]*'")
+
+    def test_fresh_fuzzy_drag_starting_at_line_start_stays_counted(self):
+        r"""A fresh fuzzy drag starting just after a ^ marker must see the \n
+        before it as the left neighbor (which [\S\s]+ would swallow)."""
+        value = "a\nb\nc"
+        # Internal: ^=0, a=1, $=2, \n=3, ^=4, b=5, $=6, \n=7, ^=8, c=9, $=10
+        model = init_model(value)
+        model, _ = update(make_mouse_down_event(5, top_half=False, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(9, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(9, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'[\S\s]{3}'")
+
+    def test_fuzzy_handle_resize_ending_on_newline_stays_counted(self):
+        r"""Resizing a fuzzy segment's right handle onto a \n hits the same
+        boundary lookup: 'c' follows across the ^ marker, so stay counted."""
+        value = "a\nb\nc"
+        # Internal: ^=0, a=1, $=2, \n=3, ^=4, b=5, $=6, \n=7, ^=8, c=9, $=10
+        model = init_model(value)
+        model['search'] = r"r'([\S\s]{3})'"
+
+        model, _ = update(make_handle_mouse_down_event(0, 'right'),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(7, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(7, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['search'], r"r'([^c]+)'")
+
+
 # =============================================================================
 # Extend Left (Prepend) Tests
 # =============================================================================
@@ -706,7 +800,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         # Find where the fuzzy segment spans
         highlights = parse_regex_for_highlighting(model['search'], self.value)
         fuzzy_segment = None
-        for start, end, seg_type, _, _, _ in highlights:
+        for start, end, seg_type, _, _, _, _ in highlights:
             if seg_type == 'fuzzy':
                 fuzzy_segment = (start, end)
                 break
@@ -758,7 +852,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         # Find where the fuzzy segment spans
         highlights = parse_regex_for_highlighting(model['search'], self.value)
         fuzzy_segment = None
-        for start, end, seg_type, _, _, _ in highlights:
+        for start, end, seg_type, _, _, _, _ in highlights:
             if seg_type == 'fuzzy':
                 fuzzy_segment = (start, end)
                 break
@@ -899,7 +993,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         # Verify the fuzzy segment exists (in canonical format, \s* only covers whitespace)
         highlights = parse_regex_for_highlighting(model['search'], value)
         fuzzy_segment = None
-        for start, end, seg_type, _, _, _ in highlights:
+        for start, end, seg_type, _, _, _, _ in highlights:
             if seg_type == 'fuzzy':
                 fuzzy_segment = (start, end, seg_type)
                 break
@@ -1354,7 +1448,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
 
         highlights = parse_regex_for_highlighting(r"r'(\n+)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
 
         # Should span both newlines
         # First \n is at string index 1 -> internal 3
@@ -1371,7 +1465,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         string_value = "a\n\nb"
         highlights = parse_regex_for_highlighting(r"r'(\n\n)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'literal')
 
     def test_newline_quantifier_matches(self):
@@ -1381,7 +1475,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         string_value = "a\n\n\nb"  # Three newlines
         highlights = parse_regex_for_highlighting(r"r'(\n{2,3})'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'literal')
 
     def test_dot_plus_correct_span(self):
@@ -1393,7 +1487,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal indices: ^=0, h=1, e=2, l=3, l=4, o=5, $=6
         highlights = parse_regex_for_highlighting(r"r'(.+)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(start, 1)  # 'h' at internal index 1
         self.assertEqual(end, 6)    # After 'o' at internal index 5, so end is 6
 
@@ -1405,7 +1499,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal indices: ^=0, x=1, a=2, a=3, y=4, $=5
         highlights = parse_regex_for_highlighting(r"r'((.)\2)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         # "aa" is at string positions 1-3, internal indices 2-4
         self.assertEqual(start, 2)  # First 'a'
         self.assertEqual(end, 4)    # After second 'a'
@@ -1418,7 +1512,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal indices: ^=0, a=1, $=2, \n=3, ^=4, x=5, b=6, $=7
         highlights = parse_regex_for_highlighting(r"r'((?<=\n)x)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         # 'x' is at string index 2, internal index 5
         self.assertEqual(start, 5)
         self.assertEqual(end, 6)
@@ -1431,7 +1525,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal indices: ^=0, a=1, x=2, $=3, \n=4, ^=5, b=6, $=7
         highlights = parse_regex_for_highlighting(r"r'(x(?=\n))'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         # 'x' is at string index 1, internal index 2
         self.assertEqual(start, 2)
         self.assertEqual(end, 3)
@@ -1444,7 +1538,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal indices: ^=0, h=1, e=2, l=3, l=4, o=5, ' '=6, w=7, o=8, r=9, l=10, d=11, $=12
         highlights = parse_regex_for_highlighting(r"r'(\bworld\b)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         # "world" is at string positions 6-11, internal indices 7-12
         self.assertEqual(start, 7)   # 'w'
         self.assertEqual(end, 12)    # After 'd'
@@ -1457,7 +1551,7 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Internal: ^=0, h=1, e=2, l=3, l=4, o=5, $=6, \n=7, ^=8, w=9, o=10, r=11, l=12, d=13, $=14
         highlights = parse_regex_for_highlighting(r"r'(\nworld)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         # \n is at string index 5 -> internal 7
         # "world" ends at string index 10 -> internal 13
         self.assertEqual(start, 7)   # \n
@@ -1482,9 +1576,99 @@ class TestTwoPhaseMatching(unittest.TestCase):
         # Use single backslash for the \A anchor in the regex pattern
         highlights = parse_regex_for_highlighting(r"r'(\Ahello)'", string_value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         # Should start at internal index 0 (^ position)
         self.assertEqual(start, 0)
+
+    def test_caret_at_string_start_includes_marker(self):
+        """^ matching at the very start highlights the visible ^ marker."""
+        string_value = "abcdef\nghijk"
+        # Internal: ^=0, a=1 ... f=6, $=7, \n=8, ^=9, g=10 ... k=14, $=15
+        highlights = parse_regex_for_highlighting(r"r'(^a)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 0)
+        self.assertEqual(end, 2)
+
+    def test_caret_at_line_start_includes_marker(self):
+        """^ matching after a newline highlights that line's ^ marker too."""
+        string_value = "abcdef\nghijk"
+        # Internal: ^=0, a=1 ... f=6, $=7, \n=8, ^=9, g=10 ... k=14, $=15
+        highlights = parse_regex_for_highlighting(r"r'(^g)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 9)   # the line-2 ^ marker
+        self.assertEqual(end, 11)    # through 'g'
+
+    def test_lone_caret_group_at_line_start_highlights_marker(self):
+        """A zero-width (^) group at a line start highlights the ^ marker, not
+        the character after it."""
+        string_value = "abcdef\nghijk"
+        highlights = parse_regex_for_highlighting(r"r'(^)(g)'", string_value)
+        self.assertEqual(len(highlights), 2)
+        caret_start, caret_end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(caret_start, 9)
+        self.assertEqual(caret_end, 10)
+        g_start, g_end, _, _, _, _, _ = highlights[1]
+        self.assertEqual((g_start, g_end), (10, 11))
+
+    def test_dollar_at_line_end_includes_marker(self):
+        """A literal drag can produce r'def$'; the line's $ marker highlights."""
+        string_value = "abcdef\nghijk"
+        # Internal: ^=0, a=1 ... f=6, $=7, \n=8, ^=9, g=10 ... k=14, $=15
+        highlights = parse_regex_for_highlighting(r"r'(def$)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 4)
+        self.assertEqual(end, 8)     # through the $ marker at 7
+
+    def test_dollar_at_string_end_includes_marker(self):
+        """$ matching at the very end highlights the trailing $ marker."""
+        string_value = "abcdef\nghijk"
+        highlights = parse_regex_for_highlighting(r"r'(ijk$)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 12)
+        self.assertEqual(end, 16)    # through the trailing $ marker at 15
+
+    def test_lone_dollar_group_at_line_end_highlights_marker(self):
+        """A zero-width ($) group highlights the $ marker itself."""
+        string_value = "abcdef\nghijk"
+        highlights = parse_regex_for_highlighting(r"r'(f)($)'", string_value)
+        self.assertEqual(len(highlights), 2)
+        self.assertEqual((highlights[0][0], highlights[0][1]), (6, 7))
+        self.assertEqual((highlights[1][0], highlights[1][1]), (7, 8))
+
+    def test_caret_and_dollar_spanning_whole_line(self):
+        """^...$ around a full line highlights both anchor markers."""
+        string_value = "abcdef\nghijk"
+        highlights = parse_regex_for_highlighting(r"r'(^ghijk$)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 9)   # line-2 ^ marker
+        self.assertEqual(end, 16)    # through the trailing $ marker
+
+    def test_dollar_on_empty_line_includes_marker(self):
+        r"""\n$ ending at an empty line's $ includes that line's $ marker."""
+        string_value = "a\n\nb"
+        # Internal: ^=0, a=1, $=2, \n=3, ^=4, $=5, \n=6, ^=7, b=8, $=9
+        # \n$ matches the first \n (str 1..2), whose $ lands on the empty line.
+        highlights = parse_regex_for_highlighting(r"r'(\n$)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 3)   # the \n
+        self.assertEqual(end, 6)     # through the empty line's $ marker at 5
+
+    def test_caret_on_empty_line_includes_marker(self):
+        """^ matching an empty line's start highlights that line's ^ marker."""
+        string_value = "a\n\nb"
+        # Internal: ^=0, a=1, $=2, \n=3, ^=4, $=5, \n=6, ^=7, b=8, $=9
+        # ^\n only matches at string pos 2 (the empty line's own \n).
+        highlights = parse_regex_for_highlighting(r"r'(^\n)'", string_value)
+        self.assertEqual(len(highlights), 1)
+        start, end, _, _, _, _, _ = highlights[0]
+        self.assertEqual(start, 4)   # the empty line's ^ marker
+        self.assertEqual(end, 8)     # through the \n and its trailing ^ marker
 
 
 # =============================================================================
@@ -1877,13 +2061,14 @@ class TestDropdownInVisualize(unittest.TestCase):
 
         # Should contain a dropdown toggle event for segment 1 (the fuzzy one)
         self.assertIn('DropdownToggle', html)
-        self.assertIn('fuzzy-pattern-1', html)
+        self.assertIn('fuzzy-pattern-0-1', html)
 
     def test_visualize_renders_dropdown_options_when_open(self):
         """When dropdown is open, options are rendered."""
         model = init_model("hello world")
         model['search'] = r"r'(hello)(.*)(world)'"
-        model['openDropdown'] = {'id': 'fuzzy-pattern-1', 'segmentIndex': 1}
+        model['openDropdown'] = {'id': 'fuzzy-pattern-0-1', 'segmentIndex': 1,
+                                 'matchIndex': 0}
 
         html = visualize("hello world", model, None, None)
 
@@ -1901,70 +2086,70 @@ class TestPatternDisplay(unittest.TestCase):
         r"""The \w pattern should display as \w, not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(\w*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\w')
 
     def test_whitespace_displays_as_backslash_s(self):
         r"""The \s pattern should display as \s, not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(\s*)(world)'", '   world')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\s')
 
     def test_digit_displays_as_backslash_d(self):
         r"""The \d pattern should display as \d, not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(\d*)(!)'", '123!')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\d')
 
     def test_non_whitespace_displays_as_backslash_S(self):
         r"""The \S pattern should display as \S, not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(\S*)( )'", 'hello ')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\S')
 
     def test_non_digit_displays_as_backslash_D(self):
         r"""The \D pattern should display as \D, not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(\D*)(1)'", 'hello1')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\D')
 
     def test_non_word_displays_as_backslash_W(self):
         r"""The \W pattern should display as \W, not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(\W*)(a)'", '...a')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, r'\W')
 
     def test_character_range_displays_as_brackets(self):
         """Character class [a-z] should display as [a-z]."""
         highlights = parse_regex_for_highlighting(r"r'([a-z]*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, '[a-z]')
 
     def test_character_set_displays_as_brackets(self):
         """Character set [abc] should display as [abc]."""
         highlights = parse_regex_for_highlighting(r"r'([abc]*)(d)'", 'abcd')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, '[abc]')
 
     def test_dot_displays_as_dot(self):
         """The . pattern should display as . not [...]."""
         highlights = parse_regex_for_highlighting(r"r'(.)(!)(!)'", 'a!!')
         self.assertEqual(len(highlights), 3)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, '.')
 
     def test_literal_displays_correctly(self):
         """Literal patterns display as-is."""
         highlights = parse_regex_for_highlighting(r"r'(hello)(world)'", 'helloworld')
         self.assertEqual(len(highlights), 2)
-        _, _, _, pattern_display, _, _ = highlights[0]
+        _, _, _, pattern_display, _, _, _ = highlights[0]
         self.assertEqual(pattern_display, 'hello')
 
 
@@ -1975,71 +2160,71 @@ class TestFuzzyPatternRecognition(unittest.TestCase):
         """The classic .* pattern is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(.*)(world)'", 'hello world')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_whitespace_star_is_fuzzy(self):
         r"""The \s* pattern is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(\s*)(world)'", '   world')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_digit_star_is_fuzzy(self):
         r"""The \d* pattern is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(\d*)(world)'", '123world')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_word_char_star_is_fuzzy(self):
         r"""The \w* pattern is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(\w*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_non_whitespace_star_is_fuzzy(self):
         r"""The \S* pattern is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(\S*)( )'", 'hello ')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_character_class_star_is_fuzzy(self):
         """Character class with * like [a-z]* is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'([a-z]*)(!)'", 'hello!')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_character_class_plus_is_fuzzy(self):
         """Character class with + like [A-Z]+ is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'([A-Z]+)(!)'", 'HELLO!')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_dot_plus_is_fuzzy(self):
         """The .+ pattern is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(hello)(.+)'", 'hello world')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[1]
+        _, _, seg_type, _, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_single_dot_is_fuzzy(self):
         """A single . (any char) is fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(.)(ello)'", 'hello')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[0]
+        _, _, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_literal_text_is_not_fuzzy(self):
         """Literal text patterns are not fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(hello)(world)'", 'helloworld')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type1, _, _, _ = highlights[0]
-        _, _, seg_type2, _, _, _ = highlights[1]
+        _, _, seg_type1, _, _, _, _ = highlights[0]
+        _, _, seg_type2, _, _, _, _ = highlights[1]
         self.assertEqual(seg_type1, 'literal')
         self.assertEqual(seg_type2, 'literal')
 
@@ -2047,7 +2232,7 @@ class TestFuzzyPatternRecognition(unittest.TestCase):
         r"""Escaped special chars like \. are literal, not fuzzy."""
         highlights = parse_regex_for_highlighting(r"r'(hello)(\.)'", 'hello.')
         self.assertEqual(len(highlights), 2)
-        _, _, seg_type, _, _, _ = highlights[1]
+        _, _, seg_type, _, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'literal')
 
 
@@ -2182,8 +2367,12 @@ class TestSynthesizeFuzzyPattern(unittest.TestCase):
     # ---- Step 2: {n} repetition ----
 
     def test_mixed_text_uses_dot_n(self):
-        """Mixed characters (letters+digits+space) -> .{n}."""
-        result = synthesize_fuzzy_pattern("a1 ", next_char="b")
+        """Mixed characters (letters+digits+space) with no anchored edge -> .{n}.
+
+        With prev_char='' the left edge IS anchored, and the drag gets [^b]+
+        instead -- see TestNegatedClassSynthesis.
+        """
+        result = synthesize_fuzzy_pattern("a1 ", prev_char="x", next_char="b")
         self.assertEqual(result, r".{3}")
 
     def test_single_char_with_same_next(self):
@@ -2209,8 +2398,12 @@ class TestSynthesizeFuzzyPattern(unittest.TestCase):
         self.assertEqual(result, r"\s+")
 
     def test_mixed_with_newline_uses_bracket_n(self):
-        r"""'a\nb' can't use .* (dot doesn't match \n), uses [\S\s]{3}."""
-        result = synthesize_fuzzy_pattern("a\nb", next_char=" ")
+        r"""'a\nb' can't use .* (dot doesn't match \n), uses [\S\s]{3}.
+
+        Again only once the left edge is unanchored; an anchored one gets
+        [^ ]+ instead.
+        """
+        result = synthesize_fuzzy_pattern("a\nb", prev_char="x", next_char=" ")
         # . doesn't match \n, but [\S\s] does
         self.assertEqual(result, r"[\S\s]{3}")
 
@@ -2220,14 +2413,14 @@ class TestSynthesizeFuzzyPattern(unittest.TestCase):
         r"""\s+ pattern is recognized as fuzzy in highlighting."""
         highlights = parse_regex_for_highlighting(r"r'hello\s+world'", 'hello   world')
         self.assertEqual(len(highlights), 3)
-        _, _, seg_type, _, _, _ = highlights[1]
+        _, _, seg_type, _, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_synthesized_exact_n_pattern_is_fuzzy_in_highlights(self):
         r"""\d{3} pattern is recognized as fuzzy in highlighting."""
         highlights = parse_regex_for_highlighting(r"r'prefix\d{3}suffix'", 'prefix123suffix')
         self.assertEqual(len(highlights), 3)
-        _, _, seg_type, _, _, _ = highlights[1]
+        _, _, seg_type, _, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
 
     def test_synthesized_pattern_matches_exact_range(self):
@@ -2235,9 +2428,333 @@ class TestSynthesizeFuzzyPattern(unittest.TestCase):
         highlights = parse_regex_for_highlighting(r"r'hello\s{3}world'", 'hello   world')
         self.assertEqual(len(highlights), 3)
         # The fuzzy segment should cover exactly 3 characters
-        fuzzy_start, fuzzy_end, seg_type, _, _, _ = highlights[1]
+        fuzzy_start, fuzzy_end, seg_type, _, _, _, _ = highlights[1]
         self.assertEqual(seg_type, 'fuzzy')
         self.assertEqual(fuzzy_end - fuzzy_start, 3)
+
+
+# =============================================================================
+# Negated character class [^N]
+# =============================================================================
+
+class TestNegatedClassDisplay(unittest.TestCase):
+    r"""A ONE-character negated class parses to NOT_LITERAL, not IN.
+
+    Multi-character classes like [^,;] come back as IN [NEGATE, ...] and have
+    always read back correctly, which is why this never surfaced -- but every
+    class the fuzzy inference generates is exactly one character wide.
+    """
+
+    def test_single_char_negated_class_is_fuzzy(self):
+        highlights = parse_regex_for_highlighting(r"r'[^,]+'", 'abc,def')
+        self.assertTrue(highlights)
+        _, _, seg_type, pattern_display, _, _, _ = highlights[0]
+        self.assertEqual(seg_type, 'fuzzy')
+        self.assertEqual(pattern_display, '[^,]')
+
+    def test_single_char_negated_class_without_quantifier_is_fuzzy(self):
+        highlights = parse_regex_for_highlighting(r"r'([^,])'", 'abc,def')
+        self.assertTrue(highlights)
+        _, _, seg_type, pattern_display, _, _, _ = highlights[0]
+        self.assertEqual(seg_type, 'fuzzy')
+        self.assertEqual(pattern_display, '[^,]')
+
+    def test_negated_class_reads_back_on_every_match(self):
+        highlights = parse_regex_for_highlighting(r"r'([^,]+)(, )'", 'ab, cd, ef')
+        fuzzies = [h for h in highlights if h[2] == 'fuzzy']
+        self.assertEqual(len(fuzzies), 2)
+        for h in fuzzies:
+            self.assertEqual(h[3], '[^,]')
+
+    def test_multi_char_negated_class_still_works(self):
+        highlights = parse_regex_for_highlighting(r"r'[^,;]+'", 'abc,def')
+        self.assertTrue(highlights)
+        _, _, seg_type, pattern_display, _, _, _ = highlights[0]
+        self.assertEqual(seg_type, 'fuzzy')
+        self.assertEqual(pattern_display, '[^,;]')
+
+
+class TestNegatedClassOption(unittest.TestCase):
+    """The [^N] option itself: when it exists, and how N is spelled."""
+
+    def test_offered_for_a_real_following_char(self):
+        self.assertEqual(negated_class_option(','), ('[^,]', '[^,]'))
+
+    def test_not_offered_without_a_following_char(self):
+        # '' = end of string, None = abuts an existing segment, sentinels are
+        # the ^/$ anchor markers -- none of them is something to stop at.
+        self.assertIsNone(negated_class_option(''))
+        self.assertIsNone(negated_class_option(None))
+        self.assertIsNone(negated_class_option(DC2))
+        self.assertIsNone(negated_class_option(DC3))
+
+    def test_sits_just_after_dot_in_the_option_list(self):
+        values = [v for v, _ in fuzzy_pattern_options(',')]
+        self.assertEqual(values[values.index('.') + 1], '[^,]')
+        # ... and the static list is otherwise untouched.
+        self.assertEqual([v for v in values if v != '[^,]'],
+                         [v for v, _ in FUZZY_PATTERN_OPTIONS])
+
+    def test_no_following_char_leaves_the_list_alone(self):
+        self.assertEqual(fuzzy_pattern_options(None), list(FUZZY_PATTERN_OPTIONS))
+
+    def test_generated_class_round_trips_for_tricky_delimiters(self):
+        r"""What we generate has to read back as itself.
+
+        `(` and `)` are escaped past what the regex engine needs, because
+        parse_top_level_segments counts parens without skipping character
+        classes and a bare one would split the segment in the wrong place.
+        """
+        for delim in [',', ')', '(', ']', '[', '-', '^', '$', '.', '*', '|',
+                      '"', "'", '\\', '\n', '\t']:
+            pattern, label = negated_class_option(delim)
+            self.assertEqual(pattern, label, delim)
+            self.assertEqual(len(parse_all_segments(pattern + '+')), 1,
+                             (delim, pattern))
+            highlights = parse_regex_for_highlighting(
+                make_regex_search(pattern + '+'), 'abc')
+            self.assertTrue(highlights, delim)
+            self.assertEqual(highlights[0][2], 'fuzzy', delim)
+            self.assertEqual(highlights[0][3], pattern, delim)
+
+
+class TestNegatedClassSynthesis(unittest.TestCase):
+    """A drag that stops at a delimiter should say so, rather than freezing the
+    length of whatever happened to be there.
+
+    The ordering rule: a class describing the CONTENT beats one describing only
+    where the drag STOPS, which beats one giving only its LENGTH.
+    """
+
+    def test_mixed_content_stopping_at_delimiter(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('John Smith', prev_char='', next_char=','),
+            '[^,]+')
+
+    def test_adjacent_to_a_segment_on_the_left_uses_star(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('John Smith', prev_char=None, next_char=','),
+            '[^,]*')
+
+    def test_a_content_class_still_wins(self):
+        # [a-z] says what the text IS; [^,] only says where it stops.
+        self.assertEqual(
+            synthesize_fuzzy_pattern('cd', prev_char=',', next_char=','),
+            '[a-z]+')
+
+    def test_a_fixed_length_content_class_beats_the_negated_class(self):
+        # '12' out of '123' is two digits, not "everything up to a 3".
+        self.assertEqual(
+            synthesize_fuzzy_pattern('12', prev_char='', next_char='3'), r'\d{2}')
+        self.assertEqual(
+            synthesize_fuzzy_pattern('3.14', prev_char='', next_char='1'),
+            r'[0-9\.]{4}')
+
+    def test_unanchored_left_edge_falls_back_to_a_length(self):
+        # [^,] matches 'x' too, so an unanchored [^,]+ would run left past the
+        # drag -- the very jump this change exists to remove.
+        self.assertEqual(
+            synthesize_fuzzy_pattern('John Smith', prev_char='x', next_char=','),
+            '.{10}')
+
+    def test_text_containing_the_stop_char_falls_back(self):
+        # [^,]+ cannot cover a drag that has a ',' inside it.
+        self.assertEqual(
+            synthesize_fuzzy_pattern('a, b', prev_char='', next_char=','), '.{4}')
+
+    def test_end_of_string_has_nothing_to_stop_at(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('a1 ', prev_char='x', next_char=''), '.{3}')
+
+    def test_abutting_segment_has_nothing_to_stop_at(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('a1 ', prev_char='x', next_char=None), '.{3}')
+
+    def test_anchor_sentinel_is_not_a_stop_char(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('a1 ', prev_char='x', next_char=DC3), '.{3}')
+
+    def test_mixed_text_stops_at_the_next_char(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('a1 ', prev_char='', next_char='b'), '[^b]+')
+
+    def test_text_with_a_newline_stops_at_the_next_char(self):
+        self.assertEqual(
+            synthesize_fuzzy_pattern('a\nb', prev_char='', next_char=' '), '[^ ]+')
+
+
+class TestNegatedClassDropdown(unittest.TestCase):
+    """[^N] is dynamic: N is whatever follows that segment in that match."""
+
+    def test_option_is_offered_for_the_following_char(self):
+        import html as html_mod
+        value = 'ab, cd, ef'
+        model = init_model(value)
+        model['search'] = r"r'(.*?)(, )'"
+        model['openDropdown'] = {'id': 'fuzzy-pattern-1-0', 'segmentIndex': 0,
+                                 'matchIndex': 1}
+        out = visualize(value, model, None, None)
+        self.assertIn(
+            html_mod.escape(repr(DropdownSelect('fuzzy-pattern-1-0', '[^,]'))), out)
+
+    def test_no_option_when_the_segment_runs_to_the_end_of_the_string(self):
+        value = 'hello world'
+        model = init_model(value)
+        model['search'] = r"r'(hello)(.*)'"
+        model['openDropdown'] = {'id': 'fuzzy-pattern-0-1', 'segmentIndex': 1,
+                                 'matchIndex': 0}
+        out = visualize(value, model, None, None)
+        self.assertNotIn('[^', out)
+
+    def test_selecting_the_option_rewrites_the_segment(self):
+        value = 'ab, cd, ef'
+        model = init_model(value)
+        model['search'] = r"r'(.*)(,\ )'"
+        model['openDropdown'] = {'id': 'fuzzy-pattern-0-0', 'segmentIndex': 0,
+                                 'matchIndex': 0}
+        model, _ = update(make_dropdown_select_event('fuzzy-pattern-0-0', '[^,]'),
+                          None, model, value)
+        self.assertEqual(model['search'], r"r'[^,]*,\ '")
+
+
+# =============================================================================
+# Lazy quantifiers keep a fuzzy segment's neighbour in place
+# =============================================================================
+
+class TestLazifyOvershootingFuzzy(unittest.TestCase):
+    r"""A greedy `.*` in front of a literal binds that literal to its LAST
+    occurrence, so the segment the user just dragged appears to jump down the
+    string. Assembling the pattern makes such a fuzzy lazy -- but only where
+    the overshoot is real.
+    """
+
+    def test_appending_a_literal_lazifies_the_fuzzy_before_it(self):
+        self.assertEqual(append_segment_to_regex(r"r'(.*)'", 'literal', ', '),
+                         r"r'.*?,\ '")
+
+    def test_prepending_a_fuzzy_lazifies_it(self):
+        self.assertEqual(prepend_segment_to_regex(r"r'(hello)'", 'fuzzy', '.*'),
+                         r"r'.*?hello'")
+
+    def test_appending_a_literal_after_an_ungrouped_fuzzy(self):
+        self.assertEqual(append_segment_to_regex(r"r'hello.*'", 'literal', 'world'),
+                         r"r'hello.*?world'")
+
+    def test_inserting_a_fuzzy_before_a_literal_lazifies_it(self):
+        self.assertEqual(
+            insert_segment_at_position(r"r'(world)'", 0, 'fuzzy', '.*'),
+            r"r'.*?world'")
+
+    def test_a_class_that_cannot_cross_the_literal_stays_greedy(self):
+        # \s can't match the 'w' of world, so \s+ never overshoots it.
+        self.assertEqual(append_segment_to_regex(r"r'hello\s+'", 'literal', 'world'),
+                         r"r'hello\s+world'")
+
+    def test_a_negated_class_stays_greedy(self):
+        # [^,] can't match ',' -- it already stops itself.
+        self.assertEqual(append_segment_to_regex(r"r'[^,]+'", 'literal', ', '),
+                         r"r'[^,]+,\ '")
+
+    def test_a_closed_quantifier_stays_as_written(self):
+        self.assertEqual(append_segment_to_regex(r"r'([A-Z]{1})'", 'literal', 'C'),
+                         r"r'[A-Z]{1}C'")
+
+    def test_a_trailing_fuzzy_stays_greedy(self):
+        # Lazy at the tail has nothing to stop at: (hello)(.*?) on 'hello world'
+        # would collapse to a single character.
+        self.assertEqual(append_segment_to_regex(r"r'hello'", 'fuzzy', '.*'),
+                         r"r'hello.*'")
+
+    def test_typed_input_is_left_exactly_as_typed(self):
+        model = init_model('hello world')
+        model, _ = update(make_search_box_input_event(r"r'(hello)(.*)(world)'"),
+                          ('x', 'x'), model, 'hello world')
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'")
+
+    def test_resizing_the_fuzzy_keeps_it_lazy(self):
+        # resize_fuzzy_segment re-infers with next_char=None, which yields a
+        # greedy '*'; the segment must not silently lose its laziness.
+        value = 'John Smith, Jane Doe'
+        result = resize_fuzzy_segment(r"r'.*?,\ '", 0, value, 1, 11,
+                                      prev_char='', next_char=None)
+        self.assertEqual(result, r"r'.*?,\ '")
+
+    def test_resizing_a_literal_leaves_its_neighbour_alone(self):
+        result = resize_literal_segment(r"r'(hello)(.*)(world)'", 0, 'hello world',
+                                        _legacy_internal_index(2),
+                                        _legacy_internal_index(6))
+        self.assertIn('(.*)', result)
+
+
+class TestFuzzyDragDoesNotMoveItsNeighbour(unittest.TestCase):
+    """The complaint all of this is for, at the level the user meets it: after
+    a fuzzy drag, the literal already placed must still sit where it was put."""
+
+    def setUp(self):
+        self.var_and_exp = ('x', 'x')
+
+    def test_literal_first_then_fuzzy_drag_left(self):
+        # 'John Smith, Jane Doe, Ann Lee' -- internal idx = string idx + 1,
+        # so the first ', ' is internal 11-12 and 'John Smith' is 1-10.
+        value = 'John Smith, Jane Doe, Ann Lee'
+        model = init_model(value)
+
+        model, _ = update(make_mouse_down_event(11, legacy_index=False, top_half=True),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(12, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(12, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r',\ '")
+
+        model, _ = update(make_mouse_down_event(10, legacy_index=False, top_half=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(1, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(1, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'.*?,\ '")
+
+        # The ', ' is still on the FIRST comma, not the second.
+        highlights = parse_regex_for_highlighting(model['search'], value)
+        literal = next(h for h in highlights if h[2] == 'literal' and h[6] == 0)
+        self.assertEqual((literal[0], literal[1]), (11, 13))
+
+    def test_fuzzy_first_then_literal(self):
+        # 'hello world and world again' -- 'hello' is internal 1-5, the first
+        # 'world' is 7-11, the second is 17-21.
+        value = 'hello world and world again'
+        model = init_model(value)
+
+        model, _ = update(make_mouse_down_event(1, legacy_index=False, top_half=True),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(5, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(5, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'hello'")
+
+        # Fuzzy-extend right, all the way to the end of the string.
+        model, _ = update(make_mouse_down_event(6, legacy_index=False, top_half=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(27, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(27, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'hello.*'")
+
+        # Now pick the FIRST 'world' out of the fuzzy region.
+        model, _ = update(make_mouse_down_event(7, legacy_index=False, top_half=True),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_move_event(11, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(11, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'hello.*?world'")
+
+        highlights = parse_regex_for_highlighting(model['search'], value)
+        literal = next(h for h in highlights if h[2] == 'literal' and h[5] == 2)
+        self.assertEqual((literal[0], literal[1]), (7, 12))
 
 
 # =============================================================================
@@ -2384,6 +2901,34 @@ class TestIsAdjacentLeft(unittest.TestCase):
         self.assertFalse(is_adjacent_left(_legacy_internal_index(11), _legacy_internal_index(10), "hello\nworld"))
 
 
+class TestManyMatchesMouseDownPerformance(unittest.TestCase):
+    """A click checks adjacency against every match, and a dense search in a
+    long string has thousands. Each check must be cheap: paying a full pass
+    over the string per match froze a 65k-char string with 10k matches for
+    ~a minute on one MouseDown."""
+
+    def test_mouse_down_with_thousands_of_matches_is_fast(self):
+        line = "this is a sample string with several s chars spread across it ok\n"
+        value = line * 1000  # 65,000 chars, 10,000 's' matches
+        var_and_exp = ('x', 'x')
+
+        # Both clicks abut no match, so every match's adjacency gets checked:
+        # near the start the left-scan walks all 10k matches, near the end
+        # the right-scan does.
+        for click_at in (2,                              # the 'h' of "this"
+                         len(value) - 3):                # near the end
+            model = init_model(value)
+            model['search'] = r"r's'"
+            event = make_mouse_down_event(click_at, legacy_index=False)
+
+            t0 = time.perf_counter()
+            update(event, var_and_exp, model, value)
+            elapsed = time.perf_counter() - t0
+
+            self.assertLess(elapsed, 1.0,
+                            f"MouseDown at {click_at} took {elapsed:.1f}s")
+
+
 class TestSelectionAdjacencyIntegration(unittest.TestCase):
     """Integration tests for extending selections across anchor boundaries.
 
@@ -2432,8 +2977,10 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(8),
                          var_and_exp, model, value)
 
-        # Click at index 8 is far from last_end=3, starts new selection for \n
-        self.assertEqual(model['search'], r"r'\n'")
+        # /^[a-z]{1}/ matches on both lines (re.M). The click is nowhere near
+        # the first match's end, but it sits right before the SECOND match, so
+        # it extends that one leftward rather than starting over.
+        self.assertEqual(model['search'], r"r'(\n)(^)[a-z]{1}'")
 
     def test_right_extend_over_dollar_to_newline_hello_first(self):
         """Extend /(hello)/ by clicking \\n (past $) should extend.
@@ -2558,8 +3105,10 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         model, _ = update(make_mouse_up_event(8),
                          var_and_exp, model, value)
 
-        # Should extend left (includes \n and ^ which is between)
-        self.assertEqual(model['search'], r"r'(\n^)(world)'")
+        # Should extend left over the ^ the click reached across. The ^ is a
+        # position the user clicked through, not a character they picked, so
+        # the new segment is the \n alone.
+        self.assertEqual(model['search'], r"r'(\n)(world)'")
 
     def test_left_extend_over_caret_to_backslash_A(self):
         """Select "hello" from h, clicking \\A (past ^) should extend left.
@@ -2948,7 +3497,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                           self.var_and_exp, model, self.value)
 
-        self.assertEqual(model['search'], r"r'hello.*world'")
+        # Lazy: dragging 'world' out of the fuzzy pins it to the occurrence the
+        # user dragged, rather than letting the greedy .* push it to the last.
+        self.assertEqual(model['search'], r"r'hello.*?world'")
 
     def test_type_regex_then_new_mouse_selection_replaces(self):
         """Clicking far from the typed regex starts a fresh selection.
@@ -3980,7 +4531,9 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         model, _ = update(make_mouse_up_event(12),
                           self.var_and_exp, model, self.value)
-        self.assertEqual(model['search'], r"r'hello.*world'")
+        # Lazy, because the drag put a literal after a greedy .* (see
+        # TestLazifyOvershootingFuzzy).
+        self.assertEqual(model['search'], r"r'hello.*?world'")
 
         # Search box: tweak fuzzy to \s+
         model, _ = update(make_search_box_input_event(r"r'(hello)(\s+)(world)'"),
@@ -3992,7 +4545,7 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
             None,
             r"r'hello'",
             r"r'(hello)(.*)'",
-            r"r'hello.*world'",
+            r"r'hello.*?world'",
         ])
 
     def test_searchbox_to_mouse_preserves_undo_chain(self):
@@ -4049,15 +4602,17 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
 # Test Helper: Handle Mouse Down Events
 # =============================================================================
 
-def make_handle_mouse_down_event(segment_index: int, side: str) -> dict:
+def make_handle_mouse_down_event(segment_index: int, side: str, match_index: int = 0) -> dict:
     """Create a HandleMouseDown event dict for drag handle interaction.
 
     Args:
         segment_index: Index of the segment whose handle is being dragged
         side: 'left' or 'right' - which handle
+        match_index: Which occurrence of the pattern the handle belongs to
     """
     return {
-        'pythonEventStr': repr(HandleMouseDown(segment_index=segment_index, side=side)),
+        'pythonEventStr': repr(HandleMouseDown(segment_index=segment_index, side=side,
+                                               match_index=match_index)),
         'eventJSON': {
             'buttons': 1,
         }
@@ -4195,11 +4750,15 @@ class TestResizeFuzzySegment(unittest.TestCase):
         self.assertEqual(result, r"r'(hello)(\s*)'")
 
     def test_fuzzy_adjacent_right_literal_uses_star(self):
-        r"""With a literal neighbor on the right (next_char=None), inference uses *."""
+        r"""With a literal neighbor on the right (next_char=None), inference uses *.
+
+        Lazy because [a-z]* can reach the 'w' of world and would otherwise bind
+        it to its last occurrence.
+        """
         result = resize_fuzzy_segment(r"r'(.*)(world)'", 0, self.value,
                                       _legacy_internal_index(2), _legacy_internal_index(7),
                                       prev_char='', next_char=None)
-        self.assertEqual(result, r"r'([a-z]*)(world)'")
+        self.assertEqual(result, r"r'([a-z]*?)(world)'")
 
     def test_no_change_if_empty_range(self):
         """Empty range (new_end <= new_start) returns the original regex unchanged."""
@@ -4592,22 +5151,27 @@ class TestFuzzyDragHandleUpdate(unittest.TestCase):
 # =============================================================================
 
 class TestLiteralDragHandleRendering(unittest.TestCase):
-    """Test that drag handles appear in HTML for literal segments, not fuzzy."""
+    """Test that drag handles appear in HTML for literal segments, not fuzzy.
+
+    Handles render only on the active (here: hovered) segment; see
+    TestHandlesOnlyOnActiveSegment."""
 
     def setUp(self):
         self.value = "hello world"
 
     def test_literal_segment_has_resize_handle(self):
-        """Literal selection bracket renders char-span-resize-handle elements (CSS gives them ew-resize cursor)."""
+        """Literal selection bracket renders chr-resize-handle elements (CSS gives them ew-resize cursor)."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)'"
+        model['hoverIdx'] = 3
         html_output = visualize(self.value, model, None, None)
-        self.assertIn('char-span-resize-handle', html_output)
+        self.assertIn('chr-resize-handle', html_output)
 
     def test_literal_segment_has_left_handle(self):
         """First char of literal segment renders a left drag handle."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)'"
+        model['hoverIdx'] = 3
         html_output = visualize(self.value, model, None, None)
         self.assertIn("side=&#x27;left&#x27;", html_output)
 
@@ -4615,6 +5179,7 @@ class TestLiteralDragHandleRendering(unittest.TestCase):
         """Last char of literal segment renders a right drag handle."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)'"
+        model['hoverIdx'] = 3
         html_output = visualize(self.value, model, None, None)
         self.assertIn("side=&#x27;right&#x27;", html_output)
 
@@ -4622,6 +5187,7 @@ class TestLiteralDragHandleRendering(unittest.TestCase):
         """Drag handle elements have HandleMouseDown event attribute."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)'"
+        model['hoverIdx'] = 3
         html_output = visualize(self.value, model, None, None)
         self.assertIn('HandleMouseDown', html_output)
 
@@ -4629,43 +5195,50 @@ class TestLiteralDragHandleRendering(unittest.TestCase):
         """A standalone fuzzy selection has BOTH ends open, so it gets two handles."""
         model = init_model(self.value)
         model['search'] = r"r'(.*)'"
+        model['hoverIdx'] = 5  # inside the first (whole-string) occurrence
         html_output = visualize(self.value, model, None, None)
-        # Exactly two HandleMouseDown for a lone fuzzy: one per open end.
+        # One handle per open end, on the hovered occurrence only.
         self.assertEqual(html_output.count('HandleMouseDown'), 2)
-        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;)", html_output)
-        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;)", html_output)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;, match_index=0)", html_output)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;, match_index=0)", html_output)
 
     def test_fuzzy_open_right_has_right_handle_only(self):
         """In /(hello)(.*)/, the trailing fuzzy has an open RIGHT end only."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)(.*)'"
+        model['hoverIdx'] = 8  # inside the fuzzy segment
         html_output = visualize(self.value, model, None, None)
         # Fuzzy is segment index 1: right handle present, left handle absent.
-        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;)", html_output)
-        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;left&#x27;)", html_output)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;", html_output)
+        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;left&#x27;", html_output)
 
     def test_fuzzy_open_left_has_left_handle_only(self):
         """In /(.*)(world)/, the leading fuzzy has an open LEFT end only."""
         model = init_model(self.value)
         model['search'] = r"r'(.*)(world)'"
+        model['hoverIdx'] = 3  # inside the fuzzy segment
         html_output = visualize(self.value, model, None, None)
         # Fuzzy is segment index 0: left handle present, right handle absent.
-        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;)", html_output)
-        self.assertNotIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;)", html_output)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;", html_output)
+        self.assertNotIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;", html_output)
 
     def test_mixed_segments_flanked_fuzzy_has_no_handles(self):
-        """In /(hello)(.*)(world)/, both literals get left+right handles, and the
-        fuzzy segment is flanked on both sides so it gets NO resize handle."""
+        """In /(hello)(.*)(world)/, a hovered literal gets left+right handles,
+        but the fuzzy segment is flanked on both sides so even hovered it gets
+        NO resize handle."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)(.*)(world)'"
+        model['hoverIdx'] = 3  # inside the 'hello' literal
         html_output = visualize(self.value, model, None, None)
-        self.assertIn('HandleMouseDown', html_output)
-        # 2 literals * 2 handles + 0 fuzzy handles = 4
-        handle_count = html_output.count('HandleMouseDown')
-        self.assertEqual(handle_count, 4)
-        # The flanked fuzzy (segment index 1) has neither handle.
-        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;left&#x27;)", html_output)
-        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;)", html_output)
+        self.assertEqual(html_output.count('HandleMouseDown'), 2)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;", html_output)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;", html_output)
+
+        # The flanked fuzzy (segment index 1, the ' ' between the literals)
+        # has neither handle even when it is the hovered segment.
+        model['hoverIdx'] = 6
+        html_output = visualize(self.value, model, None, None)
+        self.assertNotIn("HandleMouseDown(segment_index=1", html_output)
 
 
 # =============================================================================
@@ -5185,13 +5758,14 @@ class TestRepetitionDropdownRendering(unittest.TestCase):
 
         html_output = visualize("hello world", model, None, None)
 
-        self.assertIn('repetition-1', html_output)
+        self.assertIn('repetition-0-1', html_output)
 
     def test_repetition_dropdown_open_shows_options(self):
         """When repetition dropdown is open, options are rendered."""
         model = init_model("hello world")
         model['search'] = r"r'hello.*world'"
-        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1,
+        model['openDropdown'] = {'id': 'repetition-0-1', 'segmentIndex': 1,
+                                  'matchIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         html_output = visualize("hello world", model, None, None)
@@ -5203,7 +5777,8 @@ class TestRepetitionDropdownRendering(unittest.TestCase):
         """When repetition dropdown is open, text input fields for {n} and {n,m} are present."""
         model = init_model("hello world")
         model['search'] = r"r'hello.*world'"
-        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1,
+        model['openDropdown'] = {'id': 'repetition-0-1', 'segmentIndex': 1,
+                                  'matchIndex': 0,
                                   'exactN': '', 'rangeMin': '', 'rangeMax': ''}
 
         html_output = visualize("hello world", model, None, None)
@@ -5224,12 +5799,12 @@ class TestRepetitionDropdownPrefillAndSelected(unittest.TestCase):
 
     # --- Renderer: .selected on the matching simple option --------------------
 
-    def _open_dropdown_for(self, value, search, segment_index=0):
+    def _open_dropdown_for(self, value, search, segment_index=0, match_index=0):
         """Helper: open the repetition dropdown for the given segment via the
         same code path the UI takes (DropdownToggle), so prefill happens."""
         model = init_model(value)
         model['search'] = search
-        ev = make_dropdown_toggle_event(f'repetition-{segment_index}')
+        ev = make_dropdown_toggle_event(f'repetition-{match_index}-{segment_index}')
         model, _ = update(ev, None, model, value)
         return model
 
@@ -5407,20 +5982,22 @@ class TestHoverPreview(unittest.TestCase):
 
     # --- Rendering tests ---
 
-    def test_visualize_shows_hover_class_for_literal(self):
-        """visualize() adds the 'hover' CSS class to the hovered char-span (CSS supplies the border)."""
+    def test_hover_emits_no_hover_class_and_keeps_the_char_grouped(self):
+        """hoverIdx drives which match's labels show; it no longer emits a
+        'hover' char class (no CSS rule ever styled it) nor breaks the hovered
+        plain char out of its text group just to carry that class."""
         model = init_model(self.value)
         model['hoverIdx'] = 4  # 'l' in "hello" (new internal index)
 
         html_output = visualize(self.value, model, None, None)
 
-        # The hovered char-span gets the 'hover' class.
-        self.assertIn('class="char-span hover"', html_output)
-        # Border styling is now done in CSS, not inline.
-        self.assertNotIn('border-top', html_output)
+        self.assertNotIn('class="chr hover"', html_output)
+        # Without the class there is no reason to individually render the
+        # hovered plain char: it stays inside its grouped text span.
+        self.assertNotIn('snc-idx="4"', html_output)
 
     def test_hover_does_not_affect_highlighted_char(self):
-        """If a char is already in a selected segment, the .hover class is not applied to it."""
+        """A char in a selected segment renders its highlight classes only."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)'"
         # Hover on index 3 which is inside the 'hello' literal segment (new index space).
@@ -5429,168 +6006,334 @@ class TestHoverPreview(unittest.TestCase):
         html_output = visualize(self.value, model, None, None)
 
         import re as _re
-        m = _re.search(r'<span class="char-span-container" snc-mouse="3"[^>]*><span class="([^"]+)"', html_output)
+        m = _re.search(r'<span class="([^"]+)" snc-idx="1"', html_output)
         self.assertIsNotNone(m)
         # Already highlighted; should not also get the standalone hover class.
         self.assertNotIn('hover', m.group(1).split())
         self.assertIn('highlight', m.group(1).split())
 
-    def test_hover_char_span_has_hover_class(self):
-        """Hover preview wraps the hovered char-span with the 'hover' class.
 
-        The visual border (left/right/top/bottom) is supplied by CSS rules
-        targeting the .hover class instead of inline style attributes.
-        """
+class TestMoveListenersAndMouseUpNotify(unittest.TestCase):
+    """Every idle mouse move costs a full program run, so the markup only asks
+    for moves where they matter: match chars carry an explicit snc-mouse-move
+    (hover reveals that occurrence's labels); everything else tracks moves only
+    while a drag is in progress. A drag's mouseup can land outside the widget,
+    so while one is in progress the container carries snc-notify-mouse-is-up,
+    which the front-end fires (at most once per rendered HTML) on a mouseup or
+    a no-buttons move, letting the stuck drag finalize."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.var_and_exp = ('x', 'x')
+
+    def test_idle_only_match_chars_listen_for_moves(self):
         model = init_model(self.value)
-        model['hoverIdx'] = 4
+        model['search'] = r"r'world'"
 
-        html_output = visualize(self.value, model, None, None)
+        out = visualize(self.value, model, None, None)
 
-        import re as _re
-        m = _re.search(r'<span class="char-span-container" snc-mouse="4"[^>]*><span class="([^"]+)"', html_output)
-        self.assertIsNotNone(m, "Should find inner char-span inside snc-mouse=4")
-        self.assertIn('hover', m.group(1).split())
+        # Boundary chars w and d carry explicit move listeners; the grouped
+        # interior asks for hover moves via snc-hover-moves instead.
+        self.assertEqual(out.count('snc-mouse-move='), 2)
+        self.assertEqual(out.count('snc-hover-moves'), 1)
+        self.assertNotIn('snc-notify-mouse-is-up', out)
+
+    def test_drag_in_progress_renders_the_notify_attr(self):
+        model, _ = update(make_mouse_down_event(5, top_half=True),
+                          self.var_and_exp, self.model, self.value)
+        self.assertTrue(model['dragging'])
+
+        out = visualize(self.value, model, None, None)
+
+        self.assertIn('snc-notify-mouse-is-up="NotifyMouseIsUp()"', out)
+
+    def test_handle_drag_renders_the_notify_attr(self):
+        model = init_model(self.value)
+        model['search'] = r"r'(hello)'"
+        model, _ = update(make_handle_mouse_down_event(0, 'right'),
+                          self.var_and_exp, model, self.value)
+
+        out = visualize(self.value, model, None, None)
+
+        self.assertIn('snc-notify-mouse-is-up="NotifyMouseIsUp()"', out)
+
+    def test_notify_mouse_is_up_finalizes_a_stuck_drag(self):
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                          self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_move_event(6),
+                          self.var_and_exp, model, self.value)
+
+        ev = {'pythonEventStr': repr(NotifyMouseIsUp()), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, self.var_and_exp, model, self.value)
+
+        self.assertFalse(model['dragging'])
+        self.assertEqual(model['search'], r"r'hello'")
+
+    def test_notify_mouse_is_up_finalizes_a_stuck_handle_drag(self):
+        model = init_model(self.value)
+        model['search'] = r"r'(hello)'"
+        model, _ = update(make_handle_mouse_down_event(0, 'right'),
+                          self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(7),
+                          self.var_and_exp, model, self.value)
+
+        ev = {'pythonEventStr': repr(NotifyMouseIsUp()), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, self.var_and_exp, model, self.value)
+
+        self.assertIsNone(model.get('handleDrag'))
+        self.assertEqual(model['search'], r"r'(hello\ )'")
+
+    def test_notify_mouse_is_up_without_a_drag_is_a_no_op(self):
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+
+        ev = {'pythonEventStr': repr(NotifyMouseIsUp()), 'eventJSON': {'buttons': 0}}
+        model, _ = update(ev, self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], r"r'hello'")
+        self.assertFalse(model.get('dragging'))
+        self.assertIsNone(model.get('handleDrag'))
+
+
+class TestHandlesOnlyOnActiveSegment(unittest.TestCase):
+    """Interactive segments render resize handles only while active (hovered,
+    mid-drag, or with their dropdown open) -- the same gate the labels use.
+    Rendered unconditionally they were dead weight: a dense pattern has
+    thousands of matches, and two handle spans per match dwarfed the string
+    itself. Slices keep theirs unconditionally -- there is only one."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+
+    def test_idle_segments_render_no_handles(self):
+        model = init_model(self.value)
+        model['search'] = r"r'(hello)'"
+        out = visualize(self.value, model, None, None)
+        self.assertNotIn('chr-resize-handle', out)
+
+    def test_hovered_segment_renders_its_handles(self):
+        model = init_model(self.value)
+        model['search'] = r"r'(hello)'"
+        model['hoverIdx'] = 3
+        out = visualize(self.value, model, None, None)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;, match_index=0)", out)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;, match_index=0)", out)
+
+    def test_only_the_hovered_match_offers_handles(self):
+        value = 'ab ab'
+        model = init_model(value)
+        model['search'] = r"r'(ab)'"
+        model['hoverIdx'] = 1  # inside the first 'ab'
+        out = visualize(value, model, None, None)
+        self.assertEqual(out.count('chr-resize-handle left'), 1)
+        self.assertEqual(out.count('chr-resize-handle right'), 1)
+
+    def test_slice_handles_stay_without_hover(self):
+        model = init_model(self.value)
+        model['search'] = '2:5'
+        out = visualize(self.value, model, None, None)
+        self.assertIn('chr-resize-handle left', out)
+        self.assertIn('chr-resize-handle right', out)
+
+    def test_handle_drag_keeps_the_dragged_segments_handles(self):
+        model = init_model(self.value)
+        model['search'] = r"r'(hello)'"
+        model, _ = update(make_handle_mouse_down_event(0, 'right'),
+                          self.var_and_exp, model, self.value)
+        out = visualize(self.value, model, None, None)
+        self.assertIn('chr-resize-handle', out)
+
+
+class TestMatchInteriorGrouping(unittest.TestCase):
+    """Interior chars of a segment ride in one grouped span (like plain text)
+    carrying the segment's highlight classes; only the boundary chars stay
+    individual, since they hold the rounding, labels, and handles. The
+    front-end derives exact indices from snc-idx-start, and snc-hover-moves
+    marks interactive interiors as wanting idle hover moves (hovering a match
+    is how its labels appear)."""
+
+    def test_interior_chars_share_one_span(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'world'"
+        out = visualize(value, model, None, None)
+
+        m = re.search(r'<span class="([^"]*)" snc-idx-start="8" snc-hover-moves>orl</span>', out)
+        self.assertIsNotNone(m, "interior 'orl' should be one grouped span")
+        classes = m.group(1).split()
+        self.assertIn('chr', classes)
+        self.assertIn('highlight', classes)
+        self.assertIn('literal', classes)
+        # Boundary chars keep their own spans (rounding, labels, handles).
+        self.assertIn('snc-idx="7"', out)
+        self.assertIn('snc-idx="11"', out)
+        for interior in (8, 9, 10):
+            self.assertNotIn(f'snc-idx="{interior}"', out)
+
+    def test_short_matches_have_no_interior_group(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'lo'"
+        out = visualize(value, model, None, None)
+        # [4,6): both chars are boundaries; nothing to group.
+        self.assertIn('snc-idx="4"', out)
+        self.assertIn('snc-idx="5"', out)
+
+    def test_fuzzy_interior_groups_with_fuzzy_classes(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(h)(.*)(d)'"
+        out = visualize(value, model, None, None)
+
+        m = re.search(r'<span class="([^"]*)" snc-idx-start="3" snc-hover-moves>llo wor</span>', out)
+        self.assertIsNotNone(m, "fuzzy interior should be one grouped span")
+        self.assertIn('fuzzy', m.group(1).split())
+
+    def test_pick_regions_group_and_stay_hover_silent(self):
+        """Pick-mode prefix/suffix regions span the whole string; per-char
+        spans there made switching tools on a big string take seconds. The
+        interiors group like any segment, carrying the region's click target
+        and drag expression ONCE -- and no char asks for hover moves, since
+        pick mode has no hover-driven UI (CSS :hover does the brightening)."""
+        value = "hello world!"
+        model = init_model(value)
+        model['search'] = r"r'world'"
+        model['tool'] = 'pick'
+        out = visualize(value, model, None, None, var_and_exp=('x', 'x'))
+
+        # Prefix region [1,7): interior 'ello' (2-5) is one grouped span with
+        # the region's listeners; boundary chars keep individual spans.
+        m = re.search(
+            r'<span class="chr highlight segment-region" '
+            r'snc-idx-start="2" snc-mouse-down="SegmentToggle\([^"]*"[^>]*>ello</span>',
+            out)
+        self.assertIsNotNone(m, "prefix interior should be one grouped span with SegmentToggle")
+        # Match region [7,12): interior 'orl' (8-10) grouped as segment-group.
+        self.assertIn('segment-group" snc-idx-start="8"', out)
+        for interior in (2, 3, 4, 5, 8, 9, 10):
+            self.assertNotIn(f'snc-idx="{interior}"', out)
+        # Nothing in pick mode listens for moves.
+        self.assertNotIn('snc-mouse-move=', out)
+        self.assertNotIn('snc-hover-moves', out)
+
+    def test_slice_interior_groups_without_hover_moves(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = '2:9'
+        out = visualize(value, model, None, None)
+
+        # Slice [3,10): interior 4-8. No hover-driven UI for slices, so the
+        # group does not ask for idle moves.
+        m = re.search(r'<span class="([^"]*)" snc-idx-start="4">lo wo</span>', out)
+        self.assertIsNotNone(m, "slice interior should be one grouped span")
+        self.assertIn('slice', m.group(1).split())
 
 
 class TestRegexAnchorClass(unittest.TestCase):
     """In effective index mode the visualizer should hide regex anchors (^/$)
     but keep escape-sequence displays (\\n, \\t) visible, since those represent
     real characters in the string. The Python side tags only the anchor
-    chars with `is-regex-anchor`; the CSS targets only that class for the
+    chars with `regex-anchor`; the CSS targets only that class for the
     index-mode hide rule, so escape displays remain visible.
     """
 
     def _classes_at(self, html_output: str, mouse_index: int):
         import re as _re
         m = _re.search(
-            rf'<span class="char-span-container[^"]*" snc-mouse="{mouse_index}"[^>]*>'
-            rf'<span class="([^"]+)"',
+            rf'<span class="([^"]+)" snc-idx="{mouse_index}"',
             html_output,
         )
-        self.assertIsNotNone(m, f"Should find char-span at index {mouse_index}")
-        return m.group(1).split()
-
-    def _container_classes_at(self, html_output: str, mouse_index: int):
-        """Return the wrapper container's class list at the given internal index."""
-        import re as _re
-        m = _re.search(
-            rf'<span class="([^"]+)" snc-mouse="{mouse_index}"',
-            html_output,
-        )
-        self.assertIsNotNone(m, f"Should find char-span-container at index {mouse_index}")
+        self.assertIsNotNone(m, f"Should find chr at index {mouse_index}")
         return m.group(1).split()
 
     def test_string_start_caret_has_is_regex_anchor(self):
-        """The leading ^ at internal index 0 gets `is-regex-anchor`."""
+        """The leading ^ at internal index 0 gets `regex-anchor`."""
         value = "hi"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         classes = self._classes_at(html_output, 0)
-        self.assertIn('is-special', classes)
-        self.assertIn('is-regex-anchor', classes)
+        self.assertIn('special', classes)
+        self.assertIn('regex-anchor', classes)
 
     def test_string_end_dollar_has_is_regex_anchor(self):
-        """The trailing $ gets `is-regex-anchor`."""
+        """The trailing $ gets `regex-anchor`."""
         value = "hi"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         end_index = compute_internal_length(value) - 1
         classes = self._classes_at(html_output, end_index)
-        self.assertIn('is-special', classes)
-        self.assertIn('is-regex-anchor', classes)
+        self.assertIn('special', classes)
+        self.assertIn('regex-anchor', classes)
 
     def test_synth_dollar_before_newline_has_is_regex_anchor(self):
-        """The synthesized $ rendered before a \\n display gets `is-regex-anchor`."""
+        """The synthesized $ rendered before a \\n display gets `regex-anchor`."""
         value = "a\nb"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         classes = self._classes_at(html_output, 2)
-        self.assertIn('is-special', classes)
-        self.assertIn('is-regex-anchor', classes)
+        self.assertIn('special', classes)
+        self.assertIn('regex-anchor', classes)
 
     def test_synth_caret_after_newline_has_is_regex_anchor(self):
-        """The synthesized ^ rendered after a \\n display gets `is-regex-anchor`."""
+        """The synthesized ^ rendered after a \\n display gets `regex-anchor`."""
         value = "a\nb"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         classes = self._classes_at(html_output, 4)
-        self.assertIn('is-special', classes)
-        self.assertIn('is-regex-anchor', classes)
+        self.assertIn('special', classes)
+        self.assertIn('regex-anchor', classes)
 
     def test_newline_display_is_special_but_not_anchor(self):
-        """The \\n escape display is `is-special` but NOT `is-regex-anchor`."""
+        """The \\n escape display is `special` but NOT `regex-anchor`."""
         value = "a\nb"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         classes = self._classes_at(html_output, 3)
-        self.assertIn('is-special', classes)
-        self.assertNotIn('is-regex-anchor', classes)
+        self.assertIn('special', classes)
+        self.assertNotIn('regex-anchor', classes)
 
     def test_tab_display_is_special_but_not_anchor(self):
-        """The \\t escape display is `is-special` but NOT `is-regex-anchor`."""
+        """The \\t escape display is `special` but NOT `regex-anchor`."""
         value = "a\tb"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         classes = self._classes_at(html_output, 2)
-        self.assertIn('is-special', classes)
-        self.assertNotIn('is-regex-anchor', classes)
+        self.assertIn('special', classes)
+        self.assertNotIn('regex-anchor', classes)
 
-    def test_container_for_anchor_carries_is_regex_anchor(self):
-        """The wrapper for ^/$ also carries is-regex-anchor so CSS can collapse
-        it (display:none) in index mode and the \\n display sits flush at the
-        end of its line."""
-        value = "a\nb"
+    def test_char_span_is_a_single_span(self):
+        """Each char is ONE span carrying both the visual classes and the
+        snc-idx listener - no wrapper container element."""
+        value = "hi"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
-        # Synth $ before \n (index 2) and synth ^ after \n (index 4)
-        for idx in (0, 2, 4, 6):  # ^, synth $, synth ^, $
-            container_classes = self._container_classes_at(html_output, idx)
-            self.assertIn(
-                'is-regex-anchor', container_classes,
-                f"container at {idx} should carry is-regex-anchor",
-            )
-
-    def test_container_for_escape_display_lacks_is_regex_anchor(self):
-        """Containers for \\n / \\t escape displays must NOT carry is-regex-anchor
-        (otherwise they'd be collapsed in index mode)."""
-        for value, escape_idx in [("a\nb", 3), ("a\tb", 2)]:
-            model = init_model(value)
-            html_output = visualize(value, model, None, None)
-            container_classes = self._container_classes_at(html_output, escape_idx)
-            self.assertNotIn(
-                'is-regex-anchor', container_classes,
-                f"container at {escape_idx} for value {value!r} should NOT carry is-regex-anchor",
-            )
+        self.assertNotIn('chr-container', html_output)
 
     def test_caret_anchors_carry_is_anchor_start(self):
-        """Both string-start ^ and synthesized ^ after \\n carry is-anchor-start
-        (not is-anchor-end). The CSS keeps these visibility:hidden in index
-        mode so the string doesn't shift left."""
+        """Both string-start ^ and synthesized ^ after \\n carry anchor-start
+        (not anchor-end). The CSS hides these (but keeps their glyph slot)
+        in index mode so the string doesn't shift left."""
         value = "a\nb"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         for idx in (0, 4):  # ^ at string start, synth ^ after \n
-            container_classes = self._container_classes_at(html_output, idx)
-            inner_classes = self._classes_at(html_output, idx)
-            self.assertIn('is-anchor-start', container_classes)
-            self.assertNotIn('is-anchor-end', container_classes)
-            self.assertIn('is-anchor-start', inner_classes)
-            self.assertNotIn('is-anchor-end', inner_classes)
+            classes = self._classes_at(html_output, idx)
+            self.assertIn('anchor-start', classes)
+            self.assertNotIn('anchor-end', classes)
 
     def test_dollar_anchors_carry_is_anchor_end(self):
-        """Both synthesized $ before \\n and string-end $ carry is-anchor-end
-        (not is-anchor-start). The CSS collapses these (display:none) in index
+        """Both synthesized $ before \\n and string-end $ carry anchor-end
+        (not anchor-start). The CSS collapses these (display:none) in index
         mode so \\n displays sit flush with the end of their line."""
         value = "a\nb"
         model = init_model(value)
         html_output = visualize(value, model, None, None)
         for idx in (2, 6):  # synth $ before \n, $ at string end
-            container_classes = self._container_classes_at(html_output, idx)
-            inner_classes = self._classes_at(html_output, idx)
-            self.assertIn('is-anchor-end', container_classes)
-            self.assertNotIn('is-anchor-start', container_classes)
-            self.assertIn('is-anchor-end', inner_classes)
-            self.assertNotIn('is-anchor-start', inner_classes)
+            classes = self._classes_at(html_output, idx)
+            self.assertIn('anchor-end', classes)
+            self.assertNotIn('anchor-start', classes)
 
 
 # =============================================================================
@@ -5702,8 +6445,8 @@ class TestSmallParameter(unittest.TestCase):
         """Small mode's fast path doesn't generate the ^/$ regex anchors."""
         model = init_model("hello")
         output = visualize("hello", model, None, None, small=True)
-        self.assertNotIn('is-regex-anchor', output)
-        self.assertNotIn('is-special', output)
+        self.assertNotIn('regex-anchor', output)
+        self.assertNotIn('special', output)
 
     def test_small_mode_omits_highlights(self):
         """Small mode skips selection/highlight computation entirely."""
@@ -5711,7 +6454,7 @@ class TestSmallParameter(unittest.TestCase):
         model['search'] = r"r'l'"
         output = visualize("hello", model, None, None, small=True)
         self.assertNotIn('highlight', output)
-        self.assertNotIn('char-span', output)
+        self.assertNotIn('chr', output)
 
     def test_small_mode_prints_raw_string(self):
         """Small mode prints the string as one plain text node (wrapped in quotes),
@@ -5774,7 +6517,7 @@ class TestSmallModeQuotes(unittest.TestCase):
 class TestSmallModeIsNotCharAddressable(unittest.TestCase):
     """The non-focused preview carries no per-character addressing at all.
 
-    snc-text-start is the front-end's hook for turning a caret offset into an
+    snc-idx-start is the front-end's hook for turning a caret offset into an
     internal index, and the preview cannot honour it: a newline prints one
     character but spends three internal indices ($, the \\n display, ^), so
     every character after one would name the wrong index. Nothing needs those
@@ -5784,18 +6527,18 @@ class TestSmallModeIsNotCharAddressable(unittest.TestCase):
 
     def test_no_text_start_index_single_line(self):
         model = init_model("abc")
-        self.assertNotIn('snc-text-start', visualize("abc", model, None, None, small=True))
+        self.assertNotIn('snc-idx-start', visualize("abc", model, None, None, small=True))
 
     def test_no_text_start_index_multiline(self):
         model = init_model("ab\ncd\nef")
-        self.assertNotIn('snc-text-start',
+        self.assertNotIn('snc-idx-start',
                          visualize("ab\ncd\nef", model, None, None, small=True))
 
     def test_no_per_character_mouse_listeners(self):
         """The whole point of the preview is to stay cheap: one text node, not
         one element per character."""
         output = visualize("abcdef", init_model("abcdef"), None, None, small=True)
-        self.assertNotIn('snc-mouse=', output)
+        self.assertNotIn('snc-idx=', output)
 
     def test_multiline_preview_is_still_one_text_node(self):
         """Newlines must not split the string into a span per line."""
@@ -5812,87 +6555,89 @@ class TestSmallModeIsNotCharAddressable(unittest.TestCase):
         """Only the preview drops the addressing; the focused render batches
         plain characters into indexed groups exactly as before."""
         output = visualize("abcdef", init_model("abcdef"), None, None, small=False)
-        self.assertIn('snc-text-start', output)
+        self.assertIn('snc-idx-start', output)
 
 
 class TestTextGrouping(unittest.TestCase):
     """Test that consecutive plain characters are grouped into a single span
-    using snc-text-start instead of individual snc-mouse spans."""
+    using snc-idx-start instead of individual snc-idx spans."""
 
     def test_plain_string_uses_grouped_span(self):
         """For 'hello' with no highlights/hover, the 5 plain chars should be
-        in a single snc-text-start span, not 5 individual snc-mouse spans."""
+        in a single snc-idx-start span, not 5 individual snc-idx spans."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
-        self.assertIn('snc-text-start="1"', output)
+        self.assertIn('snc-idx-start="1"', output)
         import re as _re
-        individual_plain = _re.findall(r'snc-mouse="[1-5]"', output)
+        individual_plain = _re.findall(r'snc-idx="[1-5]"', output)
         self.assertEqual(len(individual_plain), 0,
-                         "Plain chars should not have individual snc-mouse spans")
+                         "Plain chars should not have individual snc-idx spans")
 
     def test_grouped_span_contains_all_plain_chars(self):
         """The grouped span's text content should contain the full plain text."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
-        self.assertIn('snc-text-start="1"', output)
+        self.assertIn('snc-idx-start="1"', output)
         import re as _re
-        match = _re.search(r'<span [^>]*snc-text-start="1"[^>]*>([^<]+)</span>', output)
+        match = _re.search(r'<span [^>]*snc-idx-start="1"[^>]*>([^<]+)</span>', output)
         self.assertIsNotNone(match, "Should find grouped span starting at index 1")
         self.assertEqual(match.group(1), "hello")
 
     def test_special_chars_always_individual_spans(self):
-        """Prefix/suffix markers and \\n/\\t always get individual snc-mouse spans."""
+        """Prefix/suffix markers and \\n/\\t always get individual snc-idx spans."""
         model = init_model("a\nb")
         output = visualize("a\nb", model, None, None)
         # Prefix anchor (^) at internal index 0.
-        self.assertIn('snc-mouse="0"', output)
+        self.assertIn('snc-idx="0"', output)
         # Newline expands to multiple individual char spans.
         for special_idx in [2, 3, 4]:
-            self.assertIn(f'snc-mouse="{special_idx}"', output,
+            self.assertIn(f'snc-idx="{special_idx}"', output,
                           f"Newline expansion index {special_idx} should be individual span")
 
     def test_group_flushes_at_newline(self):
         """'ab\\ncd' should produce groups for 'ab' and 'cd', with \\n chars individual."""
         model = init_model("ab\ncd")
         output = visualize("ab\ncd", model, None, None)
-        self.assertIn('snc-text-start="1"', output)
-        self.assertIn('snc-text-start="6"', output)
+        self.assertIn('snc-idx-start="1"', output)
+        self.assertIn('snc-idx-start="6"', output)
 
     def test_group_flushes_at_tab(self):
         """'ab\\tcd' should produce groups for 'ab' and 'cd', with \\t individual."""
         model = init_model("ab\tcd")
         output = visualize("ab\tcd", model, None, None)
-        self.assertIn('snc-text-start="1"', output)
-        self.assertIn('snc-text-start="4"', output)
-        self.assertIn('snc-mouse="3"', output)
+        self.assertIn('snc-idx-start="1"', output)
+        self.assertIn('snc-idx-start="4"', output)
+        self.assertIn('snc-idx="3"', output)
 
-    def test_hover_breaks_group(self):
-        """When hoverIdx points to a plain char, that char gets its own span
-        and the surrounding chars are in separate groups."""
+    def test_hover_does_not_break_group(self):
+        """hoverIdx used to pull the hovered plain char out of its text group
+        to carry a 'hover' class no CSS rule styled. It renders nothing now,
+        so the group stays intact."""
         model = init_model("hello")
         model['hoverIdx'] = 4
         output = visualize("hello", model, None, None)
-        self.assertIn('snc-mouse="4"', output)
-        self.assertIn('snc-text-start="1"', output)
-        self.assertIn('snc-text-start="5"', output)
+        self.assertNotIn('snc-idx="4"', output)
+        self.assertIn('snc-idx-start="1"', output)
 
-    def test_highlight_breaks_group(self):
-        """Highlighted chars get individual spans; surrounding plain chars are grouped."""
+    def test_highlight_boundaries_break_group(self):
+        """Segment boundary chars get individual spans (rounding, labels,
+        handles); interior match chars group like plain text, with the
+        segment's classes (TestMatchInteriorGrouping)."""
         model = init_model("hello world")
         model['search'] = r"r'(hello)'"
         output = visualize("hello world", model, None, None)
-        import re as _re
-        for idx in range(1, 6):
-            self.assertIn(f'snc-mouse="{idx}"', output,
-                          f"Highlighted char at index {idx} should be individual span")
-        self.assertIn('snc-text-start=', output)
+        for idx in (1, 5):
+            self.assertIn(f'snc-idx="{idx}"', output,
+                          f"Boundary char at index {idx} should be individual span")
+        self.assertIn('snc-idx-start="2"', output)  # interior 'ell'
+        self.assertIn('snc-idx-start="6"', output)  # plain ' world'
 
     def test_start_index_correctness_across_groups(self):
-        """With 'ab\\tcd', verify snc-text-start values match internal indexing."""
+        """With 'ab\\tcd', verify snc-idx-start values match internal indexing."""
         model = init_model("ab\tcd")
         output = visualize("ab\tcd", model, None, None)
         import re as _re
-        starts = _re.findall(r'snc-text-start="(\d+)"', output)
+        starts = _re.findall(r'snc-idx-start="(\d+)"', output)
         self.assertIn('1', starts, "First group should start at index 1")
         self.assertIn('4', starts, "Second group should start at index 4")
 
@@ -5901,7 +6646,7 @@ class TestTextGrouping(unittest.TestCase):
         model = init_model("a<b")
         output = visualize("a<b", model, None, None)
         import re as _re
-        match = _re.search(r'<span [^>]*snc-text-start="1"[^>]*>(.*?)</span>', output)
+        match = _re.search(r'<span [^>]*snc-idx-start="1"[^>]*>(.*?)</span>', output)
         self.assertIsNotNone(match)
         self.assertIn('&lt;', match.group(1))
 
@@ -5909,22 +6654,21 @@ class TestTextGrouping(unittest.TestCase):
         """Even a single plain char between specials should use grouped span."""
         model = init_model("\na\n")
         output = visualize("\na\n", model, None, None)
-        self.assertIn('snc-text-start="4"', output)
+        self.assertIn('snc-idx-start="4"', output)
 
     def test_empty_string_no_grouped_spans(self):
-        """An empty string should have no snc-text-start spans."""
+        """An empty string should have no snc-idx-start spans."""
         model = init_model("")
         output = visualize("", model, None, None)
-        self.assertNotIn('snc-text-start', output)
+        self.assertNotIn('snc-idx-start', output)
 
-    def test_grouped_span_uses_text_group_class(self):
-        """Grouped spans use the string-visualizer-text-group class for shared styling."""
+    def test_grouped_span_has_no_class(self):
+        """Grouped text spans carry only snc-idx-start - no CSS class (nothing
+        styles them, so the class attribute would just bloat the HTML)."""
         model = init_model("hello")
         output = visualize("hello", model, None, None)
-        import re as _re
-        match = _re.search(r'<span ([^>]*)snc-text-start="1"', output)
-        self.assertIsNotNone(match)
-        self.assertIn('string-visualizer-text-group', match.group(1))
+        self.assertNotIn('string-visualizer-text-group', output)
+        self.assertIn('<span snc-idx-start="1">', output)
 
 
 # =============================================================================
@@ -6947,7 +7691,7 @@ class TestStringSearchHighlighting(unittest.TestCase):
         value = "hello world"
         highlights = parse_regex_for_highlighting("'hello'", value)
         self.assertEqual(len(highlights), 1)
-        start, end, seg_type, _, _, _ = highlights[0]
+        start, end, seg_type, _, _, _, _ = highlights[0]
         self.assertEqual(seg_type, 'literal')
 
     def test_many_match(self):
@@ -9376,7 +10120,7 @@ class TestActionButtonRendering(unittest.TestCase):
         """Fuzzy pattern dropdown panel uses code font (has 'code' class)."""
         model = init_model("hello world")
         model['search'] = r"r'(.*)'"
-        model['openDropdown'] = {'id': 'fuzzy-pattern-0', 'segmentIndex': 0}
+        model['openDropdown'] = {'id': 'fuzzy-pattern-0-0', 'segmentIndex': 0, 'matchIndex': 0}
         html_output = visualize("hello world", model, None, None, max_width=400)
         self.assertIn('snc-dropdown-panel left code"', html_output)
 
@@ -9387,7 +10131,7 @@ class TestActionButtonRendering(unittest.TestCase):
         overrides .snc-dropdown-category-name back to UI font even inside .code panels)."""
         model = init_model("hello world")
         model['search'] = r"r'(.*)'"
-        model['openDropdown'] = {'id': 'repetition-0', 'segmentIndex': 0}
+        model['openDropdown'] = {'id': 'repetition-0-0', 'segmentIndex': 0, 'matchIndex': 0}
         html_output = visualize("hello world", model, None, None, max_width=400)
         self.assertIn('snc-dropdown-panel categorized right code"', html_output)
         self.assertIn('snc-dropdown-category-name">Repetition</div>', html_output)
@@ -12575,11 +13319,11 @@ class TestSliceResizeHandles(unittest.TestCase):
         model = init_model(value)
         model['search'] = '2:5'
         html_str = visualize(value, model, None, None)
-        self.assertIn('char-span-resize-handle left', html_str)
-        self.assertIn('char-span-resize-handle right', html_str)
+        self.assertIn('chr-resize-handle left', html_str)
+        self.assertIn('chr-resize-handle right', html_str)
         # Handles are wired to HandleMouseDown for segment 0.
-        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;)", html_str)
-        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;)", html_str)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;, match_index=0)", html_str)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;, match_index=0)", html_str)
 
     def test_visualize_no_handles_for_single_index(self):
         """A bare-index pick (single centered label) does NOT render handles."""
@@ -12587,7 +13331,7 @@ class TestSliceResizeHandles(unittest.TestCase):
         model = init_model(value)
         model['search'] = '2'
         html_str = visualize(value, model, None, None)
-        self.assertNotIn('char-span-resize-handle', html_str)
+        self.assertNotIn('chr-resize-handle', html_str)
 
     def test_handle_drag_right_extends_slice(self):
         """Dragging the right handle past the current end extends the slice.
@@ -13391,10 +14135,10 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = '2:7'
         html_str = visualize(value, model, None, None)
-        # group_0 char wrapper carries the slice expression.
+        # group_0 char span carries the slice expression.
         self.assertRegex(
             html_str,
-            rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("str[2:7]"))}',
+            rf'<span class="chr[^"]*"[^>]*{re.escape(exp_attr("str[2:7]"))}',
         )
         # start chip carries the literal start index.
         self.assertIn(exp_attr('2'), html_str)
@@ -13408,7 +14152,7 @@ class TestSegmentSelection(unittest.TestCase):
         html_str = visualize(value, model, None, None)
         self.assertRegex(
             html_str,
-            rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("str[5]"))}',
+            rf'<span class="chr[^"]*"[^>]*{re.escape(exp_attr("str[5]"))}',
         )
 
     # --- literal string / string-expression searches ------------------------
@@ -13656,9 +14400,9 @@ class TestSegmentSelection(unittest.TestCase):
         html_str = visualize(value, model, None, None)
         self.assertIn('segment-selected', html_str)
 
-    def test_visualize_segment_mode_snc_py_exp_on_char_wrappers_not_chips(self):
+    def test_visualize_segment_mode_snc_py_exp_on_char_spans_not_chips(self):
         """Per spec: snc-py-exps for prefix/group/suffix segments goes on the
-        highlighted char-span-container itself, not as a floating chip above.
+        highlighted chr itself, not as a floating chip above.
 
         Only the start/end indices remain as floating labels.
         """
@@ -13667,21 +14411,21 @@ class TestSegmentSelection(unittest.TestCase):
         model['tool'] = 'pick'
         model['search'] = r"r'world'1"
         html_str = visualize(value, model, None, None)
-        # Wrapper for first match's chars carries snc-py-exps pointing at $[0].
+        # First match's char spans carry snc-py-exps pointing at $[0].
         self.assertRegex(
             html_str,
-            rf'<span class="char-span-container"[^>]*{re.escape(exp_attr("$[0]"))}',
+            rf'<span class="chr[^"]*"[^>]*{re.escape(exp_attr("$[0]"))}',
         )
-        # Wrapper for prefix chars carries snc-py-exps for the slice expression.
+        # Prefix char spans carry snc-py-exps for the slice expression.
         self.assertRegex(
             html_str,
-            rf'<span class="char-span-container"[^>]*'
+            rf'<span class="chr[^"]*"[^>]*'
             rf'{re.escape(exp_attr("str[:$.start()]"))}',
         )
-        # Wrapper for suffix chars carries snc-py-exps for the tail slice.
+        # Suffix char spans carry snc-py-exps for the tail slice.
         self.assertRegex(
             html_str,
-            rf'<span class="char-span-container"[^>]*'
+            rf'<span class="chr[^"]*"[^>]*'
             rf'{re.escape(exp_attr("str[$.end():]"))}',
         )
         # No floating chip with the segment's label expression text - only the
@@ -14543,6 +15287,181 @@ class TestMenuRowReadings(unittest.TestCase):
     def test_a_loop_row_writes_a_statement_too(self):
         rows = self.readings(self.predicate_render(), 'Over match objects')
         self.assertEqual([r.get('label') for r in rows], [None])
+
+
+# =============================================================================
+# Every Match Is A Place To Work From
+# =============================================================================
+
+class TestEveryMatchCarriesSegmentIndices(unittest.TestCase):
+    """Highlights name their pattern segment AND which occurrence they are.
+
+    A segment index is a position in the *pattern*, so it is the same number in
+    every match; the match index is what tells two occurrences of it apart.
+    """
+
+    def test_each_occurrence_gets_the_same_segment_index(self):
+        highlights = parse_regex_for_highlighting(r"r'(ab)'", 'ab ab ab')
+        self.assertEqual([h[5] for h in highlights], [0, 0, 0])
+        self.assertEqual([h[6] for h in highlights], [0, 1, 2])
+
+    def test_multi_segment_pattern_numbers_segments_within_each_match(self):
+        highlights = parse_regex_for_highlighting(r"r'(a)(b)'", 'ab ab')
+        self.assertEqual([h[5] for h in highlights], [0, 1, 0, 1])
+        self.assertEqual([h[6] for h in highlights], [0, 0, 1, 1])
+
+    def test_first_match_mode_still_yields_one_match(self):
+        highlights = parse_regex_for_highlighting(r"r'(ab)'1", 'ab ab ab')
+        self.assertEqual([h[6] for h in highlights], [0])
+
+
+class TestExtendFromAnyMatch(unittest.TestCase):
+    """Clicking beside any occurrence extends the regex, rather than throwing
+    it away and starting a new selection from that spot."""
+
+    var_and_exp = ('str1', 'str1')
+
+    def down_up(self, model, value, idx, top_half=True):
+        model, _ = update(make_mouse_down_event(idx, top_half=top_half, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(idx, legacy_index=False),
+                          self.var_and_exp, model, value)
+        return model
+
+    def test_click_right_of_the_last_match_appends_a_segment(self):
+        # 'foo1 foo2 foo3': internal index = string index + 1, so the '3' of the
+        # third match sits at 14, right where that match ends.
+        value = 'foo1 foo2 foo3'
+        model = init_model(value)
+        model['search'] = r"r'(foo)'"
+        model = self.down_up(model, value, 14)
+        self.assertEqual(model['search'], r"r'(foo)(3)'")
+
+    def test_click_right_of_a_middle_match_appends_a_segment(self):
+        value = 'foo1 foo2 foo3'
+        model = init_model(value)
+        model['search'] = r"r'(foo)'"
+        model = self.down_up(model, value, 9)  # the '2' of the second match
+        self.assertEqual(model['search'], r"r'(foo)(2)'")
+
+    def test_click_left_of_a_later_match_prepends_a_segment(self):
+        # 'xfoo yfoo': the 'y' at internal 6 abuts the second match's start (7).
+        value = 'xfoo yfoo'
+        model = init_model(value)
+        model['search'] = r"r'(foo)'"
+        model = self.down_up(model, value, 6)
+        self.assertEqual(model['search'], r"r'(y)(foo)'")
+
+    def test_click_inside_a_later_matchs_fuzzy_segment_splits_it(self):
+        # 'a1b\na2b': the second match's (.*) covers the '2' at internal 8.
+        value = 'a1b\na2b'
+        model = init_model(value)
+        model['search'] = r"r'(a)(.*)(b)'"
+        model, _ = update(make_mouse_down_event(8, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['insertAfterSegment'], 1)
+        self.assertEqual(model['search'], r"r'(a)(.*)(b)'")
+
+    def test_a_click_that_abuts_nothing_still_starts_over(self):
+        # 'foo1   foo2': internal 6 is the middle of the three spaces, touching
+        # neither the first match (ends at 4) nor the second (starts at 8).
+        value = 'foo1   foo2'
+        model = init_model(value)
+        model['search'] = r"r'(foo)'"
+        model = self.down_up(model, value, 6)
+        self.assertEqual(model['search'], r"r'\ '")
+
+
+class TestHandleDragOnAnyMatch(unittest.TestCase):
+    """A resize handle resizes its own occurrence's span, not the first one's."""
+
+    var_and_exp = ('str1', 'str1')
+
+    def test_dragging_the_second_matchs_right_handle_uses_that_match(self):
+        # 'a1 a2': the second 'a' is at internal 4, its '2' at 5.
+        value = 'a1 a2'
+        model = init_model(value)
+        model['search'] = r"r'(a)'"
+        model, _ = update(make_handle_mouse_down_event(0, 'right', match_index=1),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(5, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'(a2)'")
+
+    def test_dragging_the_first_matchs_right_handle_still_uses_the_first(self):
+        value = 'a1 a2'
+        model = init_model(value)
+        model['search'] = r"r'(a)'"
+        model, _ = update(make_handle_mouse_down_event(0, 'right', match_index=0),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(2, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'(a1)'")
+
+
+class TestEveryMatchLooksTheSame(unittest.TestCase):
+    """No occurrence is rendered as the privileged one."""
+
+    def rendered(self, value, search, **model_kw):
+        model = init_model(value)
+        model['search'] = search
+        model.update(model_kw)
+        return visualize(value, model, None, None)
+
+    def test_every_matched_char_is_interactive(self):
+        out = self.rendered('ab ab', r"r'(ab)'")
+        self.assertEqual(out.count('is-interactive'), 4)
+
+    def test_idle_matches_offer_no_resize_handles(self):
+        # Uniformity holds the other way now: no match has handles until one
+        # is made active by pointing at it (TestHandlesOnlyOnActiveSegment).
+        out = self.rendered('ab ab', r"r'(ab)'")
+        self.assertEqual(out.count('chr-resize-handle'), 0)
+
+    def test_pick_mode_still_singles_out_the_first_match(self):
+        out = self.rendered('ab ab', r"r'(ab)'", tool='pick')
+        self.assertEqual(out.count('segment-group'), 2)  # one match, 2 chars
+
+
+class TestScrollToFirstMatch(unittest.TestCase):
+    """The first match is scrolled into view when the user did not point at
+    one themselves -- typing a search, or switching to the pick tool."""
+
+    var_and_exp = ('str1', 'str1')
+
+    def scroll_target_index(self, html_out):
+        """The internal index of the char carrying snc-scroll-to-match."""
+        m = re.search(r'snc-idx="(\d+)"[^>]*snc-scroll-to-match', html_out)
+        return int(m.group(1)) if m else None
+
+    def test_selecting_the_pick_tool_scrolls_to_the_match(self):
+        value = 'x' * 200 + 'needle'
+        model = init_model(value)
+        model['search'] = r"r'(needle)'"
+        model, _ = update({'pythonEventStr': repr(ToolSelect(tool='pick')),
+                           'eventJSON': {}},
+                          self.var_and_exp, model, value)
+        self.assertTrue(model['_scroll_to_match'])
+        out = visualize(value, model, None, None)
+        self.assertEqual(self.scroll_target_index(out), 201)
+
+    def test_typing_a_search_scrolls_to_the_match(self):
+        value = 'x' * 200 + 'needle'
+        model = init_model(value)
+        model, _ = update({'pythonEventStr': repr(SearchBoxInput(value=r"r'needle'")),
+                           'eventJSON': {}},
+                          self.var_and_exp, model, value)
+        self.assertTrue(model['_scroll_to_match'])
+
+    def test_clicking_in_the_string_does_not_scroll(self):
+        value = 'x' * 200 + 'needle'
+        model = init_model(value)
+        model['search'] = r"r'(needle)'"
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertFalse(model['_scroll_to_match'])
+        out = visualize(value, model, None, None)
+        self.assertNotIn('snc-scroll-to-match', out)
 
 
 if __name__ == '__main__':

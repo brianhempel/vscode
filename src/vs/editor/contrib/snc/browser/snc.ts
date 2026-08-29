@@ -115,7 +115,7 @@ function describeEventTarget(node: Node | null, root: Element): unknown {
 		const el = node instanceof Element ? node : node?.parentElement;
 		if (!el) { return undefined; }
 		const attrs: Record<string, string> = {};
-		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-mouse', 'snc-mouse-down', 'snc-mouse-up', 'snc-mouse-move', 'snc-key-down', 'snc-input', 'snc-text-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
+		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-idx', 'snc-mouse-down', 'snc-mouse-up', 'snc-mouse-move', 'snc-notify-mouse-is-up', 'snc-hover-moves', 'snc-key-down', 'snc-input', 'snc-idx-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
 			const v = el.getAttribute(name);
 			if (v !== null) { attrs[name] = v.length > 300 ? v.slice(0, 300) + '…' : v; }
 		}
@@ -1509,6 +1509,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		let node = ev.target as Node;
 		let el: Element | null = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : (node.parentElement);
+		const startEl = el;
 
 		// A visualizer rendered small is a non-focused preview, and Python drops
 		// every event on a non-focused child except the mousedown that pins focus
@@ -1519,17 +1520,30 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			return;
 		}
 
+		// Present on a visualizer's container only while it believes a drag is
+		// in progress. It means two things here: moves over plain chars and
+		// grouped text are wanted (a drag has to track wherever the pointer
+		// goes), and a mouseup no listener hears should be reported once (the
+		// notify fallback at the bottom). Idle, match chars still hear moves
+		// through their explicit snc-mouse-move; everything else stays silent,
+		// since each move costs a full program run.
+		const dragTrackingEl = startEl?.closest('[snc-notify-mouse-is-up]') ?? null;
+
 		while (el && el != this.domNode) {
-			if (el.hasAttribute(attr_name) || el.hasAttribute(`snc-mouse`)) {
+			if (el.hasAttribute(attr_name) || el.hasAttribute(`snc-idx`)) {
 				let pythonEventStr: string;
 				if (el.hasAttribute(attr_name)) {
 					pythonEventStr = el.getAttribute(attr_name) ?? '';
+				} else if (attr_name === 'snc-mouse-move' && !dragTrackingEl) {
+					// The shorthand's move expansion is drag-only; outside a
+					// drag a move over a plain char has nothing to say.
+					pythonEventStr = '';
 				} else {
-					// snc-mouse="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
+					// snc-idx="5" is shorthand for snc-mouse-move="MouseMove(5)" snc-mouse-down="MouseDown(5)" snc-mouse-up="MouseUp(5)"
 					pythonEventStr = {
-						'snc-mouse-move': `MouseMove(${el.getAttribute(`snc-mouse`)})`,
-						'snc-mouse-down': `MouseDown(${el.getAttribute(`snc-mouse`)})`,
-						'snc-mouse-up': `MouseUp(${el.getAttribute(`snc-mouse`)})`,
+						'snc-mouse-move': `MouseMove(${el.getAttribute(`snc-idx`)})`,
+						'snc-mouse-down': `MouseDown(${el.getAttribute(`snc-idx`)})`,
+						'snc-mouse-up': `MouseUp(${el.getAttribute(`snc-idx`)})`,
 					}[attr_name] ?? '';
 				}
 				// The shorthand covers move/down/up only. A mouseout over it is
@@ -1551,13 +1565,20 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			el = el.parentElement;
 		}
 
-		// Fallback: use caretRangeFromPoint for grouped text spans (snc-text-start)
+		// Fallback: use caretRangeFromPoint for grouped text spans (snc-idx-start)
 		const caretRange = document.caretRangeFromPoint(ev.clientX, ev.clientY);
 		if (caretRange && caretRange.startContainer.nodeType === Node.TEXT_NODE) {
 			let groupEl = caretRange.startContainer.parentElement;
 			while (groupEl && groupEl !== this.domNode) {
-				const startAttr = groupEl.getAttribute('snc-text-start');
+				const startAttr = groupEl.getAttribute('snc-idx-start');
 				if (startAttr !== null) {
+					// Moves over grouped text are drag-only, like the shorthand
+					// above -- except a grouped match interior (snc-hover-moves)
+					// hears idle hovers too: hovering a match is how its labels
+					// appear.
+					if (attr_name === 'snc-mouse-move' && !dragTrackingEl && !groupEl.hasAttribute('snc-hover-moves')) {
+						return;
+					}
 					const textLen = caretRange.startContainer.textContent?.length ?? 1;
 					const offset = Math.min(caretRange.startOffset, textLen - 1);
 					const charIndex = parseInt(startAttr) + offset;
@@ -1579,6 +1600,21 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					return;
 				}
 				groupEl = groupEl.parentElement;
+			}
+		}
+
+		// The mouse is up (a release, or a move showing no buttons) and no
+		// listener above heard it, but the visualizer believes a drag is in
+		// progress: tell it once so the drag can finalize. The attribute comes
+		// off the DOM here, so a burst of no-button moves costs one run, not
+		// one per move; the next render decides whether to ask again.
+		if (attr_name === 'snc-mouse-up' || (attr_name === 'snc-mouse-move' && ev.buttons === 0)) {
+			if (dragTrackingEl) {
+				const notifyStr = dragTrackingEl.getAttribute('snc-notify-mouse-is-up') ?? '';
+				dragTrackingEl.removeAttribute('snc-notify-mouse-is-up');
+				if (notifyStr !== '') {
+					this.onPointerEvent(this.wrapWithChildKeys(notifyStr, dragTrackingEl.parentElement, this.domNode), ev);
+				}
 			}
 		}
 	}
@@ -1915,11 +1951,27 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			scrollTarget.scrollIntoView({ block: 'nearest' });
 		}
 
-		// Restore scroll/focus after DOM replacement settles. Restore scroll first
-		// so focus restoration with preventScroll does not fight with scroll offsets.
+		// Restore scroll synchronously: replacing innerHTML reset every scrollable
+		// container to 0, and mouse events hit-test the DOM as it stands when they
+		// fire. Deferring the restore a frame (as focus restoration below does) let
+		// a drag's mousemove land on the string before it was scrolled back,
+		// reading the char index under the pointer from the wrong end of the
+		// string and yanking the selection backward.
 		const shouldRestoreScroll = savedWidgetScrollTop !== 0
 			|| savedWidgetScrollLeft !== 0
 			|| savedScrollOffsets.some((offset) => offset.top !== 0 || offset.left !== 0);
+		if (shouldRestoreScroll) {
+			this.domNode.scrollTop = savedWidgetScrollTop;
+			this.domNode.scrollLeft = savedWidgetScrollLeft;
+			const newScrollableElements = Array.from(this.domNode.querySelectorAll('*'))
+				.filter(dom.isHTMLElement)
+				.filter(VisualizationWidget.isScrollableElement);
+			const restoreCount = Math.min(savedScrollOffsets.length, newScrollableElements.length);
+			for (let i = 0; i < restoreCount; i++) {
+				newScrollableElements[i].scrollTop = savedScrollOffsets[i].top;
+				newScrollableElements[i].scrollLeft = savedScrollOffsets[i].left;
+			}
+		}
 		// [autofocus] elements may live inside a hoisted dropdown panel
 		// (which is taken out of this.domNode so it can be position:fixed).
 		// Look in both places.
@@ -1948,25 +2000,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 		}
 
-		if (shouldRestoreScroll || focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
+		if (focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
 			// Defer to next frame so layout/DOM updates settle, and ensure only the
-			// latest update in a burst is allowed to restore scroll/focus.
+			// latest update in a burst is allowed to restore focus. Scroll was
+			// restored synchronously above, so focus restoration with
+			// preventScroll does not fight with scroll offsets.
 			dom.getWindow(this.domNode).requestAnimationFrame(() => {
 				if (currentFocusRestoreVersion !== this.focusRestoreVersion) {
 					return;
-				}
-
-				if (shouldRestoreScroll) {
-					this.domNode.scrollTop = savedWidgetScrollTop;
-					this.domNode.scrollLeft = savedWidgetScrollLeft;
-					const newScrollableElements = Array.from(this.domNode.querySelectorAll('*'))
-						.filter(dom.isHTMLElement)
-						.filter(VisualizationWidget.isScrollableElement);
-					const restoreCount = Math.min(savedScrollOffsets.length, newScrollableElements.length);
-					for (let i = 0; i < restoreCount; i++) {
-						newScrollableElements[i].scrollTop = savedScrollOffsets[i].top;
-						newScrollableElements[i].scrollLeft = savedScrollOffsets[i].left;
-					}
 				}
 
 				// Scroll to first search match (after scroll restoration so we can
@@ -2027,10 +2068,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	private scrollToFirstMatch(matchTarget: HTMLElement): void {
+		// Overflowing is not the same as scrolling. The string visualizer puts
+		// a plain <div> inside its scroll box (to restore white-space:pre out
+		// of the flex context), and that div reports the full content height
+		// against a clamped client height -- so an overflow-only test stops on
+		// it and then sets scrollTop on something that cannot scroll. Ask for
+		// an element that actually scrolls.
 		let container: HTMLElement | null = matchTarget.parentElement;
 		while (container && container !== this.domNode) {
-			if (container.scrollHeight > container.clientHeight
-				|| container.scrollWidth > container.clientWidth) {
+			if (VisualizationWidget.isScrollableElement(container)) {
 				break;
 			}
 			container = container.parentElement;
@@ -3475,6 +3521,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * the next record and a trailing record after the pointer settles.
 	 */
 	private readonly moveLogCoalescer = new StudyLogCoalescer('widget.mouseMove', 250);
+
+	/**
+	 * The last mousemove sent to Python, as line:visIndex:eventStr:payload.
+	 * A repeat of it is skipped (same model in, same model out); anything that
+	 * can change the model -- another event, a run from an edit -- clears it,
+	 * so the same move becomes worth sending again.
+	 */
+	private lastSentMoveKey: string | null = null;
 	/** What each run was started for, keyed by run id, so run.end can say. */
 	private runTriggerById: Map<string, string> = new Map();
 	private runStartWallById: Map<string, number> = new Map();
@@ -4961,15 +5015,22 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private onPointerEvent(lineNumber: number, visIndex: number, pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect): void {
 		const rect = overrideRect ?? (ev.target as HTMLElement).getBoundingClientRect();
 
-		const eventJSON = { type: ev.type, button: ev.button, buttons: ev.buttons, detail: ev.detail, offsetY: ev.clientY - rect.top, elementHeight: rect.height, timeStamp: ev.timeStamp, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey };
+		// What Python needs to interpret the event: buttons for drag state,
+		// detail for double-clicks, modifiers for tool overrides. offsetY /
+		// elementHeight / timeStamp / button ride along only in the study log
+		// below -- nothing in Python reads them, and keeping them out of the
+		// payload makes identical moves *identical*, so repeats can be deduped
+		// instead of each costing a program run.
+		const eventJSON = { type: ev.type, buttons: ev.buttons, detail: ev.detail, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey };
+		const logEventJSON = { ...eventJSON, button: ev.button, offsetY: ev.clientY - rect.top, elementHeight: rect.height, timeStamp: ev.timeStamp };
 
 		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
-		// console.log('SNC viz_pointer event', JSON.stringify(event));
+		console.log('SNC viz_pointer event', JSON.stringify(event));
 		// An empty event string is a no-op in Python that still costs a run
 		// (and supersedes the one in flight). The dispatchers never send one
 		// now; if one turns up it is a bug, and the log should say so.
 		if (pythonEventStr === '') {
-			studyLog.log('widget.emptyEventStr', { ...this.visInfo(lineNumber, visIndex), event: eventJSON, target: describeEventTarget(ev.target as Node, ev.currentTarget as Element) }, this.editor.getModel()?.uri.toString());
+			studyLog.log('widget.emptyEventStr', { ...this.visInfo(lineNumber, visIndex), event: logEventJSON, target: describeEventTarget(ev.target as Node, ev.currentTarget as Element) }, this.editor.getModel()?.uri.toString());
 			return;
 		}
 		if (ev.type === 'mousemove' || ev.type === 'mouseout' || ev.type === 'mouseleave') {
@@ -4977,10 +5038,22 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// from wherever the pointer is now, so it reads as nonsense on its
 			// own; where the pointer went is what makes sense of it.
 			const to = ev.type === 'mousemove' ? undefined : describeEventTarget(ev.relatedTarget as Node | null, ev.currentTarget as Element);
-			this.moveLogCoalescer.note(`${lineNumber}:${visIndex}:${pythonEventStr}`, { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON, ...(to ? { to } : {}) }, this.editor.getModel()?.uri.toString());
+			this.moveLogCoalescer.note(`${lineNumber}:${visIndex}:${pythonEventStr}`, { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: logEventJSON, ...(to ? { to } : {}) }, this.editor.getModel()?.uri.toString());
 		} else {
 			this.moveLogCoalescer.flush();
-			studyLog.log('widget.mouse', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: eventJSON }, this.editor.getModel()?.uri.toString());
+			studyLog.log('widget.mouse', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, event: logEventJSON }, this.editor.getModel()?.uri.toString());
+		}
+
+		if (ev.type === 'mousemove') {
+			// A move identical to the last one sent would re-run the program to
+			// arrive at the same model. The pointer crossing back into a char it
+			// left produces a genuinely new (well, resurrected) key; sub-char
+			// jitter does not.
+			const key = `${lineNumber}:${visIndex}:${pythonEventStr}:${JSON.stringify(eventJSON)}`;
+			if (key === this.lastSentMoveKey) {
+				return;
+			}
+			this.lastSentMoveKey = key;
 		}
 
 		// Rerun on every pointer event to keep backend authoritative for selections
@@ -5064,6 +5137,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private sendEventToPython(event: UiEventSpec) {
+		// Any event other than a move can change the model, which makes a
+		// repeat of the last move meaningful again (moves themselves stamp
+		// their own key in onPointerEvent before reaching this funnel).
+		if (event.eventJSON?.type !== 'mousemove') {
+			this.lastSentMoveKey = null;
+		}
 		// Every event gets its id here, the one place they all funnel through.
 		// The runner echoes the ids it applied back on the item, which is how a
 		// queued event is retired -- see IVisualizationItem.handledEventIds.
@@ -6177,6 +6256,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 
+		// A run from anything but a move (an edit, cursor line change, ...) can
+		// rebuild the model from scratch; a repeat of the last move is then
+		// worth sending again, e.g. to restore hover state the reset dropped.
+		if (!trigger.startsWith('widget:mousemove')) {
+			this.lastSentMoveKey = null;
+		}
+
 		// Committed to a run from here on; see the field's comment.
 		this.runStarting = true;
 
@@ -6409,9 +6495,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 					for (const command of itemCommands ?? []) {
 						this.handleCommand(command);
 					}
-				} else if (msg.type === 'command') {
-					// Handle commands from visualizers
-					this.handleCommand(msg.command);
 				} else if (msg.type === 'loop') {
 					this.onLoopReport(msg.loop);
 				} else if (msg.type === 'end') {
