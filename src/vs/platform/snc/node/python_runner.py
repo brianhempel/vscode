@@ -67,7 +67,8 @@ _ctx_stack: List[List[int]] = []
 # function re-entered under the same path continues its count.
 _ctx_counts: Dict[str, Dict[int, int]] = {}
 # The iteration the editor has pinned each loop/function to, by id line. A
-# loop that isn't here renders every iteration (the editor keeps the last).
+# loop that isn't here renders every iteration (only loops the editor has
+# never seen run; once it knows a loop it pins it, to iteration 0 by default).
 _loop_selections: Dict[int, int] = {}
 # (line, site) -> (type fingerprint, model): a site logged more than once in a
 # run (inside a loop) replays its pending events on the first logging and
@@ -497,8 +498,8 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
 
     # A warm worker stops here: this is the widget the user is interacting with,
     # and everything it needs has just been computed. The first selected
-    # occurrence is the right one -- the editor pins every unpinned loop to its
-    # last iteration, so the selected one is the iteration on screen.
+    # occurrence is the right one -- the editor pins every loop it knows about,
+    # so the selected one is the iteration on screen.
     #
     # Not for an error, though: `execute_code` reports a crash with
     # `log_value(error_line, UncaughtError(e))` at the default site 0, and a

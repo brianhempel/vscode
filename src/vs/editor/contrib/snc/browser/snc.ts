@@ -3419,8 +3419,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * The iteration each loop (or function) is pinned to. A pin is keyed by a
 	 * decoration on the header line rather than the line number, so inserting
 	 * lines above it doesn't re-key it. Sent to Python on every run as
-	 * `loopSelections`; a loop with no pin renders every iteration and the
-	 * last one is what stays on screen.
+	 * `loopSelections`; a loop with no pin shows its first iteration.
 	 */
 	private loopSelections: { decorationId: string; iteration: number }[] = [];
 	/**
@@ -3432,12 +3431,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private loopCounts: Map<number, number> = new Map();
 	/** Counts reported by the run in flight. */
 	private loopCountsThisRun: Map<number, number> = new Map();
-	/**
-	 * What the run in flight was told to show for loops with no pin: their
-	 * last iteration, as counted by the run before. Every iteration would
-	 * otherwise stream in and be drawn in turn -- on each hover's rerun.
-	 */
-	private implicitLoopSelections: Map<number, number> = new Map();
 	private loopSliders: Map<number, LoopSliderWidget> = new Map();
 
 	private _visualizationItems: IVisualizationItem[] = [];
@@ -6059,17 +6052,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	/**
 	 * `{ headerLine: iteration }` as Python takes it: every pinned loop, and
-	 * for the rest the last iteration of the previous run (recorded in
-	 * `implicitLoopSelections` so the run's end can tell whether that guess
-	 * held). A loop nothing is known about yet streams every iteration.
+	 * for the rest the first iteration. Iteration 0 is the one index that
+	 * survives the loop's count changing under an edit -- any run that entered
+	 * the loop at all ran it -- so half-typed code can't move an unpinned loop
+	 * off what is on screen. A loop nothing is known about yet streams every
+	 * iteration.
 	 */
 	private loopSelectionsByLine(): Record<string, number> {
 		const out: Record<string, number> = {};
-		this.implicitLoopSelections = new Map();
 		for (const [line, count] of this.loopCounts) {
 			if (count > 0 && this.selectedIteration(line) === null) {
-				out[String(line)] = count - 1;
-				this.implicitLoopSelections.set(line, count - 1);
+				out[String(line)] = 0;
 			}
 		}
 		for (const selection of this.loopSelections) {
@@ -6119,11 +6112,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 	/**
 	 * A loop finished. Size its slider, and:
 	 *
-	 * - Unpinned, the loop shows its last iteration. Its items arrive one
-	 *   iteration after another, each replacing the last, so a line that ran
-	 *   in some earlier iteration but not the last is still showing the earlier
-	 *   one -- a branch the last iteration didn't take. Now that the count is
-	 *   known, those go.
+	 * - Unpinned, the loop shows its first iteration. A loop nothing was known
+	 *   about streamed every iteration, each item replacing the last, so what
+	 *   is on screen is whatever ran latest. Now that the loop has reported,
+	 *   those go and iteration 0 is what remains.
 	 *
 	 * A pin past the end is dealt with when the run ends (clampLoopSelections):
 	 * a function reports after every call, so mid-run its count is still
@@ -6134,9 +6126,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.loopCounts.set(loop.line, Math.max(this.loopCounts.get(loop.line) ?? 0, loop.count));
 		const selected = this.selectedIteration(loop.line);
 		if (selected === null && loop.kind === 'loop') {
-			// (A function's activations nest under recursion, so "the last
+			// (A function's activations nest under recursion, so "the first
 			// one" isn't one thing; there, whatever arrived last stays.)
-			const last = loop.count - 1;
 			const under = (path: LoopPath): boolean => {
 				const depth = path.findIndex(([line]) => line === loop.line);
 				if (depth < 0 || depth !== loop.path.length) {
@@ -6145,7 +6136,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				return loop.path.every(([line, k], i) => path[i][0] === line && path[i][1] === k);
 			};
 			const kept = this.visualizationItems.filter(item =>
-				!under(item.path) || item.path[loop.path.length][1] === last);
+				!under(item.path) || item.path[loop.path.length][1] === 0);
 			if (kept.length !== this.visualizationItems.length) {
 				this.visualizationItems = kept;
 			}
@@ -6171,15 +6162,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 				changed = true;
 			}
 		}
-		// An unpinned loop was shown at the previous run's last iteration; if
-		// this run counted differently (the code changed), that isn't its last
-		// any more.
-		for (const [line, shown] of this.implicitLoopSelections) {
-			const count = this.loopCountsThisRun.get(line);
-			if (count !== undefined && this.selectedIteration(line) === null && count - 1 !== shown) {
-				changed = true;
-			}
-		}
+		// (An unpinned loop needs nothing here: it is shown at iteration 0, which
+		// stays in range however the count moved.)
 		if (changed) {
 			this.updateLoopSliders();
 			this.scheduleRun();
@@ -6207,7 +6191,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				});
 				this.loopSliders.set(line, slider);
 			}
-			slider.update(count, this.selectedIteration(line) ?? count - 1);
+			slider.update(count, this.selectedIteration(line) ?? 0);
 		}
 		for (const [line, slider] of Array.from(this.loopSliders.entries())) {
 			if (!this.loopCounts.has(line)) {
