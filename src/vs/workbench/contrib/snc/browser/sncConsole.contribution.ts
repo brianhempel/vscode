@@ -10,6 +10,7 @@ import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
 import { EditorAction, EditorContributionInstantiation, registerEditorAction, registerEditorContribution, ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { ISNCConsoleService } from '../common/sncConsole.js';
 import { CONTEXT_IN_SNC_CONSOLE, SNCConsoleEditorContribution } from './sncConsoleEditor.js';
@@ -37,9 +38,13 @@ class SNCConsoleAutoOpenContribution extends Disposable {
 
 	static readonly ID = 'workbench.contrib.sncConsoleAutoOpen';
 
+	/** Widest the console may open as a fraction of the editor area. */
+	private static readonly MAX_WIDTH_FRACTION = 1 / 3;
+
 	constructor(
 		@ISNCConsoleService private readonly consoleService: ISNCConsoleService,
 		@IEditorService private readonly editorService: IEditorService,
+		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
 	) {
 		super();
 		this._register(this.consoleService.onDidRequestOpen(({ filePath, focus }) => this.open(filePath, focus)));
@@ -50,12 +55,37 @@ class SNCConsoleAutoOpenContribution extends Disposable {
 		if (this._store.isDisposed) {
 			return;
 		}
+		const groupsBefore = this.editorGroupsService.count;
 		// Focus only when the program is actually waiting to be typed at; plain
 		// output must not pull the caret out of the source editor.
-		await this.editorService.openEditor(
+		const pane = await this.editorService.openEditor(
 			{ resource, options: { preserveFocus: !focus, pinned: true } },
 			SIDE_GROUP
 		);
+		if (pane && this.editorGroupsService.count > groupsBefore) {
+			this.narrowNewGroup(pane.group);
+		}
+	}
+
+	/**
+	 * A fresh side group is split evenly, which hands half the window to a
+	 * console the user didn't ask to see. Take it down to a third — enough
+	 * for output, but the code stays the thing on screen. Only ever on the
+	 * group this open just created: a group the user already sized is theirs.
+	 */
+	private narrowNewGroup(group: IEditorGroup): void {
+		const available = this.editorGroupsService.getPart(group).contentDimension.width;
+		const size = this.editorGroupsService.getSize(group);
+		// Width narrower than the whole part means the split went sideways; a
+		// group stacked above or below is already as wide as everything else,
+		// and squeezing it would be squeezing the wrong dimension.
+		if (size.width >= available) {
+			return;
+		}
+		const max = Math.round(available * SNCConsoleAutoOpenContribution.MAX_WIDTH_FRACTION);
+		if (size.width > max) {
+			this.editorGroupsService.setSize(group, { width: max, height: size.height });
+		}
 	}
 }
 
