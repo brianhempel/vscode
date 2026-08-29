@@ -226,6 +226,13 @@ span.overlay-content {
 		border-right: 1px solid #00000073;
 		background: rgba(0,0,0,0.06);
 	}
+
+	/* One shared handle straddling the boundary between two segments of the
+	   same match: a bit wider so it's hittable from either side. */
+	&.seam {
+		width: 5px;
+		left: -3px;
+	}
 }
 
 .segment-label-anchor {

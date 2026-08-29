@@ -5038,7 +5038,7 @@ def make_handle_mouse_down_event(segment_index: int, side: str, match_index: int
 
     Args:
         segment_index: Index of the segment whose handle is being dragged
-        side: 'left' or 'right' - which handle
+        side: 'left', 'right', or 'seam' - which handle
         match_index: Which occurrence of the pattern the handle belongs to
     """
     return {
@@ -5653,23 +5653,25 @@ class TestLiteralDragHandleRendering(unittest.TestCase):
         self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;", html_output)
         self.assertNotIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;", html_output)
 
-    def test_mixed_segments_flanked_fuzzy_has_no_handles(self):
-        """In /(hello)(.*)(world)/, a hovered literal gets left+right handles,
-        but the fuzzy segment is flanked on both sides so even hovered it gets
-        NO resize handle."""
+    def test_mixed_segments_interior_boundaries_are_seams(self):
+        """In /(hello)(.*)(world)/, a hovered literal gets a plain handle on
+        its open outer edge and a shared seam handle at the boundary with the
+        fuzzy; the flanked fuzzy has only seams on both sides."""
         model = init_model(self.value)
         model['search'] = r"r'(hello)(.*)(world)'"
         model['hoverIdx'] = 3  # inside the 'hello' literal
         html_output = visualize(self.value, model, None, None)
         self.assertEqual(html_output.count('HandleMouseDown'), 2)
         self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;", html_output)
-        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;", html_output)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;seam&#x27;", html_output)
 
-        # The flanked fuzzy (segment index 1, the ' ' between the literals)
-        # has neither handle even when it is the hovered segment.
+        # Hovering the flanked fuzzy (segment index 1, the ' ' between the
+        # literals) shows the seams on both of its sides, nothing else.
         model['hoverIdx'] = 6
         html_output = visualize(self.value, model, None, None)
-        self.assertNotIn("HandleMouseDown(segment_index=1", html_output)
+        self.assertEqual(html_output.count('HandleMouseDown'), 2)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;seam&#x27;", html_output)
+        self.assertIn("HandleMouseDown(segment_index=2, side=&#x27;seam&#x27;", html_output)
 
 
 # =============================================================================
@@ -6575,6 +6577,169 @@ class TestHandlesOnlyOnActiveSegment(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         out = visualize(self.value, model, None, None)
         self.assertIn('chr-resize-handle', out)
+
+
+class TestSeamHandleRendering(unittest.TestCase):
+    """The boundary between two span-adjacent segments of the same match gets
+    ONE seam handle (owned by the right segment) instead of two stacked,
+    single-segment handles that each move only their own side."""
+
+    var_and_exp = ('x', 'x')
+
+    def rendered(self, value, search, hover=None):
+        model = init_model(value)
+        model['search'] = search
+        if hover is not None:
+            model['hoverIdx'] = hover
+        return visualize(value, model, None, None)
+
+    def test_literal_literal_seam_renders_one_seam_handle(self):
+        # "hello world": (hello) is internal 1-6, (\ world) is 6-12.
+        out = self.rendered("hello world", r"r'(hello)(\ world)'", hover=3)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;seam&#x27;, match_index=0)", out)
+        self.assertEqual(out.count('chr-resize-handle seam'), 1)
+
+    def test_no_plain_handles_at_the_seam(self):
+        # Hovering the left segment: its left (open) edge keeps a handle, but
+        # its right edge is the seam.
+        out = self.rendered("hello world", r"r'(hello)(\ world)'", hover=3)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;, match_index=0)", out)
+        self.assertNotIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;, match_index=0)", out)
+
+        # Hovering the right segment: no plain left handle either.
+        out = self.rendered("hello world", r"r'(hello)(\ world)'", hover=8)
+        self.assertNotIn("HandleMouseDown(segment_index=1, side=&#x27;left&#x27;, match_index=0)", out)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;, match_index=0)", out)
+
+    def test_seam_active_from_either_neighbor(self):
+        for hover in (3, 8):
+            out = self.rendered("hello world", r"r'(hello)(\ world)'", hover=hover)
+            self.assertIn('chr-resize-handle seam', out,
+                          f'seam handle missing with hover at {hover}')
+
+    def test_literal_fuzzy_seam(self):
+        # r'hello\s*': the fuzzy's left edge abuts (hello); its right edge is
+        # open, so it keeps a plain right handle when active.
+        out = self.rendered("hello world", r"r'hello\s*'", hover=3)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;seam&#x27;, match_index=0)", out)
+
+        out = self.rendered("hello world", r"r'hello\s*'", hover=6)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;right&#x27;, match_index=0)", out)
+
+    def test_no_seam_between_abutting_matches(self):
+        # 'abab': the two (ab) matches touch at internal 3, but a seam only
+        # exists inside one match.
+        out = self.rendered('abab', r"r'(ab)'", hover=1)
+        self.assertNotIn('chr-resize-handle seam', out)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;, match_index=0)", out)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;, match_index=0)", out)
+
+    def test_seam_only_on_the_active_match(self):
+        # 'a b a b': two matches of (a)(\ b); only the hovered one shows its seam.
+        out = self.rendered('a b a b', r"r'(a)(\ b)'", hover=1)
+        self.assertEqual(out.count('chr-resize-handle seam'), 1)
+        self.assertIn("HandleMouseDown(segment_index=1, side=&#x27;seam&#x27;, match_index=0)", out)
+        self.assertNotIn("side=&#x27;seam&#x27;, match_index=1", out)
+
+    def test_single_segment_outer_handles_unchanged(self):
+        out = self.rendered("hello world", r"r'(hello)'", hover=3)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;left&#x27;, match_index=0)", out)
+        self.assertIn("HandleMouseDown(segment_index=0, side=&#x27;right&#x27;, match_index=0)", out)
+        self.assertNotIn('chr-resize-handle seam', out)
+
+    def test_idle_renders_no_handles(self):
+        out = self.rendered("hello world", r"r'(hello)(\ world)'")
+        self.assertNotIn('chr-resize-handle', out)
+
+    def test_slice_handles_untouched(self):
+        out = self.rendered("hello world", '2:5')
+        self.assertIn('chr-resize-handle left', out)
+        self.assertIn('chr-resize-handle right', out)
+        self.assertNotIn('chr-resize-handle seam', out)
+
+
+class TestSeamDragUpdate(unittest.TestCase):
+    """Dragging a seam handle moves the boundary: the character under the
+    cursor becomes the first character of the right segment, so one side
+    grows by exactly what the other gives up."""
+
+    var_and_exp = ('x', 'x')
+
+    def start_drag(self, value, search, segment_index, match_index=0):
+        model = init_model(value)
+        model['search'] = search
+        model, _ = update(make_handle_mouse_down_event(segment_index, 'seam',
+                                                       match_index=match_index),
+                          self.var_and_exp, model, value)
+        return model
+
+    def drag_seam(self, value, search, segment_index, to_idx, match_index=0):
+        model = self.start_drag(value, search, segment_index, match_index)
+        model, _ = update(make_mouse_up_event(to_idx, legacy_index=False),
+                          self.var_and_exp, model, value)
+        return model
+
+    def test_literal_literal_drag_right(self):
+        model = self.drag_seam('hello world', r"r'(hello)(\ world)'", 1, 8)
+        self.assertEqual(model['search'], r"r'(hello\ w)(orld)'")
+
+    def test_literal_literal_drag_left(self):
+        model = self.drag_seam('hello world', r"r'(hello)(\ world)'", 1, 3)
+        self.assertEqual(model['search'], r"r'(he)(llo\ world)'")
+
+    def test_clamps_so_each_side_keeps_a_char(self):
+        model = self.drag_seam('hello world', r"r'(hello)(\ world)'", 1, 0)
+        self.assertEqual(model['search'], r"r'(h)(ello\ world)'")
+
+        model = self.drag_seam('hello world', r"r'(hello)(\ world)'", 1, 20)
+        self.assertEqual(model['search'], r"r'(hello\ worl)(d)'")
+
+    def test_literal_grows_into_fuzzy(self):
+        # 'a  b' with r'a\s*b': the literal 'a' absorbs a space; the fuzzy is
+        # re-synthesized over its remaining span.
+        model = self.drag_seam('a  b', r"r'a\s*b'", 1, 3)
+        self.assertEqual(model['search'], r"r'a\ \s*b'")
+
+    def test_fuzzy_yields_to_literal(self):
+        # Drag the \s*|b seam left: 'b' absorbs a space; the shrunk fuzzy is
+        # lazified since \s* could now swallow the '\ ' that follows it.
+        model = self.drag_seam('a  b', r"r'a\s*b'", 2, 3)
+        self.assertEqual(model['search'], r"r'a\s*?\ b'")
+
+    def test_counted_fuzzy_is_resynthesized_not_adjusted(self):
+        # 'ABBC' with r'A[A-Z]{2}C': shrinking the {2} fuzzy by one re-runs
+        # inference over the smaller span rather than decrementing the count.
+        model = self.drag_seam('ABBC', r"r'A[A-Z]{2}C'", 2, 3)
+        self.assertEqual(model['search'], r"r'A[A-Z]*?BC'")
+
+    def test_seam_on_later_match_uses_that_matchs_spans(self):
+        # 'a b a b' with r'(a)(\ b)': the second match spans internal 5-8.
+        model = self.drag_seam('a b a b', r"r'(a)(\ b)'", 1, 7, match_index=1)
+        self.assertEqual(model['search'], r"r'(a\ )(b)'")
+
+    def test_mid_drag_leaves_search_untouched(self):
+        model = self.start_drag('hello world', r"r'(hello)(\ world)'", 1)
+        model, _ = update(make_mouse_move_event(8, legacy_index=False),
+                          self.var_and_exp, model, 'hello world')
+        self.assertEqual(model['search'], r"r'(hello)(\ world)'")
+        self.assertEqual(model['handleDrag']['cursorIdx'], 8)
+
+    def test_notify_mouse_is_up_finalizes(self):
+        model = self.start_drag('hello world', r"r'(hello)(\ world)'", 1)
+        model, _ = update(make_mouse_move_event(8, legacy_index=False),
+                          self.var_and_exp, model, 'hello world')
+        model, _ = update({'pythonEventStr': repr(NotifyMouseIsUp()), 'eventJSON': {}},
+                          self.var_and_exp, model, 'hello world')
+        self.assertEqual(model['search'], r"r'(hello\ w)(orld)'")
+        self.assertIsNone(model['handleDrag'])
+
+    def test_undo_restores_pre_drag_regex(self):
+        model = self.drag_seam('hello world', r"r'(hello)(\ world)'", 1, 8)
+        self.assertEqual(model['undoHistory'][-1], r"r'(hello)(\ world)'")
+
+        model, _ = update(make_key_down_event('z', meta_key=True),
+                          self.var_and_exp, model, 'hello world')
+        self.assertEqual(model['search'], r"r'(hello)(\ world)'")
 
 
 class TestMatchInteriorGrouping(unittest.TestCase):

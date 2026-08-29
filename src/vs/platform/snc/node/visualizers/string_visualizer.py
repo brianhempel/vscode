@@ -225,7 +225,7 @@ class MouseOut:
 @dataclass(frozen=True, slots=True)
 class HandleMouseDown:
     segment_index: int
-    side: str  # 'left' or 'right'
+    side: str  # 'left', 'right', or 'seam' (the boundary with segment_index - 1)
     match_index: int = 0  # which occurrence of the pattern the handle sits on
 
 @dataclass(frozen=True, slots=True)
@@ -996,10 +996,47 @@ def highlight_group_span(pieces: list, start_index: int, h, model=None) -> str:
     text = html.escape(''.join(pieces))
     return f'<span class="{" ".join(classes)}" snc-idx-start="{start_index}"{hover_attr}{listeners}>{text}</span>'
 
-def char_span(string, index, is_special, highlight=None, model=None, scroll_to=False, is_regex_anchor=False):
-    return ''.join(char_span_els(string, index, is_special, highlight, model, scroll_to, is_regex_anchor))
+def _is_segment_active(model, start, end, segment_index, match_index) -> bool:
+    """Whether an occurrence of a segment is the one the user is working in:
+    hovered, mid-drag, mid-handle-drag, or with one of its dropdowns open.
 
-def char_span_els(string, index, is_special, highlight=None, model=None, scroll_to=False, is_regex_anchor=False) -> List[str]:
+    Labels and handles render only on the active occurrence -- printed on
+    every match, a dense pattern's thousands of them dwarf the string itself.
+    """
+    if model is None:
+        return False
+    h = model.get('hoverIdx')
+    active_match = model.get('_activeMatchIdx')
+    if model.get('dragging'):
+        if active_match is None or active_match == match_index:
+            return True
+    elif h is not None and start <= h < end:
+        return True
+    hd = model.get('handleDrag')
+    if (hd is not None and hd.get('matchIndex', 0) == match_index
+            and (hd.get('segmentIndex') == segment_index
+                 # A seam drag moves the boundary between its segment and the
+                 # one to its left, so both count as being dragged.
+                 or (hd.get('side') == 'seam'
+                     and hd.get('segmentIndex') == segment_index + 1))):
+        return True
+    od = model.get('openDropdown')
+    if od is not None and od.get('id') in (
+        f'repetition-{match_index}-{segment_index}',
+        f'fuzzy-pattern-{match_index}-{segment_index}',
+        f'segment-menu-{match_index}-{segment_index}',
+        'slice-label-start',
+        'slice-label-end',
+        'slice-label-center',
+    ):
+        return True
+    return False
+
+
+def char_span(string, index, is_special, highlight=None, model=None, scroll_to=False, is_regex_anchor=False, highlight_by_index=None):
+    return ''.join(char_span_els(string, index, is_special, highlight, model, scroll_to, is_regex_anchor, highlight_by_index))
+
+def char_span_els(string, index, is_special, highlight=None, model=None, scroll_to=False, is_regex_anchor=False, highlight_by_index=None) -> List[str]:
     """Render a character span with optional selection highlighting.
 
     Args:
@@ -1082,27 +1119,7 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
         segment_active = False
         if is_interactive:
             classes.append('is-interactive')
-            if model is not None:
-                h = model.get('hoverIdx')
-                active_match = model.get('_activeMatchIdx')
-                if model.get('dragging'):
-                    segment_active = (active_match is None or active_match == match_index)
-                elif h is not None and start <= h < end:
-                    segment_active = True
-                hd = model.get('handleDrag')
-                if (hd is not None and hd.get('segmentIndex') == segment_index
-                        and hd.get('matchIndex', 0) == match_index):
-                    segment_active = True
-                od = model.get('openDropdown')
-                if od is not None and od.get('id') in (
-                    f'repetition-{match_index}-{segment_index}',
-                    f'fuzzy-pattern-{match_index}-{segment_index}',
-                    f'segment-menu-{match_index}-{segment_index}',
-                    'slice-label-start',
-                    'slice-label-end',
-                    'slice-label-center',
-                ):
-                    segment_active = True
+            segment_active = _is_segment_active(model, start, end, segment_index, match_index)
             # While a literal's menu offers "Split here", the clicked char --
             # the one that would start the second half -- is styleable.
             od_split = model.get('openDropdown') if model else None
@@ -1112,10 +1129,31 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                     and seg_type == 'literal' and index > start):
                 classes.append('split-point')
 
+        # A boundary that another segment of the SAME match touches is a seam:
+        # it gets one shared move-the-boundary handle (owned by the segment on
+        # its right) instead of per-segment resize handles. Span adjacency is
+        # what makes a seam -- an abutting occurrence of a different match is
+        # not one.
+        left_seam = None
+        right_seam = None
+        if (is_interactive and highlight_by_index is not None
+                and seg_type in ('literal', 'fuzzy')):
+            ln = highlight_by_index.get(start - 1)
+            if (ln is not None and ln[5] == segment_index - 1
+                    and ln[6] == match_index and ln[1] == start
+                    and ln[2] in ('literal', 'fuzzy')):
+                left_seam = ln
+            rn = highlight_by_index.get(end)
+            if (rn is not None and rn[5] == segment_index + 1
+                    and rn[6] == match_index and rn[0] == end
+                    and rn[2] in ('literal', 'fuzzy')):
+                right_seam = rn
+
         # Fuzzy segments only get a resize handle on an OPEN end (one that does
         # not abut a neighbor segment). Segment indices are pattern positions
         # running left to right, so a segment has a left/right neighbor iff it
-        # is not the first/last. Literal segments always get both handles.
+        # is not the first/last. Literal segments get handles on their open
+        # (non-seam) edges.
         seg_count = (model or {}).get('_patternSegmentCount')
         has_left_neighbor = segment_index is not None and segment_index > 0
         has_right_neighbor = (segment_index is not None and seg_count is not None
@@ -1146,7 +1184,17 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 # Handles gate on segment_active like the labels: rendered on
                 # every occurrence, two handle spans per match dwarfed the
                 # string itself once a dense pattern had thousands of them.
-                if segment_active and (seg_type != 'fuzzy' or fuzzy_open_left):
+                if left_seam is not None:
+                    # The seam handle moves the boundary between this segment
+                    # and its left neighbor, so either being active shows it.
+                    if segment_active or _is_segment_active(
+                            model, left_seam[0], left_seam[1], left_seam[5], left_seam[6]):
+                        seam_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='seam', match_index=match_index))
+                        pat_html += (
+                            '<span class="chr-start-handle-container">'
+                            f'<span class="chr-resize-handle seam" snc-mouse-down="{html.escape(seam_handle_event)}"></span></span>'
+                        )
+                elif segment_active and (seg_type != 'fuzzy' or fuzzy_open_left):
                     left_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='left', match_index=match_index))
                     pat_html += (
                         '<span class="chr-start-handle-container">'
@@ -1172,8 +1220,11 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                     rep_str = _format_repetition(min_count, max_count)
                     seg_len = end - start
                     repetition_html = _segment_repetition_label(rep_str, segment_index, match_index, seg_type, model, seg_len, min_count, max_count)
-                # Same active-only gate as the left handle above.
-                if segment_active and (seg_type == 'literal' or fuzzy_open_right):
+                # Same active-only gate as the left handle above. A seamed
+                # right edge renders nothing: the seam handle is owned by the
+                # segment on the other side of it.
+                if (right_seam is None and segment_active
+                        and (seg_type == 'literal' or fuzzy_open_right)):
                     right_handle_event = repr(HandleMouseDown(segment_index=segment_index, side='right', match_index=match_index))
                     repetition_html += (
                         '<span class="chr-start-handle-container">'
@@ -3573,15 +3624,15 @@ def strip_capturing_groups(pattern: str) -> str:
 def vis_char_with_index_els(char, i, highlight_by_index, model=None, scroll_to=False) -> Tuple[List[str], int]:
     if char == '\n':
         return ([
-            *char_span_els('$', i, True, highlight_by_index.get(i), model, scroll_to, is_regex_anchor=True),
-            *char_span_els('\\n', i+1, True, highlight_by_index.get(i+1), model),
+            *char_span_els('$', i, True, highlight_by_index.get(i), model, scroll_to, is_regex_anchor=True, highlight_by_index=highlight_by_index),
+            *char_span_els('\\n', i+1, True, highlight_by_index.get(i+1), model, highlight_by_index=highlight_by_index),
             '\n',
-            *char_span_els('^', i+2, True, highlight_by_index.get(i+2), model, is_regex_anchor=True)
+            *char_span_els('^', i+2, True, highlight_by_index.get(i+2), model, is_regex_anchor=True, highlight_by_index=highlight_by_index)
         ], i + 3)
     elif char == '\t':
-        return (char_span_els('\\t', i, True, highlight_by_index.get(i), model, scroll_to), i + 1)
+        return (char_span_els('\\t', i, True, highlight_by_index.get(i), model, scroll_to, highlight_by_index=highlight_by_index), i + 1)
 
-    return (char_span_els(char, i, False, highlight_by_index.get(i), model, scroll_to), i + 1)
+    return (char_span_els(char, i, False, highlight_by_index.get(i), model, scroll_to, highlight_by_index=highlight_by_index), i + 1)
 
 def vis_char_with_index(char, i, highlight_by_index, model=None):
     """Visualize a character with optional highlighting.
@@ -3627,12 +3678,53 @@ def _compute_handle_drag_regex(model: dict, string_value: str) -> str | None:
     # eval_in_scope so slice/index expressions resolve correctly. The handle
     # belongs to one occurrence, and it is that occurrence's span the drag
     # resizes -- the pattern segment it rewrites is the same either way.
+    if cursor_idx is None:
+        return selection_regex
+
     highlights = parse_regex_for_highlighting(selection_regex, string_value, eval_in_scope=lambda c: eval(c))
     grabbed = [h for h in highlights if h[5] == segment_index and h[6] == match_index]
     if not grabbed:
         return selection_regex
 
     current_start, current_end, seg_type, _, _, _, _ = grabbed[0]
+
+    if side == 'seam':
+        # Move the boundary between segment_index - 1 and segment_index: the
+        # character under the cursor becomes the right segment's first one,
+        # clamped so each side keeps at least a character.
+        left_grabbed = [h for h in highlights
+                        if h[5] == segment_index - 1 and h[6] == match_index]
+        if not left_grabbed:
+            return selection_regex
+        left_start, _left_end, left_type, _, _, _, _ = left_grabbed[0]
+        right_end = current_end
+        nb = max(left_start + 1, min(cursor_idx, right_end - 1))
+        if nb <= left_start or nb >= right_end:
+            return selection_regex
+
+        seg_count = pattern_segment_count(highlights)
+
+        def resized(regex, seg_idx, seg_type_, new_start, new_end, seam_side):
+            # A fuzzy's seam side is anchored by its neighbor (None); its
+            # other side gets the same open-edge context a plain drag would.
+            if seg_type_ == 'fuzzy':
+                if seam_side == 'left':
+                    prev_char = None
+                    next_char = (None if seg_idx < seg_count - 1
+                                 else _real_char_after_internal_idx(string_value, new_end))
+                else:
+                    prev_char = (None if seg_idx > 0
+                                 else _real_char_before_internal_idx(string_value, new_start))
+                    next_char = None
+                return resize_fuzzy_segment(regex, seg_idx, string_value,
+                                            new_start, new_end, prev_char, next_char)
+            return resize_literal_segment(regex, seg_idx, string_value, new_start, new_end)
+
+        # Right segment first, so resizing the left one sees the right's NEW
+        # text when deciding whether a shrunk fuzzy must go lazy to avoid
+        # swallowing it.
+        result = resized(selection_regex, segment_index, seg_type, nb, right_end, 'left')
+        return resized(result, segment_index - 1, left_type, left_start, nb, 'right')
 
     if side == 'right':
         new_start = current_start
@@ -4528,7 +4620,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     char_els = []
 
     # Visible start anchor is selectable at internal index 0
-    char_els.append(char_span('^', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index), is_regex_anchor=True))
+    char_els.append(char_span('^', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index), is_regex_anchor=True, highlight_by_index=highlight_by_index))
 
     # Run-based emission: instead of visiting every character in Python, walk
     # only the positions where something can change and emit whole string
@@ -4657,7 +4749,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     flush_group()
 
     # (must match internal index scheme for 1:1 correspondence with extract_by_internal_indices)
-    char_els.append(char_span('$', index, True, highlight_by_index.get(index), model, scroll_to=(index == first_match_index), is_regex_anchor=True))
+    char_els.append(char_span('$', index, True, highlight_by_index.get(index), model, scroll_to=(index == first_match_index), is_regex_anchor=True, highlight_by_index=highlight_by_index))
     index += 1
 
     # The string's length used to be printed here, floating at the top-left of
