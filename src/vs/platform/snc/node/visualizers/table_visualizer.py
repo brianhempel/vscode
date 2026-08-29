@@ -10564,7 +10564,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                                  cell_vis.init_model)
                     cell_model = cell_vis.init_model(cell_value, get_visualizer,
                                                      eval_in_scope=eval_in_scope, **extra)
-                child_small = (composite_key != focused_child)
+                child_small = small or (composite_key != focused_child)
 
                 # A leaf nothing splatted reads the same expression per cell as
                 # per root row, and its cell is only ever drawn on the row that
