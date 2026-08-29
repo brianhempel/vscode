@@ -6,6 +6,7 @@
 import './media/sncConsole.css';
 import * as dom from '../../../../base/browser/dom.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { ICodeEditor, IViewZone } from '../../../../editor/browser/editorBrowser.js';
 import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
@@ -14,6 +15,8 @@ import { Range } from '../../../../editor/common/core/range.js';
 import { IEditorContribution, IEditorDecorationsCollection } from '../../../../editor/common/editorCommon.js';
 import { IModelDeltaDecoration } from '../../../../editor/common/model.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
+import { TextEditorSelectionRevealType } from '../../../../platform/editor/common/editor.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { EOF_MARKER, IConsoleChunk, ISNCConsoleService, eofMarkerLine, sourceFileForStdinUri } from '../common/sncConsole.js';
 
 /**
@@ -56,6 +59,7 @@ export class SNCConsoleEditorContribution extends Disposable implements IEditorC
 		private readonly editor: ICodeEditor,
 		@IContextKeyService contextKeyService: IContextKeyService,
 		@ISNCConsoleService private readonly consoleService: ISNCConsoleService,
+		@IEditorService private readonly editorService: IEditorService,
 	) {
 		super();
 		this.inConsole = CONTEXT_IN_SNC_CONSOLE.bindTo(contextKeyService);
@@ -102,8 +106,11 @@ export class SNCConsoleEditorContribution extends Disposable implements IEditorC
 		const domNode = this.editor.getDomNode();
 		if (domNode) {
 			this.modelBinding.add(dom.addDisposableListener(domNode, dom.EventType.CLICK, e => {
-				if ((e.target as HTMLElement).classList?.contains('snc-console-hint')) {
+				const target = e.target as HTMLElement;
+				if (target.classList?.contains('snc-console-hint')) {
 					this.insertEofMarker();
+				} else if (target.classList?.contains('snc-console-loc')) {
+					this.revealSourceLine(Number(target.dataset.line));
 				}
 			}));
 		}
@@ -232,7 +239,11 @@ export class SNCConsoleEditorContribution extends Disposable implements IEditorC
 	private fillZoneNode(node: HTMLElement, chunks: readonly IConsoleChunk[], eofHint: boolean): void {
 		dom.clearNode(node);
 		for (const chunk of chunks) {
-			const span = dom.$(chunk.stream === 'stderr' ? 'span.snc-console-stderr' : 'span.snc-console-stdout');
+			if (chunk.stream === 'stderr') {
+				node.appendChild(this.stderrNode(chunk.text));
+				continue;
+			}
+			const span = dom.$('span.snc-console-stdout');
 			span.textContent = chunk.text;
 			node.appendChild(span);
 		}
@@ -241,6 +252,54 @@ export class SNCConsoleEditorContribution extends Disposable implements IEditorC
 			hint.textContent = localize('sncConsoleEofHint', "Reading until end of input — click or press Ctrl+D to end it");
 			node.appendChild(hint);
 		}
+	}
+
+	/**
+	 * stderr, with the traceback's frame lines turned into links back into the
+	 * source. The runner has already stripped its own frames and the `<string>`
+	 * the body is exec'd under, so what's left of a frame is `line 7, in f` —
+	 * a line number in the file this console belongs to, and the one thing in a
+	 * traceback the user actually wants to go to.
+	 */
+	private stderrNode(text: string): HTMLElement {
+		const span = dom.$('span.snc-console-stderr');
+		// `, in ` is what keeps this to traceback frames: a program that prints
+		// the words "line 12" itself shouldn't sprout a link.
+		const frames = /^([ \t]*)line (\d+)(?=, in )/gm;
+		let plainFrom = 0;
+		let frame: RegExpExecArray | null;
+		while ((frame = frames.exec(text)) !== null) {
+			const start = frame.index + frame[1].length;
+			span.appendChild(document.createTextNode(text.slice(plainFrom, start)));
+			const link = dom.$('a.snc-console-loc');
+			link.textContent = `line ${frame[2]}`;
+			link.dataset.line = frame[2];
+			link.title = localize('sncConsoleGoToLine', "Go to line {0}", frame[2]);
+			span.appendChild(link);
+			plainFrom = frames.lastIndex;
+		}
+		span.appendChild(document.createTextNode(text.slice(plainFrom)));
+		return span;
+	}
+
+	/**
+	 * Put the cursor on the line the traceback names. The source is normally
+	 * open in the group the console was split off, and it should be reused
+	 * rather than opening a second copy of the file next to the console.
+	 */
+	private revealSourceLine(line: number): void {
+		if (!this.isConsole || !Number.isInteger(line) || line < 1) {
+			return;
+		}
+		const resource = URI.file(this.filePath);
+		const [openAlready] = this.editorService.findEditors(resource);
+		this.editorService.openEditor({
+			resource,
+			options: {
+				selection: { startLineNumber: line, startColumn: 1 },
+				selectionRevealType: TextEditorSelectionRevealType.CenterIfOutsideViewport,
+			}
+		}, openAlready?.groupId);
 	}
 
 	/** Exact whenever nothing wraps; `measureZonesAfterLayout` fixes it up when it does. */

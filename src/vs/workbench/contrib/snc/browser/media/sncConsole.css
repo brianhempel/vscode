@@ -18,6 +18,8 @@
 	opacity: 0.85;
 	user-select: text;
 	cursor: text;
+	/* Above the editor's own layers, or the clicks never reach the zone. */
+	z-index: 1;
 }
 
 .monaco-editor .snc-console-output .snc-console-stdout {
@@ -26,6 +28,21 @@
 
 .monaco-editor .snc-console-output .snc-console-stderr {
 	color: var(--vscode-errorForeground);
+}
+
+/*
+ * The `line 7` of a traceback frame, which goes to that line of the source.
+ * Underlined rather than recoloured: it has to stay legible as part of the
+ * error text it sits in, and the error colour is what says that.
+ */
+.monaco-editor .snc-console-output .snc-console-loc {
+	color: inherit;
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+.monaco-editor .snc-console-output .snc-console-loc:hover {
+	color: var(--vscode-textLink-activeForeground);
 }
 
 /* Input the program never got to. Not decoration: it shows how far it ran. */
