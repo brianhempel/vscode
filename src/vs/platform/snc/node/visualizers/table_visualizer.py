@@ -10291,7 +10291,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # table nothing to carry one -- opening it lifts a ceiling the table isn't
     # reaching anyway, so nothing moves until something is actually clipped.
     can_expand = True
-    expanded = bool(model.get('expanded', False))
+    expanded = bool(model.get('expanded', False) or focused_child)
     actual_max_height = (max(EXPANDED_PANE_MAX_HEIGHT, collapsed_max_height)
                          if expanded else collapsed_max_height)
     actual_min_height = min(wanted_height, actual_max_height)
