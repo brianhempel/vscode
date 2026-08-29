@@ -913,12 +913,18 @@ def _segment_index_label(label_text: str, position: str, seg_len: int = 1,
 
 HTML_ESCAPE_CHARS = '<>&\'"'
 
-def text_group_span(chars: list, start_index: int) -> str:
-    text = ''.join(html.escape(c) if c in HTML_ESCAPE_CHARS else c for c in chars)
+# Chars that always render as individual spans (newline expands to $ / \n / ^).
+_SPECIAL_CHAR_RE = re.compile(r'[\n\t]')
+
+def text_group_span(pieces: list, start_index: int) -> str:
+    """pieces: string fragments (single chars or longer slices) covering
+    consecutive internal indices from start_index. html.escape escapes
+    exactly the HTML_ESCAPE_CHARS set."""
+    text = html.escape(''.join(pieces))
     return f'<span snc-idx-start="{start_index}">{text}</span>'
 
 
-def highlight_group_span(chars: list, start_index: int, h, model=None) -> str:
+def highlight_group_span(pieces: list, start_index: int, h, model=None) -> str:
     """Interior chars of a segment, grouped into one span like plain text but
     carrying the segment's highlight classes. Boundary chars stay individual --
     they hold the start/end rounding, labels, and handles. The front-end
@@ -947,7 +953,7 @@ def highlight_group_span(chars: list, start_index: int, h, model=None) -> str:
         classes.append('is-interactive')
         if seg_type in ('literal', 'fuzzy'):
             hover_attr = ' snc-hover-moves'
-    text = ''.join(html.escape(c) if c in HTML_ESCAPE_CHARS else c for c in chars)
+    text = html.escape(''.join(pieces))
     return f'<span class="{" ".join(classes)}" snc-idx-start="{start_index}"{hover_attr}{listeners}>{text}</span>'
 
 def char_span(string, index, is_special, highlight=None, model=None, scroll_to=False, is_regex_anchor=False):
@@ -4370,59 +4376,121 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # Visible start anchor is selectable at internal index 0
     char_els.append(char_span('^', 0, True, highlight_by_index.get(0), model, scroll_to=(0 == first_match_index), is_regex_anchor=True))
 
-    group_chars = []
+    # Run-based emission: instead of visiting every character in Python, walk
+    # only the positions where something can change and emit whole string
+    # slices between them. Which highlight tuple "owns" an index changes only
+    # at some tuple's start or end; a char needs an individual span only at
+    # its owner's boundary chars (rounding, labels, handles) -- a subset of
+    # those same positions; and chips sit at known indices. So between
+    # breakpoints, every char is groupable interior with one constant
+    # signature. \n and \t always render individually, so the walk goes
+    # chunk-by-chunk between them -- inside a chunk, internal indices stay in
+    # lockstep with string positions (only \n expands).
+    breakpoints = set()
+    for h in highlights:
+        breakpoints.add(h[0])      # start char: individual span
+        breakpoints.add(h[1] - 1)  # end char: individual span
+        breakpoints.add(h[1])      # first index past: ownership may change
+    breakpoints.update(extra_chips_by_index)
+    breakpoints.update(extra_chips_after_by_index)
+    bps = sorted(breakpoints)
+    bp_count = len(bps)
+    bp_i = 0  # walk pointer; breakpoints inside \n expansions get skipped
+              # (vis_char_with_index_els handles those sub-indices itself)
+
+    group_pieces = []
     group_start = None
     group_hl = None  # None = plain text group; else the segment's highlight tuple
 
     def flush_group():
-        nonlocal group_chars, group_start, group_hl
-        if group_chars and group_start is not None:
+        nonlocal group_pieces, group_start, group_hl
+        if group_pieces and group_start is not None:
             if group_hl is None:
-                char_els.append(text_group_span(group_chars, group_start))
+                char_els.append(text_group_span(group_pieces, group_start))
             else:
-                char_els.append(highlight_group_span(group_chars, group_start, group_hl, model))
-        group_chars = []
+                char_els.append(highlight_group_span(group_pieces, group_start, group_hl, model))
+        group_pieces = []
         group_start = None
         group_hl = None
 
-    index = 1
-    for char in value:
+    def extend_group(piece, start_index, h):
+        nonlocal group_start, group_hl
+        if group_pieces and h is not group_hl:
+            flush_group()
+        if group_start is None:
+            group_start = start_index
+            group_hl = h
+        group_pieces.append(piece)
+
+    def emit_chips(chips):
         # Segment-mode start/end chips are inserted around the char they
         # belong to. They're absolutely positioned so they just need to be a
-        # sibling near the right index.
+        # sibling near the right index. Flush first so the chip stays at the
+        # correct position in the element sequence.
+        flush_group()
+        for chip_html in chips:
+            char_els.append(chip_html)
+
+    def handle_breakpoint_char(char, index):
+        # One char at a breakpoint: the full per-char logic. A char rides in a
+        # group when it has nothing of its own to carry: plain text, or the
+        # interior of any segment (its boundary chars keep individual spans
+        # for the rounding, labels, and handles). \n/\t never come here.
         chips_here = extra_chips_by_index.get(index)
         if chips_here:
-            flush_group()
-            for chip_html in chips_here:
-                char_els.append(chip_html)
+            emit_chips(chips_here)
         h = highlight_by_index.get(index)
-        # A char rides in a group when it has nothing of its own to carry:
-        # plain text, or the interior of any segment (its boundary chars keep
-        # individual spans for the rounding, labels, and handles).
-        groupable = char != '\n' and char != '\t' and (
-            h is None or (h[0] != index and h[1] - 1 != index)
-        )
-        index_before_char = index
-        if groupable:
-            if group_chars and h is not group_hl:
-                flush_group()
-            if group_start is None:
-                group_start = index
-                group_hl = h
-            group_chars.append(char)
-            index += 1
+        if h is None or (h[0] != index and h[1] - 1 != index):
+            extend_group(char, index, h)
         else:
             flush_group()
-            char_htmls, index = vis_char_with_index_els(char, index, highlight_by_index, model, scroll_to=(index == first_match_index))
+            char_htmls, _ = vis_char_with_index_els(char, index, highlight_by_index, model, scroll_to=(index == first_match_index))
             char_els.extend(char_htmls)
-        # After-chips render to the right of the char. For plain chars (which
-        # get batched into text-group spans), flush the group first so the
-        # chip stays at the correct index.
-        chips_after = extra_chips_after_by_index.get(index_before_char)
+        chips_after = extra_chips_after_by_index.get(index)
         if chips_after:
-            flush_group()
-            for chip_html in chips_after:
-                char_els.append(chip_html)
+            emit_chips(chips_after)
+
+    def handle_chunk(p0, p1, internal0):
+        # Chars value[p0:p1] (no \n/\t) at internal indices internal0+offset.
+        # Bulk slices between breakpoints; full per-char logic at each one.
+        nonlocal bp_i
+        internal_end = internal0 + (p1 - p0)
+        while bp_i < bp_count and bps[bp_i] < internal0:
+            bp_i += 1
+        cur = internal0
+        while bp_i < bp_count and bps[bp_i] < internal_end:
+            b = bps[bp_i]
+            bp_i += 1
+            if b > cur:
+                extend_group(value[p0 + (cur - internal0):p0 + (b - internal0)],
+                             cur, highlight_by_index.get(cur))
+            handle_breakpoint_char(value[p0 + (b - internal0)], b)
+            cur = b + 1
+        if cur < internal_end:
+            extend_group(value[p0 + (cur - internal0):p1],
+                         cur, highlight_by_index.get(cur))
+
+    index = 1
+    pos = 0
+    for special in _SPECIAL_CHAR_RE.finditer(value):
+        sp = special.start()
+        if sp > pos:
+            handle_chunk(pos, sp, index)
+            index += sp - pos
+        chips_here = extra_chips_by_index.get(index)
+        if chips_here:
+            emit_chips(chips_here)
+        flush_group()
+        char_htmls, new_index = vis_char_with_index_els(value[sp], index, highlight_by_index, model, scroll_to=(index == first_match_index))
+        char_els.extend(char_htmls)
+        chips_after = extra_chips_after_by_index.get(index)
+        if chips_after:
+            emit_chips(chips_after)
+        index = new_index
+        pos = sp + 1
+    if len(value) > pos:
+        handle_chunk(pos, len(value), index)
+        index += len(value) - pos
 
     flush_group()
 

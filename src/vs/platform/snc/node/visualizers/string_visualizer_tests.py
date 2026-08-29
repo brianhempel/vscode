@@ -6689,6 +6689,100 @@ class TestTextGrouping(unittest.TestCase):
         self.assertIn('<span snc-idx-start="1">', output)
 
 
+class TestRunEmissionEdgeCases(unittest.TestCase):
+    """Pin the char-emission behaviors the run-based visualize_els walk must
+    preserve: which chars get individual spans, where groups start, and how
+    abutting/sentinel-adjacent matches split."""
+
+    def test_adjacent_single_char_matches_all_individual(self):
+        """r's' on 'sss': every match char is its own start AND end, so all
+        three get individual highlighted spans and nothing groups."""
+        model = init_model("sss")
+        model['search'] = r"r's'"
+        output = visualize("sss", model, None, None)
+        for idx in (1, 2, 3):
+            self.assertIn(f'snc-idx="{idx}"', output)
+        self.assertNotIn('snc-idx-start', output)
+
+    def test_abutting_two_char_matches_all_boundary(self):
+        """r'ss' on 'ssss' matches [1,3) and [3,5); every char is a boundary
+        char of its match, so no interior groups form."""
+        model = init_model("ssss")
+        model['search'] = r"r'ss'"
+        output = visualize("ssss", model, None, None)
+        for idx in (1, 2, 3, 4):
+            self.assertIn(f'snc-idx="{idx}"', output)
+        self.assertNotIn('snc-idx-start', output)
+
+    def test_abutting_interiors_group_separately(self):
+        """r'aaaa|bbbb' on 'aaaabbbb': interiors 'aa' (idx 2) and 'bb' (idx 6)
+        each group under their own match; the seam at 4|5 stays individual."""
+        model = init_model("aaaabbbb")
+        model['search'] = r"r'aaaa|bbbb'"
+        output = visualize("aaaabbbb", model, None, None)
+        import re as _re
+        m1 = _re.search(r'<span class="([^"]*)" snc-idx-start="2"[^>]*>aa</span>', output)
+        m2 = _re.search(r'<span class="([^"]*)" snc-idx-start="6"[^>]*>bb</span>', output)
+        self.assertIsNotNone(m1)
+        self.assertIsNotNone(m2)
+        for idx in (1, 4, 5, 8):
+            self.assertIn(f'snc-idx="{idx}"', output)
+
+    def test_match_ending_at_line_end(self):
+        """r'b' on 'ab\\ncd': the match char just before the newline sentinels
+        renders as an individual highlighted span at internal index 2."""
+        model = init_model("ab\ncd")
+        model['search'] = r"r'b'"
+        output = visualize("ab\ncd", model, None, None)
+        import re as _re
+        m = _re.search(r'<span class="([^"]*)" snc-idx="2"', output)
+        self.assertIsNotNone(m)
+        self.assertIn('highlight', m.group(1))
+
+    def test_match_spanning_newline_keeps_sentinels_individual(self):
+        """r'b\\nc' on 'ab\\ncd' covers the $/\\n/^ expansion; those stay
+        individual spans and pick up the highlight."""
+        model = init_model("ab\ncd")
+        model['search'] = r"r'b\nc'"
+        output = visualize("ab\ncd", model, None, None)
+        import re as _re
+        for idx in (2, 3, 4, 5, 6):
+            m = _re.search(rf'<span class="([^"]*)" snc-idx="{idx}"', output)
+            self.assertIsNotNone(m, f"index {idx} should be an individual span")
+            self.assertIn('highlight', m.group(1))
+
+    def test_escaping_inside_highlighted_group(self):
+        """Interior match chars that need HTML escaping are escaped in the
+        grouped span."""
+        model = init_model("x<<<<y")
+        model['search'] = r"r'<<<<'"
+        output = visualize("x<<<<y", model, None, None)
+        import re as _re
+        m = _re.search(r'<span class="[^"]*highlight[^"]*" snc-idx-start="3"[^>]*>&lt;&lt;</span>', output)
+        self.assertIsNotNone(m)
+
+    def test_empty_line_groups_resume_correctly(self):
+        """'a\\n\\nb': groups re-form after the double newline expansion with
+        the right internal start index."""
+        model = init_model("a\n\nb")
+        output = visualize("a\n\nb", model, None, None)
+        # ^=0 a=1 $=2 \n=3 ^=4 $=5 \n=6 ^=7 b=8 $=9
+        self.assertIn('snc-idx-start="1"', output)
+        self.assertIn('snc-idx-start="8"', output)
+
+    def test_match_of_whole_string(self):
+        """A match covering the whole string: boundary chars individual, one
+        interior group between them."""
+        model = init_model("abcdef")
+        model['search'] = r"r'abcdef'"
+        output = visualize("abcdef", model, None, None)
+        import re as _re
+        self.assertIn('snc-idx="1"', output)
+        self.assertIn('snc-idx="6"', output)
+        m = _re.search(r'<span class="[^"]*highlight[^"]*" snc-idx-start="2"[^>]*>bcde</span>', output)
+        self.assertIsNotNone(m)
+
+
 # =============================================================================
 # First-Match Toggle Tests
 # =============================================================================
