@@ -28,7 +28,7 @@ HOW IT WORKS
 
 RENDERING:
 - The string is displayed character-by-character inside a <div>
-- Special characters (\n, \t) are shown as escape sequences
+- Special characters (\n, \t, \r) are shown as escape sequences
 - Regex anchors ^ and $ are shown as visible boundary markers
 - Each <span> has snc-mouse-* attributes containing Python code strings
   that get eval'd in the update() function to create typed event objects
@@ -954,7 +954,7 @@ def _segment_index_label(label_text: str, position: str, seg_len: int = 1,
 HTML_ESCAPE_CHARS = '<>&\'"'
 
 # Chars that always render as individual spans (newline expands to $ / \n / ^).
-_SPECIAL_CHAR_RE = re.compile(r'[\n\t]')
+_SPECIAL_CHAR_RE = re.compile(r'[\n\t\r]')
 
 def text_group_span(pieces: list, start_index: int) -> str:
     """pieces: string fragments (single chars or longer slices) covering
@@ -1371,7 +1371,7 @@ def build_internal_to_string_mapping(string_value: str) -> List[int]:
 
     Internal indices:
     - 0: ^ prefix marker (maps to string index 0, start of string)
-    - 1+: actual characters, but \n expands to 3 indices, \t to 1
+    - 1+: actual characters, but \n expands to 3 indices, \t and \r to 1
 
     Returns a list where mapping[internal_idx] = string_char_idx.
     """
@@ -1387,8 +1387,8 @@ def build_internal_to_string_mapping(string_value: str) -> List[int]:
             mapping.append(string_idx)      # $ -> current char
             mapping.append(string_idx + 1)  # \n -> after this char
             mapping.append(string_idx + 1)  # ^ -> after this char (start of next logical char)
-        elif char == '\t':
-            # \t expands to single display
+        elif char in '\t\r':
+            # \t and \r expand to single displays
             mapping.append(string_idx)
         else:
             # Regular character
@@ -1425,7 +1425,7 @@ def build_string_to_internal_mapping(string_value: str) -> List[int]:
             mapping.append(internal_idx + 1)
             internal_idx += 3
         else:
-            # Regular character (including \t which displays as single element)
+            # Regular character (including \t and \r which display as single elements)
             mapping.append(internal_idx)
             internal_idx += 1
 
@@ -3631,6 +3631,8 @@ def vis_char_with_index_els(char, i, highlight_by_index, model=None, scroll_to=F
         ], i + 3)
     elif char == '\t':
         return (char_span_els('\\t', i, True, highlight_by_index.get(i), model, scroll_to, highlight_by_index=highlight_by_index), i + 1)
+    elif char == '\r':
+        return (char_span_els('\\r', i, True, highlight_by_index.get(i), model, scroll_to, highlight_by_index=highlight_by_index), i + 1)
 
     return (char_span_els(char, i, False, highlight_by_index.get(i), model, scroll_to, highlight_by_index=highlight_by_index), i + 1)
 
@@ -3646,6 +3648,8 @@ def vis_char_with_index(char, i, highlight_by_index, model=None):
         return (char_span('$', i, True, highlight_by_index.get(i), model, is_regex_anchor=True) + (char_span('\\n', i+1, True, highlight_by_index.get(i+1), model) + '\n  ' + char_span('^', i+2, True, highlight_by_index.get(i+2), model, is_regex_anchor=True)), i + 3)
     elif char == '\t':
         return (char_span('\\t', i, True, highlight_by_index.get(i), model), i + 1)
+    elif char == '\r':
+        return (char_span('\\r', i, True, highlight_by_index.get(i), model), i + 1)
 
     return (char_span(char, i, False, highlight_by_index.get(i), model), i + 1)
 
@@ -4629,7 +4633,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # its owner's boundary chars (rounding, labels, handles) -- a subset of
     # those same positions; and chips sit at known indices. So between
     # breakpoints, every char is groupable interior with one constant
-    # signature. \n and \t always render individually, so the walk goes
+    # signature. \n, \t, and \r always render individually, so the walk goes
     # chunk-by-chunk between them -- inside a chunk, internal indices stay in
     # lockstep with string positions (only \n expands).
     breakpoints = set()
@@ -4689,7 +4693,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # One char at a breakpoint: the full per-char logic. A char rides in a
         # group when it has nothing of its own to carry: plain text, or the
         # interior of any segment (its boundary chars keep individual spans
-        # for the rounding, labels, and handles). \n/\t never come here.
+        # for the rounding, labels, and handles). \n/\t/\r never come here.
         chips_here = extra_chips_by_index.get(index)
         if chips_here:
             emit_chips(chips_here)
@@ -4705,7 +4709,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             emit_chips(chips_after)
 
     def handle_chunk(p0, p1, internal0):
-        # Chars value[p0:p1] (no \n/\t) at internal indices internal0+offset.
+        # Chars value[p0:p1] (no \n/\t/\r) at internal indices internal0+offset.
         # Bulk slices between breakpoints; full per-char logic at each one.
         nonlocal bp_i
         internal_end = internal0 + (p1 - p0)

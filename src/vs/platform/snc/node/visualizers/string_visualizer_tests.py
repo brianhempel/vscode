@@ -6899,6 +6899,24 @@ class TestRegexAnchorClass(unittest.TestCase):
         self.assertIn('special', classes)
         self.assertNotIn('regex-anchor', classes)
 
+    def test_carriage_return_display_is_special_but_not_anchor(self):
+        """The \\r escape display is `special` but NOT `regex-anchor`."""
+        value = "a\rb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        classes = self._classes_at(html_output, 2)
+        self.assertIn('special', classes)
+        self.assertNotIn('regex-anchor', classes)
+
+    def test_carriage_return_renders_as_escape_not_raw(self):
+        """A raw CR must never reach the HTML (under white-space:pre it is a
+        segment break, splitting the line); it displays as the \\r escape."""
+        value = "a\rb"
+        model = init_model(value)
+        html_output = visualize(value, model, None, None)
+        self.assertNotIn('\r', html_output)
+        self.assertIn('\\r', html_output)
+
     def test_char_span_is_a_single_span(self):
         """Each char is ONE span carrying both the visual classes and the
         snc-idx listener - no wrapper container element."""
@@ -7201,6 +7219,14 @@ class TestTextGrouping(unittest.TestCase):
         """'ab\\tcd' should produce groups for 'ab' and 'cd', with \\t individual."""
         model = init_model("ab\tcd")
         output = visualize("ab\tcd", model, None, None)
+        self.assertIn('snc-idx-start="1"', output)
+        self.assertIn('snc-idx-start="4"', output)
+        self.assertIn('snc-idx="3"', output)
+
+    def test_group_flushes_at_carriage_return(self):
+        """'ab\\rcd' should produce groups for 'ab' and 'cd', with \\r individual."""
+        model = init_model("ab\rcd")
+        output = visualize("ab\rcd", model, None, None)
         self.assertIn('snc-idx-start="1"', output)
         self.assertIn('snc-idx-start="4"', output)
         self.assertIn('snc-idx="3"', output)
