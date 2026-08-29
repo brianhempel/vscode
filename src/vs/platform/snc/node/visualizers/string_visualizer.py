@@ -1249,17 +1249,10 @@ def _real_char_after_internal_idx(string_value: str, idx: int) -> str:
     """The nearest real character at/after internal index idx, looking through
     ^/$ anchor sentinels; '' if only the end of the string follows.
 
-    Extraction walks the whole string, so this is for one-off lookups; for a
-    lookup per match of a dense pattern, extract the full internal text once
-    and use _real_char_after_in_text."""
+    Extraction walks the whole string, so this is for one-off lookups only --
+    never call it once per match of a possibly-dense pattern."""
     text = extract_by_internal_indices(string_value, idx, idx + 3)
     return ''.join(c for c in text if c not in _SENTINEL_CHARS)[:1]
-
-
-def _real_char_after_in_text(internal_text: str, idx: int) -> str:
-    """_real_char_after_internal_idx against a prebuilt internal text (one
-    extract_by_internal_indices(value, 0, ...) pass shared by many lookups)."""
-    return ''.join(c for c in internal_text[idx:idx + 3] if c not in _SENTINEL_CHARS)[:1]
 
 
 def build_internal_to_string_mapping(string_value: str) -> List[int]:
@@ -4332,22 +4325,23 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # Which occurrence the user is working in, so the pattern / repetition
         # labels of a drag land on that one rather than on all of them at once.
         model['_activeMatchIdx'] = _active_match_index(model, highlight_by_index)
-        # What each segment stops at, keyed the way the dropdown ids are, so
-        # the pattern dropdown can offer [^N]. Reading the character through
-        # the sentinel-skipping helper rather than the one position past the
-        # end matters: a segment ending at a line break stops on the `$`
-        # sentinel, which would otherwise read as nothing to stop at.
-        # One extraction pass shared by every lookup: a dense pattern has
-        # thousands of matches, and a full-string walk per match froze the
-        # render for a minute.
-        if any(h[5] is not None for h in highlights):
-            internal_text = extract_by_internal_indices(value, 0, compute_internal_length(value))
-            model['_segmentNextChars'] = {
-                f'{h[6]}-{h[5]}': _real_char_after_in_text(internal_text, h[1])
-                for h in highlights if h[5] is not None
-            }
-        else:
-            model['_segmentNextChars'] = {}
+        # What a segment stops at, keyed the way the dropdown ids are, so the
+        # pattern dropdown can offer [^N]. Reading the character through the
+        # sentinel-skipping helper rather than the one position past the end
+        # matters: a segment ending at a line break stops on the `$` sentinel,
+        # which would otherwise read as nothing to stop at.
+        # Computed ONLY for the open fuzzy-pattern dropdown -- its renderer is
+        # the sole reader, and it reads its own key. Computing one per match
+        # of a dense pattern cost a string walk per match (a minute of them).
+        model['_segmentNextChars'] = {}
+        od = model.get('openDropdown')
+        od_id = od.get('id') if od else None
+        if od_id and od_id.startswith('fuzzy-pattern-'):
+            od_key = od_id[len('fuzzy-pattern-'):]
+            for h in highlights:
+                if h[5] is not None and f'{h[6]}-{h[5]}' == od_key:
+                    model['_segmentNextChars'][od_key] = _real_char_after_internal_idx(value, h[1])
+                    break
 
     # Inline chips (start/end index labels in segment mode) are rendered as
     # extra HTML inserted before / after the corresponding char's wrapper.
