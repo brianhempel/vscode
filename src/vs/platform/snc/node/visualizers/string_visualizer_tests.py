@@ -50,6 +50,8 @@ from string_visualizer import (
     REPETITION_OPTIONS, REPETITION_TOOLTIPS,
     resize_literal_segment,
     resize_fuzzy_segment,
+    remove_segment,
+    split_literal_segment,
     extract_quantifier,
     _subpattern_to_string,
     strip_capturing_groups,
@@ -209,7 +211,7 @@ class TestBasics(unittest.TestCase):
         self.assertIsNone(model['cursorIdx'])
         self.assertFalse(model['dragging'])
         self.assertIsNone(model['extendDirection'])
-        self.assertIsNone(model['insertAfterSegment'])
+        self.assertNotIn('insertAfterSegment', model)
         # Note: stringValue is no longer stored in model - it's passed as parameter
         self.assertEqual(model['undoHistory'], [])
         self.assertEqual(model['redoHistory'], [])
@@ -1056,6 +1058,420 @@ class TestClickInsideFuzzy(unittest.TestCase):
         # Expected: A + fuzzy + C - A first, then fuzzy for B, then C
         # Bug was: (.*)(A)(C) - wrong order
         self.assertEqual(model['search'], r"r'A[A-Z]{1}C'")
+
+
+# =============================================================================
+# Segment Click Menu Tests
+# =============================================================================
+
+class TestSegmentClickMenu(unittest.TestCase):
+    """Mousedown inside an existing segment opens an actions menu below it,
+    instead of wiping the regex (literal) or starting a split-drag (fuzzy)."""
+
+    var_and_exp = ('x', 'x')
+
+    def test_literal_interior_click_opens_menu(self):
+        # "hello world": internal 1..6 is "hello"; 3 is strictly inside.
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['openDropdown'],
+                         {'id': 'segment-menu-0-0', 'segmentIndex': 0,
+                          'matchIndex': 0, 'clickIdx': 3})
+        self.assertEqual(model['search'], r"r'(hello)'")
+        self.assertFalse(model['dragging'])
+        self.assertIsNone(model['anchorIdx'])
+
+    def test_canonical_literal_interior_click_opens_menu(self):
+        # Segment-index metadata is present even without capture groups.
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'hello'"
+
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['openDropdown'],
+                         {'id': 'segment-menu-0-0', 'segmentIndex': 0,
+                          'matchIndex': 0, 'clickIdx': 3})
+        self.assertEqual(model['search'], r"r'hello'")
+
+    def test_click_on_segment_first_char_opens_menu(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+
+        model, _ = update(make_mouse_down_event(1, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-0-0')
+        self.assertEqual(model['openDropdown']['clickIdx'], 1)
+
+    def test_fuzzy_interior_click_opens_menu_not_split_drag(self):
+        # 'a1b\na2b': the second match's (.*) covers the '2' at internal 8.
+        value = 'a1b\na2b'
+        model = init_model(value)
+        model['search'] = r"r'(a)(.*)(b)'"
+
+        model, _ = update(make_mouse_down_event(8, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['openDropdown'],
+                         {'id': 'segment-menu-1-1', 'segmentIndex': 1,
+                          'matchIndex': 1, 'clickIdx': 8})
+        self.assertEqual(model['search'], r"r'(a)(.*)(b)'")
+        self.assertFalse(model['dragging'])
+        self.assertIsNone(model.get('insertAfterSegment'))
+
+    def test_fuzzy_tool_click_inside_segment_also_opens_menu(self):
+        # The menu opens regardless of the active selection tool.
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+
+        model, _ = update(make_mouse_down_event(3, legacy_index=False, top_half=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-0-0')
+        self.assertFalse(model['dragging'])
+
+    def test_mouse_up_keeps_menu_open(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+        model, _ = update(make_mouse_up_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-0-0')
+        self.assertEqual(model['search'], r"r'(hello)'")
+
+    def test_click_with_menu_open_dismisses_without_selecting(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        # Click somewhere else while the menu is open: just dismiss.
+        model, _ = update(make_mouse_down_event(8, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertIsNone(model.get('openDropdown'))
+        self.assertEqual(model['search'], r"r'(hello)'")
+        self.assertFalse(model['dragging'])
+        self.assertIsNone(model['anchorIdx'])
+
+    def test_escape_closes_menu_without_clearing_search(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        model, _ = update(make_key_down_event('Escape'),
+                          self.var_and_exp, model, value)
+
+        self.assertIsNone(model.get('openDropdown'))
+        self.assertEqual(model['search'], r"r'(hello)'")
+
+    def test_adjacent_click_still_extends_not_menu(self):
+        # Click at the match's end continues the pattern as before.
+        value = 'foo1 foo2 foo3'
+        model = init_model(value)
+        model['search'] = r"r'(foo)'"
+
+        model, _ = update(make_mouse_down_event(14, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertIsNone(model.get('openDropdown'))
+        self.assertTrue(model['dragging'])
+
+        model, _ = update(make_mouse_up_event(14, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertEqual(model['search'], r"r'(foo)(3)'")
+
+    def test_click_outside_matches_still_starts_over(self):
+        value = 'foo1   foo2'
+        model = init_model(value)
+        model['search'] = r"r'(foo)'"
+
+        model, _ = update(make_mouse_down_event(6, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertIsNone(model.get('openDropdown'))
+        self.assertTrue(model['dragging'])
+
+    def test_index_tool_click_inside_segment_is_unchanged(self):
+        # The index tool never composes with regex segments: still a fresh
+        # slice selection, no menu.
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+        model['tool'] = 'index'
+
+        model, _ = update(make_mouse_down_event(3, legacy_index=False),
+                          self.var_and_exp, model, value)
+
+        self.assertIsNone(model.get('openDropdown'))
+        self.assertEqual(model['anchorType'], 'index')
+        self.assertTrue(model['dragging'])
+
+    # --- Menu rendering ---
+
+    def _open_menu(self, value, search, click_idx):
+        model = init_model(value)
+        model['search'] = search
+        model, _ = update(make_mouse_down_event(click_idx, legacy_index=False),
+                          self.var_and_exp, model, value)
+        return model
+
+    def test_menu_panel_renders_when_open(self):
+        model = self._open_menu("hello world", r"r'(hello)'", 3)
+        html_out = visualize("hello world", model, None, None)
+
+        self.assertIn('segment-menu-panel', html_out)
+        self.assertIn('Remove segment', html_out)
+        self.assertIn('Convert to Fuzzy', html_out)
+        self.assertIn('Split here', html_out)
+
+    def test_menu_rows_fire_dropdown_select(self):
+        import html as html_mod
+        model = self._open_menu("hello world", r"r'(hello)'", 3)
+        html_out = visualize("hello world", model, None, None)
+
+        for option_value in ('remove', 'convert', 'split'):
+            event = repr(DropdownSelect('segment-menu-0-0', option_value))
+            self.assertIn(html_mod.escape(event), html_out)
+
+    def test_no_menu_panel_when_closed(self):
+        value = "hello world"
+        model = init_model(value)
+        model['search'] = r"r'(hello)'"
+        html_out = visualize(value, model, None, None)
+
+        self.assertNotIn('segment-menu-panel', html_out)
+
+    def test_fuzzy_menu_offers_convert_to_literal_and_no_split(self):
+        value = 'a1b\na2b'
+        model = self._open_menu(value, r"r'(a)(.*)(b)'", 8)
+        html_out = visualize(value, model, None, None)
+
+        self.assertIn('segment-menu-panel', html_out)
+        self.assertIn('Convert to Literal', html_out)
+        self.assertNotIn('Split here', html_out)
+
+    def test_no_split_when_clicked_on_first_char(self):
+        # Splitting before the first char would leave an empty left half.
+        model = self._open_menu("hello world", r"r'(hello)'", 1)
+        html_out = visualize("hello world", model, None, None)
+
+        self.assertIn('Remove segment', html_out)
+        self.assertNotIn('Split here', html_out)
+
+    def test_menu_renders_only_on_its_match(self):
+        # 'foo bar foo': the second 'foo' is internal 9-11.
+        value = 'foo bar foo'
+        model = self._open_menu(value, r"r'(foo)'", 10)
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-1-0')
+
+        html_out = visualize(value, model, None, None)
+        self.assertEqual(html_out.count('segment-menu-panel'), 1)
+
+    def test_open_menu_forces_segment_labels_active(self):
+        # With the menu open, its segment shows its labels like a hovered one.
+        model = self._open_menu("hello world", r"r'(hello)'", 3)
+        html_out = visualize("hello world", model, None, None)
+
+        self.assertIn('repetition-0-0', html_out)
+
+    def test_clicked_char_is_marked_as_split_point(self):
+        # The char the split would put at the head of the second half gets its
+        # own span with a split-point class, so CSS can show the cut.
+        model = self._open_menu("hello world", r"r'(hello)'", 3)
+        html_out = visualize("hello world", model, None, None)
+
+        m = re.search(r'<span class="([^"]*)" snc-idx="3"', html_out)
+        self.assertIsNotNone(m, "clicked char should render as its own span")
+        self.assertEqual(m.group(1).split(),
+                         ['chr', 'highlight', 'literal', 'is-interactive', 'split-point'])
+        self.assertEqual(html_out.count('split-point'), 1)
+
+    def test_no_split_point_when_split_not_offered(self):
+        # First-char click: no split row, no split-point marker.
+        model = self._open_menu("hello world", r"r'(hello)'", 1)
+        html_out = visualize("hello world", model, None, None)
+        self.assertNotIn('split-point', html_out)
+
+        # Fuzzy menu: no split either.
+        model = self._open_menu('a1b\na2b', r"r'(a)(.*)(b)'", 8)
+        html_out = visualize('a1b\na2b', model, None, None)
+        self.assertNotIn('split-point', html_out)
+
+
+class TestRemoveSegment(unittest.TestCase):
+    """Removing an internal segment extends its LEFT neighbor to consume the
+    removed occurrence's span; the leftmost and rightmost segments just remove
+    themselves."""
+
+    def test_internal_removal_extends_left_neighbor(self):
+        # (hello) absorbs the space \s+ realized, keeping (world).
+        self.assertEqual(
+            remove_segment(r"r'(hello)(\s+)(world)'", 1, "hello world"),
+            r"r'(hello\ )(world)'")
+
+    def test_internal_removal_with_fuzzy_left_neighbor_reinfers(self):
+        # 'a12yc': \d* consumes (y)'s span and is re-inferred over '12y';
+        # lazy because the wider class could swallow the (c) that follows.
+        self.assertEqual(
+            remove_segment(r"r'(a)(\d*)(y)(c)'", 2, 'a12yc'),
+            r"r'a[A-Za-z0-9]*?c'")
+
+    def test_last_segment_removal_drops_just_it(self):
+        self.assertEqual(
+            remove_segment(r"r'(hello)(\s+)(world)'", 2, "hello world"),
+            r"r'hello\s+'")
+
+    def test_leftmost_removes_only_itself(self):
+        self.assertEqual(
+            remove_segment(r"r'(hello)(\s+)(world)'", 0, "hello world"),
+            r"r'\s+world'")
+
+    def test_only_segment_removes_everything(self):
+        self.assertIsNone(remove_segment(r"r'(hello)'", 0, "hello world"))
+
+    def test_new_trailing_lazy_fuzzy_is_delazified(self):
+        # The laziness only existed to keep .*? from overrunning (world),
+        # which is gone now.
+        self.assertEqual(
+            remove_segment(r"r'(hello)(.*?)(world)'", 2, "hello world"),
+            r"r'hello.*'")
+
+    def test_internal_removal_on_later_match_uses_that_matchs_span(self):
+        # 'a1b a22b': the second match's \d* realizes '22' at internal 6-8.
+        self.assertEqual(
+            remove_segment(r"r'(a)(\d*)(b)'", 1, 'a1b a22b', match_index=1),
+            r"r'(a22)(b)'")
+
+    def test_flags_preserved(self):
+        self.assertEqual(
+            remove_segment(r"r'(hello)(\s+)(world)'i", 1, "hello world"),
+            r"r'(hello\ )(world)'i")
+
+    def test_capture_groups_flag_keeps_groups(self):
+        self.assertEqual(remove_segment(r"r'(hello)(\s+)'c", 1, "hello world"),
+                         r"r'(hello)'c")
+
+
+class TestSplitLiteralSegment(unittest.TestCase):
+    """Splitting a literal makes two literal segments; the clicked character
+    starts the second one."""
+
+    def test_split_before_clicked_char(self):
+        # "hello world": (hello) spans internal 1-6; split at 3 -> he + llo.
+        self.assertEqual(
+            split_literal_segment(r"r'(hello)'", 0, "hello world", 1, 3, 6),
+            r"r'(he)(llo)'")
+
+    def test_split_round_trips_as_two_segments(self):
+        result = split_literal_segment(r"r'(hello)'", 0, "hello world", 1, 3, 6)
+        inner = get_regex_inner_pattern(result)
+        self.assertEqual(len(parse_all_segments(inner)), 2)
+
+    def test_split_at_segment_start_returns_unchanged(self):
+        self.assertEqual(
+            split_literal_segment(r"r'(hello)'", 0, "hello world", 1, 1, 6),
+            r"r'(hello)'")
+
+    def test_split_middle_segment_keeps_neighbors(self):
+        # "hello world": 'world' spans internal 7-12; split at 10 -> wor + ld.
+        self.assertEqual(
+            split_literal_segment(r"r'hello\s*world'", 2, "hello world", 7, 10, 12),
+            r"r'hello\s*(wor)(ld)'")
+
+    def test_split_escapes_special_chars(self):
+        # "xa.by": (a\.b) spans internal 2-5; split at 3 -> a + \.b.
+        self.assertEqual(
+            split_literal_segment(r"r'(a\.b)'", 0, "xa.by", 2, 3, 5),
+            r"r'(a)(\.b)'")
+
+
+class TestSegmentMenuActions(unittest.TestCase):
+    """The three menu rows, driven end-to-end through MouseDown + DropdownSelect."""
+
+    var_and_exp = ('x', 'x')
+
+    def _menu_select(self, value, search, click_idx, option):
+        model = init_model(value)
+        model['search'] = search
+        model, _ = update(make_mouse_down_event(click_idx, legacy_index=False),
+                          self.var_and_exp, model, value)
+        self.assertIsNotNone(model.get('openDropdown'), 'menu did not open')
+        model, _ = update(make_dropdown_select_event(model['openDropdown']['id'], option),
+                          self.var_and_exp, model, value)
+        return model
+
+    def test_remove_middle_segment_extends_left_neighbor(self):
+        # Click inside '\ ' (internal 6): (hello) absorbs the space.
+        model = self._menu_select('hello world', r"r'(hello)(\ )(world)'", 6, 'remove')
+        self.assertEqual(model['search'], r"r'(hello\ )(world)'")
+        self.assertIsNone(model.get('openDropdown'))
+
+    def test_remove_internal_on_later_match_consumes_that_matchs_text(self):
+        # 'a1b a22b': click the second match's \d* (internal 6): (a) absorbs '22'.
+        model = self._menu_select('a1b a22b', r"r'(a)(\d*)(b)'", 6, 'remove')
+        self.assertEqual(model['search'], r"r'(a22)(b)'")
+
+    def test_remove_leftmost_removes_only_itself(self):
+        model = self._menu_select('hello world', r"r'(hello)(\ )(world)'", 3, 'remove')
+        self.assertEqual(model['search'], r"r'(\ )(world)'")
+
+    def test_remove_rightmost_removes_only_itself(self):
+        model = self._menu_select('hello world', r"r'(hello)(\ )(world)'", 8, 'remove')
+        self.assertEqual(model['search'], r"r'(hello)(\ )'")
+
+    def test_remove_only_segment_clears_search(self):
+        model = self._menu_select('hello world', r"r'(hello)'", 3, 'remove')
+        self.assertIsNone(model['search'])
+
+    def test_convert_literal_to_fuzzy_uses_inference(self):
+        # The middle '1' abuts segments on both sides, so inference gets
+        # None/None boundary context and picks a * quantifier.
+        model = self._menu_select('a1b', r"r'(a)(1)(b)'", 2, 'convert')
+        self.assertEqual(model['search'], r"r'(a)(\d*)(b)'")
+
+    def test_convert_single_literal_to_fuzzy_uses_string_context(self):
+        # 'hello' has no neighbors: string start on the left, ' ' on the right.
+        model = self._menu_select('hello world', r"r'(hello)'", 3, 'convert')
+        self.assertEqual(model['search'], r"r'([a-z]+)'")
+
+    def test_convert_fuzzy_to_literal_uses_matched_text(self):
+        model = self._menu_select('a1b', r"r'(a)(\d*)(b)'", 2, 'convert')
+        self.assertEqual(model['search'], r"r'(a)(1)(b)'")
+
+    def test_convert_on_later_match_uses_that_matchs_text(self):
+        # 'a1b a2b': the second match's \d* realizes '2' at internal 6.
+        model = self._menu_select('a1b a2b', r"r'(a)(\d*)(b)'", 6, 'convert')
+        self.assertEqual(model['search'], r"r'(a)(2)(b)'")
+
+    def test_split_action(self):
+        model = self._menu_select('hello world', r"r'(hello)'", 3, 'split')
+        self.assertEqual(model['search'], r"r'(he)(llo)'")
+        self.assertIsNone(model.get('openDropdown'))
+
+    def test_action_pushes_undo_and_undo_restores(self):
+        model = self._menu_select('hello world', r"r'(hello)'", 3, 'split')
+        self.assertEqual(model['undoHistory'][-1], r"r'(hello)'")
+
+        model, _ = update(make_key_down_event('z', meta_key=True),
+                          self.var_and_exp, model, 'hello world')
+        self.assertEqual(model['search'], r"r'(hello)'")
 
 
 # =============================================================================
@@ -2720,9 +3136,11 @@ class TestFuzzyDragDoesNotMoveItsNeighbour(unittest.TestCase):
         literal = next(h for h in highlights if h[2] == 'literal' and h[6] == 0)
         self.assertEqual((literal[0], literal[1]), (11, 13))
 
-    def test_fuzzy_first_then_literal(self):
+    def test_fuzzy_first_then_click_inside_opens_menu(self):
         # 'hello world and world again' -- 'hello' is internal 1-5, the first
-        # 'world' is 7-11, the second is 17-21.
+        # 'world' is 7-11. A drag inside a realized fuzzy region no longer
+        # carves a literal out of it: the mousedown opens the segment menu
+        # instead, so the pattern (and its neighbour) stays untouched.
         value = 'hello world and world again'
         model = init_model(value)
 
@@ -2743,18 +3161,15 @@ class TestFuzzyDragDoesNotMoveItsNeighbour(unittest.TestCase):
                           self.var_and_exp, model, value)
         self.assertEqual(model['search'], r"r'hello.*'")
 
-        # Now pick the FIRST 'world' out of the fuzzy region.
+        # A drag starting on the first 'world' opens the fuzzy's menu.
         model, _ = update(make_mouse_down_event(7, legacy_index=False, top_half=True),
                           self.var_and_exp, model, value)
         model, _ = update(make_mouse_move_event(11, legacy_index=False),
                           self.var_and_exp, model, value)
         model, _ = update(make_mouse_up_event(11, legacy_index=False),
                           self.var_and_exp, model, value)
-        self.assertEqual(model['search'], r"r'hello.*?world'")
-
-        highlights = parse_regex_for_highlighting(model['search'], value)
-        literal = next(h for h in highlights if h[2] == 'literal' and h[5] == 2)
-        self.assertEqual((literal[0], literal[1]), (7, 12))
+        self.assertEqual(model['search'], r"r'hello.*'")
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-0-1')
 
 
 # =============================================================================
@@ -3386,7 +3801,6 @@ class TestSearchBoxBasics(unittest.TestCase):
         self.model['anchorIdx'] = 5
         self.model['cursorIdx'] = 8
         self.model['dragging'] = True
-        self.model['insertAfterSegment'] = 1
 
         model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
@@ -3394,7 +3808,6 @@ class TestSearchBoxBasics(unittest.TestCase):
         self.assertIsNone(model['anchorIdx'])
         self.assertIsNone(model['cursorIdx'])
         self.assertFalse(model['dragging'])
-        self.assertIsNone(model['insertAfterSegment'])
 
     def test_invalid_regex_still_stored(self):
         """An invalid regex is still stored so the user can keep editing."""
@@ -3492,9 +3905,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         self.assertEqual(model['search'], r"r'hello\s*'")
 
     def test_type_regex_then_click_inside_fuzzy(self):
-        """Type a regex with fuzzy, then click inside the fuzzy to anchor it.
+        """Type a regex with fuzzy, then click inside the fuzzy.
 
-        Type /(hello)(.*)(world)/ -> click inside fuzzy to split with literal.
+        Type /(hello)(.*)/ -> click inside fuzzy opens its segment menu.
         """
         # Type regex with fuzzy segment in the search box
         model, _ = update(make_search_box_input_event(r"r'(hello)(.*)'"),
@@ -3502,10 +3915,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
 
         self.assertEqual(model['search'], r"r'(hello)(.*)'")
 
-        # Find the fuzzy segment and click inside it to add a literal anchor
-        # In "hello world", (.*) matches " world" (indices 7-12)
-        # Click at 'w' (index 8) to anchor inside the fuzzy
-        fuzzy_info = find_fuzzy_segment_at_index(model['search'], self.value, 8)
+        # In "hello world", (.*) matches " world" (internal 6-12); the 'w'
+        # sits at internal 7, inside the fuzzy.
+        fuzzy_info = find_fuzzy_segment_at_index(model['search'], self.value, 7)
         self.assertIsNotNone(fuzzy_info)
 
         model, _ = update(make_mouse_down_event(8, top_half=True),
@@ -3515,9 +3927,9 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
         model, _ = update(make_mouse_up_event(12),
                           self.var_and_exp, model, self.value)
 
-        # Lazy: dragging 'world' out of the fuzzy pins it to the occurrence the
-        # user dragged, rather than letting the greedy .* push it to the last.
-        self.assertEqual(model['search'], r"r'hello.*?world'")
+        # The click opens the fuzzy's menu; the pattern stays as typed.
+        self.assertEqual(model['search'], r"r'(hello)(.*)'")
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-0-1')
 
     def test_type_regex_then_new_mouse_selection_replaces(self):
         """Clicking far from the typed regex starts a fresh selection.
@@ -4525,7 +4937,7 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
 
         Mouse: /(hello)/
         Search box: /(hello)(.*)/
-        Mouse: extend with (world) inside fuzzy -> /(hello)(.*)(world)/
+        Mouse: click inside fuzzy -> its segment menu opens, pattern kept
         Search box: tweak to /(hello)(\\s+)(world)/
         """
         # Mouse: select "hello"
@@ -4542,18 +4954,20 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], r"r'(hello)(.*)'")
 
-        # Mouse: click inside fuzzy to add "world"
+        # Mouse: click inside fuzzy opens its menu, keeping the pattern
         model, _ = update(make_mouse_down_event(8, top_half=True),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_move_event(12),
+        model, _ = update(make_mouse_up_event(8),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(12),
-                          self.var_and_exp, model, self.value)
-        # Lazy, because the drag put a literal after a greedy .* (see
-        # TestLazifyOvershootingFuzzy).
-        self.assertEqual(model['search'], r"r'hello.*?world'")
+        self.assertEqual(model['search'], r"r'(hello)(.*)'")
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-0-1')
 
-        # Search box: tweak fuzzy to \s+
+        # Escape dismisses the menu
+        model, _ = update(make_key_down_event('Escape'),
+                          self.var_and_exp, model, self.value)
+        self.assertIsNone(model.get('openDropdown'))
+
+        # Search box: tweak fuzzy to \s+ and pin "world"
         model, _ = update(make_search_box_input_event(r"r'(hello)(\s+)(world)'"),
                           self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], r"r'(hello)(\s+)(world)'")
@@ -4563,7 +4977,6 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
             None,
             r"r'hello'",
             r"r'(hello)(.*)'",
-            r"r'hello.*?world'",
         ])
 
     def test_searchbox_to_mouse_preserves_undo_chain(self):
@@ -15464,14 +15877,14 @@ class TestExtendFromAnyMatch(unittest.TestCase):
         model = self.down_up(model, value, 6)
         self.assertEqual(model['search'], r"r'(y)(foo)'")
 
-    def test_click_inside_a_later_matchs_fuzzy_segment_splits_it(self):
+    def test_click_inside_a_later_matchs_fuzzy_segment_opens_its_menu(self):
         # 'a1b\na2b': the second match's (.*) covers the '2' at internal 8.
         value = 'a1b\na2b'
         model = init_model(value)
         model['search'] = r"r'(a)(.*)(b)'"
         model, _ = update(make_mouse_down_event(8, legacy_index=False),
                           self.var_and_exp, model, value)
-        self.assertEqual(model['insertAfterSegment'], 1)
+        self.assertEqual(model['openDropdown']['id'], 'segment-menu-1-1')
         self.assertEqual(model['search'], r"r'(a)(.*)(b)'")
 
     def test_a_click_that_abuts_nothing_still_starts_over(self):

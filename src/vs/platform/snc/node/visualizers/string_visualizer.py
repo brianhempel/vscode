@@ -713,6 +713,46 @@ def _segment_pattern_label(pat_str: str, segment_index: int, match_index: int,
         f'</span>'
     )
 
+
+def _segment_menu_panel(seg_type: str, segment_index: int, match_index: int,
+                        seg_start: int, model: dict) -> str:
+    """The actions menu a click inside a segment opens.
+
+    Anchored at the segment's first character; snc.ts hoists the panel and
+    places it below the trigger's box. The trigger itself is zero-size, so the
+    hidden measure span spans the text line's height for it -- that is what
+    puts the panel under the line instead of on top of it.
+    """
+    dropdown_id = f'segment-menu-{match_index}-{segment_index}'
+    open_dropdown = (model or {}).get('openDropdown') or {}
+    click_idx = open_dropdown.get('clickIdx')
+
+    rows = [
+        ('remove', 'Remove segment'),
+        ('convert', 'Convert to Literal' if seg_type == 'fuzzy' else 'Convert to Fuzzy'),
+    ]
+    # Split puts the clicked character at the head of the second half, so a
+    # click on the first character has nothing to put in the first half.
+    if seg_type == 'literal' and isinstance(click_idx, int) and click_idx > seg_start:
+        rows.append(('split', 'Split here'))
+
+    options_html = []
+    for value, label in rows:
+        select_event = repr(DropdownSelect(dropdown_id, value))
+        options_html.append(
+            f'<div class="snc-dropdown-option" snc-mouse-down="{html.escape(select_event)}">'
+            f'{html.escape(label)}</div>'
+        )
+    return (
+        f'<span class="segment-label-anchor">'
+        f'<span class="snc-dropdown-trigger">'
+        f'<span class="segment-menu-measure"></span>'
+        f'<div class="snc-dropdown-panel segment-menu-panel" snc-dropdown-align="left">'
+        f'{"".join(options_html)}</div>'
+        f'</span></span>'
+    )
+
+
 def _quantifier_to_simple_option(min_count, max_count) -> str | None:
     """Return the matching simple-option value ('1' / '?' / '*' / '+') or None.
 
@@ -1057,11 +1097,20 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                 if od is not None and od.get('id') in (
                     f'repetition-{match_index}-{segment_index}',
                     f'fuzzy-pattern-{match_index}-{segment_index}',
+                    f'segment-menu-{match_index}-{segment_index}',
                     'slice-label-start',
                     'slice-label-end',
                     'slice-label-center',
                 ):
                     segment_active = True
+            # While a literal's menu offers "Split here", the clicked char --
+            # the one that would start the second half -- is styleable.
+            od_split = model.get('openDropdown') if model else None
+            if (od_split is not None
+                    and od_split.get('id') == f'segment-menu-{match_index}-{segment_index}'
+                    and od_split.get('clickIdx') == index
+                    and seg_type == 'literal' and index > start):
+                classes.append('split-point')
 
         # Fuzzy segments only get a resize handle on an OPEN end (one that does
         # not abut a neighbor segment). Segment indices are pattern positions
@@ -1103,6 +1152,10 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                         '<span class="chr-start-handle-container">'
                         f'<span class="chr-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
                     )
+                od_menu = model.get('openDropdown') if model else None
+                if (od_menu is not None
+                        and od_menu.get('id') == f'segment-menu-{match_index}-{segment_index}'):
+                    pat_html += _segment_menu_panel(seg_type, segment_index, match_index, start, model)
         if end - 1 == index:
             classes.append('end')
             if slice_end_label is not None:
@@ -1650,6 +1703,111 @@ def replace_segment_pattern(selection_regex: str, segment_index: int, new_char_c
         old_text = segments[segment_index]['text']
         _, quantifier = extract_quantifier(old_text)
         segments[segment_index] = {'text': f'{new_char_class}{quantifier}', 'is_grouped': True}
+
+    fully_grouped_inner = ''.join(f"({s['text']})" for s in segments)
+    canonical_inner = _canonicalize_inner(fully_grouped_inner)
+    result = make_regex_search(canonical_inner, flags)
+    if 'c' in flags:
+        result = ensure_all_groups(result)
+    return result
+
+
+def remove_segment(selection_regex: str, segment_index: int, string_value: str,
+                   match_index: int = 0) -> str | None:
+    """Remove a segment via its menu.
+
+    An INTERNAL segment doesn't leave a hole: its left neighbor extends to
+    consume the removed occurrence's span (re-inferred if the neighbor is
+    fuzzy, extended literally otherwise). The leftmost and rightmost segments
+    just remove themselves.
+
+    Returns None when no segments remain. When the removed segment was the
+    last one, the new last segment is de-lazified: its laziness only existed
+    to keep it from overrunning a neighbor that is now gone. Postfix flags
+    are preserved.
+    """
+    inner_pattern = get_regex_inner_pattern(selection_regex) or ""
+    flags = get_search_flags(selection_regex)
+    segments = parse_all_segments(inner_pattern)
+    n = len(segments)
+
+    if not (0 <= segment_index < n):
+        return selection_regex
+
+    if 0 < segment_index < n - 1:
+        highlights = parse_regex_for_highlighting(selection_regex, string_value)
+        removed = next((h for h in highlights
+                        if h[5] == segment_index and h[6] == match_index), None)
+        left = next((h for h in highlights
+                     if h[5] == segment_index - 1 and h[6] == match_index), None)
+        if removed is not None and left is not None:
+            del segments[segment_index]
+            parts = [f"({s['text']})" if s['is_grouped'] else s['text'] for s in segments]
+            intermediate = make_regex_search(''.join(parts), flags)
+            if 'c' in flags:
+                intermediate = ensure_all_groups(intermediate)
+
+            left_idx = segment_index - 1
+            if left[2] == 'fuzzy':
+                # The left neighbor's own left side keeps its context; its
+                # right side now abuts the removed segment's right neighbor.
+                prev_char = (None if left_idx > 0 else
+                             _real_char_before_internal_idx(string_value, left[0]))
+                result = resize_fuzzy_segment(intermediate, left_idx, string_value,
+                                              left[0], removed[1], prev_char, None)
+            else:
+                result = resize_literal_segment(intermediate, left_idx, string_value,
+                                                left[0], removed[1])
+            result = canonicalize_regex(result)
+            if 'c' in flags:
+                result = ensure_all_groups(result)
+            return result
+        # The occurrence isn't realized (shouldn't happen from the menu, which
+        # opens on a realized span): just drop the segment.
+        kept = segments[:segment_index] + segments[segment_index + 1:]
+    else:
+        kept = segments[1:] if segment_index == 0 else segments[:segment_index]
+    if not kept:
+        return None
+
+    base, quantifier = extract_quantifier(kept[-1]['text'])
+    if len(quantifier) > 1 and quantifier.endswith('?'):
+        kept[-1] = dict(kept[-1], text=base + quantifier[:-1])
+
+    fully_grouped_inner = ''.join(f"({s['text']})" for s in kept)
+    canonical_inner = _canonicalize_inner(fully_grouped_inner)
+    result = make_regex_search(canonical_inner, flags)
+    if 'c' in flags:
+        result = ensure_all_groups(result)
+    return result
+
+
+def split_literal_segment(selection_regex: str, segment_index: int, string_value: str,
+                          seg_start: int, split_idx: int, seg_end: int) -> str:
+    """Split one literal segment in two: the character at split_idx starts the
+    second half. Both halves are re-derived from this occurrence's realized
+    span [seg_start, seg_end), so any quantifier on the original is baked in.
+
+    Returns the regex unchanged when split_idx is not strictly inside the span
+    (a first-character click has nothing to put in the first half).
+    """
+    if not (seg_start < split_idx < seg_end):
+        return selection_regex
+
+    inner_pattern = get_regex_inner_pattern(selection_regex) or ""
+    flags = get_search_flags(selection_regex)
+    segments = parse_all_segments(inner_pattern)
+    if not (0 <= segment_index < len(segments)):
+        return selection_regex
+
+    def literal_for(start: int, end: int) -> str:
+        text = extract_by_internal_indices(string_value, start, end)
+        return ''.join(char_to_regex_literal(c) for c in text)
+
+    segments[segment_index:segment_index + 1] = [
+        {'text': literal_for(seg_start, split_idx), 'is_grouped': True},
+        {'text': literal_for(split_idx, seg_end), 'is_grouped': True},
+    ]
 
     fully_grouped_inner = ''.join(f"({s['text']})" for s in segments)
     canonical_inner = _canonicalize_inner(fully_grouped_inner)
@@ -3248,6 +3406,23 @@ def find_fuzzy_segment_at_index(selection_regex: str | None, string_value: str, 
     return None
 
 
+def find_segment_at_index(selection_regex: str | None, string_value: str, idx: int) -> dict | None:
+    """
+    Find the literal or fuzzy segment whose realized span contains the given
+    internal index, in ANY match.
+
+    Returns dict with 'start', 'end', 'seg_type', 'segment_index',
+    'match_index' if found, None otherwise. Used to open the segment actions
+    menu on a click inside an existing segment.
+    """
+    highlights = parse_regex_for_highlighting(selection_regex, string_value)
+    for start, end, seg_type, _, _, seg_idx, match_idx in highlights:
+        if seg_idx is not None and seg_type in ('literal', 'fuzzy') and start <= idx < end:
+            return {'start': start, 'end': end, 'seg_type': seg_type,
+                    'segment_index': seg_idx, 'match_index': match_idx}
+    return None
+
+
 def find_extension_at_index(selection_regex: str | None, string_value: str,
                             idx: int) -> dict | None:
     """What a click at *idx* extends, considering every match -- not just the first.
@@ -3258,9 +3433,10 @@ def find_extension_at_index(selection_regex: str | None, string_value: str,
 
         {'direction': 'right', 'match_index': n}
         {'direction': 'left',  'match_index': n, 'first_start': i}
-        {'direction': None,    'match_index': n, 'segment_index': s}   (fuzzy split)
 
-    or None when the click abuts nothing and the selection should start over.
+    or None when the click abuts nothing. (A click strictly inside a segment
+    is not an extension -- see find_segment_at_index; it opens the segment
+    actions menu instead.)
 
     Right-extension wins over left, matching the old single-match order; among
     equally valid matches the nearest one to the click is taken.
@@ -3293,11 +3469,6 @@ def find_extension_at_index(selection_regex: str | None, string_value: str,
                     string_value, first_start - 1, first_start)):
             first_start -= 1
         return {'direction': 'left', 'match_index': n, 'first_start': first_start}
-
-    fuzzy = find_fuzzy_segment_at_index(selection_regex, string_value, idx)
-    if fuzzy is not None:
-        return {'direction': None, 'match_index': fuzzy['match_index'],
-                'segment_index': fuzzy['segment_index']}
 
     return None
 
@@ -3557,7 +3728,6 @@ def build_preview_regex(model, string_value: str) -> str | None:
 
     anchor_type = model.get('anchorType', 'literal')
     extend_direction = model.get('extendDirection')
-    insert_after_segment = model.get('insertAfterSegment')
     current_regex = model.get('search')
 
     start = min(a, c)
@@ -3594,7 +3764,7 @@ def build_preview_regex(model, string_value: str) -> str | None:
         #   so synthesize_fuzzy_pattern uses + (one or more).
         # - Adjacent to existing literal: pass None for that side so it uses *
         #   (zero or more), since the literal already anchors the match.
-        is_fresh = (current_regex is None or _is_flags_only(current_regex)) and extend_direction is None and insert_after_segment is None
+        is_fresh = (current_regex is None or _is_flags_only(current_regex)) and extend_direction is None
 
         if is_fresh:
             # New selection: check both edges
@@ -3608,10 +3778,6 @@ def build_preview_regex(model, string_value: str) -> str | None:
             # Appending to existing regex: literal on the left
             prev_char = None
             next_char = _real_char_after_internal_idx(string_value, end)
-        elif insert_after_segment is not None:
-            # Inserting between existing segments: literals on both sides
-            prev_char = None
-            next_char = None
         else:
             # Fallback: treat as adjacent
             prev_char = None
@@ -3620,12 +3786,6 @@ def build_preview_regex(model, string_value: str) -> str | None:
         fuzzy_pattern = synthesize_fuzzy_pattern(actual_text, prev_char, next_char)
         if extend_direction == 'left':
             return prepend_segment_to_regex(current_regex, 'fuzzy', fuzzy_pattern)
-        elif insert_after_segment is not None:
-            if insert_after_segment == 0:
-                insert_position = 0
-            else:
-                insert_position = insert_after_segment + 1
-            return insert_segment_at_position(current_regex, insert_position, 'fuzzy', fuzzy_pattern)
         else:
             return append_segment_to_regex(current_regex, 'fuzzy', fuzzy_pattern)
     else:
@@ -3633,12 +3793,6 @@ def build_preview_regex(model, string_value: str) -> str | None:
         selected_text = extract_by_internal_indices(string_value, start, end)
         if extend_direction == 'left':
             return prepend_segment_to_regex(current_regex, 'literal', selected_text)
-        elif insert_after_segment is not None:
-            if insert_after_segment == 0:
-                insert_position = 0
-            else:
-                insert_position = insert_after_segment + 1
-            return insert_segment_at_position(current_regex, insert_position, 'literal', selected_text)
         else:
             return append_segment_to_regex(current_regex, 'literal', selected_text)
 
@@ -4393,6 +4547,14 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         breakpoints.add(h[1])      # first index past: ownership may change
     breakpoints.update(extra_chips_by_index)
     breakpoints.update(extra_chips_after_by_index)
+    # An open segment menu's clicked char carries the split-point class, so it
+    # must render as its own span even though it is a segment interior char.
+    menu_click_idx = None
+    od_menu = (model or {}).get('openDropdown')
+    if od_menu is not None and str(od_menu.get('id', '')).startswith('segment-menu-'):
+        menu_click_idx = od_menu.get('clickIdx')
+        if isinstance(menu_click_idx, int):
+            breakpoints.add(menu_click_idx)
     bps = sorted(breakpoints)
     bp_count = len(bps)
     bp_i = 0  # walk pointer; breakpoints inside \n expansions get skipped
@@ -4440,7 +4602,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         if chips_here:
             emit_chips(chips_here)
         h = highlight_by_index.get(index)
-        if h is None or (h[0] != index and h[1] - 1 != index):
+        if (h is None or (h[0] != index and h[1] - 1 != index)) and index != menu_click_idx:
             extend_group(char, index, h)
         else:
             flush_group()
@@ -5054,7 +5216,6 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "cursorIdx": None,
         "dragging": False,
         "extendDirection": None,  # "left", "right", or None - which side we're extending from
-        "insertAfterSegment": None,  # Segment index to insert after (for clicking inside fuzzy)
         "openDropdown": None,     # {"id": "fuzzy-pattern-0-0", "segmentIndex": 0, "matchIndex": 0} when dropdown is open
         "handleDrag": None,       # {"segmentIndex": int, "matchIndex": int, "side": "left"|"right", "cursorIdx": int} when dragging a handle
         "_scroll_to_match": False,  # Set for one render when the first match should be scrolled to
@@ -5130,7 +5291,6 @@ def finalize_segment(model: dict, string_value: str) -> dict:
     model['anchorIdx'] = None
     model['cursorIdx'] = None
     model['extendDirection'] = None
-    model['insertAfterSegment'] = None
     model['dragging'] = False
     return model
 
@@ -5270,7 +5430,6 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
     model['anchorIdx'] = None
     model['cursorIdx'] = None
     model['dragging'] = False
-    model['insertAfterSegment'] = None
     model['openDropdown'] = None
     model['handleDrag'] = None
     model['undoHistory'] = []
@@ -6308,7 +6467,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = 'right'
-                model['insertAfterSegment'] = None  # Not inserting at specific position
             elif extension is not None and extension['direction'] == 'left':
                 # Keep existing regex, start new segment extending left from the
                 # match's start, so the selection spans from cursor to anchor.
@@ -6316,17 +6474,24 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = 'left'
-                model['insertAfterSegment'] = None  # Not inserting at specific position
-            elif extension is not None:
-                # Clicked inside a realized fuzzy region: start a new segment
-                # there, which constrains/splits the fuzzy match. Track which
-                # segment we clicked inside so we can insert after it.
-                model['anchorIdx'] = idx
-                model['anchorType'] = anchor_type
-                model['cursorIdx'] = idx
-                model['extendDirection'] = None  # Not a simple left/right extend
-                model['insertAfterSegment'] = extension['segment_index']
             else:
+                segment = (find_segment_at_index(selection_regex, value, idx)
+                           if isinstance(idx, int) else None)
+                if segment is not None:
+                    # Clicked inside an existing segment: open its actions
+                    # menu rather than starting a selection over it.
+                    model['anchorIdx'] = None
+                    model['cursorIdx'] = None
+                    model['extendDirection'] = None
+                    model['dragging'] = False
+                    model['openDropdown'] = {
+                        'id': f"segment-menu-{segment['match_index']}-{segment['segment_index']}",
+                        'segmentIndex': segment['segment_index'],
+                        'matchIndex': segment['match_index'],
+                        'clickIdx': idx,
+                    }
+                    return (model, commands)
+
                 # Fresh start: reset selection, preserving linked-editing state,
                 # search flags, active tool, and expand/collapse chrome.
                 saved_linked = (model.get('linked_action'), model.get('linked_source_expr'))
@@ -6444,7 +6609,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['anchorIdx'] = None
                     model['cursorIdx'] = None
                     model['dragging'] = False
-                    model['insertAfterSegment'] = None
 
             elif key == 'z' and meta_key and not shift_key:
                 # Cmd-Z: Undo
@@ -6459,7 +6623,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['anchorIdx'] = None
                     model['cursorIdx'] = None
                     model['dragging'] = False
-                    model['insertAfterSegment'] = None
 
             elif key == 'z' and meta_key and shift_key:
                 # Cmd-Shift-Z: Redo
@@ -6474,7 +6637,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['anchorIdx'] = None
                     model['cursorIdx'] = None
                     model['dragging'] = False
-                    model['insertAfterSegment'] = None
 
         case DropdownToggle(dropdown_id=did):
             # Toggle dropdown open/closed - committing buffered edits in either
@@ -6553,6 +6715,45 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                         # Fuzzy pattern dropdown: option is a character class
                         model['search'] = replace_segment_pattern(
                             current_regex, segment_index, option)
+                    elif did.startswith('segment-menu-'):
+                        # Segment actions menu: option is 'remove' / 'convert'
+                        # / 'split'. Convert and split work on THIS occurrence's
+                        # realized span, so look its highlight up.
+                        match_index = open_dropdown.get('matchIndex', 0)
+                        if option == 'remove':
+                            model['search'] = remove_segment(
+                                current_regex, segment_index, value, match_index)
+                        else:
+                            highlights = parse_regex_for_highlighting(current_regex, value)
+                            grabbed = [h for h in highlights
+                                       if h[5] == segment_index and h[6] == match_index]
+                            if grabbed:
+                                seg_start, seg_end, seg_type, _, _, _, _ = grabbed[0]
+                                click_idx = open_dropdown.get('clickIdx')
+                                if option == 'split' and seg_type == 'literal' and isinstance(click_idx, int):
+                                    model['search'] = split_literal_segment(
+                                        current_regex, segment_index, value,
+                                        seg_start, click_idx, seg_end)
+                                elif option == 'convert' and seg_type == 'literal':
+                                    # Re-infer a fuzzy over the span. A side
+                                    # that abuts a neighbor segment is anchored
+                                    # by it (None); an open side gets the
+                                    # adjacent string character, as in
+                                    # _compute_handle_drag_regex.
+                                    seg_count = pattern_segment_count(highlights)
+                                    prev_char = (None if segment_index > 0 else
+                                                 _real_char_before_internal_idx(value, seg_start))
+                                    next_char = (None if segment_index < seg_count - 1 else
+                                                 _real_char_after_internal_idx(value, seg_end))
+                                    model['search'] = resize_fuzzy_segment(
+                                        current_regex, segment_index, value,
+                                        seg_start, seg_end, prev_char, next_char)
+                                elif option == 'convert':
+                                    # Fuzzy -> literal: bake in this
+                                    # occurrence's matched text.
+                                    model['search'] = resize_literal_segment(
+                                        current_regex, segment_index, value,
+                                        seg_start, seg_end)
                     else:
                         # Repetition dropdown: option is a quantifier ('1', '?', '*', '+')
                         new_quantifier = '' if option == '1' else option
@@ -6633,7 +6834,6 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             model['anchorIdx'] = None
             model['cursorIdx'] = None
             model['dragging'] = False
-            model['insertAfterSegment'] = None
 
         case ReplaceToggle():
             model['replace_visible'] = not model.get('replace_visible', False)

@@ -145,6 +145,26 @@
 	&.end.start {
 		border-radius: 5px;
 	}
+
+	&.split-point {
+		position: relative;
+
+		/* a rotated square, shoved under the menu, so it looks like a triangle */
+		&::before {
+			content: '';
+			position: absolute;
+			left: -4px;
+			top: 17px;
+			bottom: 0;
+			width: 7px;
+			background: var(--snc-border-color);
+			border: 1px solid var(--snc-border-color); /* left here so you can try diff backgrounds */
+			pointer-events: none;
+			z-index: 15;
+			height: 7px;
+			transform: rotate(45deg);
+		}
+	}
 }
 
 .string-visualizer > * {
@@ -237,7 +257,6 @@ span.overlay-content {
 	z-index: 10;
 	cursor: pointer;
 	white-space: nowrap;
-	opacity: 0.7;
 
 	border-radius: 2px;
 	/* border: 1px solid transparent; */
@@ -245,7 +264,6 @@ span.overlay-content {
 	background: var(--snc-bg);
 
 	&:hover {
-		opacity: 1;
 		/* border-color: 1px solid var(--snc-border-color); */
 		background: var(--snc-hover-bg);
 	}
@@ -279,12 +297,10 @@ span.overlay-content {
 	   Reuses .pattern/.repetition positioning (left/right). */
 	&.index-label {
 		cursor: pointer;
-		opacity: 0.85;
 		color: var(--snc-accent);
 
 		&:hover {
 			background: var(--snc-hover-bg);
-			opacity: 1;
 		}
 
 		/* Single-char index pick: one label centered under the char. Set on
@@ -299,6 +315,20 @@ span.overlay-content {
 
 .segment-label-anchor .snc-dropdown-trigger {
 	position: static;
+}
+
+/* Invisible stand-in for the segment-menu trigger's box: the anchor is
+   zero-size, so snc.ts measures this span instead (resolveMeasureTarget) and
+   hangs the hoisted menu panel off its bottom - i.e. just below the text
+   line the clicked segment sits on. */
+.segment-menu-measure {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 1px;
+	height: 1.15em;
+	visibility: hidden;
+	pointer-events: none;
 }
 
 /* Tiny one-input panel that pops up when a slice label is clicked.
