@@ -2928,6 +2928,24 @@ class TestManyMatchesMouseDownPerformance(unittest.TestCase):
             self.assertLess(elapsed, 1.0,
                             f"MouseDown at {click_at} took {elapsed:.1f}s")
 
+    def test_render_of_dense_click_preview_is_fast(self):
+        """Clicking a single lone char previews a one-char pattern with
+        thousands of matches; the render after it (and every drag-move render
+        that follows) must not pay a full string walk per match (as
+        _segmentNextChars once did)."""
+        line = "this is a sample string with several s chars spread across it ok\n"
+        value = line * 1000
+        model = init_model(value)
+        event = make_mouse_down_event(value.index(' s ') + 2, legacy_index=False)
+        model, _ = update(event, ('x', 'x'), model, value)
+        self.assertTrue(model['dragging'])
+
+        t0 = time.perf_counter()
+        visualize(value, model, None, None)
+        elapsed = time.perf_counter() - t0
+
+        self.assertLess(elapsed, 1.0, f"dense preview render took {elapsed:.1f}s")
+
 
 class TestSelectionAdjacencyIntegration(unittest.TestCase):
     """Integration tests for extending selections across anchor boundaries.
