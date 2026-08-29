@@ -22,6 +22,7 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.vscode-oss-dev\extensions" -Target
 
 # Python stuff
 pip install pytest
+pip install "pandas<3" "numpy<2"
 
 # If you want to write Python that downloads URLs, you'll need SSL certs
 /Applications/Python\ 3.14/Install\ Certificates.command

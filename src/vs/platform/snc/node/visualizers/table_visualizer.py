@@ -159,6 +159,12 @@ class ColumnClick:
     col: str
 
 @dataclass(frozen=True, slots=True)
+class ColumnResize:
+    """User resized a column by dragging the resize handle."""
+    col: str
+    width: int
+
+@dataclass(frozen=True, slots=True)
 class RemoveColumnClick:
     """User clicked the (x) button to remove a column."""
     col: str
@@ -560,6 +566,9 @@ class ChangeSourceExpr:
     end_line: int
     end_col: int
 
+@dataclass(frozen=True, slots=True)
+class SelectGroupedComputeTab:
+    grouped: bool
 
 # === Saved config (the line's #%click comment) ===
 
@@ -5048,10 +5057,10 @@ ROW_AGG_INDEXES = ('min(range(len($$)), key=lambda i: $)',
 ROW_AGGS_BY_INDEX = tuple(f'$$[{expr}]' for expr in ROW_AGG_INDEXES)
 
 COMPUTE_AGGS = (
-    ('#Unique',         'len(set($))'),
-    ('#Present',        'sum(x is not None for x in $)'),
-    ('#Missing',        'sum(x is None for x in $)'),
-    ('#NaN',            'sum(math.isnan(x) for x in $)'),
+    ('# Unique',         'len(set($))'),
+    ('# Present',        'sum(x is not None for x in $)'),
+    ('# Missing',        'sum(x is None for x in $)'),
+    ('# NaN',            'sum(math.isnan(x) for x in $)'),
     ('Sum',             'sum($)'),
     ('Min',             'min($)'),
     ('Min Idx',         'np.argmin($)'),
@@ -5759,7 +5768,7 @@ def _agg_is_histogram(template: str) -> bool:
 # width is per bar, of which the bar itself takes most and the gap the rest.
 _HIST_HEIGHT = 10
 _HIST_STEP = 2
-_HIST_BAR = 1.6
+_HIST_BAR = 1
 
 
 def _hist_counts(answer) -> Optional[list]:
@@ -5807,7 +5816,7 @@ def _agg_hist_svg(answer) -> str:
             height = 0.0
         else:
             height = max(1.0, _HIST_HEIGHT * count / peak)
-        bars.append(f'<rect x="{i * _HIST_STEP:g}" y="{_HIST_HEIGHT - height:g}" '
+        bars.append(f'<rect x="{i * _HIST_STEP:g}" y="{_HIST_HEIGHT - height:g}" rx="1" ry="1" '
                     f'width="{_HIST_BAR:g}" height="{height:g}" />')
     # Wide enough for the bars and the gaps between them, and no wider: the gap
     # after the last one would be a margin the drawing didn't ask for.
@@ -7576,6 +7585,7 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         'handledKeys': handled_keys,
         'display_mode': 'table',
         'columns': columns,
+        'column_widths': {},
         '_source_expr': source_expr,
         **config_fields,
         **_COLUMN_MGMT_DEFAULTS,
@@ -8427,71 +8437,90 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
                      if leaf is not None else set())
 
     rows = []
-    for label, template, checked in _compute_rows(model, col):
-        answer = _agg_value(template, values, eval_in_scope, lst, reads)
-        # A question this column can't answer isn't worth checking -- but one
-        # already checked stays clickable, or there'd be no way to uncheck it.
-        unanswered = answer is NO_ANSWER
-        inert = unanswered and not checked
-        classes = ('col-compute-row' + (' checked' if checked else '')
-                   + (' unselectable' if inert else ''))
-        toggle_attr = '' if inert else (
-            f' snc-mouse-down="'
-            f'{html.escape(repr(ComputeToggle(col=col, expr=template)))}"')
-        # The boxes and the answer sit outside the part that toggles: typing a
-        # level, or dragging the answer out, is not a way of checking the row.
-        holes = ''.join(
-            f'<input type="text" class="col-compute-hole search-box" '
-            f'snc-input="{html.escape(_compute_hole_event(col, template, i))}" '
-            f'{_agg_hole_tooltip(template)}'
-            f'value="{html.escape(text)}" spellcheck="false" />'
-            for i, text in enumerate(_agg_holes(template)))
-        # Nothing to hand over when there is no answer, and nothing to name the
-        # column by when the list has no source.
-        code = (None if unanswered or source_expr is None
-                else _agg_col_code(template, col, source_expr,
-                                   _model_binds(model), columns))
-        # The per-group box asks the same question of one group at a time, so
-        # it is offered even when the whole column can't answer it: a column of
-        # mixed types may still be summable a group at a time. Offered only
-        # where there is an honest column to write, which is what a leaf under
-        # a splat has and a column naming where its row sits hasn't.
-        group_box = ''
-        if leaf is not None and _group_agg_column(leaf, template) is not None:
-            group_box = (
-                f'<span class="col-compute-group-toggle" '
-                f'data-tooltip="{html.escape(COMPUTE_PER_GROUP_TOOLTIP)}" '
-                f'snc-mouse-down="'
-                f'{html.escape(repr(ComputeToggle(col=col, expr=template, per_group=True)))}">'
-                f'{_render_tally_check(template in group_checked)}</span>')
-        rows.append(
-            f'<div class="{classes}"{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
-            f'<span class="col-compute-toggle"{toggle_attr}>'
-            f'{_render_tally_check(checked, disabled=inert)}'
-            f'<span class="col-compute-name">{html.escape(label)}</span>'
-            f'{holes}</span>'
-            f'{group_box}'
-            f'<span class="col-compute-preview"'
-            f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
-            f'</div>')
 
-    rows.append('<div class="col-compute-sep"></div>')
-    for label, template, _suffix in COMPUTE_CODES:
-        # The row itself is the handle, there being no answer beside it to hang
-        # one off. Without a source there is no line to write and none to drag.
-        code = (None if values_expr is None
-                else _agg_code(template, values_expr, source_expr))
-        click_attr = '' if code is None else (
-            f' snc-mouse-down='
-            f'"{html.escape(repr(ComputeCodeClick(col=col, expr=template)))}"')
-        rows.append(
-            f'<div class="col-compute-row col-compute-code'
-            f'{"" if code else " unselectable"}"'
-            f'{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
-            f'<span class="col-compute-toggle"{click_attr}>'
-            f'<span class="col-compute-nocheck"></span>'
-            f'<span class="col-compute-name">{html.escape(label)}</span>'
-            f'</span></div>')
+    compute_template_rows = []
+    grouped_compute_template_rows = []
+
+    for is_group in [False, True]:
+        for label, template, checked in _compute_rows(model, col):
+            answer = _agg_value(template, values, eval_in_scope, lst, reads)
+            # A question this column can't answer isn't worth checking -- but one
+            # already checked stays clickable, or there'd be no way to uncheck it.
+            unanswered = answer is NO_ANSWER
+            inert = unanswered and not checked
+            classes = ('col-compute-row' + (' checked' if checked else '')
+                    + (' unselectable' if inert else ''))
+            toggle_attr = '' if inert else (
+                f' snc-mouse-down="'
+                f'{html.escape(repr(ComputeToggle(col=col, expr=template)))}"')
+            # The boxes and the answer sit outside the part that toggles: typing a
+            # level, or dragging the answer out, is not a way of checking the row.
+            holes = ''.join(
+                f'<input type="text" class="col-compute-hole search-box" '
+                f'snc-input="{html.escape(_compute_hole_event(col, template, i))}" '
+                f'{_agg_hole_tooltip(template)}'
+                f'value="{html.escape(text)}" spellcheck="false" />'
+                for i, text in enumerate(_agg_holes(template)))
+            # Nothing to hand over when there is no answer, and nothing to name the
+            # column by when the list has no source.
+            code = (None if unanswered or source_expr is None
+                    else _agg_col_code(template, col, source_expr,
+                                    _model_binds(model), columns))
+            # The per-group box asks the same question of one group at a time, so
+            # it is offered even when the whole column can't answer it: a column of
+            # mixed types may still be summable a group at a time. Offered only
+            # where there is an honest column to write, which is what a leaf under
+            # a splat has and a column naming where its row sits hasn't.
+            group_box = ''
+            if leaf is not None and _group_agg_column(leaf, template) is not None:
+                group_box = (
+                    f'<span class="col-compute-toggle" '
+                    f'data-tooltip="{html.escape(COMPUTE_PER_GROUP_TOOLTIP)}" '
+                    f'snc-mouse-down="'
+                    f'{html.escape(repr(ComputeToggle(col=col, expr=template, per_group=True)))}">'
+                    f'{_render_tally_check(template in group_checked)}<span class="col-compute-name">{html.escape(label)}</span>{holes}</span>')
+
+            if is_group:
+                if group_box:
+                    grouped_compute_template_rows.append(
+                        f'<div class="{classes}"{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
+                        f'{group_box}'
+                        f'<span class="col-compute-preview"'
+                        f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
+                        f'</div>'
+                    )
+            else:
+                compute_template_rows.append(
+                    f'<div class="{classes}"{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
+                    f'<span class="col-compute-toggle"{toggle_attr}>'
+                    f'{_render_tally_check(checked, disabled=inert)}'
+                    f'<span class="col-compute-name">{html.escape(label)}</span>'
+                    f'</span>{holes}'
+                    f'<span class="col-compute-preview"'
+                    f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
+                    f'</div>'
+                )
+
+
+
+    # Show tabs if there was a grouped compute template
+    if len(grouped_compute_template_rows) > 0:
+        is_grouped_tab_selected = model.get('grouped_compute_tab_selected')
+
+        rows.append('<div class="col-compute-tabs-wrapper">')
+        rows.append('<div class="col-compute-tabs">')
+        rows.append(f'<div class="col-compute-tab {"selected" if not is_grouped_tab_selected else ""}" snc-mouse-down="{html.escape(repr(SelectGroupedComputeTab(False)))}">Table</div>')
+        rows.append(f'<div class="col-compute-tab {"selected" if is_grouped_tab_selected else ""}" snc-mouse-down="{html.escape(repr(SelectGroupedComputeTab(True)))}">Per Group</div>')
+        rows.append('</div>')
+
+        if is_grouped_tab_selected:
+            rows = rows + grouped_compute_template_rows
+        else:
+            rows = rows + compute_template_rows
+
+        rows.append('</div>')
+    else:
+        rows = rows + compute_template_rows
 
     rows.append('<div class="col-compute-sep"></div>')
     # A box names itself by where it sits rather than by what it says: the first
@@ -8525,11 +8554,29 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
             f'snc-focus-key="compute-free-{col}-{i}" '
             f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
             f'data-tooltip="{html.escape(_compute_scope(_model_binds(model)).legend)}" '
-            f'value="{html.escape(template)}" placeholder="Add aggregation" '
+            f'value="{html.escape(template)}" placeholder="Expr" '
             f'spellcheck="false" />'
             f'<span class="col-compute-preview"'
             f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
             f'</div>')
+
+    rows.append('<div class="col-compute-sep"></div>')
+    for label, template, _suffix in COMPUTE_CODES:
+        # The row itself is the handle, there being no answer beside it to hang
+        # one off. Without a source there is no line to write and none to drag.
+        code = (None if values_expr is None
+                else _agg_code(template, values_expr, source_expr))
+        click_attr = '' if code is None else (
+            f' snc-mouse-down='
+            f'"{html.escape(repr(ComputeCodeClick(col=col, expr=template)))}"')
+        rows.append(
+            f'<div class="col-compute-row col-compute-code'
+            f'{"" if code else " unselectable"}"'
+            f'{py_exp_attrs(PyExp(code, _agg_imports(template)), align="right")}>'
+            f'<span class="col-compute-toggle"{click_attr}>'
+            f'<span class="col-compute-nocheck"></span>'
+            f'<span class="col-compute-name">{html.escape(label)}</span>'
+            f'</span></div>')
 
     return (f'<div class="snc-dropdown-panel flyout col-compute-panel" '
             f'snc-dropdown-align="flyout">{"".join(rows)}</div>')
@@ -8596,7 +8643,7 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
         _render_column_search_row(col, model),
         f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
-        f'class="snc-dropdown-option-label">Delete</span>'
+        f'class="snc-dropdown-option-label">Remove</span>'
         f'</div>',
         *(f'<div class="snc-dropdown-option col-add-beside"'
           f'{_column_dwell_attr(model)}>'
@@ -8659,6 +8706,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     drag_start_event = repr(ColumnDragStart(col=col))
     drag_over_event = repr(ColumnDragOver(col=col))
     drag_end_event = repr(ColumnDragEnd(col=col))
+    resize_event = repr(ColumnResize(col=col, width=0)) # The width is set by JS
 
     drag_from = model.get('column_drag_from')
     drag_over = model.get('column_drag_over')
@@ -8686,7 +8734,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         if extra_classes:
             th_classes.append(extra_classes)
         return (
-            f'<th class="{" ".join(th_classes)}"{span_attrs}>'
+            f'<th class="{" ".join(th_classes)}"{span_attrs} data-col="{repr(html.escape(col))}">'
             f'<span class="col-header-inner">'
             f'<span class="col-name">'
             f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
@@ -8732,21 +8780,27 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     # it isn't continuous, and a release that lands here has to end the drag.
     track_move = ('' if drag_from is None else
                   f'snc-mouse-move="{html.escape(drag_over_event)}" ')
+
+
+
     if extra_classes:
         th_classes.append(extra_classes)
     return (
-        f'<th class="{" ".join(th_classes)}"{span_attrs} '
+        f'<th class="{" ".join(th_classes)}"{span_attrs} data-col="{repr(html.escape(col))}" {get_col_width_style(col, model)}'
         f'{track_move}'
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span class="col-header-inner">'
+        f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
+        f'data-tooltip="Drag to reorder" '
+        f'class="col-handle col-drag-handle">⣿</span>'
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
         f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
-        f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
-        f'data-tooltip="Drag to reorder" '
-        f'class="col-handle col-drag-handle">⣿</span>'
         f'{menu_html}'
+        f'<span snc-resize-col="{html.escape(resize_event)}"'
+        f'data-tooltip="Resize" '
+        f'class="col-handle col-resize-handle"></span>'
         f'</span>'
         f'</th>'
     )
@@ -10245,6 +10299,15 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
 
+def get_col_width_style(col, model):
+    column_widths = model.get('column_widths')
+    width = column_widths.get(col)
+
+    if width is None:
+        return ''
+
+    return f' style="min-width: {width}px; max-width: {width}px; overflow: hidden;"'
+
 def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, every_row_exps=None):
     children = model.get('children', {})
     columns = model.get('columns', [])
@@ -10323,7 +10386,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     if not small and not read_only:
         strs.append(_render_tool_toolbar(model))
 
-    strs.append(f'<div class="list-table-scroll snc-base-visualizer" style="{table_div_style}">')
+    is_dragging_class = 'list-table-is-dragging' if model.get('column_drag_from') is not None or model.get('column_drag_over') is not None else ''
+
+    strs.append(f'<div class="list-table-scroll snc-base-visualizer {is_dragging_class}" style="{table_div_style}">')
     leaves = _leaf_columns(columns)
     header_rows = _header_cells(columns)
     # A splat carrying sub-columns spans them, and they get a header row of
@@ -10331,6 +10396,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # sub-columns anywhere this is one <tr> of width-1 cells, exactly the
     # markup it has always been.
     n_header = len(header_rows)
+
+
     # One <thead> around every header row, the way the aggregations share one
     # <tfoot>: a row group sticks as a block, so a sub-column row pins under
     # the row above it without anything having to measure that row's height.
@@ -10622,7 +10689,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 # the cell occupies the first row only and every row under it
                 # shifts left.
                 cell_span = leaf_span(leaf.depth)
-                strs.append(f'<td{cell_span}>')
+                strs.append(f'<td data-col="{repr(html.escape(col))}" {get_col_width_style(col, model)} {cell_span}>')
                 strs.append(wrap_child_prefix(composite_key))
                 strs.extend(cell_htmls)
                 strs.append(wrap_child_suffix)
@@ -10630,7 +10697,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 strs.append('</td>')
             else:
                 cell_span = leaf_span(leaf.depth)
-                strs.append(f'<td{cell_span}>{pick_overlay(i, f"col_{ci}")}</td>')
+                strs.append(f'<td data-col="{repr(html.escape(col))}" {get_col_width_style(col, model)} {cell_span}>{pick_overlay(i, f"col_{ci}")}</td>')
 
         strs.append('</tr>')
 
@@ -11696,6 +11763,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case DeselectChildren():
             model['focused_child'] = None
+
+        case SelectGroupedComputeTab(grouped=grouped):
+            model['grouped_compute_tab_selected'] = grouped
+
+        case ColumnResize(col=col, width=width):
+            model['column_widths'][col] = width
+
 
     if is_nested(var_and_exp):
         return (model, commands)

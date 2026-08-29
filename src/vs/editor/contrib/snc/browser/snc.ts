@@ -115,7 +115,7 @@ function describeEventTarget(node: Node | null, root: Element): unknown {
 		const el = node instanceof Element ? node : node?.parentElement;
 		if (!el) { return undefined; }
 		const attrs: Record<string, string> = {};
-		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-idx', 'snc-mouse-down', 'snc-mouse-up', 'snc-mouse-move', 'snc-notify-mouse-is-up', 'snc-hover-moves', 'snc-key-down', 'snc-input', 'snc-idx-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
+		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-idx', 'snc-mouse-down', 'snc-resize-col', 'snc-mouse-up', 'snc-mouse-move', 'snc-notify-mouse-is-up', 'snc-hover-moves', 'snc-key-down', 'snc-input', 'snc-idx-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
 			const v = el.getAttribute(name);
 			if (v !== null) { attrs[name] = v.length > 300 ? v.slice(0, 300) + '…' : v; }
 		}
@@ -1546,6 +1546,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						'snc-mouse-up': `MouseUp(${el.getAttribute(`snc-idx`)})`,
 					}[attr_name] ?? '';
 				}
+
+				if (attr_name === 'snc-resize-col') {
+					pythonEventStr = pythonEventStr.replace("width=0", `width=${(ev as any).resizeWidth}`);
+				}
+
 				// The shorthand covers move/down/up only. A mouseout over it is
 				// nothing the visualizer asked to hear about -- and it fires at
 				// every element boundary the pointer crosses. Sent anyway (as an
@@ -1941,6 +1946,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// aren't clipped by its overflow.
 		this.hoistSegmentLabels();
 		this.hoistNestedToolbars();
+		this.setupResizableColumns();
 		this.updateLayoutMode();
 
 		// Scroll any element marked for scroll-into-view (e.g. selected autocomplete item)
@@ -2551,6 +2557,65 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.hoistedSegmentLabelListeners.push(
 				dom.addDisposableListener(scroller, 'scroll', () => this.repositionHoistedSegmentLabels())
 			);
+		}
+	}
+
+	private setupResizableColumns(): void {
+		const resiable_col_handles = Array.from(this.domNode.querySelectorAll<HTMLElement>('.col-resize-handle')).filter(dom.isHTMLElement);
+
+		for (const handle of resiable_col_handles) {
+			const col = handle.closest<HTMLElement>('.col-header');
+			const table = col?.closest<HTMLElement>('.list-table-scroll');
+			if (!col || !table) { continue; }
+
+			const col_attr = col.dataset['col']!;
+			const cells = Array.from(table.querySelectorAll<HTMLElement>('td[data-col="' + CSS.escape(col_attr) + '"]'));
+
+			let currWidth = 0;
+			let mouseX = 0;
+
+			const beginResizing = (e: PointerEvent) => {
+				currWidth = col!.offsetWidth - 10; // Subtract the padding
+				handle.onpointermove = resize;
+
+				mouseX = e.clientX;
+
+			  handle.setPointerCapture(e.pointerId);
+			}
+
+			const stopResizing = (e: PointerEvent) => {
+				handle.onpointermove = null;
+				handle.releasePointerCapture(e.pointerId);
+
+				// const event: UiEventSpec = {
+				// 	line: link.line,
+				// 	visIndex: link.visIndex,
+				// 	pythonEventStr: 'lambda e: Unlink()',
+				// 	eventJSON: { type: 'unlink' },
+				// };
+
+				const augmented_e = { ...e, resizeWidth: currWidth, target: handle };
+				this.dispatch_mouse_python_event('snc-resize-col', augmented_e);
+
+				mouseX = 0;
+				currWidth = 0;
+			};
+
+			const resize = (e: PointerEvent) => {
+				const dx = e.clientX - mouseX;
+				currWidth += dx;
+				mouseX = e.clientX;
+
+				[...cells, col!].forEach(cell => {
+					cell.style.maxWidth = `${currWidth}px`;
+					cell.style.minWidth = `${currWidth}px`;
+					cell.style.overflow = 'hidden';
+				});
+			};
+
+
+			this._register(dom.addDisposableListener(handle, 'pointerdown', beginResizing));
+			this._register(dom.addDisposableListener(handle, 'pointerup', stopResizing));
 		}
 	}
 

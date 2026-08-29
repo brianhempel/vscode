@@ -646,7 +646,7 @@
 
 .visualizer-container .visualizer-container > .snc-tool-and-visualizer > .tool-toolbar {
 	right: calc(100% + 5px);
-	left: auto;
+	left: revert-rule;
 }
 
 .visualizer-container .snc-generic-visualizer {
@@ -1351,7 +1351,7 @@
 	background: var(--snc-table-header-bg);
 	border-bottom-width: 0;
 	box-shadow: var(--snc-col-header-edge);
-	padding: 5px 3px;
+	padding: 5px 5px;
 	position: relative;
 
 	/* a column actively filtering rows */
@@ -1408,21 +1408,38 @@
 	pointer-events: none;
 }
 
+.list-visualizer .col-resize-handle {
+	cursor: ew-resize;
+  position: absolute;
+  right: -6px;
+  width: 2px;
+  height: 100%;
+  border-left: 1px solid var(--snc-accent);
+  z-index: 100;
+}
+
 .col-header:hover > .col-header-inner > .col-handle {
 	opacity: 1;
 	pointer-events: auto;
 }
 
 .list-visualizer .col-drag-handle {
-	position: absolute;
-  font-family: var(--snc-code-font-family);
-  border: 1px solid var(--snc-border-color);
-  background: var(--snc-table-header-bg);
-  border-right-color: var(--snc-table-header-bg);
-  margin-right: 0px;
-  right: 100%;
-  border-radius: 3px 0 0 3px;
-  cursor: grab;
+	font-family: var(--snc-code-font-family);
+  border-radius: 3px;
+  padding: 0px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  opacity: 0;
+  background: var(--snc-hover-bg);
+  width: 10px;
+  overflow: hidden;
+  white-space: pre;
+}
+
+.list-table-scroll:not(.list-table-is-dragging) > table .col-header:hover > .col-header-inner > .col-drag-handle,
+.col-drag-source > .col-header-inner > .col-drag-handle {
+	opacity: 1;
 }
 
 /* Flex lives on an inner wrapper, never on the <th> itself: display:flex on a
@@ -1471,6 +1488,7 @@
   padding-left: 1px;
   font-weight: 400;
   flex-grow: 1;
+  text-align: center;
 }
 
 .editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.active {
@@ -1549,17 +1567,8 @@
 
 	.col-search-input {
 		box-sizing: border-box;
-		min-width: 150px;
-		padding-left: calc(7.5ch); /* for "(code)" and "not in" */
+		/*min-width: 150px;*/
 		padding-right: calc(4.5ch); /* for "AND" */
-	}
-
-	/* look at the comparator dropdown to know how much left padding we need */
-	.search-box-wrapper:has(*[data-charlen="1"]) .col-search-input {
-		padding-left: calc(2.5ch);
-	}
-	.search-box-wrapper:has(*[data-charlen="2"]) .col-search-input {
-		padding-left: 6px;
 	}
 
 	/* --- The tally: each of the column's values and how many rows have it ---
@@ -1889,11 +1898,51 @@
 	line-height: 1.5;
 	padding: 2px;*/
 
+	.col-compute-tabs-wrapper {
+    padding-top: 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+
+    .col-compute-tabs {
+        display: flex;
+        background: var(--snc-menu-bg);
+        border-bottom: 1px solid var(--snc-border-color);
+        border-radius: 4px 4px 0px 0px;
+        padding: 4px 4px;
+        justify-content: space-between;
+        /* width: 100%; */
+        position: absolute;
+        top: 0px;
+        left: 0px;
+        width: -webkit-fill-available;
+        gap: 4px;
+
+        .col-compute-tab {
+            display: flex;
+            padding: 0px 0px;
+            border-radius: 4px;
+            width: -webkit-fill-available;
+            justify-content: center;
+            cursor: pointer;
+
+            &.selected {
+                background: white;
+                border: 1px solid var(--snc-border-color);
+            }
+
+            &:hover:not(.selected) {
+                background: var(--snc-hover-bg);
+            }
+        }
+    }
+	}
+
 	.col-compute-row {
 		display: flex;
 		align-items: center;
 		gap: 3px;
-		padding: 0 2px;
+		padding: 1px 2px;
 		border-radius: 3px;
 
 		/* Only the name and its box highlight: the level box and the answer
@@ -1974,14 +2023,15 @@
 	}
 
 	.col-compute-preview {
-		flex: none;
 		padding-left: 8px;
 		color: var(--snc-text-muted);
 		font-variant-numeric: tabular-nums;
-		max-width: 140px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		flex-grow: 1;
+    display: flex;
+    justify-content: end;
 	}
 
 	/* The rows that write a line have no checkbox -- but they still start where
