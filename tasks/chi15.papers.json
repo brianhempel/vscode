@@ -1,39 +1,331 @@
 [
-  {"ID": 101, "paper_title": "Crowd-Powered Captioning for Live Lectures", "abstract": "", "keywords": ["crowdsourcing", "accessibility", "captioning"], "type": "long", "award": "bp",
-   "authors": [{"name": "Priya Raman", "institution": "Carnegie Mellon University", "city": "Pittsburgh", "country": "USA"},
-               {"name": "Tomasz Wielgus", "institution": "Carnegie Mellon University", "city": "Pittsburgh", "country": "USA"}]},
-  {"ID": 102, "paper_title": "Social Signals in Group Chat", "abstract": "", "keywords": ["social", "messaging", "groups"], "type": "long", "award": "none",
-   "authors": [{"name": "Mei-Lin Huang", "institution": "University of Washington", "city": "Seattle", "country": "USA"},
-               {"name": "Priya Raman", "institution": "Carnegie Mellon University", "city": "Pittsburgh", "country": "USA"}]},
-  {"ID": 103, "paper_title": "Sketching Interfaces for Data Journalists", "abstract": "", "keywords": ["visualization", "sketching"], "type": "short", "award": "none",
-   "authors": [{"name": "Olu Adeyemi", "institution": "University of Washington", "city": "Seattle", "country": "USA"}]},
-  {"ID": 104, "paper_title": "Wearables for Social Anxiety", "abstract": "", "keywords": ["wearables", "social", "health"], "type": "long", "award": "hm",
-   "authors": [{"name": "Sofia Bergström", "institution": "KTH Royal Institute of Technology", "city": "Stockholm", "country": "Sweden"},
-               {"name": "Anders Lindqvist", "institution": "KTH Royal Institute of Technology", "city": "Stockholm", "country": "Sweden"},
-               {"name": "Mei-Lin Huang", "institution": "University of Washington", "city": "Seattle", "country": "USA"}]},
-  {"ID": 105, "paper_title": "Debugging Spreadsheets with Live Previews", "abstract": "", "keywords": ["end-user programming", "spreadsheets"], "type": "long", "award": "none",
-   "authors": [{"name": "Tomasz Wielgus", "institution": "Carnegie Mellon University", "city": "Pittsburgh", "country": "USA"}]},
-  {"ID": 106, "paper_title": "Crowdsourcing Map Corrections in Rural Areas", "abstract": "", "keywords": ["crowdsourcing", "maps", "ICTD"], "type": "long", "award": "none",
-   "authors": [{"name": "Dilnoza Karimova", "institution": "University of Tokyo", "city": "Tokyo", "country": "Japan"},
-               {"name": "Haruto Sato", "institution": "University of Tokyo", "city": "Tokyo", "country": "Japan"}]},
-  {"ID": 107, "paper_title": "Haptic Feedback for Touchscreen Typing", "abstract": "", "keywords": ["haptics", "text entry"], "type": "short", "award": "none",
-   "authors": [{"name": "Haruto Sato", "institution": "University of Tokyo", "city": "Tokyo", "country": "Japan"}]},
-  {"ID": 108, "paper_title": "Privacy Attitudes in Social Media Sharing", "abstract": "", "keywords": ["privacy", "social media"], "type": "long", "award": "none",
-   "authors": [{"name": "Grace Okonkwo", "institution": "University of Michigan", "city": "Ann Arbor", "country": "USA"},
-               {"name": "Priya Raman", "institution": "Carnegie Mellon University", "city": "Pittsburgh", "country": "USA"}]},
-  {"ID": 109, "paper_title": "Designing Voice Assistants for Older Adults", "abstract": "", "keywords": ["voice", "aging", "accessibility"], "type": "long", "award": "bp",
-   "authors": [{"name": "Grace Okonkwo", "institution": "University of Michigan", "city": "Ann Arbor", "country": "USA"}]},
-  {"ID": 110, "paper_title": "A Social Robot for Classroom Engagement", "abstract": "", "keywords": ["robots", "education", "social"], "type": "long", "award": "none",
-   "authors": [{"name": "Anders Lindqvist", "institution": "KTH Royal Institute of Technology", "city": "Stockholm", "country": "Sweden"}]},
-  {"ID": 111, "paper_title": "Gesture Elicitation for Smart Glasses", "abstract": "", "keywords": ["gestures", "wearables"], "type": "short", "award": "none",
-   "authors": [{"name": "Mei-Lin Huang", "institution": "University of Washington", "city": "Seattle", "country": "USA"},
-               {"name": "Olu Adeyemi", "institution": "University of Washington", "city": "Seattle", "country": "USA"}]},
-  {"ID": 112, "paper_title": "Paying the Crowd Fairly: Wage Estimation on Microtask Platforms", "abstract": "", "keywords": ["crowdsourcing", "labor", "ethics"], "type": "long", "award": "hm",
-   "authors": [{"name": "Dilnoza Karimova", "institution": "University of Tokyo", "city": "Tokyo", "country": "Japan"},
-               {"name": "Tomasz Wielgus", "institution": "Carnegie Mellon University", "city": "Pittsburgh", "country": "USA"}]},
-  {"ID": 113, "paper_title": "Tangible Programming Blocks for Preschoolers", "abstract": "", "keywords": ["tangibles", "education", "children"], "type": "long", "award": "none",
-   "authors": [{"name": "Sofia Bergström", "institution": "KTH Royal Institute of Technology", "city": "Stockholm", "country": "Sweden"}]},
-  {"ID": 114, "paper_title": "Notifications That Respect Focus Time", "abstract": "", "keywords": ["notifications", "attention", "productivity"], "type": "short", "award": "none",
-   "authors": [{"name": "Olu Adeyemi", "institution": "University of Washington", "city": "Seattle", "country": "USA"},
-               {"name": "Grace Okonkwo", "institution": "University of Michigan", "city": "Ann Arbor", "country": "USA"}]}
+  {
+    "ID": 101,
+    "paper_title": "Crowd-Powered Captioning for Live Lectures",
+    "abstract": "",
+    "keywords": [
+      "crowdsourcing",
+      "accessibility",
+      "captioning"
+    ],
+    "type": "long",
+    "award": "bp",
+    "authors": [
+      {
+        "name": "Priya Raman",
+        "institution": "Carnegie Mellon University",
+        "city": "Pittsburgh",
+        "country": "USA"
+      },
+      {
+        "name": "Tomasz Wielgus",
+        "institution": "Carnegie Mellon University",
+        "city": "Pittsburgh",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 102,
+    "paper_title": "Social Signals in Group Chat",
+    "abstract": "",
+    "keywords": [
+      "social",
+      "messaging",
+      "groups"
+    ],
+    "type": "long",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Mei-Lin Huang",
+        "institution": "University of Washington",
+        "city": "Seattle",
+        "country": "USA"
+      },
+      {
+        "name": "Priya Raman",
+        "institution": "Carnegie Mellon University",
+        "city": "Pittsburgh",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 103,
+    "paper_title": "Sketching Interfaces for Data Journalists",
+    "abstract": "",
+    "keywords": [
+      "visualization",
+      "sketching"
+    ],
+    "type": "short",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Olu Adeyemi",
+        "institution": "University of Washington",
+        "city": "Seattle",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 104,
+    "paper_title": "Wearables for Social Anxiety",
+    "abstract": "",
+    "keywords": [
+      "wearables",
+      "social",
+      "health"
+    ],
+    "type": "long",
+    "award": "hm",
+    "authors": [
+      {
+        "name": "Sofia Bergström",
+        "institution": "KTH Royal Institute of Technology",
+        "city": "Stockholm",
+        "country": "Sweden"
+      },
+      {
+        "name": "Anders Lindqvist",
+        "institution": "KTH Royal Institute of Technology",
+        "city": "Stockholm",
+        "country": "Sweden"
+      },
+      {
+        "name": "Mei-Lin Huang",
+        "institution": "University of Washington",
+        "city": "Seattle",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 105,
+    "paper_title": "Debugging Spreadsheets with Live Previews",
+    "abstract": "",
+    "keywords": [
+      "end-user programming",
+      "spreadsheets"
+    ],
+    "type": "long",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Tomasz Wielgus",
+        "institution": "Carnegie Mellon University",
+        "city": "Pittsburgh",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 106,
+    "paper_title": "Crowdsourcing Map Corrections in Rural Areas",
+    "abstract": "",
+    "keywords": [
+      "crowdsourcing",
+      "maps",
+      "ICTD"
+    ],
+    "type": "long",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Dilnoza Karimova",
+        "institution": "University of Tokyo",
+        "city": "Tokyo",
+        "country": "Japan"
+      },
+      {
+        "name": "Haruto Sato",
+        "institution": "University of Tokyo",
+        "city": "Tokyo",
+        "country": "Japan"
+      }
+    ]
+  },
+  {
+    "ID": 107,
+    "paper_title": "Haptic Feedback for Touchscreen Typing",
+    "abstract": "",
+    "keywords": [
+      "haptics",
+      "text entry"
+    ],
+    "type": "short",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Haruto Sato",
+        "institution": "University of Tokyo",
+        "city": "Tokyo",
+        "country": "Japan"
+      }
+    ]
+  },
+  {
+    "ID": 108,
+    "paper_title": "Privacy Attitudes in Social Media Sharing",
+    "abstract": "",
+    "keywords": [
+      "privacy",
+      "social media"
+    ],
+    "type": "long",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Grace Okonkwo",
+        "institution": "University of Michigan",
+        "city": "Ann Arbor",
+        "country": "USA"
+      },
+      {
+        "name": "Priya Raman",
+        "institution": "Carnegie Mellon University",
+        "city": "Pittsburgh",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 109,
+    "paper_title": "Designing Voice Assistants for Older Adults",
+    "abstract": "",
+    "keywords": [
+      "voice",
+      "aging",
+      "accessibility"
+    ],
+    "type": "long",
+    "award": "bp",
+    "authors": [
+      {
+        "name": "Grace Okonkwo",
+        "institution": "University of Michigan",
+        "city": "Ann Arbor",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 110,
+    "paper_title": "A Social Robot for Classroom Engagement",
+    "abstract": "",
+    "keywords": [
+      "robots",
+      "education",
+      "social"
+    ],
+    "type": "long",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Anders Lindqvist",
+        "institution": "KTH Royal Institute of Technology",
+        "city": "Stockholm",
+        "country": "Sweden"
+      }
+    ]
+  },
+  {
+    "ID": 111,
+    "paper_title": "Gesture Elicitation for Smart Glasses",
+    "abstract": "",
+    "keywords": [
+      "gestures",
+      "wearables"
+    ],
+    "type": "short",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Mei-Lin Huang",
+        "institution": "University of Washington",
+        "city": "Seattle",
+        "country": "USA"
+      },
+      {
+        "name": "Olu Adeyemi",
+        "institution": "University of Washington",
+        "city": "Seattle",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 112,
+    "paper_title": "Paying the Crowd Fairly: Wage Estimation on Microtask Platforms",
+    "abstract": "",
+    "keywords": [
+      "crowdsourcing",
+      "labor",
+      "ethics"
+    ],
+    "type": "long",
+    "award": "hm",
+    "authors": [
+      {
+        "name": "Dilnoza Karimova",
+        "institution": "University of Tokyo",
+        "city": "Tokyo",
+        "country": "Japan"
+      },
+      {
+        "name": "Tomasz Wielgus",
+        "institution": "Carnegie Mellon University",
+        "city": "Pittsburgh",
+        "country": "USA"
+      }
+    ]
+  },
+  {
+    "ID": 113,
+    "paper_title": "Tangible Programming Blocks for Preschoolers",
+    "abstract": "",
+    "keywords": [
+      "tangibles",
+      "education",
+      "children"
+    ],
+    "type": "long",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Sofia Bergström",
+        "institution": "KTH Royal Institute of Technology",
+        "city": "Stockholm",
+        "country": "Sweden"
+      }
+    ]
+  },
+  {
+    "ID": 114,
+    "paper_title": "Notifications That Respect Focus Time",
+    "abstract": "",
+    "keywords": [
+      "notifications",
+      "attention",
+      "productivity"
+    ],
+    "type": "short",
+    "award": "none",
+    "authors": [
+      {
+        "name": "Olu Adeyemi",
+        "institution": "University of Washington",
+        "city": "Seattle",
+        "country": "USA"
+      },
+      {
+        "name": "Grace Okonkwo",
+        "institution": "University of Michigan",
+        "city": "Ann Arbor",
+        "country": "USA"
+      }
+    ]
+  }
 ]

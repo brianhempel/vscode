@@ -1,16 +1,56 @@
 {
   "theaters": [
-    {"name": "Grand Cinema", "district": "Haidian",
-     "movies": [
-       {"title": "The Dark Knight", "showtimes": ["14:00", "19:30"]},
-       {"title": "Up", "showtimes": ["11:00", "15:15"]},
-       {"title": "Amelie", "showtimes": ["21:00"]}
-     ]},
-    {"name": "Star Multiplex", "district": "Chaoyang",
-     "movies": [
-       {"title": "The Dark Knight", "showtimes": ["18:00"]},
-       {"title": "Spirited Away", "showtimes": ["10:30", "13:00", "16:45"]},
-       {"title": "Heat", "showtimes": ["22:15"]}
-     ]}
+    {
+      "name": "Grand Cinema",
+      "district": "Haidian",
+      "movies": [
+        {
+          "title": "The Dark Knight",
+          "showtimes": [
+            "14:00",
+            "19:30"
+          ]
+        },
+        {
+          "title": "Up",
+          "showtimes": [
+            "11:00",
+            "15:15"
+          ]
+        },
+        {
+          "title": "Amelie",
+          "showtimes": [
+            "21:00"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Star Multiplex",
+      "district": "Chaoyang",
+      "movies": [
+        {
+          "title": "The Dark Knight",
+          "showtimes": [
+            "18:00"
+          ]
+        },
+        {
+          "title": "Spirited Away",
+          "showtimes": [
+            "10:30",
+            "13:00",
+            "16:45"
+          ]
+        },
+        {
+          "title": "Heat",
+          "showtimes": [
+            "22:15"
+          ]
+        }
+      ]
+    }
   ]
 }
