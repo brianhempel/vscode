@@ -1,0 +1,10 @@
+{
+  "12 REDWOOD DR": {"walkscore": 41, "description": "Car-Dependent"},
+  "450 SEACLIFF DR": {"walkscore": 63, "description": "Somewhat Walkable"},
+  "3300 SOQUEL AVE": {"walkscore": 78, "description": "Very Walkable"},
+  "77 CLIFF AVE": {"walkscore": 55, "description": "Somewhat Walkable"},
+  "901 RIO DEL MAR BLVD": {"walkscore": 72, "description": "Very Walkable"},
+  "15 CABRILLO ST": {"walkscore": 36, "description": "Car-Dependent"},
+  "88 VALENCIA RD": {"walkscore": 19, "description": "Car-Dependent"},
+  "680 UNIVERSITY AVE": {"walkscore": 94, "description": "Walker's Paradise"}
+}

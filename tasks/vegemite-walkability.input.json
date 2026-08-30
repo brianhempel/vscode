@@ -1,0 +1,11 @@
+[
+  {"address": "680 University Ave", "city": "Palo Alto", "zip": "94301", "price": "$1,950,000"},
+  {"address": "12 Redwood Dr.", "city": "Aptos", "zip": "95003", "price": "$1,850,000"},
+  {"address": "450 SEACLIFF DRIVE, APTOS CA", "city": "Aptos", "zip": "95003", "price": "$2,100,000"},
+  {"address": "3300 Soquel Avenue", "city": "Aptos", "zip": "95003", "price": "$1,799,000"},
+  {"address": "77 Cliff Ave", "city": "Aptos", "zip": "95003", "price": "$1,275,000"},
+  {"address": "901 Rio Del Mar Blvd", "city": "Aptos", "zip": "95003", "price": "$1,999,999"},
+  {"address": "15 CABRILLO ST.", "city": "Aptos", "zip": "95003", "price": "$1,750,000"},
+  {"address": "2 Ocean View Ave", "city": "Santa Cruz", "zip": "95060", "price": "$1,880,000"},
+  {"address": "88 Valencia Road", "city": "Aptos", "zip": "95003", "price": "$1,825,000"}
+]

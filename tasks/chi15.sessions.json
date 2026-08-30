@@ -1,0 +1,8 @@
+[
+  {"session_title": "Crowdsourcing I", "room": "Room 301", "day": "Monday", "time": "11:00-12:20", "chair": "R. Quill", "submissions": [101, 106, 112]},
+  {"session_title": "Social Computing", "room": "Room 302", "day": "Monday", "time": "11:00-12:20", "chair": "L. Fenwick", "submissions": [102, 108, 110]},
+  {"session_title": "Wearables & Health", "room": "Room 301", "day": "Tuesday", "time": "09:00-10:20", "chair": "N. Ostrow", "submissions": [104, 111]},
+  {"session_title": "End-User Programming", "room": "Room 303", "day": "Tuesday", "time": "09:00-10:20", "chair": "D. Marsh", "submissions": [105, 103]},
+  {"session_title": "Accessibility & Aging", "room": "Room 302", "day": "Tuesday", "time": "14:00-15:20", "chair": "P. Vale", "submissions": [109, 107, 114]},
+  {"session_title": "Learning & Play", "room": "Room 301", "day": "Wednesday", "time": "11:00-12:20", "chair": "S. Achebe", "submissions": [113]}
+]

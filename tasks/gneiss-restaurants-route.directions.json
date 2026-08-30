@@ -1,0 +1,33 @@
+{
+  "origin": "5000 Forbes Ave, Pittsburgh",
+  "routes": {
+    "410 Rivergate St": {
+      "duration_text": "14 mins",
+      "duration_seconds": 840
+    },
+    "2211 Lorimer Ave": {
+      "duration_text": "11 mins",
+      "duration_seconds": 660
+    },
+    "77 Coal Wharf Ln": {
+      "duration_text": "16 mins",
+      "duration_seconds": 960
+    },
+    "3805 Amberson Way": {
+      "duration_text": "7 mins",
+      "duration_seconds": 420
+    },
+    "900 Overlook Cir": {
+      "duration_text": "4 mins",
+      "duration_seconds": 240
+    },
+    "18 Ferry Landing": {
+      "duration_text": "19 mins",
+      "duration_seconds": 1140
+    },
+    "6101 Hazel Ct": {
+      "duration_text": "15 mins",
+      "duration_seconds": 900
+    }
+  }
+}

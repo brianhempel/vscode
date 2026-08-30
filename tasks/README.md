@@ -8,7 +8,7 @@ Each task lives in one markdown file `<slug>.md` with:
 4. **Notes for study designers** — natural sub-stages, gotchas that make good "edit the script" moments, extensions, licensing notes;
 5. **Example solution** — a complete script.
 
-Input data sits next to the markdown file as `<slug>.input.<ext>` (occasionally a second file `<slug>.<role>.<ext>`). A runnable copy of every solution sits alongside as `<slug>.py`; run it from this directory:
+Input data sits next to the markdown file as `<slug>.input.<ext>` (occasionally a second file `<slug>.<role>.<ext>`). Two datasets are shared by several tasks and are named by dataset instead: `chi15.papers.json` / `chi15.sessions.json` (the four `chi-*` tasks) and `course-db.*.csv` (the two Bakke course-database tasks). A runnable copy of every solution sits alongside as `<slug>.py`; run it from this directory:
 
 ```
 cd tasks
@@ -37,8 +37,15 @@ python3 check_all.py                # runs every solution, diffs against the .md
 | Kandel et al., CHI 2011 (Wrangler) | Data-wrangling user-study tasks from an HCI paper | Tasks reconstructed with synthetic data |
 | Stack Overflow classics | Very high-view questions (natural sort, flatten nested dict) | CC-BY-SA; rewritten |
 | Real-world formats (Apache Common Log Format, vCard RFC 2426, SemVer 2.0.0, GitHub heading anchors) | Formats people actually script against | Public specs |
+| Chang & Myers, CHI 2016 / Chang's CMU thesis (Gneiss) | Lab study (12 spreadsheet users + 6 JS/Python programmers) on two CHI'15 JSON files; participants rated the five tasks 6.6/7 "realistic" | Tasks reconstructed; synthetic papers/sessions |
+| Bakke, Karger & Miller, CHI 2011 (Related Worksheets); Bakke & Karger, SIGMOD 2016 / MIT thesis (SIEUFERD) | Mechanical-Turk and lab studies of query construction over a normalized course database and a lobbying dataset | Tasks reconstructed; synthetic tables, invented names |
+| García, Gil, Bakke & Karger, 2021 (BESDUI) | A published *benchmark* of 12 end-user structured-data tasks adopted from the Berlin SPARQL Benchmark e-commerce use case | Task text rewritten; synthetic BSBM-shaped JSON |
+| Gulwani, Harris & Singh, CACM 2012; Singh, PVLDB 2016 (BlinkFill) | Worked examples taken verbatim from Excel help forums / StackOverflow — the canonical PBE string tasks | Examples paraphrased |
+| Scaffidi, Myers & Shaw, VL/HCC 2008 (Toped) | Study where admin assistants validated phone / address / company columns from the EUSES spreadsheet corpus | Reconstructed with synthetic strings |
+| Lin et al., IUI 2009 (Vegemite); Wang et al., WWW 2009 (Mashroom); Litt & Jackson, Onward! 2020 (Wildcard); Horowitz & Heer 2025 (Sculpin) | End-user mashup / customization / JSON-transformation systems; their study tasks and demos | Reconstructed with mock API responses (one real keyless ARTIC API response) |
+| Edwards, Petricek & van der Storm, 2023 (schema-change challenge problems); Petricek & Edwards 2025 (Denicek) | Published challenge problems for live/local-first programming | Rewritten; synthetic data |
 
-## Task index (43 tasks)
+## Task index (64 tasks)
 
 Difficulty: E = easy, M = medium, H = medium–hard. "Both ways" = the solution goes string → structure → string (or list ⇄ string).
 
@@ -120,6 +127,34 @@ Difficulty: E = easy, M = medium, H = medium–hard. "Both ways" = the solution 
 | [markdown-toc](markdown-toc.md) | headings → GitHub slugs (dedupe) → nested TOC, ignoring code fences | E–M | document → (level,title) → slugs → text |
 | [recipe-scaler](recipe-scaler.md) (synthetic) | `2 1/2 cups flour` → parse → ×1.5 → mixed fractions back | M | full round trip |
 
+### HCI research: user-study tasks and worked examples from the literature
+
+Reconstructed from papers in the user's Zotero library. Each md's Source line cites the paper, the study population and how the original task was phrased.
+
+| Task | Paper / origin | What it involves | Diff. | Shape |
+|---|---|---|---|---|
+| [chi-papers-institutions](chi-papers-institutions.md) | Chang & Myers CHI'16 tasks 1–2 | "social" keyword count; top‑3 institutions by *distinct* papers | E–M | nested JSON → dict of sets → report |
+| [chi-session-schedule](chi-session-schedule.md) | Chang & Myers task 3 / thesis §5.2 | join papers↔sessions, best session per time slot | M | two JSONs → join → group → schedule |
+| [chi-tuesday-cmu](chi-tuesday-cmu.md) | Chang & Myers task 4 | Tuesday papers with a CMU author | E | filtered join → text |
+| [chi-author-conflicts](chi-author-conflicts.md) | Chang & Myers task 5 | authors with two papers in one session / one slot | M–H | inverted index → groupings |
+| [gneiss-restaurants-route](gneiss-restaurants-route.md) | Chang thesis §3.3, §3.5.1 | top‑5 Yelp-style results + driving times + Static‑Map `&markers=` URL | E–M | nested JSON → table → URL string |
+| [related-worksheets-courses](related-worksheets-courses.md) | Bakke et al. CHI'11 Table 1 | five lookup questions over 7 normalized CSV tables | M | CSVs → dict indexes → answers |
+| [sieuferd-course-catalog](sieuferd-course-catalog.md) | Bakke & Karger SIGMOD'16 tasks 3–6 | nested course catalog report, semester filter, inverted to instructor→courses | M | flat tables → nested → outline |
+| [sieuferd-lobbying-cpi](sieuferd-lobbying-cpi.md) | Bakke thesis §1.1, tasks 1–2 | lobbying totals per company, CPI-adjusted, superseded reports excluded | E–M | two tables → nested lists → table |
+| [besdui-product-search](besdui-product-search.md) | García et al. BESDUI (BSBM) T1/2/4/6/7/9/11/12 | AND/OR/NOT feature filters, similarity, substring, recent reviews, cheapest valid offer, schema export | M | nested JSON → filters → export |
+| [gulwani-cacm-strings](gulwani-cacm-strings.md) | Gulwani et al. CACM'12 Ex. 1, 2, 4 | phone normalisation w/ default area code; capital-letter abbreviation; `6-3-2008` → `Jun 3rd, 2008` | E | CSV → per-column transforms |
+| [gulwani-cacm-tables](gulwani-cacm-tables.md) | CACM'12 Ex. 3, 5 | two-table price lookup; wide → long layout transform | E–M | tables → lookups; unpivot |
+| [blinkfill-examples](blinkfill-examples.md) | Singh PVLDB'16 Ex. 1–4 | country after comma; initials `B.S.`; add missing `]`; text between markers | E | CSV → four string transforms |
+| [toped-typo-finder](toped-typo-finder.md) | Scaffidi et al. VL/HCC'08 | validate phone/address/company strings with hard + *soft* constraints, explain violations | M | text → constraint checks → report |
+| [vegemite-walkability](vegemite-walkability.md) | Lin et al. IUI'09 task 1 | filter listings by zip/price, normalise addresses, join walk scores | E–M | JSON → filter → normalise → join |
+| [vegemite-visa-bulletin](vegemite-visa-bulletin.md) | Lin et al. IUI'09 task 3 | pull one cell from fixed-width text tables in monthly bulletins, `01JAN08` → ISO, month-to-month movement | E–M | text → tables → dates → numbers |
+| [sculpin-artic-gallery](sculpin-artic-gallery.md) | Horowitz & Heer 2025 Fig. 5 (real ARTIC API data) | build query URL, IIIF image URLs, group by artist, render Markdown gallery | E–M | string → URL; JSON → grouped → Markdown |
+| [sculpin-todo-grouping](sculpin-todo-grouping.md) | Sculpin Fig. 6 + Wildcard TodoMVC snooze | apply add/done/snooze commands, render grouped text UI | E–M | JSON + commands → state → text (app-like) |
+| [wildcard-listings](wildcard-listings.md) | Litt & Jackson Onward!'20 Airbnb example | parse `$1,234 / night` and `4.87 (213)`, filter, sort, join walk score, favourites | E–M | display strings → records → table |
+| [mashroom-movies](mashroom-movies.md) | Wang et al. WWW'09 movie mashup | theaters→movies nested table + fuzzy review search results filtered to exact normalised title | M | nested + string matching → enriched nested |
+| [extract-entity-migration](extract-entity-migration.md) | Edwards et al. 2023 §2–3 | split an orders sheet into customers + orders (dedupe, conflicts), reverse, shipping view | E–M | wide → two tables → wide; bidirectional |
+| [speaker-list-refactor](speaker-list-refactor.md) | Edwards et al. 2023 §4–5 / Denicek | merge two divergent Markdown edits (added+sorted list vs list→table refactor), rewrite formula path | M | Markdown → records → merged Markdown (document editing) |
+
 ## Suggested pairings for a study session
 
 - **Warm-up (5 min):** camel-case, natural-sort, or password-policy.
@@ -127,5 +162,7 @@ Difficulty: E = easy, M = medium, H = medium–hard. "Both ways" = the solution 
 - **Pattern-detection heavy:** pig-latin, ipv7-abba, digit-words, phone-email-extractor, luhn-card-filter, room-checksums.
 - **Nested-data heavy (little string work):** json-abacus, tree-building, deep-merge-configs, flatten-nested-dict, rest-api-ious.
 - **Not data-processing (generation / simulation / editing):** twelve-days, mad-libs, minesweeper, crate-stacks, crypto-square, markdown-refactor.
+- **Closest to published HCI study tasks (for comparability with prior work):** the four `chi-*` tasks (Chang & Myers 2016 gave programmers 10–15 min each), related-worksheets-courses, sieuferd-lobbying-cpi, besdui-product-search, toped-typo-finder, vegemite-walkability.
+- **Multi-file joins over nested data:** chi-session-schedule, sieuferd-course-catalog, mashroom-movies, gneiss-restaurants-route.
 
 Every `.md` has a "Notes for study designers" section listing natural sub-stages and a deliberately buggy starting variant that turns the task into an *edit-this-script* task.

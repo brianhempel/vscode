@@ -1,0 +1,12 @@
+[
+  {"name": "Sunny loft near the park", "price": "$1,234 / night", "rating": "4.87 (213)", "neighborhood": "Mission", "amenities": ["Wifi", "Kitchen", "Washer"]},
+  {"name": "Cozy studio", "price": "$98", "rating": "4.52 (41)", "neighborhood": "Sunset", "amenities": ["Wifi"]},
+  {"name": "Victorian with garden", "price": "$310 / night", "rating": "4.95 (88)", "neighborhood": "Haight", "amenities": ["Kitchen", "Garden", "Wifi"]},
+  {"name": "Brand new condo", "price": "$205 / night", "rating": "New", "neighborhood": "SoMa", "amenities": ["Wifi", "Gym", "Pool"]},
+  {"name": "Room in shared flat", "price": "$75", "rating": "4.31 (120)", "neighborhood": "Mission", "amenities": ["Wifi"]},
+  {"name": "Bay view penthouse", "price": "$2,050 / night", "rating": "4.9 (12)", "neighborhood": "Nob Hill", "amenities": ["Wifi", "Kitchen", "Parking", "Hot tub"]},
+  {"name": "Quiet garden cottage", "price": "$160 / night", "rating": "4.76 (305)", "neighborhood": "Sunset", "amenities": ["Kitchen", "Garden"]},
+  {"name": "Artist's warehouse space", "price": "$140", "rating": "New", "neighborhood": "Dogpatch", "amenities": ["Wifi", "Workshop"]},
+  {"name": "Family home, 3 bedrooms", "price": "$420 / night", "rating": "4.68 (57)", "neighborhood": "Haight", "amenities": ["Kitchen", "Washer", "Parking"]},
+  {"name": "Tiny room, big heart", "price": "$65", "rating": "4.58 (9)", "neighborhood": "Dogpatch", "amenities": []}
+]

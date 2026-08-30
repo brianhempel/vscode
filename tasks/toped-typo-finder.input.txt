@@ -1,0 +1,29 @@
+## phone
+412-268-1234
+(412) 268 1234
+412.268.1234
+412-268-12345
+268-1234
+412-ABC-1234
+1-412-268-1234
+412-268-1234 ext. 12
+
+## address
+1000 EVANS AVE.
+12 MILES NORTH OF INDEPENDENCE
+5000 Forbes Avenue
+221B Baker St
+P.O. Box 1234
+1600 Pennsylvania Ave NW
+Forbes Avenue 5000
+7 Elm Blvd
+
+## company
+Acme Corp.
+ACME CORP
+Acme Corp. Inc. LLC
+Wayne Enterprises
+initech
+Stark Industries, Inc.
+Globex
+Tyrell Corporation & Sons
