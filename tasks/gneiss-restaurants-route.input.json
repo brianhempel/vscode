@@ -1,0 +1,168 @@
+{
+  "businesses": [
+    {
+      "name": "Steel City Sandwich Co.",
+      "rating": 4.0,
+      "review_count": 812,
+      "location": {
+        "address1": "410 Rivergate St",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4517,
+        "longitude": -79.9856
+      },
+      "reviews": [
+        {
+          "text": "Fries on the sandwich. Enough said.",
+          "rating": 5
+        },
+        {
+          "text": "Loud but fun.",
+          "rating": 3
+        }
+      ]
+    },
+    {
+      "name": "Pierogi Parlor",
+      "rating": 4.5,
+      "review_count": 340,
+      "location": {
+        "address1": "2211 Lorimer Ave",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4657,
+        "longitude": -79.9457
+      },
+      "reviews": [
+        {
+          "text": "Best pierogi in town.",
+          "rating": 5
+        }
+      ]
+    },
+    {
+      "name": "Asado Alley",
+      "rating": 4.5,
+      "review_count": 1105,
+      "location": {
+        "address1": "77 Coal Wharf Ln",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4431,
+        "longitude": -80.0017
+      },
+      "reviews": [
+        {
+          "text": "Worth the line.",
+          "rating": 5
+        },
+        {
+          "text": "Steak was perfect.",
+          "rating": 5
+        }
+      ]
+    },
+    {
+      "name": "Ellsworth Noodle Bar",
+      "rating": 4.0,
+      "review_count": 623,
+      "location": {
+        "address1": "3805 Amberson Way",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4527,
+        "longitude": -79.9316
+      },
+      "reviews": [
+        {
+          "text": "Cash only, bring some.",
+          "rating": 4
+        }
+      ]
+    },
+    {
+      "name": "The Oval Patio",
+      "rating": 3.5,
+      "review_count": 455,
+      "location": {
+        "address1": "900 Overlook Cir",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4423,
+        "longitude": -79.9531
+      },
+      "reviews": [
+        {
+          "text": "Great patio near campus.",
+          "rating": 4
+        }
+      ]
+    },
+    {
+      "name": "Station Sushi",
+      "rating": 4.0,
+      "review_count": 210,
+      "location": {
+        "address1": "18 Ferry Landing",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4338,
+        "longitude": -80.0032
+      },
+      "reviews": [
+        {
+          "text": "Solid sushi, river view.",
+          "rating": 4
+        }
+      ]
+    },
+    {
+      "name": "Butler Street Garden",
+      "rating": 4.5,
+      "review_count": 498,
+      "location": {
+        "address1": "6101 Hazel Ct",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4795,
+        "longitude": -79.9548
+      },
+      "reviews": [
+        {
+          "text": "The garden is magical.",
+          "rating": 5
+        },
+        {
+          "text": "Pad see ew was excellent.",
+          "rating": 4
+        }
+      ]
+    },
+    {
+      "name": "Passport Kitchen",
+      "rating": 4.0,
+      "review_count": 377,
+      "location": {
+        "address1": "900 Overlook Cir",
+        "city": "Pittsburgh"
+      },
+      "coordinates": {
+        "latitude": 40.4424,
+        "longitude": -79.9535
+      },
+      "reviews": [
+        {
+          "text": "Menu changes with the country.",
+          "rating": 4
+        }
+      ]
+    }
+  ]
+}

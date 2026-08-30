@@ -1,0 +1,14 @@
+id,course_code,section_code,type,semester_id
+1,MUS 105,L01,lecture,2
+2,MUS 105,P01,precept,2
+3,KOR 107,L01,lecture,2
+4,HIS 383,L01,lecture,2
+5,HIS 383,P01,precept,2
+6,HIS 383,P02,precept,2
+7,ENG 212,L01,lecture,1
+8,ENG 212,P01,precept,1
+9,COS 226,L01,lecture,2
+10,COS 226,P01,precept,2
+11,PHY 103,L01,lecture,1
+12,ART 220,L01,lecture,2
+13,PHI 201,L01,lecture,1
