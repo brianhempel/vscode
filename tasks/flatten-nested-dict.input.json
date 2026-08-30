@@ -6,19 +6,34 @@
   },
   "server": {
     "host": "0.0.0.0",
-    "ports": [8080, 8443],
+    "ports": [
+      8080,
+      8443
+    ],
     "tls": {
       "enabled": true,
       "cert": "/etc/ssl/inventory.pem"
     }
   },
   "database": {
-    "primary": {"host": "db1.internal", "port": 5432},
+    "primary": {
+      "host": "db1.internal",
+      "port": 5432
+    },
     "replicas": [
-      {"host": "db2.internal", "port": 5432},
-      {"host": "db3.internal", "port": 5433}
+      {
+        "host": "db2.internal",
+        "port": 5432
+      },
+      {
+        "host": "db3.internal",
+        "port": 5433
+      }
     ]
   },
-  "features": ["search", "export"],
+  "features": [
+    "search",
+    "export"
+  ],
   "log_level": "info"
 }

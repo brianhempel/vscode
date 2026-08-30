@@ -1,10 +1,61 @@
 {
-  "ledger": [1, 2, {"c": "red", "value": 100}, 3],
+  "ledger": [
+    1,
+    2,
+    {
+      "c": "red",
+      "value": 100
+    },
+    3
+  ],
   "accounts": {
-    "alice": {"balance": 40, "tags": ["red", "vip"], "history": [5, -5, 10]},
-    "bob": {"balance": 25, "colour": "red", "history": [1000, 2000]},
-    "carol": {"balance": "12", "nested": {"deep": {"deeper": 7, "shade": "green"}}}
+    "alice": {
+      "balance": 40,
+      "tags": [
+        "red",
+        "vip"
+      ],
+      "history": [
+        5,
+        -5,
+        10
+      ]
+    },
+    "bob": {
+      "balance": 25,
+      "colour": "red",
+      "history": [
+        1000,
+        2000
+      ]
+    },
+    "carol": {
+      "balance": "12",
+      "nested": {
+        "deep": {
+          "deeper": 7,
+          "shade": "green"
+        }
+      }
+    }
   },
-  "misc": [{"x": [1, 2, 3], "y": "red"}, [4, {"z": 5}], "6", 8.5],
+  "misc": [
+    {
+      "x": [
+        1,
+        2,
+        3
+      ],
+      "y": "red"
+    },
+    [
+      4,
+      {
+        "z": 5
+      }
+    ],
+    "6",
+    8.5
+  ],
   "note": "green"
 }

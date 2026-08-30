@@ -1,95 +1,395 @@
 {
   "products": [
-    {"id": 1, "label": "waterskiing sharpness horseshoes", "type": "sheeny",
-     "features": ["stroboscopes", "gadgeteers", "corkscrew"], "propertyNumeric1": 512, "propertyNumeric2": 88,
-     "offers": [
-       {"vendor": "Vendor12", "country": "US", "price": 1299.50, "deliveryDays": 2, "validFrom": "2008-05-01", "validTo": "2008-06-15"},
-       {"vendor": "Vendor04", "country": "US", "price": 1180.00, "deliveryDays": 5, "validFrom": "2008-05-10", "validTo": "2008-07-01"},
-       {"vendor": "Vendor19", "country": "DE", "price": 1105.00, "deliveryDays": 2, "validFrom": "2008-04-20", "validTo": "2008-06-30"},
-       {"vendor": "Vendor07", "country": "US", "price": 1250.00, "deliveryDays": 3, "validFrom": "2008-06-01", "validTo": "2008-08-31"}
-     ],
-     "reviews": [
-       {"title": "Sturdy but loud", "language": "en", "date": "2008-05-20", "rating": 7, "reviewer": "Reviewer3"},
-       {"title": "Solide Verarbeitung", "language": "de", "date": "2008-05-25", "rating": 8, "reviewer": "Reviewer9"},
-       {"title": "Great gadgeteers support", "language": "en", "date": "2008-05-27", "rating": 9, "reviewer": "Reviewer1"},
-       {"title": "Not what I expected", "language": "en", "date": "2008-04-02", "rating": 4, "reviewer": "Reviewer5"}
-     ]},
-    {"id": 2, "label": "boozed thermostats", "type": "sheeny",
-     "features": ["stroboscopes", "gadgeteers"], "propertyNumeric1": 430, "propertyNumeric2": 120,
-     "offers": [
-       {"vendor": "Vendor02", "country": "US", "price": 640.00, "deliveryDays": 1, "validFrom": "2008-05-01", "validTo": "2008-05-31"},
-       {"vendor": "Vendor11", "country": "CN", "price": 590.00, "deliveryDays": 9, "validFrom": "2008-05-01", "validTo": "2008-12-31"}
-     ],
-     "reviews": [
-       {"title": "Boozed indeed", "language": "en", "date": "2008-03-11", "rating": 6, "reviewer": "Reviewer2"},
-       {"title": "Runs warm", "language": "en", "date": "2008-05-30", "rating": 5, "reviewer": "Reviewer7"}
-     ]},
-    {"id": 3, "label": "ales gadgeteers", "type": "sheeny",
-     "features": ["gadgeteers", "corkscrew"], "propertyNumeric1": 470, "propertyNumeric2": 61,
-     "offers": [
-       {"vendor": "Vendor05", "country": "US", "price": 210.00, "deliveryDays": 3, "validFrom": "2008-05-15", "validTo": "2008-06-15"},
-       {"vendor": "Vendor05", "country": "US", "price": 199.00, "deliveryDays": 6, "validFrom": "2008-05-15", "validTo": "2008-06-15"}
-     ],
-     "reviews": [
-       {"title": "Cheerful ales", "language": "en", "date": "2008-05-18", "rating": 8, "reviewer": "Reviewer4"},
-       {"title": "Pas mal", "language": "fr", "date": "2008-05-19", "rating": 7, "reviewer": "Reviewer6"}
-     ]},
-    {"id": 4, "label": "sheeny stroboscopes deluxe", "type": "sheeny",
-     "features": ["stroboscopes", "wormholes"], "propertyNumeric1": 620, "propertyNumeric2": 44,
-     "offers": [
-       {"vendor": "Vendor08", "country": "US", "price": 980.00, "deliveryDays": 2, "validFrom": "2008-01-01", "validTo": "2008-05-27"},
-       {"vendor": "Vendor03", "country": "GB", "price": 950.00, "deliveryDays": 4, "validFrom": "2008-05-01", "validTo": "2008-09-30"}
-     ],
-     "reviews": [
-       {"title": "Bright!", "language": "en", "date": "2008-02-14", "rating": 9, "reviewer": "Reviewer8"}
-     ]},
-    {"id": 5, "label": "gadgeteers unplugged", "type": "sheeny",
-     "features": ["gadgeteers", "wormholes"], "propertyNumeric1": 455, "propertyNumeric2": 73,
-     "offers": [
-       {"vendor": "Vendor14", "country": "US", "price": 330.00, "deliveryDays": 2, "validFrom": "2008-05-20", "validTo": "2008-06-20"}
-     ],
-     "reviews": [
-       {"title": "Quiet and reliable", "language": "en", "date": "2008-05-22", "rating": 8, "reviewer": "Reviewer3"}
-     ]},
-    {"id": 6, "label": "horseshoes and ales", "type": "tackle",
-     "features": ["stroboscopes", "gadgeteers", "corkscrew"], "propertyNumeric1": 700, "propertyNumeric2": 30,
-     "offers": [
-       {"vendor": "Vendor10", "country": "US", "price": 75.00, "deliveryDays": 1, "validFrom": "2008-05-01", "validTo": "2008-12-31"}
-     ],
-     "reviews": [
-       {"title": "Lucky charm", "language": "en", "date": "2008-05-02", "rating": 10, "reviewer": "Reviewer2"}
-     ]},
-    {"id": 7, "label": "corkscrew tandem", "type": "tackle",
-     "features": ["corkscrew"], "propertyNumeric1": 150, "propertyNumeric2": 210,
-     "offers": [
-       {"vendor": "Vendor06", "country": "FR", "price": 42.00, "deliveryDays": 7, "validFrom": "2008-05-01", "validTo": "2008-05-31"}
-     ],
-     "reviews": []},
-    {"id": 8, "label": "stroboscopes for morales", "type": "sheeny",
-     "features": ["stroboscopes"], "propertyNumeric1": 488, "propertyNumeric2": 95,
-     "offers": [
-       {"vendor": "Vendor01", "country": "US", "price": 400.00, "deliveryDays": 3, "validFrom": "2008-05-01", "validTo": "2008-05-20"},
-       {"vendor": "Vendor13", "country": "US", "price": 410.00, "deliveryDays": 2, "validFrom": "2008-05-21", "validTo": "2008-06-30"}
-     ],
-     "reviews": [
-       {"title": "Flashy", "language": "en", "date": "2008-05-26", "rating": 6, "reviewer": "Reviewer1"},
-       {"title": "Muy brillante", "language": "es", "date": "2008-05-28", "rating": 9, "reviewer": "Reviewer10"}
-     ]},
-    {"id": 9, "label": "wormholes weekender", "type": "luggage",
-     "features": ["wormholes", "gadgeteers"], "propertyNumeric1": 530, "propertyNumeric2": 12,
-     "offers": [
-       {"vendor": "Vendor15", "country": "US", "price": 260.00, "deliveryDays": 2, "validFrom": "2008-05-01", "validTo": "2008-06-30"}
-     ],
-     "reviews": [
-       {"title": "Roomy", "language": "en", "date": "2008-05-10", "rating": 7, "reviewer": "Reviewer4"}
-     ]},
-    {"id": 10, "label": "sheeny horseshoes mini", "type": "sheeny",
-     "features": ["stroboscopes", "gadgeteers", "corkscrew"], "propertyNumeric1": 390, "propertyNumeric2": 150,
-     "offers": [
-       {"vendor": "Vendor09", "country": "US", "price": 150.00, "deliveryDays": 2, "validFrom": "2008-05-01", "validTo": "2008-06-30"}
-     ],
-     "reviews": [
-       {"title": "Tiny horseshoes", "language": "en", "date": "2008-05-29", "rating": 8, "reviewer": "Reviewer7"}
-     ]}
+    {
+      "id": 1,
+      "label": "waterskiing sharpness horseshoes",
+      "type": "sheeny",
+      "features": [
+        "stroboscopes",
+        "gadgeteers",
+        "corkscrew"
+      ],
+      "propertyNumeric1": 512,
+      "propertyNumeric2": 88,
+      "offers": [
+        {
+          "vendor": "Vendor12",
+          "country": "US",
+          "price": 1299.5,
+          "deliveryDays": 2,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-06-15"
+        },
+        {
+          "vendor": "Vendor04",
+          "country": "US",
+          "price": 1180.0,
+          "deliveryDays": 5,
+          "validFrom": "2008-05-10",
+          "validTo": "2008-07-01"
+        },
+        {
+          "vendor": "Vendor19",
+          "country": "DE",
+          "price": 1105.0,
+          "deliveryDays": 2,
+          "validFrom": "2008-04-20",
+          "validTo": "2008-06-30"
+        },
+        {
+          "vendor": "Vendor07",
+          "country": "US",
+          "price": 1250.0,
+          "deliveryDays": 3,
+          "validFrom": "2008-06-01",
+          "validTo": "2008-08-31"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Sturdy but loud",
+          "language": "en",
+          "date": "2008-05-20",
+          "rating": 7,
+          "reviewer": "Reviewer3"
+        },
+        {
+          "title": "Solide Verarbeitung",
+          "language": "de",
+          "date": "2008-05-25",
+          "rating": 8,
+          "reviewer": "Reviewer9"
+        },
+        {
+          "title": "Great gadgeteers support",
+          "language": "en",
+          "date": "2008-05-27",
+          "rating": 9,
+          "reviewer": "Reviewer1"
+        },
+        {
+          "title": "Not what I expected",
+          "language": "en",
+          "date": "2008-04-02",
+          "rating": 4,
+          "reviewer": "Reviewer5"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "label": "boozed thermostats",
+      "type": "sheeny",
+      "features": [
+        "stroboscopes",
+        "gadgeteers"
+      ],
+      "propertyNumeric1": 430,
+      "propertyNumeric2": 120,
+      "offers": [
+        {
+          "vendor": "Vendor02",
+          "country": "US",
+          "price": 640.0,
+          "deliveryDays": 1,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-05-31"
+        },
+        {
+          "vendor": "Vendor11",
+          "country": "CN",
+          "price": 590.0,
+          "deliveryDays": 9,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-12-31"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Boozed indeed",
+          "language": "en",
+          "date": "2008-03-11",
+          "rating": 6,
+          "reviewer": "Reviewer2"
+        },
+        {
+          "title": "Runs warm",
+          "language": "en",
+          "date": "2008-05-30",
+          "rating": 5,
+          "reviewer": "Reviewer7"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "label": "ales gadgeteers",
+      "type": "sheeny",
+      "features": [
+        "gadgeteers",
+        "corkscrew"
+      ],
+      "propertyNumeric1": 470,
+      "propertyNumeric2": 61,
+      "offers": [
+        {
+          "vendor": "Vendor05",
+          "country": "US",
+          "price": 210.0,
+          "deliveryDays": 3,
+          "validFrom": "2008-05-15",
+          "validTo": "2008-06-15"
+        },
+        {
+          "vendor": "Vendor05",
+          "country": "US",
+          "price": 199.0,
+          "deliveryDays": 6,
+          "validFrom": "2008-05-15",
+          "validTo": "2008-06-15"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Cheerful ales",
+          "language": "en",
+          "date": "2008-05-18",
+          "rating": 8,
+          "reviewer": "Reviewer4"
+        },
+        {
+          "title": "Pas mal",
+          "language": "fr",
+          "date": "2008-05-19",
+          "rating": 7,
+          "reviewer": "Reviewer6"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "label": "sheeny stroboscopes deluxe",
+      "type": "sheeny",
+      "features": [
+        "stroboscopes",
+        "wormholes"
+      ],
+      "propertyNumeric1": 620,
+      "propertyNumeric2": 44,
+      "offers": [
+        {
+          "vendor": "Vendor08",
+          "country": "US",
+          "price": 980.0,
+          "deliveryDays": 2,
+          "validFrom": "2008-01-01",
+          "validTo": "2008-05-27"
+        },
+        {
+          "vendor": "Vendor03",
+          "country": "GB",
+          "price": 950.0,
+          "deliveryDays": 4,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-09-30"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Bright!",
+          "language": "en",
+          "date": "2008-02-14",
+          "rating": 9,
+          "reviewer": "Reviewer8"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "label": "gadgeteers unplugged",
+      "type": "sheeny",
+      "features": [
+        "gadgeteers",
+        "wormholes"
+      ],
+      "propertyNumeric1": 455,
+      "propertyNumeric2": 73,
+      "offers": [
+        {
+          "vendor": "Vendor14",
+          "country": "US",
+          "price": 330.0,
+          "deliveryDays": 2,
+          "validFrom": "2008-05-20",
+          "validTo": "2008-06-20"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Quiet and reliable",
+          "language": "en",
+          "date": "2008-05-22",
+          "rating": 8,
+          "reviewer": "Reviewer3"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "label": "horseshoes and ales",
+      "type": "tackle",
+      "features": [
+        "stroboscopes",
+        "gadgeteers",
+        "corkscrew"
+      ],
+      "propertyNumeric1": 700,
+      "propertyNumeric2": 30,
+      "offers": [
+        {
+          "vendor": "Vendor10",
+          "country": "US",
+          "price": 75.0,
+          "deliveryDays": 1,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-12-31"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Lucky charm",
+          "language": "en",
+          "date": "2008-05-02",
+          "rating": 10,
+          "reviewer": "Reviewer2"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "label": "corkscrew tandem",
+      "type": "tackle",
+      "features": [
+        "corkscrew"
+      ],
+      "propertyNumeric1": 150,
+      "propertyNumeric2": 210,
+      "offers": [
+        {
+          "vendor": "Vendor06",
+          "country": "FR",
+          "price": 42.0,
+          "deliveryDays": 7,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-05-31"
+        }
+      ],
+      "reviews": []
+    },
+    {
+      "id": 8,
+      "label": "stroboscopes for morales",
+      "type": "sheeny",
+      "features": [
+        "stroboscopes"
+      ],
+      "propertyNumeric1": 488,
+      "propertyNumeric2": 95,
+      "offers": [
+        {
+          "vendor": "Vendor01",
+          "country": "US",
+          "price": 400.0,
+          "deliveryDays": 3,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-05-20"
+        },
+        {
+          "vendor": "Vendor13",
+          "country": "US",
+          "price": 410.0,
+          "deliveryDays": 2,
+          "validFrom": "2008-05-21",
+          "validTo": "2008-06-30"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Flashy",
+          "language": "en",
+          "date": "2008-05-26",
+          "rating": 6,
+          "reviewer": "Reviewer1"
+        },
+        {
+          "title": "Muy brillante",
+          "language": "es",
+          "date": "2008-05-28",
+          "rating": 9,
+          "reviewer": "Reviewer10"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "label": "wormholes weekender",
+      "type": "luggage",
+      "features": [
+        "wormholes",
+        "gadgeteers"
+      ],
+      "propertyNumeric1": 530,
+      "propertyNumeric2": 12,
+      "offers": [
+        {
+          "vendor": "Vendor15",
+          "country": "US",
+          "price": 260.0,
+          "deliveryDays": 2,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-06-30"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Roomy",
+          "language": "en",
+          "date": "2008-05-10",
+          "rating": 7,
+          "reviewer": "Reviewer4"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "label": "sheeny horseshoes mini",
+      "type": "sheeny",
+      "features": [
+        "stroboscopes",
+        "gadgeteers",
+        "corkscrew"
+      ],
+      "propertyNumeric1": 390,
+      "propertyNumeric2": 150,
+      "offers": [
+        {
+          "vendor": "Vendor09",
+          "country": "US",
+          "price": 150.0,
+          "deliveryDays": 2,
+          "validFrom": "2008-05-01",
+          "validTo": "2008-06-30"
+        }
+      ],
+      "reviews": [
+        {
+          "title": "Tiny horseshoes",
+          "language": "en",
+          "date": "2008-05-29",
+          "rating": 8,
+          "reviewer": "Reviewer7"
+        }
+      ]
+    }
   ]
 }

@@ -1,7 +1,30 @@
 {
   "users": [
-    {"name": "Adam", "owes": {"Bob": 12.0}, "owed_by": {"Chuck": 4.0}, "balance": -8.0},
-    {"name": "Bob", "owes": {}, "owed_by": {"Adam": 12.0}, "balance": 12.0},
-    {"name": "Chuck", "owes": {"Adam": 4.0}, "owed_by": {}, "balance": -4.0}
+    {
+      "name": "Adam",
+      "owes": {
+        "Bob": 12.0
+      },
+      "owed_by": {
+        "Chuck": 4.0
+      },
+      "balance": -8.0
+    },
+    {
+      "name": "Bob",
+      "owes": {},
+      "owed_by": {
+        "Adam": 12.0
+      },
+      "balance": 12.0
+    },
+    {
+      "name": "Chuck",
+      "owes": {
+        "Adam": 4.0
+      },
+      "owed_by": {},
+      "balance": -4.0
+    }
   ]
 }

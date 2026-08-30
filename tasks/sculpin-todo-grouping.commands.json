@@ -1,7 +1,25 @@
 [
-  {"op": "add", "text": "Send the calendar invite", "assignee": "Maya"},
-  {"op": "done", "id": 1},
-  {"op": "snooze", "id": 5, "until": "2024-05-12"},
-  {"op": "add", "text": "Prepare slides", "assignee": "Theo"},
-  {"op": "done", "id": 8}
+  {
+    "op": "add",
+    "text": "Send the calendar invite",
+    "assignee": "Maya"
+  },
+  {
+    "op": "done",
+    "id": 1
+  },
+  {
+    "op": "snooze",
+    "id": 5,
+    "until": "2024-05-12"
+  },
+  {
+    "op": "add",
+    "text": "Prepare slides",
+    "assignee": "Theo"
+  },
+  {
+    "op": "done",
+    "id": 8
+  }
 ]

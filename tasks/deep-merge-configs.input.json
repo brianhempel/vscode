@@ -1,19 +1,53 @@
 {
   "defaults": {
-    "server": {"host": "localhost", "port": 8080, "tls": {"enabled": false, "cert": null}},
-    "logging": {"level": "info", "handlers": ["console"]},
-    "features": {"beta": false, "search": true},
+    "server": {
+      "host": "localhost",
+      "port": 8080,
+      "tls": {
+        "enabled": false,
+        "cert": null
+      }
+    },
+    "logging": {
+      "level": "info",
+      "handlers": [
+        "console"
+      ]
+    },
+    "features": {
+      "beta": false,
+      "search": true
+    },
     "name": "app"
   },
   "site": {
-    "server": {"host": "example.org", "tls": {"enabled": true, "cert": "/etc/ssl/site.pem"}},
-    "logging": {"handlers": ["console", "file"]},
-    "features": {"beta": true}
+    "server": {
+      "host": "example.org",
+      "tls": {
+        "enabled": true,
+        "cert": "/etc/ssl/site.pem"
+      }
+    },
+    "logging": {
+      "handlers": [
+        "console",
+        "file"
+      ]
+    },
+    "features": {
+      "beta": true
+    }
   },
   "local": {
-    "server": {"port": 9090},
-    "logging": {"level": "debug"},
-    "features": {"experimental_ui": true},
+    "server": {
+      "port": 9090
+    },
+    "logging": {
+      "level": "debug"
+    },
+    "features": {
+      "experimental_ui": true
+    },
     "name": "app-dev"
   }
 }
