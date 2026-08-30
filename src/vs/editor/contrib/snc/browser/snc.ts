@@ -1529,6 +1529,54 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// since each move costs a full program run.
 		const dragTrackingEl = startEl?.closest('[snc-notify-mouse-is-up]') ?? null;
 
+		// Where the pointer sits inside grouped text (snc-idx-start), resolved
+		// up front so the walk below can give the group the same nearest-
+		// element precedence as an explicit listener. Handled only as a
+		// post-walk fallback, a click on grouped chars inside a table bubbled
+		// past the string to the list visualizer's DeselectChildren mousedown
+		// and unfocused the child instead of placing the cursor.
+		const caretRange = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+		let caretGroupEl: Element | null = null;
+		if (caretRange && caretRange.startContainer.nodeType === Node.TEXT_NODE) {
+			let g: Element | null = caretRange.startContainer.parentElement;
+			while (g && g !== this.domNode) {
+				if (g.hasAttribute('snc-idx-start')) {
+					caretGroupEl = g;
+					break;
+				}
+				g = g.parentElement;
+			}
+		}
+		const dispatchGroupedTextEvent = (groupEl: Element): boolean => {
+			if (!caretRange) { return false; }
+			// Moves over grouped text are drag-only, like the snc-idx shorthand
+			// -- except a grouped match interior (snc-hover-moves) hears idle
+			// hovers too: hovering a match is how its labels appear.
+			if (attr_name === 'snc-mouse-move' && !dragTrackingEl && !groupEl.hasAttribute('snc-hover-moves')) {
+				return false;
+			}
+			const textNode = caretRange.startContainer;
+			const textLen = textNode.textContent?.length ?? 1;
+			const offset = Math.min(caretRange.startOffset, textLen - 1);
+			const charIndex = parseInt(groupEl.getAttribute('snc-idx-start') ?? '0') + offset;
+			let pythonEventStr: string = {
+				'snc-mouse-move': `MouseMove(${charIndex})`,
+				'snc-mouse-down': `MouseDown(${charIndex})`,
+				'snc-mouse-up': `MouseUp(${charIndex})`,
+			}[attr_name] ?? '';
+			// The group covers move/down/up only: nothing to say for a mouseout.
+			if (pythonEventStr === '') {
+				return false;
+			}
+			pythonEventStr = this.wrapWithChildKeys(pythonEventStr, groupEl.parentElement, this.domNode);
+			// Build a per-character rect for accurate offsetY/elementHeight
+			const charRange = document.createRange();
+			charRange.setStart(textNode, offset);
+			charRange.setEnd(textNode, Math.min(offset + 1, textLen));
+			this.onPointerEvent(pythonEventStr, ev, charRange.getBoundingClientRect());
+			return true;
+		};
+
 		while (el && el != this.domNode) {
 			if (el.hasAttribute(attr_name) || el.hasAttribute(`snc-idx`)) {
 				let pythonEventStr: string;
@@ -1566,46 +1614,24 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				pythonEventStr = this.wrapWithChildKeys(pythonEventStr, el.parentElement, this.domNode);
 				this.onPointerEvent(pythonEventStr, ev);
 				return;
+			} else if (el === caretGroupEl) {
+				// The grouped text under the pointer beats any listener above
+				// it, exactly as an explicit listener here would. A gated move
+				// keeps walking: an ancestor row may be mid-drag and tracking
+				// moves of its own.
+				if (dispatchGroupedTextEvent(el)) {
+					return;
+				}
 			}
 			el = el.parentElement;
 		}
 
-		// Fallback: use caretRangeFromPoint for grouped text spans (snc-idx-start)
-		const caretRange = document.caretRangeFromPoint(ev.clientX, ev.clientY);
-		if (caretRange && caretRange.startContainer.nodeType === Node.TEXT_NODE) {
-			let groupEl = caretRange.startContainer.parentElement;
-			while (groupEl && groupEl !== this.domNode) {
-				const startAttr = groupEl.getAttribute('snc-idx-start');
-				if (startAttr !== null) {
-					// Moves over grouped text are drag-only, like the shorthand
-					// above -- except a grouped match interior (snc-hover-moves)
-					// hears idle hovers too: hovering a match is how its labels
-					// appear.
-					if (attr_name === 'snc-mouse-move' && !dragTrackingEl && !groupEl.hasAttribute('snc-hover-moves')) {
-						return;
-					}
-					const textLen = caretRange.startContainer.textContent?.length ?? 1;
-					const offset = Math.min(caretRange.startOffset, textLen - 1);
-					const charIndex = parseInt(startAttr) + offset;
-					let pythonEventStr: string = {
-						'snc-mouse-move': `MouseMove(${charIndex})`,
-						'snc-mouse-down': `MouseDown(${charIndex})`,
-						'snc-mouse-up': `MouseUp(${charIndex})`,
-					}[attr_name] ?? '';
-					// As above: nothing to say for a mouseout, so say nothing.
-					if (pythonEventStr === '') {
-						return;
-					}
-					pythonEventStr = this.wrapWithChildKeys(pythonEventStr, groupEl.parentElement, this.domNode);
-					// Build a per-character rect for accurate offsetY/elementHeight
-					const charRange = document.createRange();
-					charRange.setStart(caretRange.startContainer, offset);
-					charRange.setEnd(caretRange.startContainer, Math.min(offset + 1, textLen));
-					this.onPointerEvent(pythonEventStr, ev, charRange.getBoundingClientRect());
-					return;
-				}
-				groupEl = groupEl.parentElement;
-			}
+		// Fallback: the grouped text under the pointer was not on the target's
+		// ancestor chain (a click in the empty area beside a line lands on the
+		// container while the caret snaps into the nearest text) and nothing
+		// nearer claimed the event.
+		if (caretGroupEl && dispatchGroupedTextEvent(caretGroupEl)) {
+			return;
 		}
 
 		// The mouse is up (a release, or a move showing no buttons) and no
