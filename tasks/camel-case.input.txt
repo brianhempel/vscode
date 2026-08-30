@@ -1,0 +1,6 @@
+the-stealth-warrior
+A-B-C
+user_id
+already
+get-http_response-code
+snake_case_only

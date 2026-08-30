@@ -1,0 +1,10 @@
+ADJECTIVE: silly
+NOUN: chandelier
+VERB: screamed
+NOUN: pickup truck
+ADVERB: suspiciously
+ADJECTIVE: purple
+ADJECTIVE: enormous
+NOUN: teapot
+VERB: sing
+ADVERB: loudly
