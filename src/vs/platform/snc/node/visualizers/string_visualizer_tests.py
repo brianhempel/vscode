@@ -1291,6 +1291,17 @@ class TestSegmentClickMenu(unittest.TestCase):
 
         self.assertIn('repetition-0-0', html_out)
 
+    def test_menu_panel_is_anchored_at_the_clicked_char(self):
+        # The panel hangs off the char that was clicked, not the segment's
+        # first char, so it lands under that char's split-point caret.
+        model = self._open_menu("hello world", r"r'(hello)'", 3)
+        html_out = visualize("hello world", model, None, None)
+
+        after_panel = html_out[html_out.index('segment-menu-panel'):]
+        m = re.search(r'snc-idx="(\d+)"', after_panel)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), '3')
+
     def test_clicked_char_is_marked_as_split_point(self):
         # The char the split would put at the head of the second half gets its
         # own span with a split-point class, so CSS can show the cut.

@@ -338,6 +338,14 @@ span.overlay-content {
 	pointer-events: none;
 }
 
+/* The segment actions menu hangs off the clicked character, so left-aligning
+   it there would put the character at the panel's very corner. Slide it left
+   so the caret drawn on that char (.chr.split-point::before) points into the
+   panel instead. */
+.snc-dropdown-panel.segment-menu-panel {
+	margin-left: -20px;
+}
+
 /* Tiny one-input panel that pops up when a slice label is clicked.
    Lets the user replace e.g. '5' with a variable name like 'n'.
    Override the .snc-dropdown-panel default min-width:100px so the panel

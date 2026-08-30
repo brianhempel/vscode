@@ -718,7 +718,9 @@ def _segment_menu_panel(seg_type: str, segment_index: int, match_index: int,
                         seg_start: int, model: dict) -> str:
     """The actions menu a click inside a segment opens.
 
-    Anchored at the segment's first character; snc.ts hoists the panel and
+    Anchored at the clicked character (the caller picks the char to emit it
+    on) and nudged left by CSS so the caret drawn on that char points at the
+    panel rather than at its very corner; snc.ts hoists the panel and
     places it below the trigger's box. The trigger itself is zero-size, so the
     hidden measure span spans the text line's height for it -- that is what
     puts the panel under the line instead of on top of it.
@@ -1200,10 +1202,6 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                         '<span class="chr-start-handle-container">'
                         f'<span class="chr-resize-handle left" snc-mouse-down="{html.escape(left_handle_event)}"></span></span>'
                     )
-                od_menu = model.get('openDropdown') if model else None
-                if (od_menu is not None
-                        and od_menu.get('id') == f'segment-menu-{match_index}-{segment_index}'):
-                    pat_html += _segment_menu_panel(seg_type, segment_index, match_index, start, model)
         if end - 1 == index:
             classes.append('end')
             if slice_end_label is not None:
@@ -1230,6 +1228,18 @@ def char_span_els(string, index, is_special, highlight=None, model=None, scroll_
                         '<span class="chr-start-handle-container">'
                         f'<span class="chr-resize-handle right" snc-mouse-down="{html.escape(right_handle_event)}"></span></span>'
                     )
+
+        # The actions menu hangs off the char that was clicked, not the
+        # segment's first char, so it opens under the caret drawn on that char.
+        # A clickIdx outside the segment (or missing) falls back to the start.
+        od_menu = model.get('openDropdown') if model else None
+        if (is_interactive and od_menu is not None
+                and od_menu.get('id') == f'segment-menu-{match_index}-{segment_index}'):
+            menu_idx = od_menu.get('clickIdx')
+            if not isinstance(menu_idx, int) or not (start <= menu_idx < end):
+                menu_idx = start
+            if menu_idx == index:
+                pat_html += _segment_menu_panel(seg_type, segment_index, match_index, start, model)
     # Idle mouse moves each cost a full program run, so only match chars ask
     # for them: hovering one reveals that occurrence's labels. The front-end
     # expands the snc-idx shorthand's move only while a drag is in progress
