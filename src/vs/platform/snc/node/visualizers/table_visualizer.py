@@ -3259,6 +3259,31 @@ def _is_dict_binds(binds: 'dict | None') -> bool:
     return 'k' in (binds or {})
 
 
+def _first_match_mode(model) -> bool:
+    """Whether the table is showing one match rather than all of them.
+
+    Either the user asked for it, or the pick tool is active -- pick composes
+    an expression out of the first match, so it works over one row by
+    construction.
+
+    That second half is inherited, and it is not quite honest: pick only pins
+    first-match mode when there IS a search to have a first match OF. With an
+    empty search box it spans every row, which is what the search box's own
+    toggle says (_render_search_box_input: "Pick covers every row"), while the
+    Filter button beside it goes on reading "Find One" over a comprehension
+    that returns all of them. The honest rule is
+    `tool == 'pick' and model.get('search')`; it is not adopted here only so
+    that removing the stored flag changes no behaviour of its own.
+
+    Derived rather than stored, and that is the whole point. Writing the tool's
+    half into `first_match` on the way in meant something had to unwrite it on
+    the way out, and nothing did: leaving pick left the table first-match-only
+    with no pick on screen to explain it. Nor could the unwrite be a blind
+    reset -- it would throw away a preference the user set before picking.
+    """
+    return bool(model.get('first_match', False)) or model.get('tool') == 'pick'
+
+
 def _default_item_expr(binds: 'dict | None') -> str:
     """What bare `$` stands for in a comprehension over these rows: the pair for
     a dict, the row itself for a list."""
@@ -5903,7 +5928,7 @@ def _search_context_for(model: dict, var_and_exp=None,
     if not search:
         return _pick_only_context(model, source_expr, has_var, suggest_base)
 
-    first = bool(model.get('first_match', False))
+    first = _first_match_mode(model)
     parsed = parse_search_term(search)
     if not parsed:
         return None
@@ -6168,7 +6193,6 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
         model['pick_expr'] = _dollarize_row_names(pick_expr,
                                                   _predicate_binds_index(ctx),
                                                   bool(ctx.get('is_dict')))
-        model['first_match'] = True
         model['tool'] = 'pick'
     else:
         model['pick_expr'] = None
@@ -9238,13 +9262,14 @@ def _render_column_input(lst, model, get_visualizer, is_editing, span_attrs=''):
 def _resolve_first_and_index(model, eval_in_scope):
     """Compute the effective `first` flag and `is_index_search` for the given model.
 
-    Plain slice and plain index searches force first=True (they target a single
-    region). Broadcast slices (lists in start/stop) keep the user's first_match
-    preference because there are multiple regions to iterate.
+    Starts from _first_match_mode -- what the user asked for, or the pick tool.
+    Plain slice and plain index searches then force first=True (they target a
+    single region). Broadcast slices (lists in start/stop) keep the preference
+    because there are multiple regions to iterate.
     """
     search = model.get('search')
     has_search = search is not None and search != ''
-    first = bool(model.get('first_match', False))
+    first = _first_match_mode(model)
     is_index_search = False
 
     if not has_search:
@@ -10400,6 +10425,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # There is nothing to pick out of a small (unfocused) preview. With a search
     # pick is first-match-only; without one the whole table is one band.
     pick_mode = (model.get('tool') == 'pick') and not small and not read_only
+    # Deliberately not _first_match_mode: the tool's half is gated on there
+    # being a pick on screen to explain it, and a preview has none. The user's
+    # half is not gated -- a preview of a first-match table is still one.
     first = bool(model.get('first_match', False)) or pick_mode
 
     matched_indices = set()
@@ -11730,7 +11758,6 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['picked'] = None
                 model['pick_expr'] = None
                 if t == 'pick':
-                    model['first_match'] = True
                     # Filter is the only action that consumes a picked
                     # expression, so a linked line switches over to it.
                     if model.get('linked_action'):

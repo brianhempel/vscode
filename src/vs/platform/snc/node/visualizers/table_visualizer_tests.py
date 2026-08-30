@@ -6756,6 +6756,7 @@ from table_visualizer import (
     ToolSelect, PickToggle,
     _pick_region_ids, _pick_region_expr, _build_pick_expr, _pick_needs_index,
     _pick_edge_class, _pick_is_array, pick_filter_expr, PICK_IDX_COLUMN,
+    _first_match_mode,
 )
 
 
@@ -6792,7 +6793,8 @@ def make_pick_model(picked=None, columns=None, search=PICK_SEARCH, tool='pick'):
     model['columns'] = list(PICK_COLUMNS if columns is None else columns)
     model['search'] = search
     model['tool'] = tool
-    model['first_match'] = True
+    # No first_match: pick implies it (_first_match_mode), so a fixture that
+    # wrote it would park the model in a state the app can no longer reach.
     model['picked'] = list(picked) if picked else None
     model['pick_expr'] = _build_pick_expr(model, 'strs')
     return model
@@ -6840,13 +6842,18 @@ class TestPickToolToolbar(unittest.TestCase):
         output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
         self.assertIn('pick-tool-selected', output)
 
-    def test_selecting_pick_forces_first_match(self):
+    def test_selecting_pick_reads_as_first_match_without_writing_it(self):
+        # Pick works over the first match only. That is a fact about the tool,
+        # so it is derived from the tool -- nothing writes the flag on the way
+        # in, and so nothing has to remember to unwrite it on the way out.
         model = make_pick_model(tool='normal')
         model['first_match'] = False
         new_model, _ = update(make_tool_select_event('pick'), ('strs', 'strs'),
                               model, PICK_STRS, mock_get_visualizer, pick_eval)
-        self.assertEqual(new_model['tool'], 'pick')
-        self.assertTrue(new_model['first_match'])
+        self.assertEqual(
+            (new_model['tool'], new_model['first_match'],
+             _first_match_mode(new_model)),
+            ('pick', False, True))
 
     def test_leaving_pick_clears_selection(self):
         model = make_pick_model(picked=['match_col_1'])
@@ -6865,7 +6872,11 @@ class TestPickToolToolbar(unittest.TestCase):
         self.assertIsNone(new_model['pick_expr'])
 
     def test_first_match_toggle_inert_in_pick_mode(self):
+        # Pick reads as first-match whatever the flag says, so the toggle has
+        # nothing to do while it is active: it leaves the preference exactly as
+        # it found it (and renders dimmed to say so).
         model = make_pick_model()
+        model['first_match'] = True
         new_model, _ = update(make_first_match_toggle_event(), ('strs', 'strs'),
                               model, PICK_STRS, mock_get_visualizer, pick_eval)
         self.assertTrue(new_model['first_match'])
@@ -6877,6 +6888,73 @@ class TestPickToolToolbar(unittest.TestCase):
             r'<span class="([^"]*)" snc-mouse-down="ActionButtonClick\(action=&#x27;delete',
             output)
         self.assertIn('dimmed', delete_btn.group(1))
+
+
+
+def _first_match_view(model, out):
+    """What the bar and the rows say about first-match mode, in one shape."""
+    return {
+        'first_match': bool(model.get('first_match')),
+        'filter': 'Find One' if 'Find One' in out else 'Filter',
+        'dimmed': re.findall(
+            r'class="action-button dimmed" snc-mouse-down='
+            r'"ActionButtonClick\(action=&#x27;(\w+)&#x27;', out),
+        'matched_rows': out.count('class="row-match"'),
+    }
+
+
+class TestFirstMatchOutlivesPick(unittest.TestCase):
+    """A trip through the pick tool leaves the first-match preference alone.
+
+    Pick works over the first match only, so while it is active the table reads
+    as first-match -- but that is the TOOL saying so. Storing it in the model
+    meant that leaving pick left it set, and nothing said so: the Filter button
+    stuck on "Find One", Count went dim, and a search with four matches went on
+    showing one.
+    """
+
+    # Four of the five rows match, so a table that has quietly gone
+    # first-match-only shows up in the row count and not only in a label.
+    SEARCH = 'len($) > 2'
+
+    def _model(self, tool='normal', first_match=False):
+        model = make_pick_model(search=self.SEARCH, tool=tool)
+        model['first_match'] = first_match
+        return model
+
+    def _view(self, model):
+        out = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval,
+                        var_and_exp=('strs', 'strs'))
+        return _first_match_view(model, out)
+
+    def _round_trip(self, model):
+        for tool in ('pick', 'normal'):
+            model, _ = update(make_tool_select_event(tool), ('strs', 'strs'),
+                              model, PICK_STRS, mock_get_visualizer, pick_eval)
+        return model
+
+    def test_the_trip_through_pick_changes_nothing(self):
+        self.assertEqual(self._view(self._round_trip(self._model())),
+                         self._view(self._model()))
+
+    def test_a_preference_the_user_set_is_still_there_afterwards(self):
+        # The reset a stored flag would need can't be a blind one: someone who
+        # asked for first-match before picking still wants it after.
+        self.assertEqual(
+            self._view(self._round_trip(self._model(first_match=True))),
+            self._view(self._model(first_match=True)))
+
+    def test_pick_itself_still_reads_as_first_match(self):
+        self.assertEqual(self._view(self._model(tool='pick'))['filter'],
+                         'Find One')
+
+    def test_the_code_pick_writes_is_unchanged(self):
+        # is_first reaches the generator through the context, which derives it
+        # the same way -- so what a click writes while picking, and what the
+        # hover tooltip previews, are what they always were.
+        ctx = _get_search_context(self._model(tool='pick'), ('strs', 'strs'),
+                                  eval_in_scope=pick_eval)
+        self.assertTrue(ctx['is_first'])
 
 
 class TestPickRegions(unittest.TestCase):
@@ -11039,7 +11117,8 @@ def make_dict_pick_model(picked=None, columns=None, search=DICT_PICK_SEARCH,
     model['columns'] = dict(DICT_PICK_COLUMNS if columns is None else columns)
     model['search'] = search
     model['tool'] = tool
-    model['first_match'] = True
+    # No first_match: pick implies it (_first_match_mode), so a fixture that
+    # wrote it would park the model in a state the app can no longer reach.
     model['picked'] = list(picked) if picked else None
     model['pick_expr'] = _build_pick_expr(model, 'd')
     return model
