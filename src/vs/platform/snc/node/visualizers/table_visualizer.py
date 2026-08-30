@@ -8002,7 +8002,7 @@ def _render_sort_panel(col, model) -> str:
         # so a row already checked hands over the line as it stands rather than
         # the unsort a click there would write. Rightwards, like every handle in
         # these menus: a tooltip above one would cover the rows around it.
-        rows.append(
+        row_html = (
             f'<div class="{classes}"'
             f'{py_exp_attrs(None if inert else _sort_expr(text, reads, direction, _model_binds(model)), align="right")}>'
             f'<span class="col-compute-toggle"{toggle_attr}>'
@@ -8010,8 +8010,6 @@ def _render_sort_panel(col, model) -> str:
             f'<span class="col-compute-name">{_sort_label(direction)}</span>'
             f'</span></div>')
 
-    rows.append('<div class="col-compute-sep"></div>')
-    for direction in SORT_DIRECTIONS:
         # The row itself is the handle, like Unique and Tally. Without a source
         # there is no list to name and so no line to write or drag.
         code = (None if source_expr is None
@@ -8020,15 +8018,21 @@ def _render_sort_panel(col, model) -> str:
         click_attr = '' if code is None else (
             f' snc-mouse-down="'
             f'{html.escape(repr(SortCodeClick(col=col, direction=direction)))}"')
-        rows.append(
-            f'<div class="col-compute-row col-compute-code col-sort-code'
-            f'{"" if code else " unselectable"}"'
+
+
+        row_alt_html = (
+            f'<div class="col-compute-row col-sort-code col-compute-row-aside"'
             f'{py_exp_attrs(code, align="right")}>'
-            f'<span class="col-compute-toggle"{click_attr}>'
-            f'<span class="col-compute-nocheck"></span>'
-            f'<span class="col-compute-name">'
-            f'{_sort_label(direction)} (new code)</span>'
-            f'</span></div>')
+            f'<span class="col-compute-toggle" {click_attr} data-tooltip="Insert as new code">{ICONS['plus']}</span>'
+            f'</span>'
+            f'</div>'
+        )
+
+        rows.append(
+            f'<div class="col-convert-wrapper">'
+            f'{row_html}'
+            f'{row_alt_html}'
+            f'</div>')
 
     return (f'<div class="snc-dropdown-panel flyout col-compute-panel '
             f'col-sort-panel" snc-dropdown-align="flyout">{"".join(rows)}</div>')
@@ -8337,7 +8341,8 @@ def _render_convert_panel(col, model) -> str:
         # tooltip above one would cover the rows around it.
         code = (None if inert else
                 _convert_values_expr(columns, col, to, source_expr, binds))
-        rows.append(
+
+        row_html = (
             f'<div class="col-compute-row col-convert-row'
             f'{" checked" if checked else ""}'
             f'{" unselectable" if inert else ""}"'
@@ -8345,28 +8350,54 @@ def _render_convert_panel(col, model) -> str:
             f'<span class="col-compute-toggle"{toggle_attr}>'
             f'{_render_tally_check(checked, disabled=inert)}'
             f'<span class="col-compute-name">{to}</span>'
-            f'</span></div>')
+            f'</span>'
+            f'</div>'
+        )
 
-    rows.append('<div class="col-compute-sep"></div>')
-    for to in CONVERT_TYPES:
+
         # The row itself is the handle, like Sort's `(new code)` rows. What it
         # writes replaces any conversion the column already has rather than
         # nesting inside it, the way the checkboxes do.
         seg, _ident = _convert_target(col, to)
-        inert = not _convert_writable(columns, col, seg)
-        click_attr = '' if inert else (
+        click_attr = (
             f' snc-mouse-down="'
             f'{html.escape(repr(ConvertTypeColumnClick(col=col, to=to)))}"')
-        code = (None if inert else
-                _convert_values_expr(columns, col, to, source_expr, binds))
-        rows.append(
-            f'<div class="col-compute-row col-compute-code col-convert-code'
-            f'{" unselectable" if inert else ""}"'
+        code = _convert_values_expr(columns, col, to, source_expr, binds)
+
+        row_alt_html = (
+            f'<div class="col-compute-row col-convert-row col-compute-row-aside"'
             f'{py_exp_attrs(code, align="right")}>'
-            f'<span class="col-compute-toggle"{click_attr}>'
-            f'<span class="col-compute-nocheck"></span>'
-            f'<span class="col-compute-name">{to} (new column)</span>'
-            f'</span></div>')
+            f'<span class="col-compute-toggle" {click_attr} data-tooltip="Insert as a new column">{ICONS['column-right']}</span>'
+            f'</span>'
+            f'</div>'
+        )
+
+        rows.append(
+            f'<div class="col-convert-wrapper">'
+            f'{row_html}'
+            f'{row_alt_html}'
+            f'</div>')
+
+    # rows.append('<div class="col-compute-sep"></div>')
+    # for to in CONVERT_TYPES:
+    #     # The row itself is the handle, like Sort's `(new code)` rows. What it
+    #     # writes replaces any conversion the column already has rather than
+    #     # nesting inside it, the way the checkboxes do.
+    #     seg, _ident = _convert_target(col, to)
+    #     inert = not _convert_writable(columns, col, seg)
+    #     click_attr = '' if inert else (
+    #         f' snc-mouse-down="'
+    #         f'{html.escape(repr(ConvertTypeColumnClick(col=col, to=to)))}"')
+    #     code = (None if inert else
+    #             _convert_values_expr(columns, col, to, source_expr, binds))
+    #     rows.append(
+    #         f'<div class="col-compute-row col-compute-code col-convert-code'
+    #         f'{" unselectable" if inert else ""}"'
+    #         f'{py_exp_attrs(code, align="right")}>'
+    #         f'<span class="col-compute-toggle"{click_attr}>'
+    #         f'<span class="col-compute-nocheck"></span>'
+    #         f'<span class="col-compute-name">{to} (new column)</span>'
+    #         f'</span></div>')
 
     return (f'<div class="snc-dropdown-panel flyout col-compute-panel '
             f'col-convert-panel" snc-dropdown-align="flyout">'
@@ -8495,9 +8526,9 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
                     f'<span class="col-compute-toggle"{toggle_attr}>'
                     f'{_render_tally_check(checked, disabled=inert)}'
                     f'<span class="col-compute-name">{html.escape(label)}</span>'
-                    f'</span>{holes}'
+                    f'{holes}'
                     f'<span class="col-compute-preview"'
-                    f'>{"" if unanswered else _agg_answer_html(template, answer)}</span>'
+                    f'>{"" if unanswered else _agg_answer_html(template, answer)}</span></span>'
                     f'</div>'
                 )
 

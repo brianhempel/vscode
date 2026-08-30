@@ -1938,6 +1938,14 @@
     }
 	}
 
+	.col-convert-wrapper {
+    display: flex;
+
+    > .col-compute-row:not(.col-compute-row-aside) {
+    	flex: 1;
+    }
+	}
+
 	.col-compute-row {
 		display: flex;
 		align-items: center;
@@ -1949,7 +1957,12 @@
 		   are not ways of checking the row. */
 		&:has(.col-compute-toggle:hover) {
 			background: var(--snc-hover-bg);
+
+			&.col-compute-row-aside {
+				background: none;
+			}
 		}
+
 
 		/* A question this column has no answer to is a row to read past. */
 		&.unselectable {
@@ -1959,13 +1972,35 @@
 				background: none;
 			}
 		}
+
+
+		&.col-compute-row-aside .col-compute-toggle > svg {
+			width: 10px;
+			height: 10px;
+		}
+
+		&.col-sort-code > .col-compute-toggle > svg {
+			width: 9px;
+			height: 9px;
+		}
+
+
+		&.col-compute-row-aside > span.col-compute-toggle {
+	    background: #ececec;
+	    border-radius: 4px;
+	    padding: 3px;
+
+			&:hover {
+				background: #d2d2d2;
+			}
+		}
 	}
 
 	.col-compute-toggle {
 		display: flex;
 		align-items: center;
 		gap: 3px;
-		/*flex: 1;*/
+		flex: 1;
 		cursor: pointer;
 		user-select: none;
 		/*flex-direction: row-reverse;*/
@@ -2000,7 +2035,6 @@
 
 	.col-compute-name {
 		white-space: nowrap;
-		flex-grow: 1;
 	}
 
 	/* The level of a percentile, sized for three digits and no more: it is part
@@ -2029,9 +2063,9 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		flex-grow: 1;
     display: flex;
     justify-content: end;
+    flex-grow: 1;
 	}
 
 	/* The rows that write a line have no checkbox -- but they still start where
