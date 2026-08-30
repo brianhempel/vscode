@@ -1,0 +1,32 @@
+$ cd /
+$ ls
+dir docs
+dir src
+14848 notes.txt
+8504 readme.md
+$ cd docs
+$ ls
+29116 guide.pdf
+2557 changelog.txt
+dir images
+$ cd images
+$ ls
+62596 logo.png
+$ cd ..
+$ cd ..
+$ cd src
+$ ls
+dir lib
+dir tests
+4060 main.py
+$ cd lib
+$ ls
+80900 parser.py
+5626 util.py
+$ cd ..
+$ cd tests
+$ ls
+7214 test_parser.py
+$ cd ..
+$ cd ..
+$ ls

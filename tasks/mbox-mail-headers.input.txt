@@ -1,0 +1,91 @@
+From stephen.marquard@uct.ac.za Sat Jan  5 09:14:16 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: stephen.marquard@uct.ac.za
+Subject: [sakai] svn commit: r39772 - content/branches
+X-DSPAM-Confidence: 0.8475
+X-DSPAM-Probability: 0.0000
+
+Author: stephen.marquard@uct.ac.za
+Date: 2008-01-05 09:14:16 -0500 (Sat, 05 Jan 2008)
+Fix for SAK-12345: content hosting resources
+
+From louis@media.berkeley.edu Fri Jan  4 18:10:48 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: louis@media.berkeley.edu
+Subject: [sakai] svn commit: r39771 - site/trunk
+X-DSPAM-Confidence: 0.6178
+X-DSPAM-Probability: 0.0000
+
+Update the site tool. See message From: sakai-dev list for details.
+
+From zqian@umich.edu Fri Jan  4 16:10:39 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: zqian@umich.edu
+Subject: [sakai] svn commit: r39770 - gradebook/trunk
+X-DSPAM-Confidence: 0.6961
+X-DSPAM-Probability: 0.0000
+
+Gradebook import fix.
+
+From rjlowe@iupui.edu Fri Jan  4 15:46:24 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: rjlowe@iupui.edu
+Subject: [sakai] svn commit: r39769 - assignment/trunk
+X-DSPAM-Confidence: 0.7565
+X-DSPAM-Probability: 0.0000
+
+Assignment tool: allow resubmission.
+
+From zqian@umich.edu Fri Jan  4 15:03:18 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: zqian@umich.edu
+Subject: [sakai] svn commit: r39766 - gradebook/trunk
+X-DSPAM-Confidence: 0.7626
+X-DSPAM-Probability: 0.0000
+
+Gradebook: fix column ordering.
+
+From cwen@iupui.edu Fri Jan  4 11:37:30 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: cwen@iupui.edu
+Subject: [sakai] svn commit: r39765 - portal/trunk
+X-DSPAM-Confidence: 0.7556
+X-DSPAM-Probability: 0.0000
+
+Portal: update navigation.
+
+From stephen.marquard@uct.ac.za Fri Jan  4 11:11:52 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: stephen.marquard@uct.ac.za
+Subject: [sakai] svn commit: r39764 - content/trunk
+X-DSPAM-Confidence: 0.7002
+X-DSPAM-Probability: 0.0000
+
+Content: null check in resource listing.
+
+From zqian@umich.edu Fri Jan  4 09:05:31 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: zqian@umich.edu
+Subject: [sakai] svn commit: r39763 - gradebook/trunk
+X-DSPAM-Confidence: 0.7615
+X-DSPAM-Probability: 0.0000
+
+Gradebook: unit tests.
+
+From ray@media.berkeley.edu Thu Jan  3 19:51:21 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: ray@media.berkeley.edu
+Subject: [sakai] svn commit: r39760 - user/trunk
+X-DSPAM-Confidence: 0.6932
+X-DSPAM-Probability: 0.0000
+
+User tool: password reset page.
+
+From cwen@iupui.edu Thu Jan  3 16:23:48 2008
+Return-Path: <postmaster@collab.sakaiproject.org>
+From: cwen@iupui.edu
+Subject: [sakai] svn commit: r39758 - portal/trunk
+X-DSPAM-Confidence: 0.6526
+X-DSPAM-Probability: 0.0000
+
+Portal: skin fixes.

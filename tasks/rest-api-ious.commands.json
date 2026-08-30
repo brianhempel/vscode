@@ -1,0 +1,8 @@
+[
+  {"op": "add", "user": "Dan"},
+  {"op": "iou", "lender": "Adam", "borrower": "Dan", "amount": 5.5},
+  {"op": "iou", "lender": "Bob", "borrower": "Adam", "amount": 3.0},
+  {"op": "iou", "lender": "Chuck", "borrower": "Adam", "amount": 10.0},
+  {"op": "iou", "lender": "Dan", "borrower": "Adam", "amount": 5.5},
+  {"op": "get", "users": ["Adam", "Chuck"]}
+]

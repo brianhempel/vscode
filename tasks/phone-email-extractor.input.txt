@@ -1,0 +1,15 @@
+Contact Us
+==========
+
+Our main office can be reached at 415-555-1011 during business hours,
+or by email at info@example-co.com. For billing questions, call
+(415) 555-9999 or write to billing@example-co.com.
+
+Sales team:
+  - Alice Zhang, alice.zhang@example-co.com, 415.555.0000
+  - Bob Ortega (bob_ortega@sales.example-co.com) - 415 555 3333 ext 4
+  - Priya Nair <priya@example-co.co.uk>, tel. 800-420-0001
+
+Press inquiries: press@example-co.com or +1 415-555-1011 (same as main line).
+Fax: 415-555-7788. Please do not send email to noreply@example-co.com.
+Old number 555-1234 is no longer in service. Order #4155551011 is unrelated.
