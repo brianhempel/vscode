@@ -84,14 +84,13 @@ def answer(question):
         i += 2
     return result
 
-if __name__ == "__main__":
-    with open("wordy.input.txt") as f:
-        for line in f:
-            q = line.strip()
-            if not q:
-                continue
-            try:
-                print(f"{q} -> {answer(q)}")
-            except ValueError as e:
-                print(f"{q} -> ERROR: {e}")
+with open("wordy.input.txt") as f:
+    for line in f:
+        q = line.strip()
+        if not q:
+            continue
+        try:
+            print(f"{q} -> {answer(q)}")
+        except ValueError as e:
+            print(f"{q} -> ERROR: {e}")
 ```

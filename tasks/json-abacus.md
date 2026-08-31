@@ -48,9 +48,8 @@ def total(node, skip_red=False):
         return sum(total(value, skip_red) for value in node.values())
     return 0                            # strings (even "12") and None count as zero
 
-if __name__ == "__main__":
-    with open("json-abacus.input.json") as f:
-        doc = json.load(f)
-    print(f"Sum of all numbers: {total(doc)}")
-    print(f"Sum ignoring 'red' objects: {total(doc, skip_red=True)}")
+with open("json-abacus.input.json") as f:
+    doc = json.load(f)
+print(f"Sum of all numbers: {total(doc)}")
+print(f"Sum ignoring 'red' objects: {total(doc, skip_red=True)}")
 ```

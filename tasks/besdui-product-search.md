@@ -136,17 +136,16 @@ def t12(product, offer):
                   "valid": [offer["validFrom"], offer["validTo"]]},
     }
 
-if __name__ == "__main__":
-    print("T1 sheeny + stroboscopes AND gadgeteers, num1 > 450:", labels(t1("sheeny", ["stroboscopes", "gadgeteers"], 450)))
-    print("T2 sheeny + stroboscopes OR gadgeteers, num1 > 450: ", labels(t2("sheeny", ["stroboscopes", "gadgeteers"], 450)))
-    print("T4 sheeny + stroboscopes, NOT gadgeteers, num1 > 300:", labels(t4("sheeny", ["stroboscopes"], "gadgeteers", 300)))
-    print("T6 similar to 'boozed thermostats':", labels(t6(2)))
-    print("T7 label contains 'ales':", labels(t7("ales")))
-    print("T9 3 most recent English reviews for product 1:")
-    for r in t9(1, "en", 3):
-        print(f"   {r['date']}  {r['rating']:>2}/10  {r['title']} ({r['reviewer']})")
-    offer = t11(1, "US", 3, "2008-05-28")
-    print(f"T11 cheapest US offer, <=3 days, valid 2008-05-28: {offer['vendor']} ${offer['price']:.2f}")
-    print("T12 exported offer:")
-    print(json.dumps(t12(by_id(1), offer), indent=2))
+print("T1 sheeny + stroboscopes AND gadgeteers, num1 > 450:", labels(t1("sheeny", ["stroboscopes", "gadgeteers"], 450)))
+print("T2 sheeny + stroboscopes OR gadgeteers, num1 > 450: ", labels(t2("sheeny", ["stroboscopes", "gadgeteers"], 450)))
+print("T4 sheeny + stroboscopes, NOT gadgeteers, num1 > 300:", labels(t4("sheeny", ["stroboscopes"], "gadgeteers", 300)))
+print("T6 similar to 'boozed thermostats':", labels(t6(2)))
+print("T7 label contains 'ales':", labels(t7("ales")))
+print("T9 3 most recent English reviews for product 1:")
+for r in t9(1, "en", 3):
+    print(f"   {r['date']}  {r['rating']:>2}/10  {r['title']} ({r['reviewer']})")
+offer = t11(1, "US", 3, "2008-05-28")
+print(f"T11 cheapest US offer, <=3 days, valid 2008-05-28: {offer['vendor']} ${offer['price']:.2f}")
+print("T12 exported offer:")
+print(json.dumps(t12(by_id(1), offer), indent=2))
 ```

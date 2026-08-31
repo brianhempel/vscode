@@ -86,12 +86,11 @@ def build_toc(lines):
         entries.append((level, title, slug))
     return entries
 
-if __name__ == "__main__":
-    with open("markdown-toc.input.md") as f:
-        lines = [l.rstrip("\n") for l in f]
-    toc = build_toc(lines)
-    top = min(level for level, _, _ in toc)
-    for level, title, slug in toc:
-        indent = "  " * (level - top)
-        print(f"{indent}- [{title}](#{slug})")
+with open("markdown-toc.input.md") as f:
+    lines = [l.rstrip("\n") for l in f]
+toc = build_toc(lines)
+top = min(level for level, _, _ in toc)
+for level, title, slug in toc:
+    indent = "  " * (level - top)
+    print(f"{indent}- [{title}](#{slug})")
 ```

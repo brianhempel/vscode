@@ -68,6 +68,5 @@ def parse(markdown):
         res += '</ul>'
     return res
 
-if __name__ == '__main__':
-    with open('markdown-refactor.input.md') as f:
-        print(parse(f.read().rstrip('\n')))
+with open('markdown-refactor.input.md') as f:
+    print(parse(f.read().rstrip('\n')))

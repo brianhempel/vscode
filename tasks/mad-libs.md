@@ -77,15 +77,14 @@ def fill(template, words):
         out_lines.append(" ".join(out_tokens))
     return "\n".join(out_lines), counts
 
-if __name__ == "__main__":
-    with open("mad-libs.input.txt") as f:
-        template = f.read()
-    words = load_words("mad-libs.words.txt")
+with open("mad-libs.input.txt") as f:
+    template = f.read()
+words = load_words("mad-libs.words.txt")
 
-    text, counts = fill(template, words)
-    print(text)
-    print()
-    print("Replaced:", ", ".join(f"{k}={counts[k]}" for k in PLACEHOLDERS))
-    unused = sum(len(words[k]) - counts[k] for k in PLACEHOLDERS)
-    print(f"Unused words: {unused}")
+text, counts = fill(template, words)
+print(text)
+print()
+print("Replaced:", ", ".join(f"{k}={counts[k]}" for k in PLACEHOLDERS))
+unused = sum(len(words[k]) - counts[k] for k in PLACEHOLDERS)
+print(f"Unused words: {unused}")
 ```

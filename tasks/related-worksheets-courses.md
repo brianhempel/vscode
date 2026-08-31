@@ -141,13 +141,12 @@ def precept_teacher(course_code, day, start_time):
                 return [i["name"] for i in instructors_of_section.get(s["id"], [])]
     return []
 
-if __name__ == "__main__":
-    print("1.", ", ".join(full_title(c) for c in courses_taught_by("Theo Lindqvist")))
-    mus = code_of_title("MUS 105: Music Theory Through Performance and Composition")
-    print("2.", grade_percent(mus, "Midterm Exam") + "%")
-    print("3.", ", ".join(full_title(c) for c in afternoon_lectures("LA")))
-    kor = code_of_title("KOR 107: Intermediate Korean II")
-    print("4.", ", ".join(instructor_emails(kor)))
-    his = code_of_title("HIS 383: The United States Since 1920")
-    print("5.", ", ".join(precept_teacher(his, "Wed", "10:00")))
+print("1.", ", ".join(full_title(c) for c in courses_taught_by("Theo Lindqvist")))
+mus = code_of_title("MUS 105: Music Theory Through Performance and Composition")
+print("2.", grade_percent(mus, "Midterm Exam") + "%")
+print("3.", ", ".join(full_title(c) for c in afternoon_lectures("LA")))
+kor = code_of_title("KOR 107: Intermediate Korean II")
+print("4.", ", ".join(instructor_emails(kor)))
+his = code_of_title("HIS 383: The United States Since 1920")
+print("5.", ", ".join(precept_teacher(his, "Wed", "10:00")))
 ```

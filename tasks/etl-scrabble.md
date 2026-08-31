@@ -50,16 +50,15 @@ def transform(old):
 def score_word(word, scores):
     return sum(scores[ch] for ch in word.lower() if ch in scores)
 
-if __name__ == "__main__":
-    with open("etl-scrabble.input.json") as f:
-        old = json.load(f)
+with open("etl-scrabble.input.json") as f:
+    old = json.load(f)
 
-    new = transform(old)
-    print("Stage 1: letter -> score")
-    print(json.dumps(new))
+new = transform(old)
+print("Stage 1: letter -> score")
+print(json.dumps(new))
 
-    print()
-    print("Stage 2: word scores")
-    for word in ["cabbage", "quiz", "python", "oxyphenbutazone"]:
-        print(f"{word:<16} {score_word(word, new)}")
+print()
+print("Stage 2: word scores")
+for word in ["cabbage", "quiz", "python", "oxyphenbutazone"]:
+    print(f"{word:<16} {score_word(word, new)}")
 ```

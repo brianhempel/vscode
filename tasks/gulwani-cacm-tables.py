@@ -32,12 +32,11 @@ def unpivot(wide_rows):
                 long_rows.append((name, column, value))
     return long_rows
 
-if __name__ == "__main__":
-    print("Selling prices (Ex. 3):")
-    for name, date, price in selling_prices(read_csv("gulwani-cacm-tables.markup.csv"),
-                                            read_csv("gulwani-cacm-tables.cost.csv")):
-        print(f"  {name:<9} {date:<8} {price}")
-    print()
-    print("Test dates, long format (Ex. 5):")
-    for name, qual, date in unpivot(read_csv("gulwani-cacm-tables.input.csv")):
-        print(f"  {name:<7} {qual:<7} {date}")
+print("Selling prices (Ex. 3):")
+for name, date, price in selling_prices(read_csv("gulwani-cacm-tables.markup.csv"),
+                                        read_csv("gulwani-cacm-tables.cost.csv")):
+    print(f"  {name:<9} {date:<8} {price}")
+print()
+print("Test dates, long format (Ex. 5):")
+for name, qual, date in unpivot(read_csv("gulwani-cacm-tables.input.csv")):
+    print(f"  {name:<7} {qual:<7} {date}")

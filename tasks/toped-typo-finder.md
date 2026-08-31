@@ -135,15 +135,14 @@ def parse_blocks(text):
             blocks[current].append(line.strip())
     return blocks
 
-if __name__ == "__main__":
-    with open("toped-typo-finder.input.txt") as f:
-        blocks = parse_blocks(f.read())
-    for kind, strings in blocks.items():
-        print(f"[{kind}]")
-        for s in strings:
-            hard, soft = CHECKERS[kind](s)
-            verdict = "INVALID" if hard else "QUESTIONABLE" if soft else "VALID"
-            reasons = "; ".join(hard + soft)
-            print(f"  {verdict:<12} {s:<32} {reasons}".rstrip())
-        print()
+with open("toped-typo-finder.input.txt") as f:
+    blocks = parse_blocks(f.read())
+for kind, strings in blocks.items():
+    print(f"[{kind}]")
+    for s in strings:
+        hard, soft = CHECKERS[kind](s)
+        verdict = "INVALID" if hard else "QUESTIONABLE" if soft else "VALID"
+        reasons = "; ".join(hard + soft)
+        print(f"  {verdict:<12} {s:<32} {reasons}".rstrip())
+    print()
 ```

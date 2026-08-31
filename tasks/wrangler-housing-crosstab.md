@@ -65,19 +65,18 @@ def fold(crosstab_text):
                 rows.append((r["year"], m, r[m]))
     return rows
 
-if __name__ == "__main__":
-    with open("wrangler-housing-crosstab.input.csv", newline="") as f:
-        long_rows = list(csv.DictReader(f))
+with open("wrangler-housing-crosstab.input.csv", newline="") as f:
+    long_rows = list(csv.DictReader(f))
 
-    table = unfold(long_rows)
-    crosstab = render_crosstab(table)
-    print(crosstab)
+table = unfold(long_rows)
+crosstab = render_crosstab(table)
+print(crosstab)
 
-    print()
-    refolded = fold(crosstab)
-    print(f"Refolded rows: {len(refolded)} (original: {len(long_rows)})")
-    original = [(r["year"], r["month"], r["price"]) for r in long_rows]
-    print("Round trip matches original:", refolded == original)
-    missing = [f"{y}-{m}" for y in sorted(table) for m in MONTHS if m not in table[y]]
-    print("Missing months:", ", ".join(missing))
+print()
+refolded = fold(crosstab)
+print(f"Refolded rows: {len(refolded)} (original: {len(long_rows)})")
+original = [(r["year"], r["month"], r["price"]) for r in long_rows]
+print("Round trip matches original:", refolded == original)
+missing = [f"{y}-{m}" for y in sorted(table) for m in MONTHS if m not in table[y]]
+print("Missing months:", ", ".join(missing))
 ```

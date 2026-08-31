@@ -18,12 +18,11 @@ def natural_key(s):
     # each chunk with its type: (0, int) sorts before (1, str) when they would otherwise clash.
     return [(0, c) if isinstance(c, int) else (1, c) for c in chunks(s)]
 
-if __name__ == "__main__":
-    with open("natural-sort.input.txt") as f:
-        names = [line.strip() for line in f if line.strip()]
+with open("natural-sort.input.txt") as f:
+    names = [line.strip() for line in f if line.strip()]
 
-    plain = sorted(names)
-    natural = sorted(names, key=natural_key)
-    print(f"{'Plain sorted()':<16} {'Natural sort'}")
-    for a, b in zip(plain, natural):
-        print(f"{a:<16} {b}")
+plain = sorted(names)
+natural = sorted(names, key=natural_key)
+print(f"{'Plain sorted()':<16} {'Natural sort'}")
+for a, b in zip(plain, natural):
+    print(f"{a:<16} {b}")

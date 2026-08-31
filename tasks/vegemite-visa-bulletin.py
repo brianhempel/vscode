@@ -27,18 +27,17 @@ def to_iso(cell):
     day, mon, yy = int(cell[:2]), MONTHS[cell[2:5]], int(cell[5:])
     return date(2000 + yy, mon, day).isoformat()
 
-if __name__ == "__main__":
-    with open("vegemite-visa-bulletin.input.txt") as f:
-        bulletins = parse_bulletins(f.read())
+with open("vegemite-visa-bulletin.input.txt") as f:
+    bulletins = parse_bulletins(f.read())
 
-    print("EB-3, All Chargeability Areas:")
-    dates = []
-    for title, table in bulletins:
-        iso = to_iso(table["3rd"][0])             # column 0 = All Chargeability Areas
-        dates.append((title, iso))
-        print(f"  {title:<15} {iso}")
+print("EB-3, All Chargeability Areas:")
+dates = []
+for title, table in bulletins:
+    iso = to_iso(table["3rd"][0])             # column 0 = All Chargeability Areas
+    dates.append((title, iso))
+    print(f"  {title:<15} {iso}")
 
-    print("\nMovement since previous bulletin:")
-    for (prev_title, prev), (title, cur) in zip(dates, dates[1:]):
-        delta = (date.fromisoformat(cur) - date.fromisoformat(prev)).days
-        print(f"  {title:<15} {delta:+d} days")
+print("\nMovement since previous bulletin:")
+for (prev_title, prev), (title, cur) in zip(dates, dates[1:]):
+    delta = (date.fromisoformat(cur) - date.fromisoformat(prev)).days
+    print(f"  {title:<15} {delta:+d} days")

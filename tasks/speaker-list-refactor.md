@@ -110,9 +110,8 @@ def render(base_lines, speakers):
             out.append(rewrite_formula(line))
     return "\n".join(out)
 
-if __name__ == "__main__":
-    base = open("speaker-list-refactor.base.md").read().splitlines()
-    a = open("speaker-list-refactor.a.md").read().splitlines()
-    b = open("speaker-list-refactor.b.md").read().splitlines()
-    print(render(base, merge(a, b)))
+base = open("speaker-list-refactor.base.md").read().splitlines()
+a = open("speaker-list-refactor.a.md").read().splitlines()
+b = open("speaker-list-refactor.b.md").read().splitlines()
+print(render(base, merge(a, b)))
 ```

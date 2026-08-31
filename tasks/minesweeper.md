@@ -76,12 +76,11 @@ def annotate(board):
         out.append(row)
     return out
 
-if __name__ == "__main__":
-    with open("minesweeper.input.txt", encoding="utf-8") as f:
-        boards = parse_boards(f.read())
-    for i, board in enumerate(boards, 1):
-        print(f"Board {i}:")
-        for row in annotate(board):
-            print("|" + row + "|")
-        print()
+with open("minesweeper.input.txt", encoding="utf-8") as f:
+    boards = parse_boards(f.read())
+for i, board in enumerate(boards, 1):
+    print(f"Board {i}:")
+    for row in annotate(board):
+        print("|" + row + "|")
+    print()
 ```

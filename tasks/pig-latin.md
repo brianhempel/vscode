@@ -64,9 +64,8 @@ def translate_word(word):
 def translate_line(line):
     return " ".join(translate_word(w) for w in line.split())
 
-if __name__ == "__main__":
-    with open("pig-latin.input.txt") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            print(f"{line:<32} -> {translate_line(line)}")
+with open("pig-latin.input.txt") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        print(f"{line:<32} -> {translate_line(line)}")
 ```

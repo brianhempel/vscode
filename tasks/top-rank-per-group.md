@@ -126,10 +126,9 @@ def render_table(top):
             lines.append(f"  {rank:<5}{p['name']:<18}{p['salary']:>8,}")
     return "\n".join(lines)
 
-if __name__ == "__main__":
-    rows = load("top-rank-per-group.input.csv")
-    top = top_per_group(group_by(rows, "department"), TOP_N)
-    print(render_table(top))
-    print()
-    print(json.dumps(top, indent=2))
+rows = load("top-rank-per-group.input.csv")
+top = top_per_group(group_by(rows, "department"), TOP_N)
+print(render_table(top))
+print()
+print(json.dumps(top, indent=2))
 ```

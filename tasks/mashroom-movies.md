@@ -81,23 +81,22 @@ def merge(theaters, reviews):
                 unmatched.append((theater["name"], movie["title"]))
     return theaters, unmatched
 
-if __name__ == "__main__":
-    with open("mashroom-movies.input.json") as f:
-        theaters = json.load(f)["theaters"]
-    with open("mashroom-movies.reviews.json") as f:
-        reviews = json.load(f)
+with open("mashroom-movies.input.json") as f:
+    theaters = json.load(f)["theaters"]
+with open("mashroom-movies.reviews.json") as f:
+    reviews = json.load(f)
 
-    theaters, unmatched = merge(theaters, reviews)
-    for theater in theaters:
-        print(f"{theater['name']} ({theater['district']})")
-        for m in sorted(theater["movies"], key=lambda m: -(m["rating"] or 0)):
-            rating = f"{m['rating']:.1f}" if m["rating"] is not None else "n/a"
-            print(f"  {m['title']:<16} {rating:>4}  {', '.join(m['showtimes'])}")
-    print()
-    print("No exact review match:", ", ".join(f"{t}: {m}" for t, m in unmatched) or "none")
-    print()
-    print("Merged records (one JSON line per movie):")
-    for theater in theaters:
-        for m in theater["movies"]:
-            print(json.dumps({"theater": theater["name"], **m}, ensure_ascii=False))
+theaters, unmatched = merge(theaters, reviews)
+for theater in theaters:
+    print(f"{theater['name']} ({theater['district']})")
+    for m in sorted(theater["movies"], key=lambda m: -(m["rating"] or 0)):
+        rating = f"{m['rating']:.1f}" if m["rating"] is not None else "n/a"
+        print(f"  {m['title']:<16} {rating:>4}  {', '.join(m['showtimes'])}")
+print()
+print("No exact review match:", ", ".join(f"{t}: {m}" for t, m in unmatched) or "none")
+print()
+print("Merged records (one JSON line per movie):")
+for theater in theaters:
+    for m in theater["movies"]:
+        print(json.dumps({"theater": theater["name"], **m}, ensure_ascii=False))
 ```

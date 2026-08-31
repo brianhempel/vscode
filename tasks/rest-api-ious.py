@@ -46,9 +46,8 @@ def apply(db, cmd):
     else:
         raise ValueError(f"unknown op {op}")
 
-if __name__ == "__main__":
-    db = {u["name"]: u for u in load("rest-api-ious.input.json")["users"]}
-    for cmd in load("rest-api-ious.commands.json"):
-        apply(db, cmd)
-    final = {"users": [db[n] for n in sorted(db)]}
-    print(json.dumps(final, indent=2))
+db = {u["name"]: u for u in load("rest-api-ious.input.json")["users"]}
+for cmd in load("rest-api-ious.commands.json"):
+    apply(db, cmd)
+final = {"users": [db[n] for n in sorted(db)]}
+print(json.dumps(final, indent=2))

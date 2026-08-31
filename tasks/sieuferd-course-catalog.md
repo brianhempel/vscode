@@ -145,15 +145,14 @@ def outline(catalog):
             lines.append(f"    {sec['section']} {sec['type']:<7} {sec['semester']:<12} {who}")
     return "\n".join(lines)
 
-if __name__ == "__main__":
-    spring = build_catalog("Spring 06-07")
-    print("== Courses offered in Spring 06-07 ==")
-    print(outline(spring))
-    print()
-    print("== Courses per instructor (Spring 06-07) ==")
-    for name, cs in invert(spring).items():
-        print(f"{name}: {'; '.join(cs)}")
-    print()
-    print("== One course as nested JSON ==")
-    print(json.dumps(spring[1]))
+spring = build_catalog("Spring 06-07")
+print("== Courses offered in Spring 06-07 ==")
+print(outline(spring))
+print()
+print("== Courses per instructor (Spring 06-07) ==")
+for name, cs in invert(spring).items():
+    print(f"{name}: {'; '.join(cs)}")
+print()
+print("== One course as nested JSON ==")
+print(json.dumps(spring[1]))
 ```

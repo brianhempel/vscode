@@ -62,15 +62,14 @@ def parse_vcards(lines):
         # VERSION and anything unknown are ignored.
     return cards
 
-if __name__ == "__main__":
-    with open("vcard-to-json.input.vcf") as f:
-        contacts = parse_vcards(f.readlines())
+with open("vcard-to-json.input.vcf") as f:
+    contacts = parse_vcards(f.readlines())
 
-    for c in contacts:          # one compact JSON object per line
-        print(json.dumps(c))
-    print()
-    print("Contacts with a cell phone:")
-    for c in contacts:
-        cells = [p["number"] for p in c["phones"] if "cell" in p["type"]]
-        if cells:
-            print(f"  {c['full_name']}: {', '.join(cells)}")
+for c in contacts:          # one compact JSON object per line
+    print(json.dumps(c))
+print()
+print("Contacts with a cell phone:")
+for c in contacts:
+    cells = [p["number"] for p in c["phones"] if "cell" in p["type"]]
+    if cells:
+        print(f"  {c['full_name']}: {', '.join(cells)}")

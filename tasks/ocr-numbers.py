@@ -31,8 +31,7 @@ def read_file(path):
     groups = [raw[i:i + 4] for i in range(0, len(raw), 4)]
     return [read_group(g) for g in groups if len(g) == 4]
 
-if __name__ == "__main__":
-    results = read_file("ocr-numbers.input.txt")
-    for i, r in enumerate(results, 1):
-        print(f"group {i}: {r}")
-    print("joined:", ",".join(results))
+results = read_file("ocr-numbers.input.txt")
+for i, r in enumerate(results, 1):
+    print(f"group {i}: {r}")
+print("joined:", ",".join(results))

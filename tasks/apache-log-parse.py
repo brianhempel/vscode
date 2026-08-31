@@ -53,5 +53,4 @@ def main():
     for hour in sorted(by_hour):
         print(f"  {hour}:00  {'#' * by_hour[hour]} ({by_hour[hour]})")
 
-if __name__ == "__main__":
-    main()
+main()

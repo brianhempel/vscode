@@ -20,18 +20,17 @@ def mask(candidate):
     digits = candidate.replace(" ", "")
     return "**** **** **** " + digits[-4:]
 
-if __name__ == "__main__":
-    with open("luhn-card-filter.input.txt") as f:
-        candidates = [line.rstrip("\n") for line in f if line.strip()]
+with open("luhn-card-filter.input.txt") as f:
+    candidates = [line.rstrip("\n") for line in f if line.strip()]
 
-    valid = []
-    for c in candidates:
-        ok = luhn_valid(c)
-        print(f"{c:<22} {'VALID' if ok else 'INVALID'}")
-        if ok:
-            valid.append(c)
+valid = []
+for c in candidates:
+    ok = luhn_valid(c)
+    print(f"{c:<22} {'VALID' if ok else 'INVALID'}")
+    if ok:
+        valid.append(c)
 
-    print()
-    print(f"{len(valid)} valid number(s):")
-    for c in valid:
-        print(f"  {mask(c)}")
+print()
+print(f"{len(valid)} valid number(s):")
+for c in valid:
+    print(f"  {mask(c)}")

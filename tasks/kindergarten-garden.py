@@ -25,9 +25,8 @@ def assign(rows):
         garden[child] = plants_for(rows, i)
     return garden
 
-if __name__ == "__main__":
-    with open("kindergarten-garden.input.txt") as f:
-        rows = parse_garden(f.read())
-    garden = assign(rows)
-    for child, plants in garden.items():
-        print(f"{child}: {', '.join(plants)}")
+with open("kindergarten-garden.input.txt") as f:
+    rows = parse_garden(f.read())
+garden = assign(rows)
+for child, plants in garden.items():
+    print(f"{child}: {', '.join(plants)}")

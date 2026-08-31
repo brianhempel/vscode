@@ -32,20 +32,19 @@ def expand(text):
         result.extend(range(lo, hi + 1))
     return result
 
-if __name__ == "__main__":
-    with open("range-extraction.input.txt") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            mode, payload = line.split(":", 1)
-            payload = payload.strip()
-            if mode == "extract":
-                numbers = [int(x) for x in payload.split(",")]
-                print(f"extract  {payload}")
-                print(f"      -> {extract(numbers)}")
-            elif mode == "expand":
-                print(f"expand   {payload}")
-                print(f"      -> {expand(payload)}")
-            else:
-                raise ValueError(f"unknown mode {mode!r}")
+with open("range-extraction.input.txt") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        mode, payload = line.split(":", 1)
+        payload = payload.strip()
+        if mode == "extract":
+            numbers = [int(x) for x in payload.split(",")]
+            print(f"extract  {payload}")
+            print(f"      -> {extract(numbers)}")
+        elif mode == "expand":
+            print(f"expand   {payload}")
+            print(f"      -> {expand(payload)}")
+        else:
+            raise ValueError(f"unknown mode {mode!r}")

@@ -45,5 +45,4 @@ def main():
     print(f"Overall mean   : {total_sum / total_good:.3f}")
     print(f"Longest bad run: {best_run} readings, ending on {best_run_end}")
 
-if __name__ == "__main__":
-    main()
+main()

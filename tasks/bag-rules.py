@@ -27,13 +27,12 @@ def bags_inside(rules, colour):
     """Total number of bags a `colour` bag must contain."""
     return sum(n * (1 + bags_inside(rules, inner)) for inner, n in rules[colour].items())
 
-if __name__ == "__main__":
-    with open("bag-rules.input.txt") as f:
-        rules = parse_rules(f.readlines())
+with open("bag-rules.input.txt") as f:
+    rules = parse_rules(f.readlines())
 
-    print(f"Rules: {len(rules)}")
-    holders = sorted(c for c in rules if can_contain(rules, c, "shiny gold"))
-    print(f"Colours that can eventually contain shiny gold: {len(holders)}")
-    for c in holders:
-        print(f"  {c}")
-    print(f"Bags inside one shiny gold bag: {bags_inside(rules, 'shiny gold')}")
+print(f"Rules: {len(rules)}")
+holders = sorted(c for c in rules if can_contain(rules, c, "shiny gold"))
+print(f"Colours that can eventually contain shiny gold: {len(holders)}")
+for c in holders:
+    print(f"  {c}")
+print(f"Bags inside one shiny gold bag: {bags_inside(rules, 'shiny gold')}")

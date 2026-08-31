@@ -46,18 +46,17 @@ RULES = {
 def fully_valid(rec):
     return has_required_fields(rec) and all(RULES[k](rec[k]) for k in RULES)
 
-if __name__ == "__main__":
-    with open("passport-validation.input.txt") as f:
-        records = parse_records(f.read())
+with open("passport-validation.input.txt") as f:
+    records = parse_records(f.read())
 
-    stage1 = [r for r in records if has_required_fields(r)]
-    stage2 = [r for r in records if fully_valid(r)]
+stage1 = [r for r in records if has_required_fields(r)]
+stage2 = [r for r in records if fully_valid(r)]
 
-    print(f"Records: {len(records)}")
-    print(f"Stage 1 (all required fields present): {len(stage1)}")
-    print(f"Stage 2 (all values valid): {len(stage2)}")
-    print("Valid pids:", ", ".join(r["pid"] for r in stage2))
-    for r in records:
-        if has_required_fields(r) and not fully_valid(r):
-            bad = [k for k in RULES if not RULES[k](r[k])]
-            print(f"  pid {r['pid']}: fails {', '.join(bad)}")
+print(f"Records: {len(records)}")
+print(f"Stage 1 (all required fields present): {len(stage1)}")
+print(f"Stage 2 (all values valid): {len(stage2)}")
+print("Valid pids:", ", ".join(r["pid"] for r in stage2))
+for r in records:
+    if has_required_fields(r) and not fully_valid(r):
+        bad = [k for k in RULES if not RULES[k](r[k])]
+        print(f"  pid {r['pid']}: fails {', '.join(bad)}")

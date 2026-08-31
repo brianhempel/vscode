@@ -70,17 +70,16 @@ def valid_by_position(entry):
     second = pw[entry["hi"] - 1] == letter
     return first != second                   # exactly one of them
 
-if __name__ == "__main__":
-    with open("password-policy.input.txt") as f:
-        entries = [parse(line) for line in f if line.strip()]
+with open("password-policy.input.txt") as f:
+    entries = [parse(line) for line in f if line.strip()]
 
-    by_count = [e for e in entries if valid_by_count(e)]
-    by_position = [e for e in entries if valid_by_position(e)]
+by_count = [e for e in entries if valid_by_count(e)]
+by_position = [e for e in entries if valid_by_position(e)]
 
-    print(f"Total entries: {len(entries)}")
-    print(f"Valid under rule A (count in range): {len(by_count)}")
-    print(f"Valid under rule B (exactly one position): {len(by_position)}")
-    print("Rule B passwords:")
-    for e in by_position:
-        print(f"  {e['password']}  ({e['lo']}-{e['hi']} {e['letter']})")
+print(f"Total entries: {len(entries)}")
+print(f"Valid under rule A (count in range): {len(by_count)}")
+print(f"Valid under rule B (exactly one position): {len(by_position)}")
+print("Rule B passwords:")
+for e in by_position:
+    print(f"  {e['password']}  ({e['lo']}-{e['hi']} {e['letter']})")
 ```

@@ -54,18 +54,17 @@ def outline(tree, sizes, name="/", depth=0):
             lines.append(f"{'  ' * (depth + 1)}- {child} (file, size={value})")
     return lines
 
-if __name__ == "__main__":
-    with open("terminal-filesystem.input.txt") as f:
-        tree = build_tree(f.readlines())
-    sizes = sizes_of(tree)
-    print("\n".join(outline(tree, sizes)))
-    print()
-    small = {d: s for d, s in sizes.items() if s <= SMALL_LIMIT}
-    print(f"Directories of size <= {SMALL_LIMIT}: {sorted(small)}")
-    print(f"Sum of their sizes: {sum(small.values())}")
-    free_now = TOTAL_SPACE - sizes["/"]
-    must_free = NEEDED_FREE - free_now
-    candidates = {d: s for d, s in sizes.items() if s >= must_free}
-    best = min(candidates, key=candidates.get)
-    print(f"Free space now: {free_now}; need to free at least {must_free}")
-    print(f"Smallest directory to delete: {best} (size {sizes[best]})")
+with open("terminal-filesystem.input.txt") as f:
+    tree = build_tree(f.readlines())
+sizes = sizes_of(tree)
+print("\n".join(outline(tree, sizes)))
+print()
+small = {d: s for d, s in sizes.items() if s <= SMALL_LIMIT}
+print(f"Directories of size <= {SMALL_LIMIT}: {sorted(small)}")
+print(f"Sum of their sizes: {sum(small.values())}")
+free_now = TOTAL_SPACE - sizes["/"]
+must_free = NEEDED_FREE - free_now
+candidates = {d: s for d, s in sizes.items() if s >= must_free}
+best = min(candidates, key=candidates.get)
+print(f"Free space now: {free_now}; need to free at least {must_free}")
+print(f"Smallest directory to delete: {best} (size {sizes[best]})")

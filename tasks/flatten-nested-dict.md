@@ -95,17 +95,16 @@ def _listify(node):
             return [node[str(i)] for i in as_int]
     return node
 
-if __name__ == "__main__":
-    with open("flatten-nested-dict.input.json") as f:
-        config = json.load(f)
+with open("flatten-nested-dict.input.json") as f:
+    config = json.load(f)
 
-    flat = flatten(config)
-    width = max(len(k) for k in flat)
-    for key in sorted(flat):
-        print(f"{key:<{width}}  = {json.dumps(flat[key])}")
+flat = flatten(config)
+width = max(len(k) for k in flat)
+for key in sorted(flat):
+    print(f"{key:<{width}}  = {json.dumps(flat[key])}")
 
-    rebuilt = unflatten(flat)
-    print()
-    print("round trip ok:", rebuilt == config)
-    print("replica hosts:", [r["host"] for r in rebuilt["database"]["replicas"]])
+rebuilt = unflatten(flat)
+print()
+print("round trip ok:", rebuilt == config)
+print("replica hosts:", [r["host"] for r in rebuilt["database"]["replicas"]])
 ```

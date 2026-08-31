@@ -34,16 +34,15 @@ def tops(stacks):
 def show(stacks):
     return "\n".join(f"stack {i + 1}: {' '.join(s) or '(empty)'}" for i, s in enumerate(stacks))
 
-if __name__ == "__main__":
-    with open("crate-stacks.input.txt") as f:
-        stacks, moves = parse(f.read())
-    print("Initial stacks (bottom -> top):")
-    print(show(stacks))
-    a = simulate(stacks, moves, one_at_a_time=True)
-    print("\nStage A (one crate at a time):")
-    print(show(a))
-    print("Top crates:", tops(a))
-    b = simulate(stacks, moves, one_at_a_time=False)
-    print("\nStage B (several crates at once):")
-    print(show(b))
-    print("Top crates:", tops(b))
+with open("crate-stacks.input.txt") as f:
+    stacks, moves = parse(f.read())
+print("Initial stacks (bottom -> top):")
+print(show(stacks))
+a = simulate(stacks, moves, one_at_a_time=True)
+print("\nStage A (one crate at a time):")
+print(show(a))
+print("Top crates:", tops(a))
+b = simulate(stacks, moves, one_at_a_time=False)
+print("\nStage B (several crates at once):")
+print(show(b))
+print("Top crates:", tops(b))

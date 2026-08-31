@@ -68,19 +68,18 @@ def to_kebab(identifier):
             out.append(ch)
     return "".join(out).strip("-")
 
-if __name__ == "__main__":
-    with open("camel-case.input.txt") as f:
-        identifiers = [line.strip() for line in f if line.strip()]
+with open("camel-case.input.txt") as f:
+    identifiers = [line.strip() for line in f if line.strip()]
 
-    print("Stage 1: to camelCase")
-    camels = []
-    for ident in identifiers:
-        camel = to_camel(ident)
-        camels.append(camel)
-        print(f"{ident:<26} -> {camel}")
+print("Stage 1: to camelCase")
+camels = []
+for ident in identifiers:
+    camel = to_camel(ident)
+    camels.append(camel)
+    print(f"{ident:<26} -> {camel}")
 
-    print()
-    print("Stage 2: back to kebab-case")
-    for camel in camels:
-        print(f"{camel:<26} -> {to_kebab(camel)}")
+print()
+print("Stage 2: back to kebab-case")
+for camel in camels:
+    print(f"{camel:<26} -> {to_kebab(camel)}")
 ```

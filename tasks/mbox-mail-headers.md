@@ -76,20 +76,19 @@ def count_by(messages, key):
         counts[m[key]] = counts.get(m[key], 0) + 1
     return counts
 
-if __name__ == "__main__":
-    with open("mbox-mail-headers.input.txt") as f:
-        messages = parse_mbox(f)
+with open("mbox-mail-headers.input.txt") as f:
+    messages = parse_mbox(f)
 
-    print(f"Messages: {len(messages)}")
+print(f"Messages: {len(messages)}")
 
-    senders = count_by(messages, "sender")
-    top = max(senders.items(), key=lambda kv: kv[1])
-    print(f"Most prolific sender: {top[0]} ({top[1]} messages)")
+senders = count_by(messages, "sender")
+top = max(senders.items(), key=lambda kv: kv[1])
+print(f"Most prolific sender: {top[0]} ({top[1]} messages)")
 
-    print("Messages per hour:")
-    for hour, n in sorted(count_by(messages, "hour").items()):
-        print(f"  {hour} {n}")
+print("Messages per hour:")
+for hour, n in sorted(count_by(messages, "hour").items()):
+    print(f"  {hour} {n}")
 
-    confidences = [m["confidence"] for m in messages if m["confidence"] is not None]
-    print(f"Average spam confidence: {sum(confidences) / len(confidences):.4f}")
+confidences = [m["confidence"] for m in messages if m["confidence"] is not None]
+print(f"Average spam confidence: {sum(confidences) / len(confidences):.4f}")
 ```

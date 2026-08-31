@@ -91,20 +91,19 @@ def table(rows):
         out.append(f"{r['name']:<28}{'$' + str(r['price']):>6}  {rating:<12}{r['walkscore']:>5}  {r['neighborhood']}")
     return "\n".join(out)
 
-if __name__ == "__main__":
-    with open("wildcard-listings.input.json") as f:
-        listings = json.load(f)
-    with open("wildcard-listings.walkscore.json") as f:
-        walkscores = json.load(f)
+with open("wildcard-listings.input.json") as f:
+    listings = json.load(f)
+with open("wildcard-listings.walkscore.json") as f:
+    walkscores = json.load(f)
 
-    rows = enrich(listings, walkscores)
-    good = [r for r in rows if r["rating"] is not None and r["rating"] > 4.5]
-    good.sort(key=lambda r: r["price"])
-    print(f"Rated above 4.5, cheapest first ({len(good)} of {len(rows)}):")
-    print(table(good))
+rows = enrich(listings, walkscores)
+good = [r for r in rows if r["rating"] is not None and r["rating"] > 4.5]
+good.sort(key=lambda r: r["price"])
+print(f"Rated above 4.5, cheapest first ({len(good)} of {len(rows)}):")
+print(table(good))
 
-    favourites = {"Quiet garden cottage", "Victorian with garden", "Brand new condo"}
-    print()
-    print("Favourites:")
-    print(table([r for r in rows if r["name"] in favourites]))
+favourites = {"Quiet garden cottage", "Victorian with garden", "Brand new condo"}
+print()
+print("Favourites:")
+print(table([r for r in rows if r["name"] in favourites]))
 ```

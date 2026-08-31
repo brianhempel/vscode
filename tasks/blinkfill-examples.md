@@ -61,12 +61,11 @@ def between(message, left="nextData", right="moreInfo"):
     end = message.index(right, start)
     return message[start:end].strip()
 
-if __name__ == "__main__":
-    with open("blinkfill-examples.input.csv", newline="") as f:
-        rows = list(csv.DictReader(f))
-    out = csv.writer(sys.stdout)
-    out.writerow(["country", "initials", "code", "extracted"])
-    for r in rows:
-        out.writerow([country(r["city_country"]), initials(r["name"]),
-                      close_bracket(r["code"]), between(r["message"])])
+with open("blinkfill-examples.input.csv", newline="") as f:
+    rows = list(csv.DictReader(f))
+out = csv.writer(sys.stdout)
+out.writerow(["country", "initials", "code", "extracted"])
+for r in rows:
+    out.writerow([country(r["city_country"]), initials(r["name"]),
+                  close_bracket(r["code"]), between(r["message"])])
 ```

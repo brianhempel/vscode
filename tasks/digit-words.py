@@ -26,15 +26,14 @@ def calibration(line, extractor):
         return 0
     return ds[0] * 10 + ds[-1]
 
-if __name__ == "__main__":
-    with open("digit-words.input.txt") as f:
-        lines = [line.strip() for line in f if line.strip()]
-    print(f"{'line':<18}{'A':>4}{'B':>4}")
-    total_a = total_b = 0
-    for line in lines:
-        a = calibration(line, digits_only)
-        b = calibration(line, digits_and_words)
-        total_a += a
-        total_b += b
-        print(f"{line:<18}{a:>4}{b:>4}")
-    print(f"{'sum':<18}{total_a:>4}{total_b:>4}")
+with open("digit-words.input.txt") as f:
+    lines = [line.strip() for line in f if line.strip()]
+print(f"{'line':<18}{'A':>4}{'B':>4}")
+total_a = total_b = 0
+for line in lines:
+    a = calibration(line, digits_only)
+    b = calibration(line, digits_and_words)
+    total_a += a
+    total_b += b
+    print(f"{line:<18}{a:>4}{b:>4}")
+print(f"{'sum':<18}{total_a:>4}{total_b:>4}")

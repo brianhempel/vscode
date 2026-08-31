@@ -82,10 +82,9 @@ def outline(node, depth=0):
         lines.extend(outline(child, depth + 1))
     return lines
 
-if __name__ == "__main__":
-    with open("tree-building.input.json") as f:
-        records = json.load(f)
-    tree = build_tree(records)
-    print("\n".join(outline(tree)))
-    print(json.dumps(tree))
+with open("tree-building.input.json") as f:
+    records = json.load(f)
+tree = build_tree(records)
+print("\n".join(outline(tree)))
+print(json.dumps(tree))
 ```

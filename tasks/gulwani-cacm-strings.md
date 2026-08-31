@@ -72,13 +72,12 @@ def reformat_date(s):
     month, day, year = (int(part) for part in s.split("-"))
     return f"{MONTHS[month - 1]} {ordinal(day)}, {year}"
 
-if __name__ == "__main__":
-    with open("gulwani-cacm-strings.input.csv", newline="") as f:
-        rows = list(csv.DictReader(f))
-    out = csv.writer(sys.stdout)
-    out.writerow(["phone", "abbreviation", "date"])
-    for row in rows:
-        out.writerow([normalise_phone(row["phone"]),
-                      abbreviate(row["name"]),
-                      reformat_date(row["date"])])
+with open("gulwani-cacm-strings.input.csv", newline="") as f:
+    rows = list(csv.DictReader(f))
+out = csv.writer(sys.stdout)
+out.writerow(["phone", "abbreviation", "date"])
+for row in rows:
+    out.writerow([normalise_phone(row["phone"]),
+                  abbreviate(row["name"]),
+                  reformat_date(row["date"])])
 ```

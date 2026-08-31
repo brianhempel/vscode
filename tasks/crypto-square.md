@@ -84,13 +84,12 @@ def decode(cipher):
     rows = ["".join(chunk[i] for chunk in chunks) for i in range(r)]
     return "".join(rows).rstrip()
 
-if __name__ == "__main__":
-    with open("crypto-square.input.txt") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            cipher = encode(line)
-            print(f"plain:   {line}")
-            print(f"cipher:  {cipher}")
-            print(f"decoded: {decode(cipher)}")
-            print()
+with open("crypto-square.input.txt") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        cipher = encode(line)
+        print(f"plain:   {line}")
+        print(f"cipher:  {cipher}")
+        print(f"decoded: {decode(cipher)}")
+        print()
 ```

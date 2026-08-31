@@ -115,19 +115,18 @@ def dedupe(items):
             out.append(x)
     return out
 
-if __name__ == "__main__":
-    with open("phone-email-extractor.input.txt") as f:
-        text = f.read()
+with open("phone-email-extractor.input.txt") as f:
+    text = f.read()
 
-    phones = dedupe(find_phones(text))
-    emails = dedupe(find_emails(text))
+phones = dedupe(find_phones(text))
+emails = dedupe(find_emails(text))
 
-    print(f"Phone numbers ({len(phones)}):")
-    for p in phones:
-        print("  " + p)
-    print(f"Emails ({len(emails)}):")
-    for e in emails:
-        print("  " + e)
+print(f"Phone numbers ({len(phones)}):")
+for p in phones:
+    print("  " + p)
+print(f"Emails ({len(emails)}):")
+for e in emails:
+    print("  " + e)
 ```
 
 ## Regex variant (same output)
@@ -158,15 +157,14 @@ def unique(items):
             out.append(x)
     return out
 
-if __name__ == "__main__":
-    with open("phone-email-extractor.input.txt") as f:
-        text = f.read()
-    phones = unique("-".join(m.groups()) for m in PHONE.finditer(text))
-    emails = unique(EMAIL.findall(text))
-    print(f"Phone numbers ({len(phones)}):")
-    for p in phones:
-        print("  " + p)
-    print(f"Emails ({len(emails)}):")
-    for e in emails:
-        print("  " + e)
+with open("phone-email-extractor.input.txt") as f:
+    text = f.read()
+phones = unique("-".join(m.groups()) for m in PHONE.finditer(text))
+emails = unique(EMAIL.findall(text))
+print(f"Phone numbers ({len(phones)}):")
+for p in phones:
+    print("  " + p)
+print(f"Emails ({len(emails)}):")
+for e in emails:
+    print("  " + e)
 ```

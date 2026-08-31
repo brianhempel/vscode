@@ -29,14 +29,13 @@ def power(game):
     m = max_per_colour(game)
     return m["red"] * m["green"] * m["blue"]
 
-if __name__ == "__main__":
-    with open("cube-game.input.txt") as f:
-        games = [parse_game(line) for line in f if line.strip()]
+with open("cube-game.input.txt") as f:
+    games = [parse_game(line) for line in f if line.strip()]
 
-    ok = [g for g in games if possible(g, LIMIT)]
-    print(f"Games: {len(games)}")
-    print(f"Possible with {LIMIT}: ids {[g['id'] for g in ok]}, sum = {sum(g['id'] for g in ok)}")
-    for g in games:
-        m = max_per_colour(g)
-        print(f"  Game {g['id']:>2}: min set {m} -> power {power(g)}")
-    print(f"Sum of powers: {sum(power(g) for g in games)}")
+ok = [g for g in games if possible(g, LIMIT)]
+print(f"Games: {len(games)}")
+print(f"Possible with {LIMIT}: ids {[g['id'] for g in ok]}, sum = {sum(g['id'] for g in ok)}")
+for g in games:
+    m = max_per_colour(g)
+    print(f"  Game {g['id']:>2}: min set {m} -> power {power(g)}")
+print(f"Sum of powers: {sum(power(g) for g in games)}")

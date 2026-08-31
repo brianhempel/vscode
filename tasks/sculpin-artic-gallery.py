@@ -37,11 +37,10 @@ def render_markdown(term, groups, total):
         lines.append("")
     return "\n".join(lines).rstrip()
 
-if __name__ == "__main__":
-    fields = ["id", "title", "artist_title", "date_display", "image_id", "department_title"]
-    print("Query URL:", build_query_url("cats", fields))
-    print()
-    with open("sculpin-artic-gallery.input.json") as f:
-        response = json.load(f)
-    groups = group_by_artist(response["data"], response["config"]["iiif_url"])
-    print(render_markdown("cats", groups, response["pagination"]["total"]))
+fields = ["id", "title", "artist_title", "date_display", "image_id", "department_title"]
+print("Query URL:", build_query_url("cats", fields))
+print()
+with open("sculpin-artic-gallery.input.json") as f:
+    response = json.load(f)
+groups = group_by_artist(response["data"], response["config"]["iiif_url"])
+print(render_markdown("cats", groups, response["pagination"]["total"]))

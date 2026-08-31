@@ -77,15 +77,14 @@ def supports_ssl(address):
                 return True
     return False
 
-if __name__ == "__main__":
-    with open("ipv7-abba.input.txt") as f:
-        addresses = [line.strip() for line in f if line.strip()]
-    tls = [a for a in addresses if supports_tls(a)]
-    ssl = [a for a in addresses if supports_ssl(a)]
-    print(f"Stage A - {len(tls)} of {len(addresses)} addresses support TLS:")
-    for a in tls:
-        print("  " + a)
-    print(f"Stage B - {len(ssl)} of {len(addresses)} addresses support SSL:")
-    for a in ssl:
-        print("  " + a)
+with open("ipv7-abba.input.txt") as f:
+    addresses = [line.strip() for line in f if line.strip()]
+tls = [a for a in addresses if supports_tls(a)]
+ssl = [a for a in addresses if supports_ssl(a)]
+print(f"Stage A - {len(tls)} of {len(addresses)} addresses support TLS:")
+for a in tls:
+    print("  " + a)
+print(f"Stage B - {len(ssl)} of {len(addresses)} addresses support SSL:")
+for a in ssl:
+    print("  " + a)
 ```

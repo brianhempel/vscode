@@ -18,8 +18,7 @@ def verse(n, gifts):
         gift_text = ", ".join(todays[:-1]) + ", and " + todays[-1]
     return f"On the {ordinal} day of Christmas my true love gave to me: {gift_text}."
 
-if __name__ == "__main__":
-    gifts = load_gifts("twelve-days.input.txt")
-    for n in (1, 2, 3, 12):
-        print(verse(n, gifts))
-        print()
+gifts = load_gifts("twelve-days.input.txt")
+for n in (1, 2, 3, 12):
+    print(verse(n, gifts))
+    print()

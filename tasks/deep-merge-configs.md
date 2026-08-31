@@ -87,19 +87,18 @@ def leaves(d, prefix=""):
         else:
             yield path, value
 
-if __name__ == "__main__":
-    with open("deep-merge-configs.input.json") as f:
-        layers = json.load(f)
-    order = ["defaults", "site", "local"]
-    merged = {}
-    for name in order:
-        merged = deep_merge(merged, layers[name])
+with open("deep-merge-configs.input.json") as f:
+    layers = json.load(f)
+order = ["defaults", "site", "local"]
+merged = {}
+for name in order:
+    merged = deep_merge(merged, layers[name])
 
-    print(json.dumps(merged, indent=2, sort_keys=True))
-    print()
-    # Provenance: last layer (in order) whose leaves contain the same path.
-    layer_leaves = {name: dict(leaves(layers[name])) for name in order}
-    for path, value in sorted(leaves(merged)):
-        origin = [name for name in order if path in layer_leaves[name]][-1]
-        print(f"{path:<28} = {json.dumps(value):<22} (from {origin})")
+print(json.dumps(merged, indent=2, sort_keys=True))
+print()
+# Provenance: last layer (in order) whose leaves contain the same path.
+layer_leaves = {name: dict(leaves(layers[name])) for name in order}
+for path, value in sorted(leaves(merged)):
+    origin = [name for name in order if path in layer_leaves[name]][-1]
+    print(f"{path:<28} = {json.dumps(value):<22} (from {origin})")
 ```

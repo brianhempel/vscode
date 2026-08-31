@@ -88,8 +88,7 @@ def render(table):
         rows.append(f"{name:<31}| {s['MP']:>2} | {s['W']:>2} | {s['D']:>2} | {s['L']:>2} | {s['P']:>2}")
     return "\n".join(rows)
 
-if __name__ == "__main__":
-    with open("tournament-table.input.txt") as f:
-        lines = f.readlines()
-    print(render(tally(lines)))
+with open("tournament-table.input.txt") as f:
+    lines = f.readlines()
+print(render(tally(lines)))
 ```

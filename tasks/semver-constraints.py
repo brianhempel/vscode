@@ -71,11 +71,10 @@ def read_input(path):
             sections[current].append(line)
     return sections["versions"], sections["constraints"]
 
-if __name__ == "__main__":
-    versions, constraints = read_input("semver-constraints.input.txt")
-    parsed = sorted(((parse_version(v), v) for v in versions))
-    for c in constraints:
-        clauses = parse_constraint(c)
-        matches = [text for tup, text in parsed if satisfies(tup, clauses)]
-        best = matches[-1] if matches else "none"
-        print(f"{c:<22} -> {best:<12} ({len(matches)} match{'es' if len(matches) != 1 else ''}: {', '.join(matches)})")
+versions, constraints = read_input("semver-constraints.input.txt")
+parsed = sorted(((parse_version(v), v) for v in versions))
+for c in constraints:
+    clauses = parse_constraint(c)
+    matches = [text for tup, text in parsed if satisfies(tup, clauses)]
+    best = matches[-1] if matches else "none"
+    print(f"{c:<22} -> {best:<12} ({len(matches)} match{'es' if len(matches) != 1 else ''}: {', '.join(matches)})")

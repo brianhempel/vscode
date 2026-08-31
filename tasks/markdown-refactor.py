@@ -42,6 +42,5 @@ def parse(markdown):
         html.append("</ul>")
     return "".join(html)
 
-if __name__ == "__main__":
-    with open("markdown-refactor.input.md") as f:
-        print(parse(f.read().rstrip("\n")))
+with open("markdown-refactor.input.md") as f:
+    print(parse(f.read().rstrip("\n")))

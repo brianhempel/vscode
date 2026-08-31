@@ -101,11 +101,10 @@ def render(todos, today):
         lines.append("")
     return "\n".join(lines).rstrip()
 
-if __name__ == "__main__":
-    with open("sculpin-todo-grouping.input.json") as f:
-        doc = json.load(f)
-    with open("sculpin-todo-grouping.commands.json") as f:
-        commands = json.load(f)
-    todos = apply(doc["todos"], commands)
-    print(render(todos, doc["today"]))
+with open("sculpin-todo-grouping.input.json") as f:
+    doc = json.load(f)
+with open("sculpin-todo-grouping.commands.json") as f:
+    commands = json.load(f)
+todos = apply(doc["todos"], commands)
+print(render(todos, doc["today"]))
 ```

@@ -54,13 +54,12 @@ def format_line(item, factor):
     unit = pluralise(item["unit"], qty)
     return " ".join(p for p in (format_quantity(qty), unit, item["name"]) if p)
 
-if __name__ == "__main__":
-    FACTOR = Fraction(3, 2)
-    with open("recipe-scaler.input.txt") as f:
-        lines = [l.rstrip("\n") for l in f]
+FACTOR = Fraction(3, 2)
+with open("recipe-scaler.input.txt") as f:
+    lines = [l.rstrip("\n") for l in f]
 
-    title, ingredients = lines[0], [l for l in lines[1:] if l.strip()]
-    print(title.replace("serves 4", f"serves {int(4 * FACTOR)}"))
-    print()
-    for line in ingredients:
-        print(format_line(parse_line(line), FACTOR))
+title, ingredients = lines[0], [l for l in lines[1:] if l.strip()]
+print(title.replace("serves 4", f"serves {int(4 * FACTOR)}"))
+print()
+for line in ingredients:
+    print(format_line(parse_line(line), FACTOR))

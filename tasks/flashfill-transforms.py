@@ -44,11 +44,10 @@ def extract_weight(product):
                 return tokens[i - 1] + " " + unit
     return ""
 
-if __name__ == "__main__":
-    with open("flashfill-transforms.input.csv", newline="") as f:
-        rows = list(csv.DictReader(f))
+with open("flashfill-transforms.input.csv", newline="") as f:
+    rows = list(csv.DictReader(f))
 
-    writer = csv.writer(sys.stdout)
-    writer.writerow(["short_name", "phone", "weight"])
-    for r in rows:
-        writer.writerow([format_name(r["name"]), format_phone(r["phone"]), extract_weight(r["product"])])
+writer = csv.writer(sys.stdout)
+writer.writerow(["short_name", "phone", "weight"])
+for r in rows:
+    writer.writerow([format_name(r["name"]), format_phone(r["phone"]), extract_weight(r["product"])])
