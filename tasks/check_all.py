@@ -21,7 +21,7 @@ def section_block(md, heading):
 ok = True
 for md_path in sorted(glob.glob("*.md")):
     slug = md_path[:-3]
-    if slug == "README" or "." in slug:   # skip data files like foo.input.md
+    if slug in ("README", "CLAUDE") or "." in slug:   # skip data files like foo.input.md
         continue
     py = slug + ".py"
     if not os.path.exists(py) and os.path.exists(os.path.join("solutions", py)):

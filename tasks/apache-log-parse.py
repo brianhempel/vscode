@@ -26,31 +26,28 @@ def parse_line(line):
         "size": 0 if size == "-" else int(size),
     }
 
-def main():
-    with open("apache-log-parse.input.log") as f:
-        entries = [parse_line(l.rstrip("\n")) for l in f if l.strip()]
+with open("apache-log-parse.input.log") as f:
+    entries = [parse_line(l.rstrip("\n")) for l in f if l.strip()]
 
-    by_status = Counter(e["status"] for e in entries)
-    print("Requests per status:")
-    for status in sorted(by_status):
-        print(f"  {status}: {by_status[status]}")
+by_status = Counter(e["status"] for e in entries)
+print("Requests per status:")
+for status in sorted(by_status):
+    print(f"  {status}: {by_status[status]}")
 
-    # Strip query strings so /search?q=a and /search?q=b count as one path.
-    by_path = Counter(e["path"].split("?")[0] for e in entries)
-    print("Top 3 paths:")
-    for path, n in by_path.most_common(3):
-        print(f"  {n:2d}  {path}")
+# Strip query strings so /search?q=a and /search?q=b count as one path.
+by_path = Counter(e["path"].split("?")[0] for e in entries)
+print("Top 3 paths:")
+for path, n in by_path.most_common(3):
+    print(f"  {n:2d}  {path}")
 
-    bytes_by_host = defaultdict(int)
-    for e in entries:
-        bytes_by_host[e["host"]] += e["size"]
-    print("Bytes per client:")
-    for host, total in sorted(bytes_by_host.items(), key=lambda kv: -kv[1]):
-        print(f"  {host:<15} {total:>7,}")
+bytes_by_host = defaultdict(int)
+for e in entries:
+    bytes_by_host[e["host"]] += e["size"]
+print("Bytes per client:")
+for host, total in sorted(bytes_by_host.items(), key=lambda kv: -kv[1]):
+    print(f"  {host:<15} {total:>7,}")
 
-    by_hour = Counter(e["hour"] for e in entries)
-    print("Requests per hour:")
-    for hour in sorted(by_hour):
-        print(f"  {hour}:00  {'#' * by_hour[hour]} ({by_hour[hour]})")
-
-main()
+by_hour = Counter(e["hour"] for e in entries)
+print("Requests per hour:")
+for hour in sorted(by_hour):
+    print(f"  {hour}:00  {'#' * by_hour[hour]} ({by_hour[hour]})")
