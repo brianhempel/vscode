@@ -336,6 +336,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 
 		this._register(dom.addDisposableListener(this.domNode, 'mousedown', (ev: MouseEvent) => {
+			// A new gesture: seal the previous one's edits into their own undo
+			// stop. SNC writes code via raw pushEditOperations, which coalesces
+			// into the open undo stack element until a boundary is pushed --
+			// without one here, every dragged segment merges into a single
+			// Cmd-Z. At-mousedown rather than at-mouseup so a final edit
+			// arriving async from Python still lands inside its own gesture.
+			this.editor.getModel()?.pushStackElement();
 			this.lastMouseDownTarget = ev.target as Node;
 			studyLog.log('widget.mousedown', { line: this.lineNumber, visIndex: this.visIndex, focused: this.isFocused(), button: ev.button, detail: ev.detail, x: ev.clientX, y: ev.clientY, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey, target: describeEventTarget(ev.target as Node, this.domNode) }, this.editor.getModel()?.uri.toString());
 			// A new press, so any held one is spent -- its own mouseup landed
