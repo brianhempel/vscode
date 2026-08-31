@@ -2656,13 +2656,17 @@
 	border-color: var(--snc-hl-literal-hover-strong);
 }
 
-.pick-band-pre:hover,
-.pick-band-post:hover,
-.pick-band-all:hover {
+/* Hover feedback rides on .hovered, not :hover: a region is several
+   cell-slices, and the front end marks all of them when any one is under the
+   mouse (see setHoveredPickRegion in snc.ts), so the whole click target
+   darkens rather than just the hovered cell. */
+.pick-band-pre.hovered,
+.pick-band-post.hovered,
+.pick-band-all.hovered {
 	background: var(--snc-hl-fuzzy-soft-hover);
 }
 
-.pick-band-match:hover {
+.pick-band-match.hovered {
 	background: var(--snc-hl-literal-hover-strong);
 }
 
@@ -2673,7 +2677,7 @@
 	border-color: var(--snc-hl-selected-strong);
 }
 
-.pick-region.selected:hover {
+.pick-region.selected.hovered {
 	background: var(--snc-hl-selected-alt-hover);
 }
 

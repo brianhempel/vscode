@@ -7012,6 +7012,18 @@ class TestPickRegions(unittest.TestCase):
         # 5 rows x (row index + 2 columns).
         self.assertEqual(output.count('class="pick-region'), 15)
 
+    def test_slices_name_their_region_for_group_hover(self):
+        # A region is drawn one cell-slice at a time, so the front end needs
+        # each slice to say which region it belongs to -- hovering any slice
+        # highlights the whole region, not just the cell under the mouse.
+        output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
+                           pick_eval)
+        got = re.findall(r'data-pick-region="([^"]*)"', output)
+        self.assertEqual(sorted(got), sorted(
+            ['pre_idx'] * 2 + ['match_idx'] + ['post_idx'] * 2
+            + ['pre_col_0'] * 2 + ['match_col_0'] + ['post_col_0'] * 2
+            + ['pre_col_1'] * 2 + ['match_col_1'] + ['post_col_1'] * 2))
+
     def test_row_striping_replaced_by_bands(self):
         output = visualize(PICK_STRS, make_pick_model(), mock_get_visualizer,
                            pick_eval)

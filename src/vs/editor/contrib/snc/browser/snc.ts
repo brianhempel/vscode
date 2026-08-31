@@ -247,6 +247,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoistedHoverHideTimer: any = null;
 	private hoistedHoverListeners: IDisposable[] = [];
 	private hoistedHoverDragging = false;
+	private hoveredPickRegionId: string | null = null;
+	private hoveredPickRegionSlices: HTMLElement[] = [];
 
 	// How long the pointer must rest on an [snc-dwell] element before its event
 	// is sent. Long enough that crossing a menu on the way somewhere else opens
@@ -586,8 +588,50 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.scheduleHoistedHoverHide();
 		}));
 
+		// Group hover for the pick tool's regions. A region spans every row of
+		// its band in one column, drawn as one overlay slice per cell (see
+		// _render_pick_region in table_visualizer.py), so CSS :hover lights
+		// only the slice under the mouse. Mirror the hover onto every slice of
+		// the region so the whole click target darkens together.
+		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
+			this.setHoveredPickRegion(this.findAncestorWithAttr(ev.target as Node, 'data-pick-region'));
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'mouseout', (ev: MouseEvent) => {
+			const relatedTarget = ev.relatedTarget as Node | null;
+			if (relatedTarget && this.findAncestorWithAttr(relatedTarget, 'data-pick-region')) { return; }
+			this.setHoveredPickRegion(null);
+		}));
+
 		// Add the widget to the editor
 		this.editor.addOverlayWidget(this);
+	}
+
+	/**
+	 * Move the pick tool's group-hover highlight to *region*'s slices (or
+	 * clear it for null). The class does the styling that :hover cannot: it
+	 * marks every cell-slice of the hovered region, not just the one under
+	 * the mouse.
+	 */
+	private setHoveredPickRegion(region: Element | null): void {
+		const regionId = region?.getAttribute('data-pick-region') ?? null;
+		// "Same region" is not enough to skip the work: a re-render (e.g. the
+		// click that toggles the region) replaces the marked elements while
+		// the pointer sits still, so the class must go back on.
+		if (regionId === this.hoveredPickRegionId
+			&& (!region || region.classList.contains('hovered'))) { return; }
+		for (const slice of this.hoveredPickRegionSlices) {
+			slice.classList.remove('hovered');
+		}
+		this.hoveredPickRegionId = regionId;
+		this.hoveredPickRegionSlices = [];
+		if (!region || regionId === null) { return; }
+		// Scoped to this table: a nested visualizer never draws regions, but
+		// two tables in one widget could reuse a region id.
+		const table = region.closest('.list-visualizer') ?? this.domNode;
+		for (const slice of table.querySelectorAll(`[data-pick-region="${CSS.escape(regionId)}"]`)) {
+			slice.classList.add('hovered');
+			this.hoveredPickRegionSlices.push(slice as HTMLElement);
+		}
 	}
 
 	/**

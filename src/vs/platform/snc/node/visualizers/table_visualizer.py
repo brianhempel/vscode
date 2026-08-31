@@ -9953,8 +9953,10 @@ def _render_pick_region(row: int, col_id: str, model: dict, first_idx: int,
         classes.append('selected')
     event = repr(PickToggle(region_id=region_id))
     expr_attr = py_exp_attrs(standalone_exprs.get(region_id))
+    # data-pick-region lets the front end find every slice of the region, so
+    # hovering one cell highlights the whole region rather than just that cell.
     return (
-        f'<span class="{" ".join(classes)}" '
+        f'<span class="{" ".join(classes)}" data-pick-region="{region_id}" '
         f'snc-mouse-down="{html.escape(event)}"{expr_attr}></span>'
     )
 
