@@ -71,7 +71,7 @@ from visualizer_utils import (
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
     parse_slot_cols,
     get_full_class_name, truncate_str, truncate_repr, wrap_drag_grab,
-    parse_slots, save_slots_at_path,
+    parse_slots, save_slots_at_path, peek_line_config,
     child_nesting_kwargs, too_deep, wants_kwarg, compose_dollar_expr,
     nerd_font_icon, render_tool_toolbar,
     render_expand_toggle, EXPANDED_PANE_MAX_HEIGHT,
@@ -4360,6 +4360,94 @@ def _grouped_slots(col: str, columns) -> list:
 
 
 # =============================================================================
+# What a generated line opens with
+# =============================================================================
+#
+# A line an action writes often holds the very rows this table is showing --
+# the list sorted, filtered, or with a row taken out -- and then the columns
+# the user set up read the new value exactly as they read this one. They are
+# view state, kept in this line's #%click comment, so the generated line
+# inherits that comment (the NewCode config slot) rather than being left to
+# detection, which knows nothing of the user's setup.
+#
+# Only where the line actually HAS one -- a table still showing what detection
+# proposed hands nothing on, since the new line's own detection re-derives it
+# -- and only where EVERY column still applies, all or nothing: a line keeping
+# half the user's columns would describe neither table. Group By is the one
+# that keeps its own answer instead: a grouped dict is NOT the same rows, and
+# _grouped_slots says what it opens with.
+
+
+def _inherited_slots(model) -> 'list | None':
+    """This table's own #%click subtree -- comment, splats, nested children,
+    whole -- for a line whose value its columns still describe. None when the
+    line saved nothing at this table's path."""
+    return peek_line_config(model.get('_config_path'))
+
+
+def _slots_read_one_row(slots) -> bool:
+    """Whether every saved slot still says something read off ONE row on its
+    own. A plain read does; a sigil doesn't -- $i was the row's place in a
+    list the row no longer sits in, $k and $v the halves of a row a lone value
+    doesn't have -- and neither does a splat, whose spread needs sub-columns
+    that a field hasn't got.
+    """
+    for entry in (slots or []):
+        if isinstance(entry, str):
+            expr, cols = entry, None
+        elif isinstance(entry, dict) and 'expr' in entry:
+            expr, cols = entry['expr'], entry.get('cols')
+        else:
+            continue
+        if cols or expr.startswith(SPLAT) or not _reads_the_row(expr):
+            return False
+    return True
+
+
+def _one_row_inherits(item, get_visualizer) -> bool:
+    """Whether a line holding *item* would read inherited slots the way this
+    table reads its columns: as $-exprs on the row (see z_object's
+    SLOTS_ARE_FIELD_EXPRS). A dict or list row says no -- it opens as a table
+    of its own ENTRIES, whose slots bind those entries rather than the row."""
+    return (get_visualizer is not None
+            and getattr(get_visualizer(item), 'SLOTS_ARE_FIELD_EXPRS', False))
+
+
+def _inherited_config(action, ctx, model, value=None, get_visualizer=None) -> 'list | None':
+    """The config a search-shaped action's line opens with, or None to leave
+    it to detection.
+
+    Filter and Delete answer with the same rows -- the same container, less
+    some of it -- so every column applies as it stands. A first-match or index
+    search answers with ONE row, which inherits only what reads off a lone row
+    and only where the row's own visualizer reads slots that way; the rows are
+    of a kind (a column is assumed homogeneous), so the value's own rows say
+    what the one that comes out will be, and a caller with none in hand (a
+    relink) declines rather than guessing. A pick is a projection, not the
+    rows; a dict's one row is a pair this table made up; and every other
+    action makes something else entirely -- a string, a count, a header --
+    that the columns say nothing about.
+    """
+    slots = _inherited_slots(model)
+    if not slots or not ctx:
+        return None
+    if action == 'delete':
+        return slots
+    if action != 'filter' or ctx.get('is_pick_only') or ctx.get('pick_expr'):
+        return None
+    # `is_first` alone doesn't say ONE row: a slice rides it too, and answers
+    # with rows. One row comes out of an index, or of a predicate under
+    # first-match.
+    if ctx.get('is_index') or (ctx.get('is_predicate') and ctx.get('is_first')):
+        if (ctx.get('is_dict') or not value or isinstance(value, dict)
+                or not _slots_read_one_row(slots)
+                or not all(_one_row_inherits(_row_at(value, i).item, get_visualizer)
+                           for i in _sample_indices(value))):
+            return None
+    return slots
+
+
+# =============================================================================
 # Row actions
 # =============================================================================
 #
@@ -4822,6 +4910,35 @@ def _row_action_name(action: str, model: dict, source_expr: str, i: int) -> str:
     _has_var, base = _name_context_for_source(source_expr)
     return _ROW_ACTION_NAMES[action].format(base=base, word=_item_word(model),
                                             i=i)
+
+
+# The rows of the menu whose line holds the same rows this table shows (the
+# container, less one), and the ones whose line holds the ONE row itself. Not
+# in the catalog rows: what a line's value inherits is a fact about the value,
+# not about how the row was named.
+_SAME_ROWS_ROW_ACTIONS = frozenset(('delete', 'last_delete', 'delete_matching'))
+_ONE_ROW_ROW_ACTIONS = frozenset(('item', 'last_item', 'pop', 'last_pop'))
+
+
+def _row_action_config(action: str, model: dict, lst, i: int,
+                       get_visualizer) -> 'list | None':
+    """What a row's line opens with -- the question _inherited_config answers
+    for a search, asked of the one row in hand. Delete keeps the container and
+    every column with it; Item and Pop hold the row itself. Cells and Headers
+    make values the columns already read OUT of the rows, which they say
+    nothing further about -- and a dict's Pop hands back the value alone,
+    which isn't the pair the columns read.
+    """
+    slots = _inherited_slots(model)
+    if not slots:
+        return None
+    if action in _SAME_ROWS_ROW_ACTIONS:
+        return slots
+    if (action in _ONE_ROW_ROW_ACTIONS and not isinstance(lst, dict)
+            and _slots_read_one_row(slots)
+            and _one_row_inherits(_row_at(lst, i).item, get_visualizer)):
+        return slots
+    return None
 
 
 # =============================================================================
@@ -11419,9 +11536,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         else:
                             ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                             if ctx:
-                                result = generate_action(_link_action_for(model), ctx)
+                                action = _link_action_for(model)
+                                result = generate_action(action, ctx)
                                 if result:
-                                    commands.append(new_code_command(result, code_imports))
+                                    commands.append(new_code_command(
+                                        result, code_imports,
+                                        config=_inherited_config(
+                                            action, ctx, model, value,
+                                            get_visualizer)))
 
             elif key == 'Backspace' and event_json.get('metaKey', False):
                 if model.get('linked_action'):
@@ -11431,7 +11553,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
-                            commands.append(new_code_command(result, code_imports))
+                            commands.append(new_code_command(
+                                result, code_imports,
+                                config=_inherited_config('delete', ctx, model,
+                                                         value, get_visualizer)))
 
             elif key == 'Escape':
                 if model.get('col_search_dropdown'):
@@ -11519,10 +11644,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # The whole list, named -- not whatever the line happens to say
                 # -- the way every Compute row asks after the whole column.
                 _has_var, base = _name_context_for_source(source_expr)
+                # The same rows in another order, so every column applies and
+                # the line opens with the origin's comment (see "What a
+                # generated line opens with").
                 commands.append(new_code_command(
                     (f'{base}_sorted', _sort_expr(source_expr, col, direction,
                                                   _model_binds(model))),
-                    code_imports))
+                    code_imports,
+                    config=_inherited_slots(model)))
 
         # One line written, like the Sort code rows, so this closes the menu.
         # The list, named -- the line the table is showing has no say in it,
@@ -11559,7 +11688,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _close_column_menus(model)
                 commands.append(new_code_command(
                     (_row_action_name(action, model, source_expr, i), code),
-                    code_imports))
+                    code_imports,
+                    config=_row_action_config(action, model, value, i,
+                                              get_visualizer)))
 
         # Convert Type leaves the menu open for the same reason Sort does: it is
         # a checkbox, and picking another type is the common next act. The
@@ -11985,7 +12116,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         if copy:
                             commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
-                            commands.append(new_code_command(result, code_imports))
+                            commands.append(new_code_command(
+                                result, code_imports,
+                                config=_inherited_config(action, ctx, model,
+                                                         value, get_visualizer)))
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
@@ -12036,7 +12170,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).
-        _maybe_auto_link(var_and_exp, model, commands, eval_in_scope=eval_in_scope)
+        _maybe_auto_link(var_and_exp, model, commands, value=value,
+                         get_visualizer=get_visualizer,
+                         eval_in_scope=eval_in_scope)
 
     return (model, commands)
 
@@ -12070,10 +12206,14 @@ _LINK_CONFIG = LinkConfig(
     statement_actions=_STATEMENT_ACTIONS,
     whole_value_context=_get_whole_list_context,
     code_imports=code_imports,
+    # A relink's insert has no value in hand, so the one-row shapes decline
+    # (see _inherited_config) and the same-rows ones inherit as everywhere.
+    new_code_config=_inherited_config,
 )
 
 
-def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=None) -> None:
+def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, value=None,
+                     get_visualizer=None, eval_in_scope=None) -> None:
     """If the current search or pick state yields a parseable expression, set up
     linked editing and append a NewCode tuple to insert the linked line.
 
@@ -12099,4 +12239,6 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
-    commands.append(new_code_command(result, code_imports))
+    commands.append(new_code_command(
+        result, code_imports,
+        config=_inherited_config(action, ctx, model, value, get_visualizer)))

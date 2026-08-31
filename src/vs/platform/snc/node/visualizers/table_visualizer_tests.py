@@ -166,6 +166,9 @@ class MockDictVisualizer:
 
 class MockObjectVisualizer:
     """Mimics an object visualizer with get_fields support."""
+    # Like the real one's: its saved slots are $-exprs on the value itself,
+    # which is what lets a table hand its columns to a line holding one row.
+    SLOTS_ARE_FIELD_EXPRS = True
     def can_visualize(self, value):
         return True
     def get_fields(self, value):
@@ -21414,6 +21417,238 @@ class TestRowActionClick(unittest.TestCase):
     def test_without_a_source_it_writes_nothing(self):
         _model, commands = self.click('delete', source=None)
         self.assertEqual(commands, [])
+
+
+# === Generated lines inherit the origin's #%click ===
+
+from table_visualizer import (_inherited_config, _inherited_slots,
+                              _slots_read_one_row, _get_search_context,
+                              _LINK_CONFIG)
+
+
+class _ObjRow:
+    """A row with fields of its own, the kind the object visualizer draws."""
+    def __init__(self, b, c):
+        self.b, self.c = b, c
+
+
+class InheritedConfigCase(unittest.TestCase):
+    """Shared plumbing: a saved comment on the origin line, and a way to read
+    what a click's NewCode opens with."""
+
+    SAVED = ["$['b']", "$['c']"]
+
+    def tearDown(self):
+        set_line_config(None)
+
+    def config_of(self, commands):
+        new_code = [c for c in commands if is_new_code(c)]
+        self.assertEqual(len(new_code), 1)
+        return new_code[0][3] if len(new_code[0]) > 3 else None
+
+
+class TestGeneratedLinesInheritTheColumns(InheritedConfigCase):
+    """A line an action writes often holds the very rows the table is showing
+    -- the list sorted, filtered, or with a row taken out -- and then the
+    columns the user set up read the new value exactly as they read this one.
+    They are view state, kept in the origin line's #%click comment, so the
+    generated line opens with that comment (the NewCode config slot) instead
+    of being left to detection, which knows nothing of the user's setup.
+
+    Only where the origin actually HAS one: a table still showing what
+    detection proposed hands nothing on, since the new line's own detection
+    re-derives it."""
+
+    def sort_click(self):
+        lst, model = sort_model()
+        return update(make_column_mouse_event(
+            repr(SortCodeClick(col="$['b']", direction='asc'))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+
+    def test_sorts_new_line_opens_with_the_origins_comment(self):
+        set_line_config(self.SAVED)
+        _, commands = self.sort_click()
+        self.assertEqual(self.config_of(commands), self.SAVED)
+
+    def test_a_line_with_no_comment_hands_nothing_on(self):
+        _, commands = self.sort_click()
+        self.assertIsNone(self.config_of(commands))
+
+    def test_the_whole_subtree_comes_along(self):
+        # A splat's sub-columns and a cell visualizer's own nested config are
+        # as much the view as the top-level exprs; the comment travels whole.
+        saved = [{'expr': "*$['pets']", 'cols': ['$[0]']},
+                 {'expr': "$['b']", 'children': ['$.start()']}]
+        set_line_config(saved)
+        _, commands = self.sort_click()
+        self.assertEqual(self.config_of(commands), saved)
+
+    def test_auto_links_filter_line_opens_with_the_origins_comment(self):
+        set_line_config(['$', '$ * 2'])
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        _, commands = update(make_search_input_event('$ > 15'), ('data', 'data'),
+                             model, lst, mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(self.config_of(commands), ['$', '$ * 2'])
+
+    def test_group_by_keeps_its_own_answer(self):
+        # A grouped dict is NOT the same rows, and _grouped_slots already says
+        # what it opens with; the comment must not clobber that.
+        set_line_config(self.SAVED)
+        lst, model = group_by_model()
+        _, commands = update(
+            make_column_mouse_event(repr(GroupByClick(col=col_at(model, 0)))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+        self.assertEqual(self.config_of(commands)[:2], ['$k', 'len($v)'])
+
+
+class TestWhichRowActionsInheritTheColumns(InheritedConfigCase):
+    """Delete keeps the container and every column with it. Item and Pop hold
+    ONE row, which inherits only what reads off a lone row, and only where the
+    row's own visualizer reads slots as $-exprs on the row -- a dict or list
+    row opens as a table of its own ENTRIES, whose slots bind those entries
+    instead. Cells and Headers make values the columns already read OUT of the
+    rows, which they say nothing further about."""
+
+    OBJ_ROWS_SAVED = ['$.b', '$.c']
+
+    def row_click(self, action, row=1, lst=None, columns=None, source='data'):
+        lst, model = row_model(lst, columns, source, open_row=row)
+        return update(make_column_mouse_event(
+            repr(RowActionClick(row=row, action=action))),
+            ('data', 'data'), model, lst, mock_get_visualizer,
+            eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+
+    def obj_rows(self):
+        return [_ObjRow(3, 'x'), _ObjRow(1, 'y'), _ObjRow(2, 'z')]
+
+    def test_delete_inherits(self):
+        set_line_config(self.SAVED)
+        for action, row in (('delete', 1), ('delete_matching', 1),
+                            ('last_delete', 2)):
+            _, commands = self.row_click(action, row=row)
+            self.assertEqual(self.config_of(commands), self.SAVED, action)
+
+    def test_cells_and_headers_do_not(self):
+        set_line_config(self.SAVED)
+        _, commands = self.row_click('cells')
+        self.assertIsNone(self.config_of(commands))
+        set_line_config(['$[0]'])
+        _, commands = self.row_click('headers', row=0,
+                                     lst=[['name'], ['Alice'], ['Bob']],
+                                     columns=['$[0]'])
+        self.assertIsNone(self.config_of(commands))
+
+    def test_item_and_pop_inherit_when_the_row_has_fields_of_its_own(self):
+        set_line_config(self.OBJ_ROWS_SAVED)
+        for action, row in (('item', 1), ('pop', 1), ('last_item', 2),
+                            ('last_pop', 2)):
+            _, commands = self.row_click(action, row=row, lst=self.obj_rows(),
+                                         columns=['$.b', '$.c'])
+            self.assertEqual(self.config_of(commands), self.OBJ_ROWS_SAVED,
+                             action)
+
+    def test_a_dict_row_opens_as_its_own_table_and_inherits_nothing(self):
+        set_line_config(self.SAVED)
+        _, commands = self.row_click('item')
+        self.assertIsNone(self.config_of(commands))
+
+    def test_one_column_that_does_not_apply_keeps_the_whole_comment_back(self):
+        # All or nothing: a line keeping half the user's columns would
+        # describe neither table. `$i` was the row's place in a list the row
+        # no longer sits in.
+        set_line_config(['$i', '$.b'])
+        _, commands = self.row_click('item', lst=self.obj_rows(),
+                                     columns=['$i', '$.b'])
+        self.assertIsNone(self.config_of(commands))
+
+    def test_a_dicts_delete_still_inherits(self):
+        # The container survives, so $k and $v mean what they meant.
+        set_line_config(['$k', '$v'])
+        _, commands = self.row_click('delete', lst={'a': 1, 'b': 2},
+                                     columns=['$k', '$v'], source='d')
+        self.assertEqual(self.config_of(commands), ['$k', '$v'])
+
+
+class TestWhichSearchActionsInheritTheColumns(InheritedConfigCase):
+    """The same question, asked per search shape: Filter and Delete answer
+    with the same rows, a first-match or index search with one row, a pick
+    with a projection, and everything else with a different thing entirely."""
+
+    ROWS = [{'b': 3, 'c': 'x'}, {'b': 1, 'c': 'y'}, {'b': 2, 'c': 'z'}]
+
+    def ctx_for(self, search, lst, first=False):
+        model = init_model(lst, mock_get_visualizer)
+        model['_source_expr'] = 'data'
+        model['search'] = search
+        model['first_match'] = first
+        ctx = _get_search_context(model, ('data', 'data'),
+                                  eval_in_scope=lambda c: eval(c, {}, {'data': lst}))
+        self.assertIsNotNone(ctx)
+        return model, ctx
+
+    def config_for(self, action, search, lst=None, first=False, saved=None):
+        lst = self.ROWS if lst is None else lst
+        set_line_config(self.SAVED if saved is None else saved)
+        model, ctx = self.ctx_for(search, lst, first=first)
+        return _inherited_config(action, ctx, model, lst, mock_get_visualizer)
+
+    def test_a_filters_rows_are_the_tables_rows(self):
+        self.assertEqual(self.config_for('filter', '$["b"] > 1'), self.SAVED)
+        self.assertEqual(self.config_for('filter', '0:2'), self.SAVED)
+
+    def test_delete_keeps_the_rows_it_does_not_delete(self):
+        self.assertEqual(self.config_for('delete', '$["b"] > 1'), self.SAVED)
+        self.assertEqual(self.config_for('delete', '1'), self.SAVED)
+
+    def test_what_makes_something_else_inherits_nothing(self):
+        for action in ('count', 'any', 'all', 'join', 'find_indices',
+                       'extract', 'loop_no_idx'):
+            self.assertIsNone(self.config_for(action, '$["b"] > 1'), action)
+
+    def test_one_dict_row_is_a_pair_and_inherits_nothing(self):
+        d = {'a': 1, 'b': 2}
+        self.assertIsNone(self.config_for('filter', '1', lst=d,
+                                          saved=['$k', '$v']))
+
+    def test_one_row_with_fields_of_its_own_inherits_as_they_stand(self):
+        rows = [_ObjRow(3, 'x'), _ObjRow(1, 'y')]
+        self.assertEqual(
+            self.config_for('filter', '$.b > 1', lst=rows, first=True,
+                            saved=['$.b', '$.c']),
+            ['$.b', '$.c'])
+        self.assertEqual(
+            self.config_for('filter', '1', lst=rows, saved=['$.b', '$.c']),
+            ['$.b', '$.c'])
+
+    def test_one_dict_shaped_row_inherits_nothing(self):
+        # The line's dict opens as a table of its own entries, where these
+        # slots would bind the pair rather than the row.
+        self.assertIsNone(self.config_for('filter', '1'))
+        self.assertIsNone(self.config_for('filter', '$["b"] > 1', first=True))
+
+    def test_a_sigil_or_a_splat_does_not_read_off_one_row(self):
+        self.assertTrue(_slots_read_one_row(['$.b', "$['c']", '$']))
+        for slots in (['$i', '$.b'], ['$k'], ['*$.pets'],
+                      [{'expr': '*$.pets', 'cols': ['$[0]']}], ['$$ + $.b']):
+            self.assertFalse(_slots_read_one_row(slots), slots)
+
+    def test_the_relink_insert_asks_the_same_question(self):
+        # The chain icon's re-insert goes through the shared relink logic, so
+        # the table's LinkConfig has to carry the answer along.
+        set_line_config(self.SAVED)
+        model, ctx = self.ctx_for('$["b"] > 1', self.ROWS)
+        self.assertEqual(_LINK_CONFIG.new_code_config('filter', ctx, model),
+                         self.SAVED)
+
+    def test_a_nested_table_reads_its_own_subtree(self):
+        # A nested model's view state lives under its parent's slot, at its
+        # _config_path -- not at the line's root.
+        set_line_config([{'expr': "*$['pets']", 'children': ['$[0]']}])
+        model = {'_config_path': ["*$['pets']"]}
+        self.assertEqual(_inherited_slots(model), ['$[0]'])
 
 
 class TestTheLastRowsCellsNameItFromTheEnd(unittest.TestCase):

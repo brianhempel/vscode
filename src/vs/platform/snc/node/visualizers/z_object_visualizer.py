@@ -144,6 +144,14 @@ _OWN_KEYS = ["Enter", "Escape", "ArrowUp", "ArrowDown", "Tab"]
 def can_visualize(value):
     return value is not None and not isinstance(value, int) and not isinstance(value, float)
 
+# What this visualizer's saved slots ARE: $-expressions read against the value
+# itself -- the same language an enclosing table's columns are written in
+# against a row. Declared so a table writing a line that holds ONE of its rows
+# can tell that handing its columns over as the line's opening config will
+# mean there what it meant here. The dict and tuple visualizers stay silent:
+# their slots bind a row's ENTRIES (a pair, an element), not the row.
+SLOTS_ARE_FIELD_EXPRS = True
+
 def get_fields(value):
     if value is None or isinstance(value, (int, float)):
         return None

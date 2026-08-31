@@ -267,6 +267,26 @@ def take_line_config() -> 'tuple[list | None, bool]':
     return result
 
 
+def peek_line_config(path=None) -> 'list | None':
+    """The slots saved at *path* in the current line's config, or None when
+    nothing is saved there.
+
+    Reading without emptying: take_line_config is the runner's, and resets the
+    store for the next line. This is for a visualizer handing its own view
+    state to a line it is writing (a NewCode config), so the answer is a copy
+    the caller may hand away rather than a view into the store. *path*
+    descends `children` the way save_slots_at_path does, so a nested
+    visualizer asks with its _config_path and reads its own subtree.
+    """
+    slots = _line_slots
+    for step_expr in (path or []):
+        obj = _find_slot(slots, step_expr) if isinstance(slots, list) else None
+        slots = obj.get('children') if obj else None
+    if not isinstance(slots, list):
+        return None
+    return json.loads(json.dumps(slots))
+
+
 def config_sig(slots: 'list | None') -> str:
     """A canonical rendering, for telling whether a comment changed."""
     return json.dumps(slots, sort_keys=True, separators=(',', ':'))
@@ -1038,6 +1058,12 @@ class LinkConfig:
     code_imports is how the visualizer says what the code it just generated
     needs imported to run; a visualizer whose code never reaches outside the
     builtins leaves it off.
+
+    new_code_config is what the line a relink INSERTS opens with (a slot list
+    -- see new_code_command's config slot), asked as (action, ctx, model): the
+    same question the visualizer answers for every other line it writes, so
+    the chain icon's insert inherits view state exactly as a fresh action
+    does. A visualizer with no view state to hand on leaves it off.
     """
     parse_line: Callable[[str], Tuple[Any, str]]
     get_context: Callable[..., 'dict | None']
@@ -1049,6 +1075,7 @@ class LinkConfig:
     statement_actions: 'frozenset[str]'
     whole_value_context: 'Callable[..., dict | None] | None' = None
     code_imports: 'Callable[[str], tuple] | None' = None
+    new_code_config: 'Callable[[str, dict, dict], list | None] | None' = None
 
 
 def link_source_expr(var_and_exp) -> 'str | None':
@@ -1160,7 +1187,10 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
                                                  suggested_var_name=None))
     elif result and mode == 'insert':
         written = result[1]
-        commands.append(new_code_command(result, cfg.code_imports))
+        config = (cfg.new_code_config(action, ctx, model)
+                  if cfg.new_code_config else None)
+        commands.append(new_code_command(result, cfg.code_imports,
+                                         config=config))
 
     if source_expr and (result or mode == 'takeover'):
         model['linked_action'] = action

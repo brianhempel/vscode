@@ -2293,5 +2293,15 @@ class TestReadOnly(unittest.TestCase):
         for marker in self.FORBIDDEN:
             self.assertNotIn(marker, out, marker)
 
+class TestSlotsAreFieldExprs(unittest.TestCase):
+    """The declaration the table visualizer reads before handing its columns
+    to a line that holds one of its rows: this visualizer's saved slots are
+    $-exprs on the value itself, so columns written against a row mean the
+    same thing here."""
+
+    def test_it_is_declared(self):
+        self.assertTrue(z_object_visualizer.SLOTS_ARE_FIELD_EXPRS)
+
+
 if __name__ == '__main__':
     unittest.main()

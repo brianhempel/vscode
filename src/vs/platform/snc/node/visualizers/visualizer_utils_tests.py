@@ -21,7 +21,7 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
                               new_code_command, is_new_code)
 from visualizer_utils import (
     parse_slots, parse_slot_cols, save_slots_at_path,
-    set_line_config, take_line_config, config_sig,
+    set_line_config, take_line_config, peek_line_config, config_sig,
     config_comment_index, parse_config_comment, format_config_comment,
     CONFIG_COMMENT_PREFIX,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
@@ -754,6 +754,43 @@ class TestLineConfigStore(unittest.TestCase):
         self.assertEqual(config_sig([{'b': 1, 'a': 2}]), config_sig([{'a': 2, 'b': 1}]))
         self.assertNotEqual(config_sig(['a']), config_sig(['b']))
         self.assertNotEqual(config_sig([]), config_sig(None))
+
+
+class TestPeekLineConfig(unittest.TestCase):
+    """Reading the store without emptying it: what a visualizer handing its
+    own view state to a line it is writing needs, where take_line_config is
+    the runner's and resets."""
+
+    def setUp(self):
+        set_line_config(None)
+
+    def tearDown(self):
+        set_line_config(None)
+
+    def test_no_store_is_none(self):
+        self.assertIsNone(peek_line_config())
+
+    def test_the_root_slots_come_back_and_stay(self):
+        set_line_config(['$.a', {'expr': '*$.m', 'cols': ['$.b']}])
+        self.assertEqual(peek_line_config(),
+                         ['$.a', {'expr': '*$.m', 'cols': ['$.b']}])
+        self.assertEqual(take_line_config()[0],
+                         ['$.a', {'expr': '*$.m', 'cols': ['$.b']}])
+
+    def test_a_path_descends_into_a_slots_children(self):
+        set_line_config(['$.a', {'expr': '$.b', 'children': ['$.q']}])
+        self.assertEqual(peek_line_config(['$.b']), ['$.q'])
+
+    def test_a_path_that_is_not_there_is_none(self):
+        set_line_config(['$.a'])
+        self.assertIsNone(peek_line_config(['$.b']))
+        self.assertIsNone(peek_line_config(['$.a']))
+
+    def test_the_answer_does_not_alias_the_store(self):
+        set_line_config([{'expr': '$.a'}])
+        peeked = peek_line_config()
+        peeked[0]['expr'] = 'junk'
+        self.assertEqual(peek_line_config(), [{'expr': '$.a'}])
 
 
 class TestConfigComment(unittest.TestCase):
