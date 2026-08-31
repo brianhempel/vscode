@@ -53,6 +53,7 @@ dist
 __pycache__
 .snc_object_fields.json
 .snc_url_cache/
+.snc_stdin/
 .vs
 .snc_table_columns.json
 working_examples/
