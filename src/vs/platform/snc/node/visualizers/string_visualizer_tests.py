@@ -11039,6 +11039,138 @@ class TestActionButtonRendering(unittest.TestCase):
 
 
 # =============================================================================
+# Index / Slice Search Action Bar Tests
+# =============================================================================
+
+class TestIndexSearchActionBar(unittest.TestCase):
+    """For an index or slice search there are no match objects or matched
+    substrings, so most actions have nothing to generate (the grammar gates
+    them on is_index/is_slice being False). Buttons whose action can't
+    generate must render dimmed instead of silently no-oping, and the
+    find_or_map button -- which reaches into the string directly -- is
+    labeled 'Slice' rather than 'Match Objects'."""
+
+    # Shared markup helpers (defined on TestActionButtonRendering).
+    _action_btn_class = TestActionButtonRendering._action_btn_class
+    _dropdown_option_class = TestActionButtonRendering._dropdown_option_class
+    _assert_dimmed = TestActionButtonRendering._assert_dimmed
+    _assert_not_dimmed = TestActionButtonRendering._assert_not_dimmed
+
+    def setUp(self):
+        self.value = "hello world"
+
+    def _html(self, search, **model_updates):
+        model = init_model(self.value)
+        model['search'] = search
+        model.update(model_updates)
+        return visualize(self.value, model, None, None, max_width=400)
+
+    # ---- find_or_map label ---------------------------------------------------
+
+    def test_slice_label_for_index_search(self):
+        html_output = self._html('5')
+        self.assertIn('<span class="text">Slice</span>', html_output)
+        self.assertNotIn('Match Objects', html_output)
+
+    def test_slice_label_for_slice_search(self):
+        html_output = self._html('2:7')
+        self.assertIn('<span class="text">Slice</span>', html_output)
+        self.assertNotIn('Match Objects', html_output)
+
+    def test_map_slice_label_with_replace(self):
+        html_output = self._html('2:7', replace_visible=True,
+                                 replace_text="$.upper()")
+        self.assertIn('<span class="text">Map Slice</span>', html_output)
+        self.assertNotIn('Map Matches', html_output)
+
+    def test_regex_search_keeps_match_objects_label(self):
+        html_output = self._html(r"r'hello'")
+        self.assertIn('Match Objects', html_output)
+        self.assertNotIn('Slice<', html_output)
+
+    # ---- Dimming of ungeneratable actions ------------------------------------
+
+    def test_substrs_dimmed_for_index_search(self):
+        self._assert_dimmed(self._html('5'), 'match_strings')
+
+    def test_substrs_dimmed_for_slice_search(self):
+        self._assert_dimmed(self._html('2:7'), 'match_strings')
+
+    def test_indexes_dimmed_for_index_search(self):
+        self._assert_dimmed(self._html('5'), 'find_indices')
+
+    def test_count_dimmed_for_index_search(self):
+        self._assert_dimmed(self._html('5'), 'count')
+
+    def test_split_dimmed_for_index_search(self):
+        self._assert_dimmed(self._html('5'), 'split')
+
+    def test_loop_rows_dimmed_for_index_search(self):
+        html_output = self._html('5')
+        for action in ('loop', 'loop_match_strings'):
+            cls = self._dropdown_option_class(html_output, action)
+            self.assertIsNotNone(cls, f"{action!r} row should be present")
+            self.assertIn('dimmed', cls.split(), f"{action!r} should be dimmed")
+
+    def test_predicate_rows_dimmed_for_index_search(self):
+        html_output = self._html('5')
+        for action in ('any', 'if_any'):
+            cls = self._dropdown_option_class(html_output, action)
+            self.assertIsNotNone(cls, f"{action!r} row should be present")
+            self.assertIn('dimmed', cls.split(), f"{action!r} should be dimmed")
+
+    # ---- Actions that do work on an index search stay enabled ----------------
+
+    def test_slice_button_enabled_for_index_search(self):
+        self._assert_not_dimmed(self._html('5'), 'find_or_map')
+
+    def test_delete_enabled_for_index_search(self):
+        self._assert_not_dimmed(self._html('5'), 'delete')
+
+    def test_regex_search_buttons_stay_enabled(self):
+        html_output = self._html(r"r'hello'")
+        for action in ('count', 'find_or_map', 'match_strings',
+                       'find_indices', 'split'):
+            self._assert_not_dimmed(html_output, action)
+
+
+class TestIndexSearchActionClicks(unittest.TestCase):
+    """Clicking an action that can't generate for an index search must leave
+    the linked action alone: a dead click that wedged linked_action onto an
+    ungeneratable action would silently stop all further linked updates."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        self.model = init_model(self.value)
+        self.model['search'] = '5'
+        # Link via the Slice (find_or_map) button on an index search.
+        self.model, first = update(make_action_button_event('find_or_map'),
+                                   self.var_and_exp, self.model, self.value)
+        self.assertEqual(self.model['linked_action'], 'find_or_map')
+        self.assertEqual(first[0][1], 'x[5]')
+
+    def test_substrs_click_emits_nothing(self):
+        _, commands = update(make_action_button_event('match_strings'),
+                             self.var_and_exp, self.model, self.value)
+        self.assertEqual(commands, [])
+
+    def test_substrs_click_keeps_linked_action(self):
+        model, _ = update(make_action_button_event('match_strings'),
+                          self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['linked_action'], 'find_or_map')
+
+    def test_search_edit_after_dead_click_still_updates_linked_line(self):
+        model, _ = update(make_action_button_event('match_strings'),
+                          self.var_and_exp, self.model, self.value)
+        model, commands = update(make_search_box_input_event('6'),
+                                 self.var_and_exp, model, self.value)
+        changes = [c for c in commands if isinstance(c, ChangeSelectedText)]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].expression, 'x[6]')
+
+
+# =============================================================================
 # Transform Preview Tests
 # =============================================================================
 

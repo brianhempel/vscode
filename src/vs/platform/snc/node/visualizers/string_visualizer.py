@@ -4166,6 +4166,16 @@ def _render_fetch_button(model: dict, value: str, every_row_exps=None) -> str:
     )
 
 
+def _ctx_is_index_or_slice(ctx: dict | None) -> bool:
+    """Whether the search context reaches into the string by position (an
+    index, slice, or any of the multi/broadcast variants) rather than by
+    matching."""
+    return bool(ctx and (ctx.get('is_index') or ctx.get('is_slice')
+                         or ctx.get('is_multi_index')
+                         or ctx.get('is_multi_pair_slice')
+                         or ctx.get('is_broadcast_slice')))
+
+
 def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=None,
                            every_row_exps=None) -> str:
     """Render the action button bar below the search/replace boxes."""
@@ -4178,6 +4188,25 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     match_count = _eval_count_via_grammar(selection_regex, value, model, eval_in_scope) if has_search else 0
     first = is_first_match_mode(selection_regex) if has_search else False
 
+    # An index or slice search reaches into the string directly: there are no
+    # match objects or matched substrings, so most actions have nothing to
+    # generate (the grammar gates them on is_index/is_slice). Probe each
+    # action against the same generator a click would use and dim the ones
+    # that come back empty, instead of offering a button that silently
+    # no-ops. The probe borrows a placeholder name when the render has no
+    # access path, the way the count preview does.
+    probe_ctx = _get_search_context(
+        model, source_expr=model.get('_source_expr') or '_snc_v',
+        eval_in_scope=eval_in_scope) if has_search else None
+
+    def can_generate(action):
+        if probe_ctx is None:
+            return False
+        try:
+            return generate_action(action, probe_ctx) is not None
+        except Exception:
+            return False
+
     def expr(action):
         return _preview_expr(model, action, eval_in_scope)
 
@@ -4185,6 +4214,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         return _every_row_action_exps(model, action, eval_in_scope, every_row_exps)
 
     def btn(label, action, enabled=True):
+        enabled = enabled and can_generate(action)
         return _action_btn(label, action, enabled,
                            expr(action) if enabled else '',
                            linked=linked_action == action,
@@ -4195,12 +4225,16 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     parts = []
 
-    parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', has_search,
-                             expr('count') if has_search else '',
-                             also=also('count') if has_search else ()))
+    count_enabled = has_search and can_generate('count')
+    parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', count_enabled,
+                             expr('count') if count_enabled else '',
+                             also=also('count') if count_enabled else ()))
     # parts.append('<div class="action-button-divider"></div>')
 
-    find_or_map_label = 'Map Matches' if replace_visible else 'Match Objects'
+    if _ctx_is_index_or_slice(probe_ctx):
+        find_or_map_label = 'Map Slice' if replace_visible else 'Slice'
+    else:
+        find_or_map_label = 'Map Matches' if replace_visible else 'Match Objects'
     parts.append(btn(f'''<span class="text">{find_or_map_label}</span>''', 'find_or_map', has_search))
 
     parts.append(btn(f'<span class="text">Substrs</span>', 'match_strings', has_search and not has_replace))
@@ -4208,11 +4242,12 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     parts.append(btn(f'<span class="text">Indexes</span>', 'find_indices', has_search))
 
     # Loop dropdown (shown on hover via CSS)
-    loop_enabled = has_search and not first
+    loop_enabled = has_search and not first and can_generate('loop')
     # 'Over matched strings' generates `for s in re.findall(...)` which ignores
     # the replace_expr, so it doesn't make sense alongside a replace/map/filter
     # predicate (mirrors the same restriction on the top-level Substrs button).
-    loop_match_strings_enabled = loop_enabled and not has_replace
+    loop_match_strings_enabled = (has_search and not first and not has_replace
+                                  and can_generate('loop_match_strings'))
 
     def loop_row(label, action, enabled):
         return _dropdown_row(label, action, enabled,
@@ -4231,7 +4266,7 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         f'</div>'
     )
     loop_btn = (
-        f'<span class="snc-dropdown-trigger {"" if loop_enabled else "dimmed"}">'
+        f'<span class="snc-dropdown-trigger {"" if loop_enabled or loop_match_strings_enabled else "dimmed"}">'
         f'<span class="action-button">{ICONS['loop']}<span class="text">Loop</span></span>'
         f'{loop_panel}</span>'
     )
@@ -4250,7 +4285,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     any_suffix = _predicate_suffix(any_val)
     all_suffix = _predicate_suffix(all_val)
 
-    all_enabled = has_search and has_replace and not first
+    any_enabled = has_search and can_generate('any')
+    all_enabled = has_search and has_replace and not first and can_generate('all')
 
     def predicate_row(label, action, enabled):
         return _dropdown_row(label, action, enabled,
@@ -4259,14 +4295,14 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
 
     predicate_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{predicate_row(f"Any{any_suffix}", "any", has_search)}'
-        f'{predicate_row(f"If Any{any_suffix}", "if_any", has_search)}'
+        f'{predicate_row(f"Any{any_suffix}", "any", any_enabled)}'
+        f'{predicate_row(f"If Any{any_suffix}", "if_any", any_enabled)}'
         f'{predicate_row(f"All{all_suffix}", "all", all_enabled)}'
         f'{predicate_row(f"If All{all_suffix}", "if_all", all_enabled)}'
         f'</div>'
     )
     predicate_btn = (
-        f'<span class="snc-dropdown-trigger {"" if has_search else "dimmed"}">'
+        f'<span class="snc-dropdown-trigger {"" if any_enabled or all_enabled else "dimmed"}">'
         f'<span class="action-button">{ICONS["exists"]}<span class="text">Any/All</span></span>'
         f'{predicate_panel}</span>'
     )
@@ -7066,15 +7102,18 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             _commit_open_dropdown_edit(model)
             model['openDropdown'] = None
             if model.get('linked_action') and not copy:
-                model['linked_action'] = action
                 ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
-                if ctx:
-                    result = generate_action(action, ctx)
-                    if result:
-                        _emit_linked_update(result[1], model, commands,
-                                            suggest_name=result[0], rename=True)
+                result = generate_action(action, ctx) if ctx else None
+                # Only adopt the action once it has generated something: a
+                # dead click (e.g. Substrs on an index search) must not wedge
+                # the link onto an action that generates nothing, which would
+                # silently stop all further linked updates.
+                if result:
+                    model['linked_action'] = action
+                    _emit_linked_update(result[1], model, commands,
+                                        suggest_name=result[0], rename=True)
             else:
                 ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx:
