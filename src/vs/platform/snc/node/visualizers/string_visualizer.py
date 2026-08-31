@@ -117,7 +117,9 @@ MODEL STATE:
   Non-regex search types use familiar Python delimiters: 'sub'/"sub" for
   substring, 5:10 for slice, `expr` for expressions.
 - anchorIdx/cursorIdx: Current drag start/end positions (internal indices)
-- anchorType: 'literal' or 'fuzzy' based on where the drag started
+- anchorType: 'literal', 'fuzzy', or 'index' - resolved from tool + modifiers
+  at mousedown and re-resolved live on every dragged move (a modifier pressed
+  or released mid-drag re-types the in-progress selection)
 - dragging: Whether a drag is in progress
 - tool: Active tool ('literal' / 'fuzzy' / 'index' / 'pick')
 - selectedSegments: In pick-tool mode, the ordered list of selected segment IDs
@@ -5318,7 +5320,8 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None)
         "_source_expr": source_expr,
         "search": None,   # Regex pattern in Pythonic raw-string form, e.g., "r'hello.*world'"
         "anchorIdx": None,
-        "anchorType": None,       # "literal" or "fuzzy" - determined when drag starts
+        "anchorType": None,       # "literal", "fuzzy", or "index" - follows tool +
+                                  # held modifiers live throughout a drag
         "cursorIdx": None,
         "dragging": False,
         "extendDirection": None,  # "left", "right", or None - which side we're extending from
@@ -5370,6 +5373,24 @@ def _resolve_selection_type(model, event_json):
     if tool == 'pick':
         return 'literal'
     return tool
+
+
+def _apply_live_selection_type(model, event_json):
+    """Mid-drag, keep the selection type in sync with the modifiers held NOW.
+
+    The toolbar highlight and the idle hover preview both follow the held
+    modifiers live, so a drag follows them live too: shift/alt/ctrl pressed or
+    released mid-drag re-type the in-progress selection, falling back to the
+    active tool when nothing is held. Whatever type is in effect at release is
+    what finalizes.
+
+    Switching to 'index' mid-drag skips the fresh-slice model reset that a
+    ctrl-mousedown does: the preview already ignores the existing pattern for
+    index selections and finalizing replaces it (leaving the old pattern in
+    undo history) -- and not resetting is what lets a ctrl press be released
+    again mid-drag with nothing lost.
+    """
+    model['anchorType'] = _resolve_selection_type(model, event_json)
 
 
 def finalize_segment(model: dict, string_value: str) -> dict:
@@ -6636,6 +6657,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['hoverIdx'] = idx
             elif model.get('dragging'):
                 model['cursorIdx'] = idx
+                _apply_live_selection_type(model, event_json)
 
         case MouseUp(index=idx):
             if model.get('handleDrag') is not None:
@@ -6644,6 +6666,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model = finalize_handle_drag(model, value)
             elif model.get('dragging'):
                 model['cursorIdx'] = idx
+                _apply_live_selection_type(model, event_json)
                 model = finalize_segment(model, value)
 
         case NotifyMouseIsUp():

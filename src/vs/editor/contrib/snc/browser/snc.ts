@@ -174,6 +174,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private linkChainEl: HTMLElement | null = null;
 	private moveThrottleTimer: any = null;
 	private readonly moveThrottleDelay = 16;
+	// Where the pointer last was with a button held. A modifier pressed or
+	// released while the pointer is stationary produces no mousemove of its
+	// own, so the window key listeners below replay this position as a
+	// synthetic move carrying the new modifier state (Python re-resolves the
+	// selection type live from the modifiers on dragged moves).
+	private lastDragPointer: { x: number; y: number; buttons: number } | null = null;
 	private lastRenderedHtml: string | null = null;
 	private focusRestoreVersion = 0;
 	// Values the user has typed into an snc-input box that Python hasn't
@@ -344,6 +350,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// arriving async from Python still lands inside its own gesture.
 			this.editor.getModel()?.pushStackElement();
 			this.lastMouseDownTarget = ev.target as Node;
+			this.lastDragPointer = { x: ev.clientX, y: ev.clientY, buttons: ev.buttons };
 			studyLog.log('widget.mousedown', { line: this.lineNumber, visIndex: this.visIndex, focused: this.isFocused(), button: ev.button, detail: ev.detail, x: ev.clientX, y: ev.clientY, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey, target: describeEventTarget(ev.target as Node, this.domNode) }, this.editor.getModel()?.uri.toString());
 			// A new press, so any held one is spent -- its own mouseup landed
 			// somewhere the widget never saw.
@@ -387,6 +394,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_mouse_python_event('snc-mouse-down', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mousemove', (ev: MouseEvent) => {
+			if (ev.buttons !== 0) {
+				this.lastDragPointer = { x: ev.clientX, y: ev.clientY, buttons: ev.buttons };
+			}
 			if (this.moveThrottleTimer) { return; }
 			this.moveThrottleTimer = setTimeout(() => { this.moveThrottleTimer = null; }, this.moveThrottleDelay);
 			this.dispatch_mouse_python_event('snc-mouse-move', ev);
@@ -423,6 +433,37 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 			this.dispatch_keyboard_event('snc-key-down', ev);
 		}));
+		// A modifier pressed or released mid-drag with the pointer stationary
+		// produces no mousemove, yet Python resolves the selection type live
+		// from the modifiers riding on dragged moves. Replay the last drag
+		// position as a synthetic move carrying the new modifier state, so the
+		// switch is heard without waiting for the pointer to move. On window,
+		// not the widget: mid-drag, keyboard focus can sit anywhere.
+		const onModifierChangeDuringDrag = (ev: KeyboardEvent) => {
+			if (ev.key !== 'Shift' && ev.key !== 'Alt' && ev.key !== 'Control') { return; }
+			if (!this.isFocused() || !this.lastDragPointer) { return; }
+			// Present on a visualizer's container only while it believes a
+			// drag is in progress.
+			if (!this.domNode.querySelector('[snc-notify-mouse-is-up]')) { return; }
+			const { x, y, buttons } = this.lastDragPointer;
+			const under = this.domNode.ownerDocument.elementFromPoint(x, y);
+			// Re-resolved rather than remembered: every Python run rebuilds the
+			// DOM, so the element the last real move hit may be gone by now.
+			if (!under || !this.domNode.contains(under)) { return; }
+			// The throttle exists to thin identical moves; this one IS the
+			// change worth sending.
+			if (this.moveThrottleTimer) { clearTimeout(this.moveThrottleTimer); this.moveThrottleTimer = null; }
+			under.dispatchEvent(new MouseEvent('mousemove', {
+				bubbles: true,
+				clientX: x,
+				clientY: y,
+				buttons,
+				altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey,
+			}));
+		};
+		const targetWindow = dom.getWindow(this.editor.getContainerDomNode());
+		this._register(dom.addDisposableListener(targetWindow, 'keydown', onModifierChangeDuringDrag, true));
+		this._register(dom.addDisposableListener(targetWindow, 'keyup', onModifierChangeDuringDrag, true));
 		this._register(dom.addDisposableListener(this.domNode, 'input', (ev: Event) => {
 			this.dispatch_input_event('snc-input', ev);
 		}));

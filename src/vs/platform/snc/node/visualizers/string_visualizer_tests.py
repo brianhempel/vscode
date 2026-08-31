@@ -113,13 +113,14 @@ def _legacy_internal_index(index: int) -> int:
     return max(index - 1, 0)
 
 
-def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool = True, shift_key: bool = False) -> dict:
+def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool = True, shift_key: bool = False, ctrl_key: bool = False) -> dict:
     """Create a MouseDown event dict.
 
     Args:
         index: The character index clicked
         top_half: If True, click is in top half (literal). If False, bottom half (fuzzy).
         shift_key: If True, simulates the shift key being held down.
+        ctrl_key: If True, simulates the ctrl key being held down (index mode).
     """
     if legacy_index:
         index = _legacy_internal_index(index)
@@ -128,6 +129,7 @@ def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool 
         'eventJSON': {
             'altKey': not top_half,
             'shiftKey': shift_key,
+            'ctrlKey': ctrl_key,
             'offsetY': 5 if top_half else 15,  # top half < 10, bottom half >= 10
             'elementHeight': 20,
             'buttons': 1,
@@ -135,7 +137,8 @@ def make_mouse_down_event(index: int, top_half: bool = True, legacy_index: bool 
     }
 
 
-def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = None, legacy_index: bool = True) -> dict:
+def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = None, legacy_index: bool = True,
+                          alt_key: bool = False, shift_key: bool = False, ctrl_key: bool = False) -> dict:
     """Create a MouseMove event dict.
 
     Args:
@@ -143,11 +146,17 @@ def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = 
         buttons: 1 if button pressed, 0 if released
         top_half: If provided, include offsetY/elementHeight for hover detection.
                   True = top half (literal), False = bottom half (fuzzy).
+        alt_key/shift_key/ctrl_key: Modifier keys held during the move. The
+                  front-end sends these on every event; the selection type
+                  follows them live during a drag.
     """
     if legacy_index:
         index = _legacy_internal_index(index)
     event_json: dict = {
         'buttons': buttons,
+        'altKey': alt_key,
+        'shiftKey': shift_key,
+        'ctrlKey': ctrl_key,
     }
     if top_half is not None:
         event_json['offsetY'] = 5 if top_half else 15  # top half < 10, bottom half >= 10
@@ -158,7 +167,8 @@ def make_mouse_move_event(index: int, buttons: int = 1, top_half: bool | None = 
     }
 
 
-def make_mouse_up_event(index: int, legacy_index: bool = True) -> dict:
+def make_mouse_up_event(index: int, legacy_index: bool = True,
+                        alt_key: bool = False, shift_key: bool = False, ctrl_key: bool = False) -> dict:
     """Create a MouseUp event dict."""
     if legacy_index:
         index = _legacy_internal_index(index)
@@ -166,6 +176,9 @@ def make_mouse_up_event(index: int, legacy_index: bool = True) -> dict:
         'pythonEventStr': repr(MouseUp(index)),
         'eventJSON': {
             'buttons': 0,
+            'altKey': alt_key,
+            'shiftKey': shift_key,
+            'ctrlKey': ctrl_key,
         }
     }
 
@@ -382,7 +395,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
                          self.var_and_exp, self.model, self.value)
         self.assertEqual(model['cursorIdx'], _legacy_internal_index(5))
 
-        model, _ = update(make_mouse_move_event(10),
+        model, _ = update(make_mouse_move_event(10, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         # Cursor tracks mouse for fuzzy (used to synthesize pattern from drag range)
@@ -397,7 +410,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
         """
         model, _ = update(make_mouse_down_event(5, top_half=False),
                          self.var_and_exp, self.model, self.value)
-        model, _ = update(make_mouse_up_event(5),
+        model, _ = update(make_mouse_up_event(5, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
@@ -415,7 +428,7 @@ class TestSingleFuzzySelection(unittest.TestCase):
         """
         model, _ = update(make_mouse_down_event(7, top_half=False),
                          self.var_and_exp, self.model, self.value)
-        model, _ = update(make_mouse_up_event(7),
+        model, _ = update(make_mouse_up_event(7, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertFalse(model['dragging'])
@@ -439,12 +452,137 @@ class TestSingleFuzzySelection(unittest.TestCase):
 
         model, _ = update(make_mouse_down_event(6, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(8),
+        model, _ = update(make_mouse_move_event(8, alt_key=True),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(8),
+        model, _ = update(make_mouse_up_event(8, alt_key=True),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], r"r'\d+'")
+
+
+# =============================================================================
+# Mid-Drag Modifier Change Tests
+# =============================================================================
+
+class TestMidDragModifierChanges(unittest.TestCase):
+    """Modifier changes DURING a drag re-type the in-progress selection.
+
+    The toolbar highlight and the idle hover preview both follow the held
+    modifiers live; a drag follows them live too, instead of freezing the
+    type resolved at mousedown. Whatever type is in effect at release is
+    what finalizes.
+
+    For "hello world", the augmented string indices are:
+        0=\\A, 1=^, 2=h, 3=e, 4=l, 5=l, 6=o, 7=' ', 8=w, 9=o, 10=r, 11=l, 12=d, 13=$, 14=\\Z
+    """
+
+    def setUp(self):
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.var_and_exp = ('x', 'x')
+
+    def test_alt_pressed_mid_drag_switches_to_fuzzy(self):
+        """A literal drag becomes fuzzy the moment alt is held."""
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['anchorType'], 'literal')
+
+        model, _ = update(make_mouse_move_event(6, alt_key=True),
+                         self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['anchorType'], 'fuzzy')
+        self.assertEqual(model['cursorIdx'], _legacy_internal_index(6))
+
+    def test_alt_released_mid_drag_reverts_to_tool_type(self):
+        """Releasing alt mid-drag falls back to the active tool (literal)."""
+        model, _ = update(make_mouse_down_event(2, top_half=False),
+                         self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['anchorType'], 'fuzzy')
+
+        model, _ = update(make_mouse_move_event(6),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['anchorType'], 'literal')
+
+        model, _ = update(make_mouse_up_event(6),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello'")
+
+    def test_modifiers_at_mouseup_decide_final_type(self):
+        """Alt held only at release still finalizes the drag as fuzzy."""
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_move_event(6),
+                         self.var_and_exp, model, self.value)
+        model, commands = update(make_mouse_up_event(6, alt_key=True),
+                                self.var_and_exp, model, self.value)
+
+        self.assertEqual(model['search'], r"r'[a-z]+'")
+
+    def test_shift_pressed_mid_drag_overrides_fuzzy_tool(self):
+        """With the fuzzy tool active, holding shift mid-drag forces literal."""
+        self.model['tool'] = 'fuzzy'
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['anchorType'], 'fuzzy')
+
+        model, _ = update(make_mouse_move_event(6, shift_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['anchorType'], 'literal')
+
+        model, _ = update(make_mouse_up_event(6, shift_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello'")
+
+    def test_ctrl_pressed_mid_drag_switches_to_index_slice(self):
+        """Holding ctrl mid-drag re-types the selection as an index slice."""
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_move_event(6, ctrl_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['anchorType'], 'index')
+
+        model, _ = update(make_mouse_up_event(6, ctrl_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], ':5')
+        self.assertTrue(is_slice_search(model['search']))
+
+    def test_ctrl_released_mid_drag_reverts_to_literal(self):
+        """A ctrl-started (index) drag becomes literal when ctrl is released."""
+        model, _ = update(make_mouse_down_event(2, top_half=True, ctrl_key=True),
+                         self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['anchorType'], 'index')
+
+        model, _ = update(make_mouse_move_event(6),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['anchorType'], 'literal')
+
+        model, _ = update(make_mouse_up_event(6),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello'")
+
+    def test_ctrl_mid_drag_replaces_existing_regex_and_keeps_undo(self):
+        """Switching to index mid-drag replaces the regex on finalize, and the
+        old pattern lands in undo history (unlike a ctrl-mousedown, which
+        resets the model up front)."""
+        # Finalize 'hello' as a literal first.
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_up_event(6),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello'")
+
+        # Extend rightward from the match (adjacent, so no model reset),
+        # pressing ctrl mid-drag.
+        model, _ = update(make_mouse_down_event(7, top_half=True),
+                         self.var_and_exp, model, self.value)
+        model, _ = update(make_mouse_move_event(12, ctrl_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['anchorType'], 'index')
+        model, _ = update(make_mouse_up_event(12, ctrl_key=True),
+                         self.var_and_exp, model, self.value)
+
+        self.assertTrue(is_slice_search(model['search']))
+        self.assertEqual(model['undoHistory'][-1], r"r'hello'")
 
 
 # =============================================================================
@@ -478,7 +616,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         # Extend with fuzzy at end
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -521,7 +659,7 @@ class TestChainedSelectionsExtendRight(unittest.TestCase):
         self.assertEqual(end_idx, _legacy_internal_index(7))
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -566,7 +704,7 @@ class TestChainThreeSegmentsWithConstrainedFuzzy(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello.*'")
@@ -613,9 +751,9 @@ class TestFuzzyDragEndingAtLineBoundary(unittest.TestCase):
     def _fuzzy_drag(self, model, start_idx, end_idx):
         model, _ = update(make_mouse_down_event(start_idx, top_half=False, legacy_index=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_move_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_move_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
         return model
 
@@ -646,9 +784,9 @@ class TestFuzzyDragEndingAtLineBoundary(unittest.TestCase):
         model = init_model(value)
         model, _ = update(make_mouse_down_event(5, top_half=False, legacy_index=False),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(9, legacy_index=False),
+        model, _ = update(make_mouse_move_event(9, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(9, legacy_index=False),
+        model, _ = update(make_mouse_up_event(9, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
         self.assertEqual(model['search'], r"r'[\S\s]{3}'")
 
@@ -712,7 +850,7 @@ class TestExtendLeft(unittest.TestCase):
         # This should extend left, NOT reset the selection
         model, _ = update(make_mouse_down_event(7, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(7),
+        model, _ = update(make_mouse_up_event(7, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         # Should prepend fuzzy: /(\s*)(world)/
@@ -738,7 +876,7 @@ class TestExtendLeft(unittest.TestCase):
         # Prepend with fuzzy by clicking the char immediately to the left (start_idx - 1 = 7)
         model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'\s*world'")
@@ -794,7 +932,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -846,7 +984,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -923,7 +1061,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         self.assertEqual(end_idx, _legacy_internal_index(7))
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -987,7 +1125,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         self.assertEqual(first_start, _legacy_internal_index(8))
         model, _ = update(make_mouse_down_event(first_start - 1, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False, alt_key=True),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], r"r'\s*world'")
@@ -1045,7 +1183,7 @@ class TestClickInsideFuzzy(unittest.TestCase):
         self.assertEqual(first_start, _legacy_internal_index(4))
         model, _ = update(make_mouse_down_event(first_start - 1, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(first_start - 1, legacy_index=False, alt_key=True),
                          var_and_exp, model, value)
         self.assertEqual(model['search'], r"r'[A-Z]{1}C'")
 
@@ -1582,7 +1720,7 @@ class TestKeyboardEvents(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -1607,7 +1745,7 @@ class TestKeyboardEvents(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          self.var_and_exp, model, self.value)
 
         # Undo
@@ -3136,9 +3274,9 @@ class TestFuzzyDragDoesNotMoveItsNeighbour(unittest.TestCase):
 
         model, _ = update(make_mouse_down_event(10, legacy_index=False, top_half=False),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(1, legacy_index=False),
+        model, _ = update(make_mouse_move_event(1, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(1, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
         self.assertEqual(model['search'], r"r'.*?,\ '")
 
@@ -3166,9 +3304,9 @@ class TestFuzzyDragDoesNotMoveItsNeighbour(unittest.TestCase):
         # Fuzzy-extend right, all the way to the end of the string.
         model, _ = update(make_mouse_down_event(6, legacy_index=False, top_half=False),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_move_event(27, legacy_index=False),
+        model, _ = update(make_mouse_move_event(27, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(27, legacy_index=False),
+        model, _ = update(make_mouse_up_event(27, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
         self.assertEqual(model['search'], r"r'hello.*'")
 
@@ -3407,7 +3545,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         last_end = get_last_segment_end_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(last_end, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(last_end, legacy_index=False),
+        model, _ = update(make_mouse_up_event(last_end, legacy_index=False, alt_key=True),
                          var_and_exp, model, value)
         self.assertEqual(model['search'], r"r'^[a-z]{1}'")
 
@@ -3513,7 +3651,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         # Click \n at 8 with fuzzy (bottom half) — skips $ at 7
         model, _ = update(make_mouse_down_event(8, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(8),
+        model, _ = update(make_mouse_up_event(8, alt_key=True),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -3695,7 +3833,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -3722,7 +3860,7 @@ class TestSelectionAdjacencyIntegration(unittest.TestCase):
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                          var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False, alt_key=True),
                          var_and_exp, model, value)
 
         self.assertEqual(model['search'], r"r'\s*world'")
@@ -3910,7 +4048,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
 
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hello\s*'")
@@ -3984,7 +4122,7 @@ class TestSearchBoxToMouseInteraction(unittest.TestCase):
 
         model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'\s*world'")
@@ -4016,7 +4154,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
 
         # Add "world" inside fuzzy
@@ -4071,7 +4209,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
 
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
 
         self.assertEqual(model['search'], r"r'hel[a-z]{1}'")
@@ -4120,7 +4258,7 @@ class TestMouseToSearchBoxInteraction(unittest.TestCase):
         start_idx = get_first_segment_start_internal_idx(model['search'], value)
         model, _ = update(make_mouse_down_event(start_idx - 1, legacy_index=False, top_half=False),
                           self.var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False),
+        model, _ = update(make_mouse_up_event(start_idx - 1, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, value)
 
         self.assertEqual(model['search'], r"r'\s*world'")
@@ -4185,7 +4323,7 @@ class TestSearchBoxUndoRedo(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], r"r'hello\s*'")
 
@@ -5000,7 +5138,7 @@ class TestSearchBoxMultipleRoundTrips(unittest.TestCase):
         end_idx = get_last_segment_end_internal_idx(model['search'], self.value)
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           self.var_and_exp, model, self.value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           self.var_and_exp, model, self.value)
         self.assertEqual(model['search'], r"r'hello\s*'")
 
@@ -8201,7 +8339,7 @@ class TestCaptureGroupsBuildPreviewRegex(unittest.TestCase):
 
         model, _ = update(make_mouse_down_event(end_idx, legacy_index=False, top_half=False),
                           var_and_exp, model, value)
-        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False),
+        model, _ = update(make_mouse_up_event(end_idx, legacy_index=False, alt_key=True),
                           var_and_exp, model, value)
 
         self.assertIn('c', get_search_flags(model['search']))
@@ -13699,10 +13837,10 @@ class TestIndexSelection(unittest.TestCase):
             'eventJSON': {'buttons': buttons, 'ctrlKey': ctrl},
         }
 
-    def _mouse_up(self, internal_index: int) -> dict:
+    def _mouse_up(self, internal_index: int, *, ctrl: bool = False) -> dict:
         return {
             'pythonEventStr': repr(MouseUp(internal_index)),
-            'eventJSON': {'buttons': 0},
+            'eventJSON': {'buttons': 0, 'ctrlKey': ctrl},
         }
 
     def test_ctrl_drag_two_chars_produces_slice(self):
@@ -13714,7 +13852,7 @@ class TestIndexSelection(unittest.TestCase):
         model = init_model(value)
         model, _ = update(self._mouse_down(1, ctrl=True), ('x', 'x'), model, value)
         model, _ = update(self._mouse_move(2, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(2), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(2, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['search'], ':2')
         self.assertTrue(is_slice_search(model['search']))
 
@@ -13724,7 +13862,7 @@ class TestIndexSelection(unittest.TestCase):
         model = init_model(value)
         # Click on '4' (internal index 5 = string index 4). k=6, no neg shorthand.
         model, _ = update(self._mouse_down(5, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(5), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(5, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['search'], '4')
 
     def test_ctrl_single_click_last_char_uses_neg_one(self):
@@ -13733,7 +13871,7 @@ class TestIndexSelection(unittest.TestCase):
         model = init_model(value)
         # Last char '9' is at internal index 10
         model, _ = update(self._mouse_down(10, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(10), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(10, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['search'], '-1')
 
     def test_ctrl_single_click_second_to_last_uses_neg_two(self):
@@ -13742,7 +13880,7 @@ class TestIndexSelection(unittest.TestCase):
         model = init_model(value)
         # Second-to-last '8' is at internal index 9 (string index 8). k=2, n>4.
         model, _ = update(self._mouse_down(9, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(9), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(9, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['search'], '-2')
 
     def test_ctrl_drag_across_newline_uses_neg_end(self):
@@ -13755,7 +13893,7 @@ class TestIndexSelection(unittest.TestCase):
         # Drag from 'b' (internal 2) to 'c' (internal 6)
         model, _ = update(self._mouse_down(2, ctrl=True), ('x', 'x'), model, value)
         model, _ = update(self._mouse_move(6, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(6), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(6, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['search'], '1:-1')
 
     def test_index_tool_drag_to_end_elides_len(self):
@@ -13777,7 +13915,7 @@ class TestIndexSelection(unittest.TestCase):
         model['search'] = r"r'hello'"
         # ctrl-click on a single char should REPLACE the regex with a bare index.
         model, _ = update(self._mouse_down(7, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(7), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(7, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['search'], '6')
 
     def test_index_drag_preserves_active_tool(self):
@@ -13786,7 +13924,7 @@ class TestIndexSelection(unittest.TestCase):
         model = init_model(value)
         model['tool'] = 'fuzzy'  # persistent fuzzy, but transient ctrl override
         model, _ = update(self._mouse_down(2, ctrl=True), ('x', 'x'), model, value)
-        model, _ = update(self._mouse_up(2), ('x', 'x'), model, value)
+        model, _ = update(self._mouse_up(2, ctrl=True), ('x', 'x'), model, value)
         self.assertEqual(model['tool'], 'fuzzy')
 
     def test_visualize_adds_tool_class_to_container(self):
@@ -15366,7 +15504,7 @@ class TestSelectionEmitsRawStringForm(unittest.TestCase):
         # Bottom-half drag selects ' ' (index 7) as a fuzzy whitespace segment
         model, _ = update(make_mouse_down_event(7, top_half=False),
                           self.var_and_exp, self.model, self.value)
-        model, _ = update(make_mouse_up_event(7),
+        model, _ = update(make_mouse_up_event(7, alt_key=True),
                           self.var_and_exp, model, self.value)
         # Should be an r'\s+' style fuzzy
         self.assertTrue(model['search'].startswith("r'"))
