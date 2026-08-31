@@ -7818,15 +7818,28 @@ class TestExtractIsThePickWhilePicking(unittest.TestCase):
         return _get_search_context(make_pick_model(**kwargs), ('strs', 'strs'),
                                    eval_in_scope=pick_eval)
 
-    def test_extract_and_filter_cannot_drift(self):
+    def test_a_searchless_pick_is_filters_answer_under_extracts_name(self):
         # The PAIR, not just the code: comparing names is what pins the pick's
         # own `strs_picked` rather than quietly renaming it `strs_cells`.
-        for search, picked in ((None, ['all_col_1']),
-                               (PICK_SEARCH, ['pre_col_1'])):
-            with self.subTest(search=search):
-                ctx = self._ctx(search=search, picked=picked)
-                self.assertEqual(generate_action('extract', ctx),
-                                 generate_action('filter', ctx))
+        ctx = self._ctx(search=None, picked=['all_col_1'])
+        self.assertEqual(generate_action('extract', ctx),
+                         generate_action('filter', ctx))
+
+    def test_a_searched_pick_is_filters_alone(self):
+        # The bands are pre/match/post -- defined relative to the match -- so
+        # the whole thing is a question about the match, and Extract has no
+        # search-independent reading of it to give. It declines rather than
+        # offering the same line under a second name.
+        ctx = self._ctx(search=PICK_SEARCH, picked=['pre_col_1'])
+        self.assertIsNone(generate_action('extract', ctx))
+        self.assertIsNotNone(generate_action('filter', ctx))
+
+    def test_a_search_with_nothing_picked_is_still_the_whole_table(self):
+        # Nothing is picked, so there is no question about the match yet.
+        # Extract dims the moment a pick turns it into one.
+        ctx = self._ctx(search=PICK_SEARCH)
+        self.assertEqual(generate_action('extract', ctx),
+                         ('strs_cells', '[(x, len(x)) for x in strs]'))
 
     def test_a_searchless_pick_is_named_for_the_pick(self):
         ctx = self._ctx(search=None, picked=['all_col_1'])
@@ -7859,6 +7872,22 @@ class TestExtractLinkRouting(unittest.TestCase):
             model, _ = self._send(model, make_tool_select_event('pick'))
             got.append(model['linked_action'])
         self.assertEqual(got, ['extract', 'filter'])
+
+    def test_a_link_outside_the_pick_tool_is_left_alone(self):
+        # Which action materialises a PICK turns on the search. Outside the
+        # tool Extract means the whole table, so typing in the search box must
+        # not hand its line to Filter -- and must not rewrite it.
+        model = make_pick_model(search=None, tool='normal')
+        model['linked_action'] = 'extract'
+        model['linked_source_expr'] = 'strs'
+        # The line the link already wrote, so a refresh that agrees with it is
+        # the no-op _emit_linked_update makes it -- as in the running app.
+        model['last_linked_expr'] = '[(x, len(x)) for x in strs]'
+        model, cmds = self._send(model, make_search_input_event('len($) > 4'))
+        self.assertEqual(
+            (model['linked_action'],
+             [c.expression for c in cmds if isinstance(c, ChangeSelectedText)]),
+            ('extract', []))
 
     def test_the_search_appearing_and_going_moves_the_link(self):
         model = make_pick_model(search=None)
@@ -7897,6 +7926,17 @@ class TestExtractRendering(unittest.TestCase):
     def test_it_is_absent_from_a_preview(self):
         out = self._render(extract_model(), small=True)
         self.assertIsNone(action_button_tag(out, 'extract'))
+
+    def test_extract_dims_in_a_searched_pick(self):
+        # The other half of the same rule: in pick mode exactly one of the two
+        # is live, and it is the one _link_action_for names.
+        out = visualize(PICK_STRS, make_pick_model(picked=['pre_col_1']),
+                        mock_get_visualizer, pick_eval,
+                        var_and_exp=('strs', 'strs'))
+        tag = action_button_tag(out, 'extract')
+        self.assertIn('dimmed', tag)
+        self.assertNotIn('data-action-expr', tag)
+        self.assertNotIn('dimmed', action_button_tag(out, 'filter'))
 
     def test_filter_dims_in_a_searchless_pick(self):
         # Otherwise both buttons are live on identical code.

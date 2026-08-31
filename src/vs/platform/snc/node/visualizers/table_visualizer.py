@@ -6317,18 +6317,30 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
             ctx.get('is_multi_index') or ctx.get('is_broadcast_slice')):
         return None
 
-    # Extract hands over the cells. A pick IS a selection of cells, so while
-    # the tool is up that is the answer -- Filter's answer, under the name that
-    # describes it. Delegated rather than restated, and its result returned
-    # whole: the two cannot drift, the pick keeps the name
-    # _suggest_name_for_action already chose for it (`strs_picked`, not
-    # `strs_cells`), and a pick with nothing in it declines here exactly as
-    # Filter does -- which is what stops auto-link writing the whole table out
-    # the moment someone opens the tool. Otherwise it is the table as drawn,
-    # which the columns say and no search changes.
+    # Extract hands over the cells, and a pick IS a selection of cells -- but
+    # only a pick made with no search is one Extract can answer for.
+    #
+    # WITHOUT a search it is Filter's answer under the name that describes it.
+    # Delegated rather than restated, and its result returned whole: the two
+    # cannot drift, the pick keeps the name _suggest_name_for_action already
+    # chose for it (`strs_picked`, not `strs_cells`), and a pick with nothing
+    # in it declines here exactly as Filter does -- which is what stops
+    # auto-link writing the whole table out the moment someone opens the tool.
+    #
+    # WITH one, the bands are pre/match/post, defined relative to the match, so
+    # the whole thing is a question about the match. That is Filter's question,
+    # and Extract has no search-independent reading of it to offer instead:
+    # "the rows before the match, ignoring the search" is not a thing. So it
+    # declines rather than putting Filter's line under a second live button.
+    #
+    # Otherwise it is the table as drawn, which the columns say and no search
+    # changes -- including with the tool up and nothing picked yet, where there
+    # is no question about the match to be had.
     if action == 'extract':
-        if ctx.get('is_pick_only') or ctx.get('pick_expr'):
+        if ctx.get('is_pick_only'):
             return generate_action('filter', ctx)
+        if ctx.get('pick_expr'):
+            return None
         expr = ctx.get('table_rows_expr')
         return (_suggest_name_for_action(action, ctx), expr) if expr else None
 
@@ -11864,9 +11876,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # changed -- so the ids in hand no longer name anything.
                 model['picked'] = None
                 model['pick_expr'] = None
-                # Which action materialises a pick turns on whether there is a
-                # search, and whether there is one has just changed.
-                if model.get('linked_action') in ('filter', 'extract'):
+                # Which action materialises a PICK turns on whether there
+                # is a search, and whether there is one has just changed. Only
+                # a pick's link: outside the tool Extract means the whole
+                # table, and a search is none of its business -- re-pointing
+                # there would rewrite the user's line into a filter.
+                if (model.get('tool') == 'pick'
+                        and model.get('linked_action') in ('filter', 'extract')):
                     model['linked_action'] = _link_action_for(model)
 
         case FirstMatchToggle():
