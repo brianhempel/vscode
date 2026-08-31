@@ -4652,6 +4652,29 @@ class TestRelinkTakeoverAdoptsExistingLine(unittest.TestCase):
         self.assertEqual(commands, [])
 
 
+class TestRelinkTakeoverKeepsCaptureGroups(unittest.TestCase):
+    """Adopting a findall line whose pattern has capture groups must keep them:
+    the search is restored in capture-groups mode ('c' flag), so the adopted
+    state regenerates the exact line rather than one with the groups stripped
+    (which would change findall's result shape from tuples to strings)."""
+
+    def setUp(self):
+        self.value = '1.2.3.4 - - "GET /index.html HTTP/1.1" 200'
+        self.var_and_exp = ('str1', 'str1')
+        self.line = (r'''str1_strings3 = re.findall'''
+                     r'''(r'(")([A-Z]*)(\ )(.*)(\ HTTP/1\.)', str1, flags=re.M)''')
+
+    def test_adopted_grouped_findall_round_trips_verbatim(self):
+        model = init_model(self.value)
+        model, commands = update(make_relink_event('takeover', text=self.line),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertEqual(commands, [])
+        self.assertEqual(
+            model.get('last_linked_expr'),
+            r'''re.findall(r'(")([A-Z]*)(\ )(.*)(\ HTTP/1\.)', str1, flags=re.M)''')
+
+
 class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
     """Taking over a line this visualizer did not write: the link is recorded,
     but the line is left alone until the user's next interaction. Recording

@@ -5536,6 +5536,11 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
             flags += '1'
         if ctx.get('is_ci'):
             flags += 'i'
+        # A pattern carrying its own parens (capture groups) must round-trip
+        # verbatim: without the 'c' flag, regeneration strips the groups and
+        # rewrites the line with a different findall result shape.
+        if ctx['regex_pattern'] != strip_capturing_groups(ctx['regex_pattern']):
+            flags += 'c'
         model['search'] = make_regex_search(ctx['regex_pattern'], flags)
     else:
         model['search'] = None
