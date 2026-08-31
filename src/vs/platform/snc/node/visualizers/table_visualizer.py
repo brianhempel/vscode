@@ -1886,6 +1886,11 @@ _ATOMIC_NODES = (ast.Name, ast.Constant, ast.Call, ast.Subscript, ast.Attribute,
                  ast.SetComp, ast.JoinedStr)
 
 
+# What a dollar run collapses to before parsing. Named because asking what
+# SHAPE a column has means recognising it in the tree afterwards.
+_DOLLAR_PLACEHOLDER = '_crt_'
+
+
 def _parse_dollar_expr(expr: str):
     """Parse a dollar-bearing expression, or None if it doesn't parse.
 
@@ -1897,8 +1902,8 @@ def _parse_dollar_expr(expr: str):
     The other sigils are values like any other, so they collapse like one.
     """
     try:
-        collapsed = DOLLARS_RE.sub(lambda m: 'i' if m[2] == 'i' else '_crt_',
-                                   expr)
+        collapsed = DOLLARS_RE.sub(
+            lambda m: 'i' if m[2] == 'i' else _DOLLAR_PLACEHOLDER, expr)
         return ast.parse(collapsed, mode='eval').body
     except SyntaxError:
         return None
@@ -3534,6 +3539,34 @@ def _column_dict_expr(col: str, source_expr: str,
         item_expr = _default_item_expr(binds)
     binding = _column_binding(col, source_expr, binds, whole_row=True)
     return f'{{k: {item_expr} for {binding}}}'
+
+
+def _column_key(col: str) -> 'str | None':
+    """The key a column reads off its row, as source, or None when it reads
+    anything else.
+
+    `$['name']` answers `"'name'"`. A bare `$`, `len($)`, an attribute and
+    `$['name'][0]` all answer None: they compute something, and a computed
+    value has no key to be filed under.
+
+    Two rules are worth their own line. A suffixed sigil rules a column out on
+    its own -- `$v['x']` is a key of the VALUE, and the row it belongs to is a
+    pair rather than a record. And only a STRING subscript counts: `$[0]` reads
+    the same whether the row is a dict or a list, and a list of lists is
+    positional rather than a record, so it is not one on this evidence.
+
+    What tells a table of records from a table that computes.
+    """
+    if _is_leaf_identity(col) or dollar_expr_sigils(col):
+        return None
+    tree = _parse_dollar_expr(col)
+    if (isinstance(tree, ast.Subscript)
+            and isinstance(tree.value, ast.Name)
+            and tree.value.id == _DOLLAR_PLACEHOLDER
+            and isinstance(tree.slice, ast.Constant)
+            and isinstance(tree.slice.value, str)):
+        return repr(tree.slice.value)
+    return None
 
 
 def _column_values(col, lst, model, eval_in_scope=None) -> list:
@@ -5902,6 +5935,7 @@ def _get_search_context(model: dict, var_and_exp=None,
                               eval_in_scope=eval_in_scope)
     if ctx is not None:
         ctx['is_dict'] = bool(model.get('_is_dict'))
+        ctx['table_rows_expr'] = _table_rows_expr(model, ctx['source_expr'])
     return ctx
 
 
@@ -6082,6 +6116,7 @@ def _get_whole_list_context(model: dict, var_and_exp=None,
     ctx = _whole_list_context_for(model, var_and_exp, source_expr=source_expr)
     if ctx is not None:
         ctx['is_dict'] = bool(model.get('_is_dict'))
+        ctx['table_rows_expr'] = _table_rows_expr(model, ctx['source_expr'])
     return ctx
 
 
@@ -6205,7 +6240,7 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
 _SUGGEST_SUFFIXES = {
     'any': 'any', 'all': 'all', 'count': 'count',
     'filter': 'filtered', 'find_indices': 'indices',
-    'join': 'joined',
+    'join': 'joined', 'extract': 'cells',
 }
 
 
@@ -6281,6 +6316,21 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
                                          'loop_new_idx') and (
             ctx.get('is_multi_index') or ctx.get('is_broadcast_slice')):
         return None
+
+    # Extract hands over the cells. A pick IS a selection of cells, so while
+    # the tool is up that is the answer -- Filter's answer, under the name that
+    # describes it. Delegated rather than restated, and its result returned
+    # whole: the two cannot drift, the pick keeps the name
+    # _suggest_name_for_action already chose for it (`strs_picked`, not
+    # `strs_cells`), and a pick with nothing in it declines here exactly as
+    # Filter does -- which is what stops auto-link writing the whole table out
+    # the moment someone opens the tool. Otherwise it is the table as drawn,
+    # which the columns say and no search changes.
+    if action == 'extract':
+        if ctx.get('is_pick_only') or ctx.get('pick_expr'):
+            return generate_action('filter', ctx)
+        expr = ctx.get('table_rows_expr')
+        return (_suggest_name_for_action(action, ctx), expr) if expr else None
 
     src = ctx['source_expr']
     first = ctx.get('is_first', False)
@@ -7318,7 +7368,67 @@ def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
     return None
 
 
-def _table_rows_exps(model: dict, source_expr: 'str | None') -> list:
+def _table_records_expr(col_ids, columns, source_expr,
+                        binds) -> 'str | None':
+    """Every row as a dict of what its columns read, when all they read is keys.
+
+    The rows of such a table ARE records and their keys are on screen, so
+    handing back tuples would throw away the half of the table that says which
+    value is which. One computed column and there is nothing to file that one
+    under, so the row goes back to being a tuple like any other shape.
+
+    A column the table draws but cannot read one value per row from -- a splat
+    -- is not among *col_ids* at all, so a table holding one is not all keys
+    either. Counting them is what stops a record coming back quietly missing a
+    column that is on screen.
+
+    No enumerate to worry about: `$i` is a sigil, and _column_key answers None
+    for anything naming one, so no column that got here asks for the row's
+    number.
+    """
+    if len(col_ids) != len(_leaf_columns(_as_columns(columns))):
+        return None
+    pairs = []
+    for col_id in col_ids:
+        col = _pick_column_expr(col_id, columns)
+        key = None if col is None else _column_key(col)
+        if key is None:
+            return None
+        elem, _names_index = _pick_element_expr(col_id, columns, source_expr,
+                                                _PICK_INNER_VAR, binds)
+        pairs.append(f'{key}: {elem}')
+    return _pick_comprehension('{' + ', '.join(pairs) + '}', source_expr,
+                               None, False, False)
+
+
+def _table_dict_expr(col_ids, columns, source_expr, binds) -> 'str | None':
+    """A dict extracts as a dict: keyed the way it is keyed, valued by whatever
+    the columns other than the key read.
+
+    The same shape _column_dict_expr gives one column, widened to several -- and
+    the pair is bound whole for its reason too: the key is the point even where
+    a column reads only the value.
+
+    The key column is dropped from the value rather than repeated inside it;
+    `{k: (k, v) ...}` says the same thing twice. A table of nothing BUT the key
+    has nothing left to value its entries by, and declines.
+    """
+    cols = [_pick_column_expr(col_id, columns) for col_id in col_ids]
+    values = [col for col in cols if col is not None and col.strip() != '$k']
+    if not values:
+        return None
+    elems = [_column_item_expr(col, source_expr, binds=binds) for col in values]
+    if any(elem is None for elem in elems):
+        return None
+    elt = elems[0] if len(elems) == 1 else '(' + ', '.join(elems) + ')'
+    rows = f'{_atomize(source_expr)}.items()'
+    binding = (f'i, (k, v) in enumerate({rows})'
+               if any(dollar_expr_names_index(col) for col in values)
+               else f'k, v in {rows}')
+    return f'{{k: {elt} for {binding}}}'
+
+
+def _table_rows_expr(model: dict, source_expr: 'str | None') -> 'str | None':
     """Every row read across the columns -- the table on screen, as code.
 
     The column twin of _row_tuple_expr: that one is one row across the columns,
@@ -7331,34 +7441,37 @@ def _table_rows_exps(model: dict, source_expr: 'str | None') -> list:
     reads the same here as it does down the table. A search is not part of it:
     this is the table, not the matches.
 
-    Nothing to offer in three cases, each because something else already says
-    it better. A DICT's is `list(d.items())`, which its column header hands
-    over. ONE column is that column, which its own header hands over -- the
-    same reason _drop_repeats stops a row handle naming one expression twice.
-    And a SPLAT column contributes no single value per row, so it is not among
-    the ids _pick_column_ids offers; a table of nothing else falls under the
-    one-column case and offers nothing.
+    The SHAPE of the answer follows the shape on screen. A dict extracts as a
+    dict (_table_dict_expr). A list whose columns are nothing but keys extracts
+    as a list of dicts (_table_records_expr), because its rows are records and
+    their keys are on screen to file them under. Everything else is one tuple
+    per row -- and ONE column of that is handed over bare rather than as a list
+    of one-tuples, the way a row's cells are (see the "as Tuple" suffix in
+    _row_action_names, which drops for the same reason).
+
+    Nothing at all where something else says it better: a SPLAT column has no
+    single value per row to contribute, so it is not among the ids
+    _pick_column_ids offers, and a table of nothing else has no columns left
+    here; and an expression that comes back AS the source -- the default
+    identity column over a list of scalars -- would write `data = data`.
     """
+    if source_expr is None:
+        return None
     columns = model.get('columns', [])
-    if source_expr is None or model.get('_is_dict'):
-        return []
+    binds = _model_binds(model)
     col_ids = [col_id for col_id in _pick_column_ids(columns)
                if col_id != PICK_IDX_COLUMN]
-    if len(col_ids) < 2:
-        return []
-    binds = _model_binds(model)
-    # The index column contributes `i`, which is what tips _pick_comprehension
-    # into the enumerate form -- so the numbered reading is the same call.
-    readings = [
-        ("Every row's cells", col_ids),
-        ('With row numbers', [PICK_IDX_COLUMN] + col_ids),
-    ]
-    exps = []
-    for label, ids in readings:
-        expr = _pick_zip_expr(ids, columns, source_expr, None, None, binds)
-        if expr:
-            exps.append(PyExp(expr, label=label))
-    return exps
+    if not col_ids:
+        return None
+    if _is_dict_binds(binds):
+        return _table_dict_expr(col_ids, columns, source_expr, binds)
+    records = _table_records_expr(col_ids, columns, source_expr, binds)
+    if records is not None:
+        return records
+    expr = (_pick_range_expr(col_ids[0], columns, source_expr, None, None, binds)
+            if len(col_ids) == 1
+            else _pick_zip_expr(col_ids, columns, source_expr, None, None, binds))
+    return None if expr == source_expr else expr
 
 
 def _pick_needs_index(pick_expr: str) -> bool:
@@ -9556,19 +9669,28 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     count_label = f'<span class="text">Count: {match_count}</span>'
     parts.append(action_btn(count_label, 'count', count_enabled, 'Count of matches'))
 
-    # 2. Filter / Find One
+    # 2. Extract -- the cells, the picked ones or all of them. Like Count it
+    # needs no search; unlike Count it is live during a pick, because a pick is
+    # exactly a selection of cells. Asked of generate_action rather than worked
+    # out here, so the button dims on precisely what a click would decline.
+    extract_label = '<span class="text">Extract</span>'
+    parts.append(action_btn(extract_label, 'extract',
+                            bool(_preview_expr(model, 'extract', eval_in_scope)),
+                            "Every row's cells"))
+
+    # 3. Filter / Find One
     filter_lbl = (
         f'{ICONS["filter"]}<span class="text">Find One<span class="shortcut">⏎</span></span>'
         if first
         else f'{ICONS["filter"]}<span class="text">Filter<span class="shortcut">⏎</span></span>'
     )
-    # Filter is the action that consumes a picked expression, so it is live for
-    # a pick made with no search too.
-    parts.append(action_btn(filter_lbl, 'filter',
-                            has_search or bool(model.get('pick_expr')),
+    # A pick with no search is Extract's now: nothing is being filtered, and
+    # lighting both buttons over one expression offers a choice that isn't one.
+    # So Filter dims there, the way Delete already does.
+    parts.append(action_btn(filter_lbl, 'filter', has_search,
                             'Filter matches (Enter)'))
 
-    # 3. Loop dropdown (hover-menu, panel always rendered with data-hover-menu)
+    # 4. Loop dropdown (hover-menu, panel always rendered with data-hover-menu)
     loop_enabled = pick_array if pick_mode else not (has_search and first)
     loop_trigger_cls = 'snc-dropdown-trigger' + ('' if loop_enabled else ' dimmed')
     # An array pick is a projection of a row range, so its elements have no
@@ -9591,7 +9713,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'</span>'
     )
 
-    # 4. ? (Any/All) dropdown (hover-menu). Show a live True/False preview of
+    # 5. ? (Any/All) dropdown (hover-menu). Show a live True/False preview of
     # the boolean each option would evaluate to (like the string visualizer).
     pred_trigger_cls = 'snc-dropdown-trigger'
     any_val, all_val = _compute_predicate_previews(model, eval_in_scope)
@@ -9620,7 +9742,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'</span>'
     )
 
-    # 5. Delete
+    # 6. Delete
     delete_lbl = (
         f'{ICONS["bin"]}<span class="text">Delete First<span class="shortcut">⌘⌫</span></span>'
         if first
@@ -9632,7 +9754,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
                             has_search and model.get('tool') != 'pick',
                             'Delete matches'))
 
-    # 6. Join dropdown (hover-menu like Loop and Any/All). The custom
+    # 7. Join dropdown (hover-menu like Loop and Any/All). The custom
     # separator <input> lives inside the panel; hovering the panel keeps it
     # open while the user types.
     open_dropdown = model.get('openDropdown')
@@ -9692,7 +9814,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'</span>'
     )
 
-    # 7. Find Indices (disabled for single-index searches — the index is already known)
+    # 8. Find Indices (disabled for single-index searches — the index is already known)
     indices_lbl = (
         f'{ICONS["search-idx"]}<span class="text">First Index</span>'
         if first
@@ -11279,11 +11401,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         model['openDropdown'] = None
                     elif model.get('search') or model.get('pick_expr'):
                         if model.get('linked_action'):
-                            model['linked_action'] = 'filter'
+                            model['linked_action'] = _link_action_for(model)
                         else:
                             ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                             if ctx:
-                                result = generate_action('filter', ctx)
+                                result = generate_action(_link_action_for(model), ctx)
                                 if result:
                                     commands.append(new_code_command(result, code_imports))
 
@@ -11742,6 +11864,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # changed -- so the ids in hand no longer name anything.
                 model['picked'] = None
                 model['pick_expr'] = None
+                # Which action materialises a pick turns on whether there is a
+                # search, and whether there is one has just changed.
+                if model.get('linked_action') in ('filter', 'extract'):
+                    model['linked_action'] = _link_action_for(model)
 
         case FirstMatchToggle():
             # Pick works over the first match only, so the toggle is inert while
@@ -11758,10 +11884,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['picked'] = None
                 model['pick_expr'] = None
                 if t == 'pick':
-                    # Filter is the only action that consumes a picked
-                    # expression, so a linked line switches over to it.
+                    # A pick is materialised by Filter or by Extract depending
+                    # on whether there is a predicate to filter by, so a linked
+                    # line switches over to whichever that is.
                     if model.get('linked_action'):
-                        model['linked_action'] = 'filter'
+                        model['linked_action'] = _link_action_for(model)
 
         case PickToggle(region_id=region_id):
             if model.get('tool') == 'pick':
@@ -11901,6 +12028,18 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 _AUTO_LINK_ACTION = 'filter'
 _AUTO_LINK_STATEMENT_ACTION = 'loop_no_idx'
 
+
+def _link_action_for(model) -> str:
+    """What a linked line for the current search/pick state is written by.
+
+    With a search the predicate really does find a row, so that is Filter. With
+    none, nothing is being filtered -- a pick is a selection of cells, which is
+    Extract. Both emit the same code for a pick (see generate_action), so this
+    chooses the honest name rather than the behaviour.
+    """
+    return 'filter' if model.get('search') else 'extract'
+
+
 # This visualizer's wiring for the shared relink logic in visualizer_utils.
 _LINK_CONFIG = LinkConfig(
     parse_line=parse_generated_code_or_assignment,
@@ -11917,7 +12056,7 @@ _LINK_CONFIG = LinkConfig(
 
 
 def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=None) -> None:
-    """If the current search state yields a parseable filter expression, set up
+    """If the current search or pick state yields a parseable expression, set up
     linked editing and append a NewCode tuple to insert the linked line.
 
     No-op if no search context is available or the generated code doesn't parse.
@@ -11925,7 +12064,11 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
     if not ctx:
         return
-    result = generate_action(_AUTO_LINK_ACTION, ctx)
+    # Not the _AUTO_LINK_ACTION constant: auto-link only runs with a search or
+    # in pick mode, and in pick mode the honest name is Extract. Both emit the
+    # same code there, so this changes the name on the link and nothing else.
+    action = _link_action_for(model)
+    result = generate_action(action, ctx)
     if not result:
         return
     suggest_name, expr = result
@@ -11934,7 +12077,7 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, eval_in_scope=
         ast.parse(with_pass_body(prefix + expr))
     except SyntaxError:
         return
-    model['linked_action'] = _AUTO_LINK_ACTION
+    model['linked_action'] = action
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True

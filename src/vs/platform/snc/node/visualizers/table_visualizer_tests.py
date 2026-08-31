@@ -7630,6 +7630,282 @@ class TestPickWithoutASearchUpdateFlow(unittest.TestCase):
         self.assertIsNone(model['pick_expr'])
 
 
+# === Extract: the cells, picked or all =======================================
+
+from table_visualizer import _table_rows_expr, _link_action_for
+
+EXTRACT_PEOPLE = [{'name': 'ada', 'age': 36}, {'name': 'grace', 'age': 45}]
+EXTRACT_COLUMNS = ["$['name']", "$['age'] * 2"]
+EXTRACT_CELLS = "[(x['name'], x['age'] * 2) for x in people]"
+
+
+def extract_eval(code):
+    return eval(code, {'people': [dict(row) for row in EXTRACT_PEOPLE]})
+
+
+def action_button_tag(html_str, action):
+    """The opening <span ...> of one action button, or None if not rendered."""
+    match = re.search(
+        r'<span class="[^"]*" snc-mouse-down="ActionButtonClick\(action='
+        r'&#x27;' + action + r'&#x27;[^>]*>', html_str)
+    return match.group(0) if match else None
+
+
+def extract_model(columns=None, **fields):
+    model = init_model(EXTRACT_PEOPLE, mock_get_visualizer,
+                       var_and_exp=('people', 'people'))
+    model['columns'] = list(EXTRACT_COLUMNS if columns is None else columns)
+    model.update(fields)
+    return model
+
+
+class TestExtractExpression(unittest.TestCase):
+    """What _table_rows_expr reads off the columns."""
+
+    def _expr(self, columns, source='strs', **fields):
+        model = make_pick_model(columns=columns, search=None, tool='normal')
+        model.update(fields)
+        return _table_rows_expr(model, source)
+
+    def test_several_columns_are_one_tuple_per_row(self):
+        self.assertEqual(self._expr(PICK_COLUMNS), '[(x, len(x)) for x in strs]')
+
+    def test_one_column_is_handed_over_bare(self):
+        # Not a list of one-tuples: the row menu's own label declines to promise
+        # a tuple it isn't writing, and so does this.
+        self.assertEqual(self._expr(['len($)']), '[len(x) for x in strs]')
+
+    def test_what_something_else_says_better_is_declined(self):
+        # A dict is no longer among these: it extracts as a dict now, which
+        # TestExtractReadsTheShapeItIsGiven covers on a real one.
+        self.assertEqual(
+            (self._expr(['$']),                       # would just be the source
+             self._expr(PICK_COLUMNS, source=None)),  # nothing to name it by
+            (None, None))
+
+
+class TestExtractAction(unittest.TestCase):
+    """Outside the pick tool, Extract is the table as drawn."""
+
+    def _click(self, model, value=None, name='people'):
+        value = EXTRACT_PEOPLE if value is None else value
+        return update(make_action_button_event('extract'), (name, name),
+                      model, value, mock_get_visualizer,
+                      eval_in_scope=extract_eval)
+
+    def _written(self, cmds):
+        return [(c[0], c[1]) for c in cmds if isinstance(c, tuple)]
+
+    def test_a_click_writes_the_table_as_drawn(self):
+        _model, cmds = self._click(extract_model())
+        self.assertEqual(self._written(cmds), [('people_cells', EXTRACT_CELLS)])
+
+    def test_a_search_is_filters_business_not_this_ones(self):
+        _model, cmds = self._click(extract_model(search="$['age'] > 40"))
+        self.assertEqual(self._written(cmds), [('people_cells', EXTRACT_CELLS)])
+
+    def test_a_table_with_nothing_to_extract_writes_nothing(self):
+        _model, cmds = self._click(extract_model(columns=['$']))
+        self.assertEqual(cmds, [])
+
+    def test_a_dict_writes_a_dict(self):
+        d = {'ada': 36, 'grace': 45}
+        model = init_model(d, mock_get_visualizer, var_and_exp=('d', 'd'))
+        _model, cmds = update(make_action_button_event('extract'), ('d', 'd'),
+                              model, d, mock_get_visualizer,
+                              eval_in_scope=lambda c: eval(c, {'d': dict(d)}))
+        self.assertEqual(self._written(cmds),
+                         [('d_cells', '{k: v for k, v in d.items()}')])
+
+
+class TestExtractReadsTheShapeItIsGiven(unittest.TestCase):
+    """Extract answers in the shape the table is in.
+
+    A dict extracts as a dict -- keyed the way it is keyed, whatever the other
+    columns read. A list of dicts extracts as a list of DICTS when its columns
+    are nothing but keys, because then the rows really are records and the keys
+    are on screen to file them under. The moment one column computes something
+    there is no key to file that one under, so the whole thing is a tuple per
+    row like every other shape.
+    """
+
+    PEOPLE = [{'name': 'ada', 'age': 36}, {'name': 'grace', 'age': 45}]
+    PETS = [{'name': 'ada', 'pets': ['cat', 'dog']}]
+
+    def _expr(self, value, columns, name):
+        model = init_model(value, mock_get_visualizer_dict_tables,
+                           var_and_exp=(name, name))
+        model['columns'] = list(columns) if isinstance(columns, list) else columns
+        return _table_rows_expr(model, name)
+
+    def _rows(self, columns, value=None):
+        return self._expr(self.PEOPLE if value is None else value,
+                          columns, 'people')
+
+    def _dict(self, value, columns):
+        return self._expr(value, columns, 'd')
+
+    # --- a dict extracts as a dict -----------------------------------------
+
+    def test_a_dict_extracts_as_a_dict(self):
+        self.assertEqual(self._dict({'a': 1, 'b': 2}, ['$k', '$v']),
+                         '{k: v for k, v in d.items()}')
+
+    def test_a_dicts_other_columns_ride_together_under_the_key(self):
+        self.assertEqual(
+            self._dict({'a': [1, 2], 'b': [3]}, ['$k', '$v', 'len($v)']),
+            '{k: (v, len(v)) for k, v in d.items()}')
+
+    def test_a_dict_column_asking_the_row_number_gets_the_enumerate(self):
+        self.assertEqual(self._dict({'a': 1}, ['$k', '($i, $v)']),
+                         '{k: (i, v) for i, (k, v) in enumerate(d.items())}')
+
+    def test_a_dict_of_nothing_but_its_keys_has_no_values_to_give(self):
+        self.assertIsNone(self._dict({'a': 1}, ['$k']))
+
+    # --- a list of dicts, when the columns are keys ------------------------
+
+    def test_columns_that_are_all_keys_make_records(self):
+        self.assertEqual(
+            self._rows(["$['name']", "$['age']"]),
+            "[{'name': x['name'], 'age': x['age']} for x in people]")
+
+    def test_one_key_column_is_still_a_record(self):
+        self.assertEqual(self._rows(["$['name']"]),
+                         "[{'name': x['name']} for x in people]")
+
+    def test_one_computed_column_makes_the_whole_row_a_tuple(self):
+        self.assertEqual(self._rows(["$['name']", "$['age'] * 2"]),
+                         "[(x['name'], x['age'] * 2) for x in people]")
+
+    def test_the_identity_column_is_not_a_key(self):
+        # `$` is drawn by default beside the fields, so this is the shape a
+        # fresh table of dicts is in: the whole row is not a key of itself.
+        self.assertEqual(self._rows(['$', "$['name']"]),
+                         "[(x, x['name']) for x in people]")
+
+    def test_a_column_reaching_further_than_a_key_is_not_one(self):
+        self.assertEqual(self._rows(["$['name']", "$['name'][0]"]),
+                         "[(x['name'], x['name'][0]) for x in people]")
+
+    def test_a_positional_subscript_is_not_a_key(self):
+        # `$[0]` reads the same whether the row is a dict or a list, and a list
+        # of lists is positional rather than a record -- so it stays a tuple.
+        self.assertEqual(self._expr([[1, 'a'], [2, 'b']], ['$[0]', '$[1]'],
+                                    'rows'),
+                         '[(x[0], x[1]) for x in rows]')
+
+    def test_a_splat_column_has_no_key_so_the_rest_stay_as_they_were(self):
+        # The splat contributes no value per row, so the columns are not all
+        # keys -- and what is left is one column, handed over bare.
+        self.assertEqual(
+            self._rows({"$['name']": {}, "*$['pets']": {}}, value=self.PETS),
+            "[x['name'] for x in people]")
+
+    # --- everything else is unchanged --------------------------------------
+
+    def test_a_list_of_scalars_still_declines(self):
+        self.assertIsNone(self._expr(['abc', 'de'], ['$'], 'strs'))
+
+    def test_a_computed_column_over_scalars_is_still_bare(self):
+        self.assertEqual(self._expr(['abc', 'de'], ['len($)'], 'strs'),
+                         '[len(x) for x in strs]')
+
+class TestExtractIsThePickWhilePicking(unittest.TestCase):
+    """Inside the pick tool, a pick IS a selection of cells."""
+
+    def _ctx(self, **kwargs):
+        return _get_search_context(make_pick_model(**kwargs), ('strs', 'strs'),
+                                   eval_in_scope=pick_eval)
+
+    def test_extract_and_filter_cannot_drift(self):
+        # The PAIR, not just the code: comparing names is what pins the pick's
+        # own `strs_picked` rather than quietly renaming it `strs_cells`.
+        for search, picked in ((None, ['all_col_1']),
+                               (PICK_SEARCH, ['pre_col_1'])):
+            with self.subTest(search=search):
+                ctx = self._ctx(search=search, picked=picked)
+                self.assertEqual(generate_action('extract', ctx),
+                                 generate_action('filter', ctx))
+
+    def test_a_searchless_pick_is_named_for_the_pick(self):
+        ctx = self._ctx(search=None, picked=['all_col_1'])
+        self.assertEqual(generate_action('extract', ctx),
+                         ('strs_picked', '[len(x) for x in strs]'))
+
+    def test_a_pick_with_nothing_in_it_declines(self):
+        # Not the whole table: in pick mode Extract is the pick, and an empty
+        # one has nothing to say. This is also what keeps auto-link safe.
+        self.assertIsNone(generate_action('extract', self._ctx(search=None)))
+
+
+class TestExtractLinkRouting(unittest.TestCase):
+    """Which action a linked line is written by, as the search comes and goes."""
+
+    def _send(self, model, event):
+        return update(event, ('strs', 'strs'), model, PICK_STRS,
+                      mock_get_visualizer, pick_eval)
+
+    def test_the_helper_names_the_honest_action(self):
+        self.assertEqual((_link_action_for({'search': 'len($) > 4'}),
+                          _link_action_for({})),
+                         ('filter', 'extract'))
+
+    def test_entering_pick_re_points_an_existing_link(self):
+        got = []
+        for search in (None, PICK_SEARCH):
+            model = make_pick_model(search=search, tool='normal')
+            model['linked_action'] = 'count'
+            model, _ = self._send(model, make_tool_select_event('pick'))
+            got.append(model['linked_action'])
+        self.assertEqual(got, ['extract', 'filter'])
+
+    def test_the_search_appearing_and_going_moves_the_link(self):
+        model = make_pick_model(search=None)
+        model['linked_action'] = 'extract'
+        model, _ = self._send(model, make_search_input_event('len($) > 4'))
+        typed = model['linked_action']
+        model, _ = self._send(model, make_search_input_event(''))
+        self.assertEqual((typed, model['linked_action']), ('filter', 'extract'))
+
+
+class TestExtractRendering(unittest.TestCase):
+    """The button in the action bar."""
+
+    def _render(self, model, **kwargs):
+        return visualize(EXTRACT_PEOPLE, model, mock_get_visualizer,
+                         extract_eval, var_and_exp=('people', 'people'),
+                         **kwargs)
+
+    def test_it_sits_between_count_and_filter(self):
+        out = self._render(extract_model())
+        self.assertLess(out.index('Count:'), out.index('>Extract<'))
+        self.assertLess(out.index('>Extract<'), out.index('>Filter'))
+
+    def test_it_is_live_with_no_search_and_offers_its_expression(self):
+        # data-action-expr is exactly what the hover tooltip reads.
+        tag = action_button_tag(self._render(extract_model()), 'extract')
+        self.assertNotIn('dimmed', tag)
+        self.assertIn('data-action-expr', tag)
+
+    def test_it_dims_and_goes_quiet_where_it_has_nothing_to_say(self):
+        tag = action_button_tag(self._render(extract_model(columns=['$'])),
+                                'extract')
+        self.assertIn('dimmed', tag)
+        self.assertNotIn('data-action-expr', tag)
+
+    def test_it_is_absent_from_a_preview(self):
+        out = self._render(extract_model(), small=True)
+        self.assertIsNone(action_button_tag(out, 'extract'))
+
+    def test_filter_dims_in_a_searchless_pick(self):
+        # Otherwise both buttons are live on identical code.
+        out = visualize(PICK_STRS, make_pick_model(search=None),
+                        mock_get_visualizer, pick_eval,
+                        var_and_exp=('strs', 'strs'))
+        self.assertIn('dimmed', action_button_tag(out, 'filter'))
+
+
 class TestListGrammarPick(_ListActionTestBase):
     """Roundtrip tests for picked filter lines."""
 
@@ -17811,92 +18087,6 @@ class TestTinyLen(unittest.TestCase):
     def test_the_count_rides_the_search_box(self):
         output = self.table(self.TALL)
         self.assertLess(output.index('search-div'), output.index('tiny-len'))
-
-
-from table_visualizer import _table_rows_exps
-
-
-class TestTableRowsExps(unittest.TestCase):
-    """The table itself, as code, on the handle the count already carries.
-
-    A row's grip hands over that row read across the columns; the count hands
-    over every row -- one tuple per row, computed columns and all. The count
-    stays first, so what the chip DRAGS is what it always dragged.
-    """
-
-    PEOPLE = [{'name': 'ada', 'age': 36}, {'name': 'grace', 'age': 45}]
-    COLUMNS = ["$['name']", "$['age'] * 2"]
-
-    def table(self, lst=None, columns=None, var_and_exp=('people', 'people'),
-              **kwargs):
-        lst = self.PEOPLE if lst is None else lst
-        model = init_model(lst, mock_get_visualizer)
-        if columns is not None:
-            model['columns'] = list(columns)
-        return visualize(lst, model, mock_get_visualizer, None,
-                         var_and_exp=var_and_exp, **kwargs)
-
-    def test_the_count_hands_over_the_table_beside_it(self):
-        out = self.table(columns=self.COLUMNS)
-        self.assertEqual(handles_in(_tiny_len(out)), [[
-            {'expr': 'len(people)', 'label': 'Count'},
-            {'expr': "[(x['name'], x['age'] * 2) for x in people]",
-             'label': "Every row's cells"},
-            {'expr': "[(i, x['name'], x['age'] * 2) "
-                     'for i, x in enumerate(people)]',
-             'label': 'With row numbers'},
-        ]])
-
-    def test_the_stack_is_offered_beside_the_widget(self):
-        # The bar is the widget's bottom edge, so above it is the table this
-        # is about. Beside it is empty editor.
-        self.assertIn('snc-py-exp-align="right"',
-                      _tiny_len(self.table(columns=self.COLUMNS)))
-
-    def test_a_computed_column_is_one_of_the_cells(self):
-        # The whole point: a column the user wrote reads the same here as it
-        # does down the table.
-        out = self.table(columns=["$['name']", "len($['name'])"])
-        self.assertEqual(exps_in(_tiny_len(out))[0][1],
-                         "[(x['name'], len(x['name'])) for x in people]")
-
-    def test_one_column_is_what_the_header_already_hands_over(self):
-        # Nothing to make a tuple out of, and the column header says it better.
-        out = self.table(columns=["$['name']"])
-        self.assertEqual(exps_in(_tiny_len(out)), [['len(people)']])
-
-    def test_a_dict_table_offers_the_count_alone(self):
-        d = {'ada': 36, 'grace': 45}
-        out = self.table(d, var_and_exp=('d', 'd'))
-        self.assertEqual(exps_in(_tiny_len(out)), [['len(d)']])
-
-    def test_nothing_without_a_source_expression(self):
-        out = self.table(columns=self.COLUMNS, var_and_exp=None)
-        self.assertNotIn('snc-py-exps', _tiny_len(out))
-
-    def test_the_preview_carries_them_too(self):
-        out = self.table(columns=self.COLUMNS, small=True)
-        self.assertEqual(exps_in(_tiny_len(out)),
-                         [['len(people)',
-                           "[(x['name'], x['age'] * 2) for x in people]",
-                           "[(i, x['name'], x['age'] * 2) "
-                           'for i, x in enumerate(people)]']])
-
-    def test_the_builder_reads_the_columns_it_is_given(self):
-        model = make_pick_model(columns=PICK_COLUMNS, search=None,
-                                tool='normal')
-        self.assertEqual([exp.expr for exp in _table_rows_exps(model, 'strs')],
-                         ['[(x, len(x)) for x in strs]',
-                          '[(i, x, len(x)) for i, x in enumerate(strs)]'])
-
-    def test_the_builder_declines_what_it_has_nothing_to_say_about(self):
-        model = make_pick_model(columns=PICK_COLUMNS, search=None,
-                                tool='normal')
-        self.assertEqual(_table_rows_exps(model, None), [])
-        self.assertEqual(_table_rows_exps(dict(model, columns=['$']), 'strs'),
-                         [])
-        self.assertEqual(_table_rows_exps(dict(model, _is_dict=True), 'strs'),
-                         [])
 
 
 # === Paging: the first page, the last few rows, and the row between ==========
