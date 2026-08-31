@@ -215,14 +215,14 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 # =============================================================================
 #
 # What a visualizer persists -- a table's columns, an object's fields -- is
-# saved with the line of code that produced the value, in a comment above it:
+# saved with the line of code that produced the value, in a trailing comment
+# on that line:
 #
-#     #%click [{"expr": "$['name']"}, {"expr": "$['age']"}]
-#     people = [{'name': 'Alice'}, ...]
+#     people = [{'name': 'Alice'}, ...]  #%click [{"expr": "$['name']"}, {"expr": "$['age']"}]
 #
-# The comment binds to the next non-comment, non-empty line, so blank lines and
-# ordinary comments may come between. Nothing is shared across lines: two lists
-# of dicts on two lines each have their own comment (or none).
+# The comment starts at the first `#%click` that opens the line or follows
+# whitespace, and runs to the end of the line. Nothing is shared across lines:
+# two lists of dicts on two lines each have their own comment (or none).
 #
 # The comment's JSON is a slot list; a slot is one column (for a list,
 # evaluated per item) or one field (for an object, evaluated on the object),
@@ -239,6 +239,12 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 # -- if so, it asks the editor to rewrite the comment.
 
 CONFIG_COMMENT_PREFIX = '#%click'
+
+# The `#%click` must open the line or follow whitespace, and be followed by
+# whitespace or the end of the line -- so `"#%click"` inside a string literal
+# or a `#%clicker` comment is not one. Mirrors CONFIG_COMMENT_RE in snc.ts.
+_CONFIG_COMMENT_RE = re.compile(
+    r'(?:^|(?<=\s))' + re.escape(CONFIG_COMMENT_PREFIX) + r'(?=\s|$)')
 
 _line_slots: 'list | None' = None
 _line_slots_dirty: bool = False
@@ -271,41 +277,24 @@ def format_config_comment(slots: list) -> str:
     return f'{CONFIG_COMMENT_PREFIX} {json.dumps(slots, ensure_ascii=False)}'
 
 
-def _is_config_comment(line_text: str) -> bool:
-    stripped = line_text.lstrip()
-    return (stripped.startswith(CONFIG_COMMENT_PREFIX)
-            and stripped[len(CONFIG_COMMENT_PREFIX):len(CONFIG_COMMENT_PREFIX) + 1] in ('', ' ', '\t'))
-
-
-def config_comment_line(source_code: str, line: int) -> 'int | None':
-    """The 1-indexed line of the `#%click` comment bound to `line`, or None.
-
-    Scans upward over blank lines and comments; the nearest config comment
-    wins. Any code in between means the comment is somebody else's.
-    """
-    lines = source_code.split('\n')
-    if line < 1 or line > len(lines):
-        return None
-    for n in range(line - 1, 0, -1):
-        text = lines[n - 1].strip()
-        if not text:
-            continue
-        if not text.startswith('#'):
-            return None
-        if _is_config_comment(text):
-            return n
-    return None
+def config_comment_index(line_text: str) -> 'int | None':
+    """Index in `line_text` where its `#%click` comment starts, or None."""
+    m = _CONFIG_COMMENT_RE.search(line_text)
+    return m.start() if m else None
 
 
 def parse_config_comment(source_code: str, line: int) -> 'list | None':
-    """The slots bound to `line`, or None when there is no comment or it is
-    unreadable."""
-    n = config_comment_line(source_code, line)
-    if n is None:
+    """The slots on `line`'s trailing comment, or None when there is no
+    comment or it is unreadable."""
+    lines = source_code.split('\n')
+    if line < 1 or line > len(lines):
         return None
-    text = source_code.split('\n')[n - 1].strip()[len(CONFIG_COMMENT_PREFIX):]
+    text = lines[line - 1]
+    i = config_comment_index(text)
+    if i is None:
+        return None
     try:
-        slots = json.loads(text)
+        slots = json.loads(text[i + len(CONFIG_COMMENT_PREFIX):])
     except (json.JSONDecodeError, TypeError):
         return None
     return slots if isinstance(slots, list) else None
@@ -836,9 +825,9 @@ def new_code_command(result, code_imports=None, config=None) -> tuple:
     now.
 
     An optional fourth slot is the config (a slot list -- see "Per-line
-    config") the new line should open with: it lands as a `#%click` comment
-    above the line, so what the visualizer knows about the value it is making
-    is not lost to detection.
+    config") the new line should open with: it lands as a trailing `#%click`
+    comment on the line, so what the visualizer knows about the value it is
+    making is not lost to detection.
 
     Code that needs nothing stays the pair it has always been, so "no third
     slot" reads as "nothing to add" everywhere the command travels.

@@ -135,10 +135,6 @@ export interface NewCodeEdit {
 	// links only its header; the body below belongs to the user. Absent on
 	// incidental edits (e.g. an auto-added import).
 	headerLines?: number;
-	// How many lines of the inserted text come BEFORE the statement -- a
-	// `#%click` config comment the new line opens with. The statement (what
-	// gets linked, and whose name is offered for renaming) starts below them.
-	leadingLines?: number;
 }
 
 export type SNCCommand =
@@ -147,12 +143,11 @@ export type SNCCommand =
 	// the editor's to decide — see pythonImports.ts.
 	| { type: 'NewCode'; triggerLine: number; triggerVisIndex: number; edits: NewCodeEdit[]; imports?: string[] }
 	| { type: 'CopyToClipboard'; text: string }
-	// Rewrite the `#%click` comment that holds the trigger line's visualizer
-	// config (its columns, fields, ...). `comment` is the whole comment text
-	// without indentation; null removes it. The editor finds the existing
-	// comment by the rule the runner reads it with -- the nearest one above
-	// with only blank lines and comments between -- and replaces it, or
-	// inserts a new line above the trigger line.
+	// Rewrite the trailing `#%click` comment that holds the trigger line's
+	// visualizer config (its columns, fields, ...). `comment` is the whole
+	// comment text; null removes it. The editor finds the existing comment by
+	// the rule the runner reads it with -- trailing on the trigger line
+	// itself -- and replaces it, or appends one at the end of the line.
 	| { type: 'SetConfigComment'; comment: string | null; triggerLine: number; triggerVisIndex: number }
 	// The backend supplies expression intent; the editor's linked range remains
 	// authoritative for the concrete assignment target. On semantic action

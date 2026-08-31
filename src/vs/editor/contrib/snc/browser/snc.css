@@ -2801,8 +2801,10 @@
 	margin-top: 5px;
 }
 
-/* The JSON of a `#%click` config comment, folded to a token that reads like a
-   fold placeholder (see SNCController.updateConfigCommentFolding). */
+/* The JSON of a trailing `#%click` config comment, folded to a token that
+   reads like a fold placeholder (see SNCController.updateConfigCommentFolding).
+   Clicking the token opens the comment (onConfigCommentMouseDown), so it gets
+   a pointer cursor and a hover highlight. */
 .monaco-editor .snc-config-payload {
 	display: none;
 }
@@ -2813,7 +2815,10 @@
 	border: 1px solid var(--vscode-editor-foldPlaceholderForeground);
 	border-radius: 3px;
 	font-size: 0.8em;
-	cursor: text;
+	cursor: pointer;
+}
+.monaco-editor .snc-config-ellipsis:hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
 }
 
 /* ---- Toggle-widgets button (editor top-right corner) ---- */

@@ -598,31 +598,31 @@ class TestBuildNewCodeEditsReportsHeaderLines(unittest.TestCase):
 
 class TestNewCodeConfig(unittest.TestCase):
     """A visualizer can send the columns a new line opens with: they land as
-    a `#%click` comment above the statement."""
+    a trailing `#%click` comment on the statement."""
 
-    def test_the_comment_goes_in_above_the_statement(self):
+    def test_the_comment_trails_the_statement(self):
         edits = _build_new_code_edits("xs = [1, 2]\n", 1, "grouped", "group(xs)",
                                       config=['$k', 'len($v)'])
         self.assertEqual(edits, [{
             'type': 'insert', 'afterLine': 1,
-            'text': format_config_comment(['$k', 'len($v)']) + '\ngrouped = group(xs)',
-            'headerLines': 1, 'leadingLines': 1}])
+            'text': 'grouped = group(xs)  ' + format_config_comment(['$k', 'len($v)']),
+            'headerLines': 1}])
 
-    def test_the_comment_takes_the_statements_indentation(self):
+    def test_the_comment_shares_the_statements_line_when_indented(self):
         edits = _build_new_code_edits("if True:\n    xs = [1]\n", 2, "g", "f(xs)",
                                       config=['$'])
-        self.assertEqual(edits[0]['text'].split('\n')[0],
-                         '    ' + format_config_comment(['$']))
+        self.assertEqual(edits[0]['text'],
+                         '    g = f(xs)  ' + format_config_comment(['$']))
 
     def test_no_config_means_no_comment(self):
         edits = _build_new_code_edits("xs = [1]\n", 1, "g", "f(xs)")
-        self.assertNotIn('leadingLines', edits[0])
         self.assertEqual(edits[0]['text'], 'g = f(xs)')
 
     def test_the_command_carries_it_out(self):
         dicts = _commands_to_dicts([('g', 'f(xs)', (), ['$'])], line=1,
                                    idx_in_line=0, model=None, source_code="xs = [1]\n")
-        self.assertEqual(dicts[0]['edits'][0]['leadingLines'], 1)
+        self.assertEqual(dicts[0]['edits'][0]['text'],
+                         'g = f(xs)  ' + format_config_comment(['$']))
         self.assertEqual(dicts[0]['imports'], [])
 
 
@@ -1100,9 +1100,9 @@ class TestSourceSpanReachesTheVisualizer(unittest.TestCase):
 
 
 class TestConfigComment(unittest.TestCase):
-    """A visualizer's saved config lives in a `#%click` comment above its line.
-    The runner reads it for the visualizer and, when the visualizer saves,
-    asks the editor to rewrite it."""
+    """A visualizer's saved config lives in a trailing `#%click` comment on its
+    line. The runner reads it for the visualizer and, when the visualizer
+    saves, asks the editor to rewrite it."""
 
     class _Vis:
         """Is handed its config at init; saves on any event."""
@@ -1146,10 +1146,10 @@ class TestConfigComment(unittest.TestCase):
         cmds = item.get('commands', [])
         return item, cmds
 
-    SRC = '#%click ["$.a"]\nxs = [1]\n'
+    SRC = 'xs = [1]  #%click ["$.a"]\n'
 
     def test_the_comment_is_the_visualizers_config(self):
-        item, cmds = self._log(self.SRC, 2)
+        item, cmds = self._log(self.SRC, 1)
         self.assertEqual(item['model']['loaded'], ['$.a'])
         self.assertEqual(item['model']['path'], [])
         self.assertEqual(item['model']['_config_sig'], config_sig(['$.a']))
@@ -1162,15 +1162,15 @@ class TestConfigComment(unittest.TestCase):
         self.assertEqual(cmds, [])
 
     def test_a_save_asks_the_editor_to_rewrite_the_comment(self):
-        item, _ = self._log(self.SRC, 2)
-        cached = {'line': 2, 'visIndex': 0, 'model': item['model'],
+        item, _ = self._log(self.SRC, 1)
+        cached = {'line': 1, 'visIndex': 0, 'model': item['model'],
                   'events': [{'pythonEventStr': 'X', 'eventJSON': {}}]}
-        item, cmds = self._log(self.SRC, 2, [cached])
+        item, cmds = self._log(self.SRC, 1, [cached])
         expected = [{'expr': '$.x'}]
         self.assertEqual(cmds, [{
             'type': 'SetConfigComment',
             'comment': format_config_comment(expected),
-            'triggerLine': 2, 'triggerVisIndex': 0}])
+            'triggerLine': 1, 'triggerVisIndex': 0}])
         # The model already reflects what the comment will say.
         self.assertEqual(item['model']['_config_sig'], config_sig(expected))
 
@@ -1178,33 +1178,33 @@ class TestConfigComment(unittest.TestCase):
         # One message, not two: the item retires the event from the editor's
         # queue, and a run superseded between an item and a trailing command
         # message would lose the command with the event already retired.
-        item, _ = self._log(self.SRC, 2)
-        cached = {'line': 2, 'visIndex': 0, 'model': item['model'],
+        item, _ = self._log(self.SRC, 1)
+        cached = {'line': 1, 'visIndex': 0, 'model': item['model'],
                   'events': [{'id': 7, 'pythonEventStr': 'X', 'eventJSON': {}}]}
-        item, cmds = self._log(self.SRC, 2, [cached])
+        item, cmds = self._log(self.SRC, 1, [cached])
         self.assertEqual([m['type'] for m in self._last_msgs], ['item'])
         self.assertEqual(item['handledEventIds'], [7])
         self.assertEqual([c['type'] for c in cmds], ['SetConfigComment'])
 
     def test_a_model_survives_a_rerun_while_the_comment_is_what_it_reflects(self):
-        item, _ = self._log(self.SRC, 2)
+        item, _ = self._log(self.SRC, 1)
         model = dict(item['model'], inits=2)
-        cached = {'line': 2, 'visIndex': 0, 'model': model}
-        item, _ = self._log(self.SRC, 2, [cached])
+        cached = {'line': 1, 'visIndex': 0, 'model': model}
+        item, _ = self._log(self.SRC, 1, [cached])
         self.assertEqual(item['model']['inits'], 2)
 
     def test_a_hand_edited_comment_rebuilds_the_model(self):
-        item, _ = self._log(self.SRC, 2)
+        item, _ = self._log(self.SRC, 1)
         model = dict(item['model'], inits=2)
-        cached = {'line': 2, 'visIndex': 0, 'model': model}
-        edited = '#%click ["$.b"]\nxs = [1]\n'
-        item, _ = self._log(edited, 2, [cached])
+        cached = {'line': 1, 'visIndex': 0, 'model': model}
+        edited = 'xs = [1]  #%click ["$.b"]\n'
+        item, _ = self._log(edited, 1, [cached])
         self.assertEqual(item['model']['inits'], 1)
         self.assertEqual(item['model']['loaded'], ['$.b'])
 
     def test_the_config_does_not_leak_to_the_next_line(self):
-        src = '#%click ["$.a"]\nxs = [1]\nys = [2]\n'
-        item, _ = self._log(src, 3)
+        src = 'xs = [1]  #%click ["$.a"]\nys = [2]\n'
+        item, _ = self._log(src, 2)
         self.assertIsNone(item['model']['loaded'])
 
 

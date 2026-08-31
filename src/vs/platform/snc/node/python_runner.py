@@ -309,8 +309,8 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     is 1-indexed (0 means before the first line).
 
     `config` is the slot list the new line opens with, if the visualizer sent
-    one: it goes in as a `#%click` comment above the statement, counted in
-    `leadingLines` so the editor knows the statement starts below it.
+    one: it goes in as a trailing `#%click` comment on the statement's first
+    line -- the line the runner reads it back from.
 
     Handles variable name collision avoidance and indentation matching. What
     the code needs imported travels separately, as the visualizer's own
@@ -339,25 +339,21 @@ def _build_new_code_edits(source_code: str, line: int, suggest_var_name: Optiona
     # Apply base indentation to all lines (supports multi-line statements like for loops)
     assignment_lines = assignment.split('\n')
     if config is not None:
-        assignment_lines.insert(0, format_config_comment(config))
+        assignment_lines[0] += '  ' + format_config_comment(config)
     text = '\n'.join(indent_str + aline for aline in assignment_lines)
-    edit = {"type": "insert", "afterLine": line, "text": text,
-            "headerLines": header_lines}
-    if config is not None:
-        edit["leadingLines"] = 1
-    edits.append(edit)
+    edits.append({"type": "insert", "afterLine": line, "text": text,
+                  "headerLines": header_lines})
 
     return edits
 
 
 @dataclass
 class SetConfigComment:
-    """Ask the editor to rewrite the `#%click` comment bound to the trigger line.
+    """Ask the editor to rewrite the trailing `#%click` comment on the trigger line.
 
-    `comment` is the whole comment text (no indentation); None removes it. The
-    editor finds the existing comment by the same binding rule the runner reads
-    it with -- the nearest config comment above, with only blank lines and
-    comments between -- and replaces it, or inserts a new line above.
+    `comment` is the whole comment text; None removes it. The editor finds the
+    existing comment by the same rule the runner reads it with -- trailing on
+    the line itself -- and replaces it, or appends one at the end of the line.
     """
     comment: Optional[str]
 
@@ -618,7 +614,7 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     finally:
         line_slots, config_dirty = take_line_config()
 
-    # A save is a change to the file: the comment above the line is rewritten
+    # A save is a change to the file: the line's trailing comment is rewritten
     # by the editor, and this model already reflects what it will say.
     #
     # Not under read-only visualizers (clickacode.readOnlyVisualizers): a save is a

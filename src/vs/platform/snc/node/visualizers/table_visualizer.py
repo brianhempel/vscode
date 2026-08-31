@@ -4325,7 +4325,7 @@ def _group_by_expr(col: str, source_expr: str,
 # The grouped dict lands on a line of its own, and what detection would say
 # about one is not what it wants: it asks a dict's VALUES for their fields, and
 # a group answers with a position per element it happens to hold. So the click
-# sends the columns along with the line, as the `#%click` comment it opens with.
+# sends the columns along with the line, as its trailing `#%click` comment.
 _GROUPED_COLUMNS = ['$k', 'len($v)']
 
 

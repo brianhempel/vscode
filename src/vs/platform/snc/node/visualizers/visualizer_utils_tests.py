@@ -22,7 +22,7 @@ from visualizer_utils import (ChildEvent, wrap_child_html, route_child_event,
 from visualizer_utils import (
     parse_slots, parse_slot_cols, save_slots_at_path,
     set_line_config, take_line_config, config_sig,
-    config_comment_line, parse_config_comment, format_config_comment,
+    config_comment_index, parse_config_comment, format_config_comment,
     CONFIG_COMMENT_PREFIX,
     child_nesting_kwargs, too_deep, MAX_NEST_DEPTH,
     opens_block, with_pass_body, without_pass_body,
@@ -757,68 +757,50 @@ class TestLineConfigStore(unittest.TestCase):
 
 
 class TestConfigComment(unittest.TestCase):
-    """A `#%click` comment binds to the next non-comment, non-empty line."""
+    """A `#%click` comment trails the line it configures."""
 
-    def test_directly_above(self):
+    def test_trailing_comment_binds_to_its_own_line(self):
+        src = 'x = 1  #%click ["$.a"]\ny = 2\n'
+        self.assertEqual(config_comment_index('x = 1  #%click ["$.a"]'), 7)
+        self.assertEqual(parse_config_comment(src, 1), ['$.a'])
+
+    def test_it_does_not_bind_to_any_other_line(self):
+        src = 'x = 1  #%click ["$.a"]\ny = 2\n'
+        self.assertIsNone(parse_config_comment(src, 2))
+
+    def test_a_comment_on_its_own_line_binds_to_nothing_below(self):
         src = '#%click ["$.a"]\nx = 1\n'
-        self.assertEqual(config_comment_line(src, 2), 1)
-        self.assertEqual(parse_config_comment(src, 2), ['$.a'])
+        self.assertIsNone(parse_config_comment(src, 2))
 
-    def test_blank_and_comment_lines_between_do_not_break_the_binding(self):
-        src = '#%click ["$.a"]\n\n# note\n   \nx = 1\n'
-        self.assertEqual(config_comment_line(src, 5), 1)
-        self.assertEqual(parse_config_comment(src, 5), ['$.a'])
-
-    def test_code_between_breaks_the_binding(self):
-        src = '#%click ["$.a"]\ny = 2\nx = 1\n'
-        self.assertIsNone(config_comment_line(src, 3))
-        self.assertIsNone(parse_config_comment(src, 3))
-        self.assertEqual(parse_config_comment(src, 2), ['$.a'])
-
-    def test_nearest_comment_wins(self):
-        src = '#%click ["$.a"]\n#%click ["$.b"]\nx = 1\n'
-        self.assertEqual(config_comment_line(src, 3), 2)
-        self.assertEqual(parse_config_comment(src, 3), ['$.b'])
-
-    def test_indented(self):
-        src = 'if True:\n    #%click ["$.a"]\n    x = 1\n'
-        self.assertEqual(config_comment_line(src, 3), 2)
-        self.assertEqual(parse_config_comment(src, 3), ['$.a'])
-
-    def test_nothing_above(self):
-        src = 'x = 1\n#%click ["$.a"]\n'
-        self.assertIsNone(config_comment_line(src, 1))
-        self.assertIsNone(parse_config_comment(src, 1))
+    def test_the_marker_must_stand_alone(self):
+        self.assertIsNone(config_comment_index('x = "#%click"'))
+        self.assertIsNone(config_comment_index('x = 1  #%clicker [1]'))
+        self.assertEqual(config_comment_index('x = 1\t#%click [1]'), 6)
 
     def test_line_out_of_range(self):
-        src = '#%click ["$.a"]\nx = 1\n'
-        self.assertIsNone(config_comment_line(src, 0))
-        self.assertIsNone(config_comment_line(src, 99))
+        src = 'x = 1  #%click ["$.a"]\n'
+        self.assertIsNone(parse_config_comment(src, 0))
         self.assertIsNone(parse_config_comment(src, 99))
 
-    def test_a_trailing_comment_is_not_a_config(self):
-        src = 'y = 2  #%click ["$.a"]\nx = 1\n'
-        self.assertIsNone(config_comment_line(src, 2))
-
     def test_malformed_json_is_no_config(self):
-        src = '#%click [not json\nx = 1\n'
-        self.assertEqual(config_comment_line(src, 2), 1)
-        self.assertIsNone(parse_config_comment(src, 2))
+        src = 'x = 1  #%click [not json\n'
+        self.assertEqual(config_comment_index(src.split('\n')[0]), 7)
+        self.assertIsNone(parse_config_comment(src, 1))
 
     def test_non_list_json_is_no_config(self):
-        src = '#%click {"a": 1}\nx = 1\n'
-        self.assertIsNone(parse_config_comment(src, 2))
+        src = 'x = 1  #%click {"a": 1}\n'
+        self.assertIsNone(parse_config_comment(src, 1))
 
     def test_no_columns_is_a_config(self):
-        src = '#%click []\nx = 1\n'
-        self.assertEqual(parse_config_comment(src, 2), [])
+        src = 'x = 1  #%click []\n'
+        self.assertEqual(parse_config_comment(src, 1), [])
 
     def test_format_round_trips(self):
         slots = [{'expr': "$['name']", 'children': ['$.x']}]
         text = format_config_comment(slots)
         self.assertTrue(text.startswith(CONFIG_COMMENT_PREFIX + ' '))
         self.assertNotIn('\n', text)
-        self.assertEqual(parse_config_comment(text + '\nx = 1\n', 2), slots)
+        self.assertEqual(parse_config_comment('x = 1  ' + text + '\n', 1), slots)
 
     def test_format_keeps_unicode(self):
         self.assertIn('é', format_config_comment(['é']))

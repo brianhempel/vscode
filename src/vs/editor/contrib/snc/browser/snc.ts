@@ -1,7 +1,7 @@
 import { registerEditorContribution, EditorContributionInstantiation, EditorAction, registerEditorAction, ServicesAccessor } from '../../../browser/editorExtensions.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js';
-import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference } from '../../../browser/editorBrowser.js';
+import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference, IEditorMouseEvent, MouseTargetType } from '../../../browser/editorBrowser.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
@@ -3024,17 +3024,33 @@ class LoopSliderWidget extends Disposable implements IOverlayWidget {
  */
 /**
  * The comment a visualizer's saved config lives in -- see "Per-line config"
- * in visualizer_utils.py. Matched as a whole line: a trailing `#%click` on a
- * line of code is not one.
+ * in visualizer_utils.py. It trails the line it configures: `#%click` at the
+ * start of the line or after whitespace (and followed by whitespace or the
+ * end of the line), running to the end of the line. Mirrors
+ * _CONFIG_COMMENT_RE in visualizer_utils.py.
  */
 const CONFIG_COMMENT_PREFIX = '#%click';
-const CONFIG_COMMENT_RE = new RegExp(`^\\s*${CONFIG_COMMENT_PREFIX}(?:\\s|$)`);
+const CONFIG_COMMENT_RE = new RegExp(`(?:^|(?<=\\s))${CONFIG_COMMENT_PREFIX}(?=\\s|$)`);
 
 /**
- * The `#%click` comment bound to `line`: the nearest one above it with only
- * blank lines and comments between (the rule the Python runner reads it by),
- * or 0 when there is none.
+ * Column of the `#` where `lineContent`'s trailing `#%click` comment starts,
+ * or 0 when the line has none.
  */
+function configCommentStartColumn(lineContent: string): number {
+	const match = CONFIG_COMMENT_RE.exec(lineContent);
+	return match ? match.index + 1 : 0;
+}
+
+/**
+ * `lineContent` without its trailing `#%click` comment and the whitespace
+ * separating it from the code, for the places that must see only the code:
+ * linked ranges, takeover checks.
+ */
+function stripConfigComment(lineContent: string): string {
+	const startCol = configCommentStartColumn(lineContent);
+	return startCol ? lineContent.slice(0, startCol - 1).trimEnd() : lineContent;
+}
+
 /** Identifies a widget within a run: its line and its site on that line. */
 function widgetKey(line: number, visIndex: number): string {
 	return `${line}:${visIndex}`;
@@ -3079,22 +3095,6 @@ export function carryForwardItems(items: readonly IVisualizationItem[], currentR
 	return items
 		.filter(item => item.runId === currentRunId || item.execution_step < resumedFromStep)
 		.map(item => item.runId === currentRunId ? item : { ...item, runId: currentRunId });
-}
-
-function configCommentLineAbove(model: ITextModel, line: number): number {
-	for (let ln = Math.min(line, model.getLineCount()) - 1; ln >= 1; ln--) {
-		const text = model.getLineContent(ln).trim();
-		if (text === '') {
-			continue;
-		}
-		if (!text.startsWith('#')) {
-			return 0;
-		}
-		if (CONFIG_COMMENT_RE.test(text)) {
-			return ln;
-		}
-	}
-	return 0;
 }
 
 /** How many lines an insert edit adds; several imports can share one edit. */
@@ -3192,18 +3192,16 @@ function importEdits(model: ITextModel, imports: readonly string[] | undefined):
 	return edits;
 }
 
-function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine: boolean, insertedRange: Range, leadingLines: number = 0): Selection | null {
-	// The statement is what carries a name; a config comment ahead of it
-	// (`leadingLines`) is skipped over.
-	const firstLine = editText.split('\n')[leadingLines] ?? '';
+function computeRenameSelectionForEdit(editText: string, isPrependedToFirstLine: boolean, insertedRange: Range): Selection | null {
+	const firstLine = editText.split('\n')[0] ?? '';
 
 	let baseLine: number;
 	let baseCol: number;
 	if (isPrependedToFirstLine) {
-		baseLine = insertedRange.startLineNumber + leadingLines;
-		baseCol = leadingLines === 0 ? insertedRange.startColumn : 1;
+		baseLine = insertedRange.startLineNumber;
+		baseCol = insertedRange.startColumn;
 	} else {
-		baseLine = insertedRange.startLineNumber + 1 + leadingLines;
+		baseLine = insertedRange.startLineNumber + 1;
 		baseCol = 1;
 	}
 
@@ -3450,6 +3448,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private debounceTimer: any = null;
 	/** The folded-away JSON of each `#%click` comment; see updateConfigCommentFolding. */
 	private readonly configCommentDecorations = this.editor.createDecorationsCollection();
+
+	/**
+	 * The one config comment shown in full, or null. Opened only by clicking
+	 * its chip (onConfigCommentMouseDown); folds again for good once the
+	 * cursor leaves its line, until the next click.
+	 */
+	private openConfigCommentLine: number | null = null;
 	private readonly debounceDelay = 100; // ms
 
 	// Streaming state
@@ -3671,6 +3676,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.clearVisualizationWidgets();
 			this.loopSelections = [];
 			this.lastInteractedWidget = null;
+			this.openConfigCommentLine = null;
 			this.updateToggleWidgetsButton();
 			// Set up language change listener for the new model
 			this.setupLanguageChangeListener();
@@ -3687,10 +3693,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.toggleWidgetsButton?.dispose();
 			this.toggleWidgetsButton = null;
 		}));
-		this._register(editor.onDidChangeCursorPosition(() => {
+		this._register(editor.onDidChangeCursorPosition(e => {
+			// An open config comment folds again as soon as the cursor leaves
+			// its line -- and stays folded until its chip is clicked again.
+			if (this.openConfigCommentLine !== null && e.position.lineNumber !== this.openConfigCommentLine) {
+				this.openConfigCommentLine = null;
+			}
 			this.updateConfigCommentFolding();
 			this.onCursorPositionChanged();
 		}));
+		this._register(editor.onMouseDown(e => { this.onConfigCommentMouseDown(e); }));
 
 		// Register scroll event handler to update overlay widget positions
 		this._register(editor.onDidScrollChange(() => {
@@ -4302,7 +4314,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		let mode: 'takeover' | 'insert' = 'insert';
 		let takeoverText = '';
 		if (nextLine > 0) {
-			const nextContent = editorModel.getLineContent(nextLine);
+			// The line's trailing config comment (if any) is not code: it stays
+			// out of the shape checks, the adopted text, and the linked range.
+			const nextContent = stripConfigComment(editorModel.getLineContent(nextLine));
 			const nextIndent = nextContent.length - nextContent.trimStart().length;
 			// Take over the line an insertion would have landed on: the same
 			// block level, or the first body line when the visualizer sits on a
@@ -4320,7 +4334,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				takeoverText = nextContent.trim();
 				const linkedRange = new Range(
 					nextLine, editorModel.getLineFirstNonWhitespaceColumn(nextLine) || 1,
-					nextLine, editorModel.getLineMaxColumn(nextLine)
+					nextLine, nextContent.length + 1
 				);
 				// Link the existing line first so the ChangeSelectedText that
 				// Python emits in response lands in it.
@@ -5357,7 +5371,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 						mainInverseRange = inv.range;
 					}
 					if (!renameSel) {
-						renameSel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range, edit.leadingLines ?? 0);
+						renameSel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range);
 					}
 				}
 				return renameSel ? [renameSel] : null;
@@ -5376,18 +5390,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const actualTriggerLine = command.triggerLine + linesInsertedAbove;
 
 				// The assignment is always inserted immediately after the (shifted)
-				// trigger line -- below any config comment it opens with. Derive
-				// the linked range directly from that line rather than from
-				// inverse-range arithmetic, which is unreliable across the
-				// multi-region edit when an import is also inserted.
+				// trigger line. Derive the linked range directly from that line
+				// rather than from inverse-range arithmetic, which is unreliable
+				// across the multi-region edit when an import is also inserted.
 				const mainEdit = edits.find(e => e.afterLine === command.triggerLine);
-				const insertedLine = actualTriggerLine + 1 + (mainEdit?.leadingLines ?? 0);
+				const insertedLine = actualTriggerLine + 1;
 				// A statement's body is the user's, so the link covers only the
-				// header lines Python reported.
+				// header lines Python reported -- and not the trailing config
+				// comment the line may open with, which SetConfigComment owns.
 				const lastHeaderLine = insertedLine + Math.max(1, mainEdit?.headerLines ?? 1) - 1;
 				const linkedRange = new Range(
 					insertedLine, model.getLineFirstNonWhitespaceColumn(insertedLine) || 1,
-					lastHeaderLine, model.getLineMaxColumn(lastHeaderLine)
+					lastHeaderLine, stripConfigComment(model.getLineContent(lastHeaderLine)).length + 1
 				);
 				this.establishLinkForRange(linkedRange, actualTriggerLine, command.triggerVisIndex);
 
@@ -5898,9 +5912,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
-	 * Rewrite (or write, or remove) the `#%click` comment above the visualizer's
-	 * line. Replacing in place rather than inserting makes a repeated command
-	 * -- an event replayed across two runs -- harmless.
+	 * Rewrite (or write, or remove) the trailing `#%click` comment on the
+	 * visualizer's line. Replacing in place rather than appending makes a
+	 * repeated command -- an event replayed across two runs -- harmless.
 	 */
 	private handleSetConfigComment(command: Extract<SNCCommand, { type: 'SetConfigComment' }>): void {
 		const model = this.editor.getModel();
@@ -5908,7 +5922,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 		// Where that line is NOW: an import this run inserted above it has
-		// already gone in by the time this lands, and the comment belongs above
+		// already gone in by the time this lands, and the comment belongs on
 		// the line as it stands, not as Python was told about it. Left as
 		// reported when the run had nothing to say about the line -- there is
 		// nothing better to go on, and it is right whenever nothing moved.
@@ -5917,57 +5931,38 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// The file has moved on since the visualizer's line was reported.
 			return;
 		}
-		const existing = configCommentLineAbove(model, boundLine);
-		const text = command.comment === null ? null : this.getLineIndentText(boundLine) + command.comment;
+		const content = model.getLineContent(boundLine);
+		const startCol = configCommentStartColumn(content);
 
 		let edit: { range: Range; text: string };
-		let linesDelta: number;
-		if (existing) {
-			if (text === null) {
-				// The bound line is below it, so there is always a next line to
-				// take the line break from.
-				edit = { range: new Range(existing, 1, existing + 1, 1), text: '' };
-				linesDelta = -1;
+		if (startCol) {
+			if (command.comment === null) {
+				// Take the whitespace separating the comment from the code too.
+				const codeEnd = content.slice(0, startCol - 1).trimEnd().length;
+				edit = { range: new Range(boundLine, codeEnd + 1, boundLine, model.getLineMaxColumn(boundLine)), text: '' };
 			} else {
-				if (model.getLineContent(existing) === text) {
+				if (content.slice(startCol - 1) === command.comment) {
 					return;
 				}
-				edit = { range: new Range(existing, 1, existing, model.getLineMaxColumn(existing)), text };
-				linesDelta = 0;
+				edit = { range: new Range(boundLine, startCol, boundLine, model.getLineMaxColumn(boundLine)), text: command.comment };
 			}
 		} else {
-			if (text === null) {
+			if (command.comment === null) {
 				return;
 			}
-			// Inserted the way NewCode inserts, so the visualizer items below
-			// shift the same way (see adjustVisualizationItemsForContentChange).
-			if (boundLine === 1) {
-				edit = { range: new Range(1, 1, 1, 1), text: text + '\n' };
-			} else {
-				const col = model.getLineMaxColumn(boundLine - 1);
-				edit = { range: new Range(boundLine - 1, col, boundLine - 1, col), text: '\n' + text };
-			}
-			linesDelta = 1;
+			const col = model.getLineMaxColumn(boundLine);
+			edit = { range: new Range(boundLine, col, boundLine, col), text: '  ' + command.comment };
 		}
 
-		// A line coming or going above the visualizer would shift it on screen;
-		// keep its line visually put. (While config comments are hidden the
-		// edit changes no layout and the correction is zero.)
-		const scrollTop = this.editor.getScrollTop();
-		const anchorTop = this.editor.getTopForLineNumber(boundLine);
-		const stabilize = linesDelta !== 0 && !this.editor.hasPendingScrollAnimation();
 		studyLog.withEditOrigin('SetConfigComment', () => model.pushEditOperations([], [edit], () => null));
-		if (stabilize) {
-			const newAnchorTop = this.editor.getTopForLineNumber(boundLine + linesDelta);
-			this.editor.setScrollTop(scrollTop + (newAnchorTop - anchorTop), ScrollType.Immediate);
-		}
 	}
 
 	/**
 	 * Fold each `#%click` comment's JSON down to a `…` token, leaving the
 	 * `#%click` prefix to say what the line is. What the JSON holds is what the
 	 * visualizer shows, so the text is storage rather than something to read.
-	 * A line the cursor is on is shown in full so it can still be edited.
+	 * The one comment the user has clicked open (`openConfigCommentLine`, see
+	 * onConfigCommentMouseDown) is shown in full so it can be edited.
 	 */
 	private updateConfigCommentFolding(): void {
 		const model = this.editor.getModel();
@@ -5975,15 +5970,20 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.configCommentDecorations.clear();
 			return;
 		}
-		const cursorLine = this.editor.getPosition()?.lineNumber;
 		const decorations: IModelDeltaDecoration[] = [];
-		for (const match of model.findMatches(CONFIG_COMMENT_RE.source, false, true, false, null, false)) {
+		const foldedLines = new Set<number>();
+		for (const match of model.findMatches(CONFIG_COMMENT_PREFIX, false, false, true, null, false)) {
 			const ln = match.range.startLineNumber;
-			if (ln === cursorLine) {
+			if (ln === this.openConfigCommentLine || foldedLines.has(ln)) {
 				continue;
 			}
 			const content = model.getLineContent(ln);
-			const payloadStart = content.indexOf(CONFIG_COMMENT_PREFIX) + CONFIG_COMMENT_PREFIX.length + 1;
+			const startCol = configCommentStartColumn(content);
+			if (!startCol) {
+				continue;
+			}
+			foldedLines.add(ln);
+			const payloadStart = startCol - 1 + CONFIG_COMMENT_PREFIX.length + 1;
 			if (payloadStart >= content.length) {
 				continue;
 			}
@@ -5997,6 +5997,29 @@ export class SNCController extends Disposable implements IEditorContribution {
 			});
 		}
 		this.configCommentDecorations.set(decorations);
+	}
+
+	/**
+	 * Open a folded config comment when its chip -- the `#%click …` tail of
+	 * the line -- is clicked. Moving the cursor onto the line is deliberately
+	 * not enough: the JSON is storage, so it stays folded until asked for, and
+	 * once the cursor leaves the line it folds again (see the cursor listener)
+	 * until the next click.
+	 */
+	private onConfigCommentMouseDown(e: IEditorMouseEvent): void {
+		const model = this.editor.getModel();
+		const position = e.target.position;
+		if (!model || !position || e.target.type !== MouseTargetType.CONTENT_TEXT) {
+			return;
+		}
+		if (position.lineNumber === this.openConfigCommentLine) {
+			return;
+		}
+		const startCol = configCommentStartColumn(model.getLineContent(position.lineNumber));
+		if (startCol && position.column >= startCol) {
+			this.openConfigCommentLine = position.lineNumber;
+			this.updateConfigCommentFolding();
+		}
 	}
 
 	/**
