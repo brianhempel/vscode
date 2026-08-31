@@ -5564,6 +5564,18 @@ def _ctx_to_model(ctx: dict, model: dict) -> None:
         start = ctx.get('slice_start', '')
         stop = ctx.get('slice_stop', '')
         model['search'] = f'{start}:{stop}'
+    # The multi branches require a source_expr: only the comprehension forms
+    # carry one, whereas ANY bare expression parses as multi-index through the
+    # greedy find_indices catch-all (see parse_generated_code_or_assignment),
+    # and without the source there is no evidence it was ever a search.
+    elif ctx.get('is_multi_index') and ctx.get('source_expr'):
+        model['search'] = ctx.get('indices_expr', '')
+    elif ctx.get('is_multi_pair_slice') and ctx.get('source_expr'):
+        model['search'] = ctx.get('pairs_expr', '')
+    elif ctx.get('is_broadcast_slice') and ctx.get('source_expr'):
+        start = ctx.get('start_list_expr') or ctx.get('slice_start') or ''
+        stop = ctx.get('stop_list_expr') or ctx.get('slice_stop') or ''
+        model['search'] = f'{start}:{stop}'
     elif ctx.get('is_expr') and ctx.get('expr'):
         model['search'] = ctx['expr']
     elif ctx.get('regex_pattern') is not None:

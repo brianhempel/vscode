@@ -4742,6 +4742,105 @@ class TestRelinkTakeoverOfForeignLine(unittest.TestCase):
         self.assertTrue(changes[0].expression.rstrip().endswith(':'))
 
 
+class TestCtxToModelRestoresSearch(unittest.TestCase):
+    """_ctx_to_model must restore the search text from any parsed line the
+    grammar can produce -- including the multi-index / pair-slice / broadcast
+    forms, which used to fall through to search=None and leave a relinked
+    visualizer with an empty search box (dimming every action)."""
+
+    def _adopt(self, code):
+        from string_visualizer import _ctx_to_model, parse_generated_code_or_assignment
+        parsed, _prefix = parse_generated_code_or_assignment(code)
+        self.assertIsNotNone(parsed, f'expected to parse: {code!r}')
+        model = init_model('hello world')
+        _ctx_to_model(parsed, model)
+        return model
+
+    def test_index_get(self):
+        self.assertEqual(self._adopt('x_result = x[5]')['search'], '5')
+
+    def test_slice_get(self):
+        self.assertEqual(self._adopt('x[2:7]')['search'], '2:7')
+
+    def test_open_slice_delete(self):
+        self.assertEqual(self._adopt("x[:2] + ''")['search'], '2:')
+
+    def test_multi_index_get(self):
+        self.assertEqual(self._adopt('[x[i] for i in [0, 2, 4]]')['search'],
+                         '[0, 2, 4]')
+
+    def test_multi_index_transform_restores_search_and_map(self):
+        model = self._adopt('[(lambda mtch: mtch.upper())(x[i]) for i in idxs]')
+        self.assertEqual(model['search'], 'idxs')
+        self.assertEqual(model['replace_text'], '$.upper()')
+
+    def test_multi_pair_get(self):
+        self.assertEqual(self._adopt('[x[i:j] for i, j in pairs]')['search'],
+                         'pairs')
+
+    def test_broadcast_start_list(self):
+        self.assertEqual(self._adopt('[x[i:7] for i in starts]')['search'],
+                         'starts:7')
+
+    def test_broadcast_stop_list(self):
+        self.assertEqual(self._adopt('[x[2:i] for i in stops]')['search'],
+                         '2:stops')
+
+    def test_broadcast_both_lists(self):
+        self.assertEqual(
+            self._adopt('[x[i:j] for i, j in zip(starts, stops)]')['search'],
+            'starts:stops')
+
+    def test_bare_expression_is_not_mistaken_for_a_search(self):
+        """Any bare expression parses via the greedy multi-index catch-all
+        (see parse_generated_code_or_assignment); without a source_expr there
+        is no evidence it was ever a search, so the search box stays empty."""
+        self.assertIsNone(self._adopt('y = some_str.upper()')['search'])
+
+
+class TestRelinkTakeoverAdoptsIndexLines(unittest.TestCase):
+    """Relink-takeover of index-tool lines: the search box must come back
+    holding the index/slice/indices the line reaches for, and the next
+    interaction must edit the line in place."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+
+    def _take_over(self, text):
+        model = init_model(self.value)
+        return update(make_relink_event('takeover', text=text),
+                      self.var_and_exp, model, self.value, eval_in_scope=eval)
+
+    def test_index_line_restores_search(self):
+        model, commands = self._take_over('x_result = x[5]')
+        self.assertEqual(commands, [])
+        self.assertEqual(model.get('linked_action'), 'find_or_map')
+        self.assertEqual(model.get('search'), '5')
+
+    def test_interaction_after_index_takeover_edits_in_place(self):
+        model, _ = self._take_over('x_result = x[5]')
+        model, commands = update(make_search_box_input_event('7'),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertEqual([(type(c).__name__, c.expression) for c in commands],
+                         [('ChangeSelectedText', 'x[7]')])
+
+    def test_multi_index_line_restores_search(self):
+        model, commands = self._take_over('chars = [x[i] for i in [0, 2]]')
+        self.assertEqual(commands, [])
+        self.assertEqual(model.get('linked_action'), 'find_or_map')
+        self.assertEqual(model.get('search'), '[0, 2]')
+
+    def test_interaction_after_multi_index_takeover_edits_in_place(self):
+        model, _ = self._take_over('chars = [x[i] for i in [0, 2]]')
+        model, commands = update(make_search_box_input_event('[1, 3]'),
+                                 self.var_and_exp, model, self.value,
+                                 eval_in_scope=eval)
+        self.assertEqual([(type(c).__name__, c.expression) for c in commands],
+                         [('ChangeSelectedText', '[x[i] for i in [1, 3]]')])
+
+
 class TestNoUnlinkButtonInActionBar(unittest.TestCase):
     """The unlink affordance moved to the front-end chain icon, so the
     visualizer no longer renders an 'Unlink' action button when linked."""
@@ -12066,6 +12165,13 @@ class TestDSLGetTransformReplace(_ActionTestBase):
         self._roundtrip(self.ACTION, {
             'is_index': True, 'is_slice': False, 'has_replace': True,
             'index_expr': '5', 'source_expr': 'x',
+            'replace_expr': "mtch.upper()",
+        })
+
+    def test_roundtrip_transform_slice(self):
+        self._roundtrip(self.ACTION, {
+            'is_index': False, 'is_slice': True, 'has_replace': True,
+            'slice_start': '2', 'slice_stop': '7', 'source_expr': 'x',
             'replace_expr': "mtch.upper()",
         })
 
