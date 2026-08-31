@@ -19,3 +19,7 @@ In general, ask the human to test UI features. If specifically asked by the user
 ## Type-checking
 
 Use `npm run typecheck-snc` to type-check TypeScript changes. It checks only the Sculpt-n-Code entry points and what they import (`src/tsconfig.snc.json`), in about a second and ~300MB. `npm run typecheck-client` walks all of `src/` and needs ~5GB of memory; only reach for it when you've touched something outside `snc/`. If you add a new SNC entry point (a file nothing in the list imports), add it to `src/tsconfig.snc.json`.
+
+## Git
+
+Never assume an old `git status` (or branch/HEAD snapshot) is still true — the human may have committed, pulled, or edited files while you worked. Always re-check (`git status`, `git log`) immediately before doing any git operations or reasoning about uncommitted changes.
