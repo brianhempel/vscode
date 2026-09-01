@@ -1291,6 +1291,16 @@
 	border-right-width: 1px;
 	vertical-align: top;
 }
+
+.list-table-cell{
+	overflow: hidden;
+
+	& > span {
+		display: flex;
+		width: fit-content;
+	}
+}
+
 /* Last row, whether or not aggregations are present. Avoid double-borders */
 .small > .list-table-scroll > table:not(:has(> tfoot > tr)) > tbody > tr:last-child > td,
 .small > .list-table-scroll > table:has(> tfoot > tr) > tfoot > tr:last-child > td {
@@ -1419,7 +1429,7 @@
 .list-visualizer .col-resize-handle {
 	cursor: ew-resize;
   position: absolute;
-  right: -6px;
+  left: 100%;
   width: 2px;
   height: 100%;
   border-left: 1px solid var(--snc-accent);
