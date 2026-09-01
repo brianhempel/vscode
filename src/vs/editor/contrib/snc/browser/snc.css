@@ -2558,12 +2558,31 @@
 	font-family: var(--snc-code-font-family);
 }
 
-/* Reserve room for the .tool-toolbar so a wide table can't scroll under it.
-   Padding, not margin: the scrollbar belongs on the scrollport's outer edge, and
-   a margin would pull the whole scrollport (scrollbar included) inward and leave
-   the toolbar stranded outside it. Same approach as .string-visualizer. */
-.list-visualizer:not(.small) > .list-table-scroll {
-	padding-right: 22px;
+/* Let a wide table scroll inside its own .list-table-scroll instead of
+   overflowing the widget.
+
+   The scroll container and the .snc-tool-and-visualizer row around it are both
+   width: fit-content, and the widget is white-space: nowrap, so their
+   min-content width is the full table: fit-content never comes down to the
+   widget's max-width and the table just spills out. Capping the row at the
+   widget's width gives the scroller (min-width: auto is 0 for a scroll
+   container) something to shrink into. The passive (small) table used to get
+   away with this only because the widget itself is overflow: hidden there and
+   the wheel handler scrolls it programmatically; the active one had nothing to
+   scroll at all.
+
+   Top level only: a nested table's max-width is set inline by its parent, and a
+   percentage inside a table cell would resolve against the cell.
+
+   The active table also leaves room at the right for the .tool-toolbar, which
+   hangs off the row's right edge (left: calc(100% + 5px), 24px wide + outline),
+   so a wide table's toolbar stays inside the widget rather than past the
+   editor's edge. */
+.monaco-editor .snc-visualization-widget > .list-visualizer > .snc-tool-and-visualizer {
+	max-width: 100%;
+}
+.monaco-editor .snc-visualization-widget > .list-visualizer:not(.small) > .snc-tool-and-visualizer {
+	max-width: calc(100% - 30px);
 }
 
 /* =============================================================================
