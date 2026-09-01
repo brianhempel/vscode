@@ -358,6 +358,22 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// A new press, so any held one is spent -- its own mouseup landed
 			// somewhere the widget never saw.
 			this.unfocusedDragPress = null;
+			// A press on a column resize handle is the start of a resize and
+			// nothing else: not a click that pins focus (the handles show on a
+			// non-focused table too, and a cursor that promises a resize has
+			// to deliver one), and not a mousedown for Python (nothing on the
+			// handle's ancestor chain wants it; the nearest listener above is
+			// the table's own, which would deselect its children). The drag
+			// itself runs on pointer events -- see setupResizableColumns.
+			{
+				const targetNode = ev.target as Node | null;
+				const targetEl = targetNode instanceof Element ? targetNode : (targetNode?.parentElement ?? null);
+				if (targetEl?.closest('.col-resize-handle')) {
+					ev.preventDefault();
+					ev.stopPropagation();
+					return;
+				}
+			}
 			// Small-mode click-to-expand: intercept the first mousedown so the
 			// click pins focus to this line instead of dispatching a Python
 			// event. We swallow the event because the small DOM is structurally
@@ -2757,7 +2773,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				// };
 
 				const augmented_e = { ...e, resizeWidth: currWidth, target: handle };
-				this.dispatch_mouse_python_event('snc-resize-col', augmented_e);
+				// Forced past the focus gate: a resize works on a non-focused
+				// table without pinning focus (see the mousedown listener).
+				this.dispatch_mouse_python_event('snc-resize-col', augmented_e, true);
 
 				mouseX = 0;
 				currWidth = 0;
