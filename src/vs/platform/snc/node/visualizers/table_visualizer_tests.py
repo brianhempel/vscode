@@ -1785,7 +1785,9 @@ class TestTableRendering(unittest.TestCase):
         unescaped = html.unescape(output)
         self.assertIn("$['a']", unescaped)
         self.assertIn("$['b']", unescaped)
-        self.assertIn('<td></td>', output) # missing cell
+        # The missing cell is a <td> with nothing in it; the tag itself
+        # carries the column's name and (if resized) its width.
+        self.assertRegex(output, r'<td[^>]*></td>') # missing cell
 
     def test_string_list_renders_as_table(self):
         lst = ["hello", "world"]
@@ -2361,7 +2363,7 @@ class TestColumnMenu(unittest.TestCase):
         # data-hover-menu would route this to the clone-on-hover path instead of
         # the hoisting path, and the menu would vanish when the pointer left it.
         self.assertNotIn('data-hover-menu', th)
-        self.assertIn('Remove Column', th)
+        self.assertIn('>Remove<', th)
         # Trigger stays visible while its panel is hoisted out of the header.
         self.assertIn('col-menu snc-hover-hidden full-opacity-on-hover open', th)
 
@@ -2884,7 +2886,9 @@ class TestCellDraggablePyExp(unittest.TestCase):
         # No drag wrapper around the focused cell. Asked of the cell rather
         # than the whole table: the row's own handle names this row by its one
         # visible column, which is the same expression from somewhere else.
-        cell = re.search(r'<td>.*?</td>', html_output, re.DOTALL).group(0)
+        cell = next(td for td in re.findall(r'<td[^>]*>.*?</td>', html_output,
+                                            re.DOTALL)
+                    if 'Alice' in td)
         self.assertNotIn(exp_attr("people[0]['name']"), cell)
         self.assertNotIn('class="py-exp-grab"', html_output)
         self.assertNotIn('class="py-exp-cell"', html_output)
@@ -8933,8 +8937,10 @@ class TestColumnSearchRendering(unittest.TestCase):
         return visualize(lst, model, mock_get_visualizer, None)
 
     def search_row(self, th):
-        """The search row's markup: the last thing in the column menu."""
-        return th[th.index('<div class="col-search-area">'):]
+        """The search row's markup: the first thing in the column menu, so it
+        ends where the first action row begins."""
+        start = th.index('<div class="col-search-area">')
+        return th[start:th.index('snc-dropdown-option', start)]
 
     def test_closed_menu_renders_no_search_row(self):
         lst = [{'name': 'Alice'}]
@@ -8951,8 +8957,8 @@ class TestColumnSearchRendering(unittest.TestCase):
         self.assertIn('col-search-op', th)
         self.assertIn('col-search-input', th)
         self.assertIn(html.escape(f'ColumnSearchInput(col={col_at(model)!r}'), th)
-        # The search row comes after the action rows, per the menu's TODO order.
-        self.assertLess(th.index('Remove Column'), th.index('col-search-area'))
+        # The search row heads the menu, ahead of the action rows.
+        self.assertLess(th.index('col-search-area'), th.index('>Remove<'))
 
     def test_chips_show_the_current_choice(self):
         lst = [{'name': 'Alice'}]
@@ -8977,10 +8983,12 @@ class TestColumnSearchRendering(unittest.TestCase):
         self.assertIn('search-box', input_html)
         # The chips paint over the input, so they come after it.
         self.assertLess(row.index('col-search-input'), row.index('col-search-chips'))
-        # The operator reads first, at the box's left edge, the way it reads in
-        # the predicate it writes; how the column composes with the others is a
-        # separate question and sits at the far end.
-        self.assertLess(row.index('col-search-op'), row.index('col-search-chips-right'))
+        # Both chips share the one group at the box's right edge. The operator
+        # reads first, the way it reads in the predicate it writes; how the
+        # column composes with the others is a separate question and sits at
+        # the far end.
+        self.assertEqual(row.count('col-search-chips-right'), 1)
+        self.assertLess(row.index('col-search-chips-right'), row.index('col-search-op'))
         self.assertLess(row.index('col-search-op'), row.index('col-search-compose'))
 
     def test_chip_options_render_only_while_that_chip_is_open(self):
@@ -9543,20 +9551,20 @@ class TestTallyRendering(unittest.TestCase):
                          ['5', '2', '3'])
 
     def test_the_section_says_what_it_is(self):
-        # The title sits on the border, so it reads before everything below it.
+        # The name heads the list, so it reads before everything below it.
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertIn('<div class="col-tally-title"><span '
-                      'class="col-tally-title-text">Tally</span></div>', tally)
-        self.assertLess(tally.index('col-tally-title'),
+        self.assertIn('<span class="col-tally-item-header">Tally</span>', tally)
+        self.assertLess(tally.index('col-tally-list-header'),
                         tally.index('col-tally-row'))
 
     def test_the_two_columns_of_values_are_named(self):
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
         self.assertEqual(
-            re.findall(r'col-tally-(?:item|count)-header">([^<]*)<', tally),
-            ['Items', 'Counts'])
+            [name.strip() for name in
+             re.findall(r'col-tally-(?:item|count)-header">([^<]*)<', tally)],
+            ['Tally', 'Counts'])
         # The names head the list, so they read before it and not among it.
         self.assertLess(tally.index('col-tally-list-header'),
                         tally.index('col-tally-list"'))
@@ -9567,7 +9575,7 @@ class TestTallyRendering(unittest.TestCase):
         lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
         _, model = tally_model(lst)
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertIn('col-tally-title', tally)
+        self.assertIn('col-tally-note', tally)
         self.assertNotIn('col-tally-list-header', tally)
 
     def test_the_tally_comes_after_the_search_row_it_writes_into(self):
@@ -9586,7 +9594,7 @@ class TestTallyRendering(unittest.TestCase):
         # owns the click, so the box only ever reports what the search says.
         lst, model = tally_model()
         boxes = self.checkboxes(self.tally(self.open_menu_html(model, lst)))
-        self.assertEqual(len(boxes), 4)  # one per value, plus Exclude
+        self.assertEqual(len(boxes), 3)  # one per value
         for box in boxes:
             self.assertIn('type="checkbox"', box)
 
@@ -9620,25 +9628,29 @@ class TestTallyRendering(unittest.TestCase):
         self.assertNotIn('disabled', self.checkboxes(rows[0])[0])
         self.assertIn('disabled', self.checkboxes(rows[1])[0])
 
-    def test_the_header_offers_select_all_select_none_and_exclude(self):
+    def test_the_foot_offers_select_all_select_none_and_exclude(self):
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
         self.assertIn(html.escape(repr(TallySelectAll(col=col_at(model)))), tally)
         self.assertIn(html.escape(repr(TallySelectNone(col=col_at(model)))), tally)
         self.assertIn(html.escape(repr(TallyExcludeToggle(col=col_at(model)))), tally)
         self.assertIn('Exclude', tally)
-        # The header reads before the values it acts on.
-        self.assertLess(tally.index('col-tally-controls'),
-                        tally.index('col-tally-row'))
+        # The controls sit under the values they act on, in one strip.
+        self.assertEqual(tally.count('col-tally-controls'), 1)
+        self.assertLess(tally.rindex('col-tally-row'),
+                        tally.index('col-tally-controls'))
+
+    def exclude_chip(self, tally):
+        return re.search(r'<span class="col-tally-exclude[^"]*"', tally).group(0)
 
     def test_exclude_shows_whether_it_is_ticked(self):
-        # It heads the tally, so its box is the first one.
+        # A chip rather than a box: it is ticked by its class, like a row.
         lst, model = tally_model()
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertNotIn(' checked', self.checkboxes(tally)[0])
+        self.assertNotIn(' checked', self.exclude_chip(tally))
         _set_column_search(model, '$', op='!=', text="'c'")
         tally = self.tally(self.open_menu_html(model, lst))
-        self.assertIn(' checked', self.checkboxes(tally)[0])
+        self.assertIn(' checked', self.exclude_chip(tally))
 
     def test_too_many_distinct_values_says_so_instead(self):
         lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
@@ -9757,13 +9769,16 @@ class TestTallyFilterBox(unittest.TestCase):
     def text(self, model):
         return _column_search_row(model, '$')['text']
 
-    def test_the_box_sits_above_the_values_it_narrows(self):
+    def test_the_box_sits_below_the_values_it_narrows(self):
+        # Under the list, above All / None / Exclude: it decides their reach.
         lst, model = tally_model()
         tally = self.tally(model, lst)
         self.assertIn('col-tally-filter', tally)
         self.assertIn(html.escape(f'TallyFilterInput(col={col_at(model)!r}'), tally)
+        self.assertLess(tally.rindex('col-tally-row'),
+                        tally.index('col-tally-filter'))
         self.assertLess(tally.index('col-tally-filter'),
-                        tally.index('col-tally-row'))
+                        tally.index('col-tally-controls'))
 
     def test_typing_narrows_the_values_shown(self):
         lst, model = tally_model()
@@ -9988,13 +10003,17 @@ class TestTallySortMenu(unittest.TestCase):
         self.assertEqual(model['tally_sort'], TALLY_SORT_DEFAULT)
         self.assertEqual(TALLY_SORT_DEFAULT, 'first')
 
-    def test_the_chip_sits_above_the_values_it_orders(self):
+    def test_the_chip_sits_below_the_values_it_orders(self):
+        # In the strip of controls under the list, behind the sort icon that
+        # says what the chip is.
         lst, model = tally_model()
         tally = self.tally(model, lst)
         self.assertIn('col-tally-sort', tally)
-        self.assertIn('Sort:', tally)
-        self.assertLess(tally.index('col-tally-sort'),
-                        tally.index('col-tally-row'))
+        self.assertIn('col-tally-sort-icon', tally)
+        self.assertLess(tally.rindex('col-tally-row'),
+                        tally.index('col-tally-sort-box'))
+        self.assertLess(tally.index('col-tally-sort-icon'),
+                        tally.index('col-tally-sort-value'))
 
     def test_the_chip_shows_the_order_in_force(self):
         lst, model = tally_model()
@@ -12092,13 +12111,23 @@ class TestGroupAggregationMenu(unittest.TestCase):
         return next(lf.expr for lf in _leaf_columns(model['columns'])
                     if lf.splat is not None)
 
-    def panel(self, model, col=None):
+    def panel(self, model, col=None, per_group=False):
+        """The Compute submenu; *per_group* picks its Per Group tab, which
+        is where a splatted column's second box lives."""
         col = col or self.leaf_expr(model)
         model = dict(model, openDropdown={'id': _menu_id('col-menu', col)},
-                     col_search_dropdown=_menu_id('compute', col))
+                     col_search_dropdown=_menu_id('compute', col),
+                     grouped_compute_tab_selected=per_group)
         out = visualize(self.D, model, mock_get_visualizer_dict_tables, None)
         self.assertIn('col-compute-panel', out)
         return out[out.index('col-compute-panel'):]
+
+    def group_boxes(self, panel):
+        """The rows on the Per Group tab, each toggling the per-group box."""
+        return [row for row in re.findall(
+                    r'<div class="col-compute-row[^"]*"[^>]*>.*?</div>',
+                    panel, re.S)
+                if 'per_group=True' in row]
 
     def toggle_cmds(self, model, expr='sum($)', col=None, per_group=False):
         """The same click, keeping what it asked the editor for."""
@@ -12112,15 +12141,22 @@ class TestGroupAggregationMenu(unittest.TestCase):
         return self.toggle_cmds(model, expr, col, per_group)[0]
 
     def test_a_splatted_column_offers_the_second_box(self):
-        out = self.panel(self.model())
-        self.assertIn('col-compute-group-toggle', out)
-        self.assertIn('per_group=True', out)
+        # The menu grows a Per Group tab, and the boxes under it ask the
+        # question of each group. The Table tab keeps to the whole column.
+        m = self.model()
+        out = self.panel(m)
+        self.assertIn('col-compute-tab', out)
+        self.assertIn('Per Group', out)
+        self.assertNotIn('per_group=True', out)
+        self.assertTrue(self.group_boxes(self.panel(m, per_group=True)))
 
     def test_a_column_that_did_not_splat_offers_one_box(self):
         m = self.model({'$k': {}, '$v': {}})
         out = self.panel(m, col='$v')
-        self.assertNotIn('col-compute-group-toggle', out)
+        self.assertNotIn('col-compute-tab', out)
         self.assertNotIn('per_group=True', out)
+        # Nor does asking for the tab conjure one.
+        self.assertNotIn('per_group=True', self.panel(m, col='$v', per_group=True))
 
     def test_ticking_the_second_box_adds_a_column(self):
         m = self.toggle(self.model(), per_group=True)
@@ -12163,9 +12199,8 @@ class TestGroupAggregationMenu(unittest.TestCase):
         m = self.model()
         leaf = _leaf_columns(m['columns'])[-1]
         m['columns'][_group_agg_column(leaf, 'sum($)')] = {}
-        out = self.panel(m, col=leaf.expr)
-        group_boxes = re.findall(
-            r'<span class="col-compute-group-toggle".*?</span>', out, re.S)
+        out = self.panel(m, col=leaf.expr, per_group=True)
+        group_boxes = self.group_boxes(out)
         self.assertTrue(any('checked' in b for b in group_boxes))
 
     def test_an_old_event_without_the_flag_still_means_the_whole_column(self):
@@ -12794,17 +12829,13 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
         self.assertIsNotNone(match, f'no {klass} span in {markup}')
         return match.group(1)
 
-    def test_the_title_hands_over_the_tally(self):
-        lst, model = tally_model()
-        title = self.exp_of(self.tally(model, lst), 'col-tally-title-text')
-        self.assertEqual(exps_in(title), [['Counter(data)']])
-        self.assertIn('draggable="true"', title)
-
     def test_the_headers_hand_over_the_values_and_the_counts(self):
+        # Tally leads with the values it lists, and the whole count reads
+        # under them: there is no title left to hand that over.
         lst, model = tally_model()
         tally = self.tally(model, lst)
         self.assertEqual(exps_in(self.exp_of(tally, 'col-tally-item-header')),
-                         [['list(Counter(data))']])
+                         [['list(Counter(data))', 'Counter(data)']])
         self.assertEqual(exps_in(self.exp_of(tally, 'col-tally-count-header')),
                          [['list(Counter(data).values())']])
 
@@ -12817,9 +12848,11 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 
     def test_the_expressions_say_which_import_they_need(self):
         lst, model = tally_model()
-        attrs = self.exp_of(self.tally(model, lst), 'col-tally-title-text')
-        self.assertEqual(handles_in(attrs)[0][0]['imports'],
-                         ['from collections import Counter'])
+        tally = self.tally(model, lst)
+        for header in ('col-tally-item-header', 'col-tally-count-header'):
+            attrs = self.exp_of(tally, header)
+            self.assertEqual(handles_in(attrs)[0][0]['imports'],
+                             ['from collections import Counter'])
 
     def test_a_column_with_no_source_hands_over_nothing(self):
         lst, model = tally_model()
@@ -12832,9 +12865,9 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
         lst = [str(i) for i in range(TALLY_MAX_CARDINALITY + 1)]
         _, model = tally_model(lst)
         tally = self.tally(model, lst)
-        self.assertIn('col-tally-note', tally)
-        self.assertEqual(exps_in(self.exp_of(tally, 'col-tally-title-text')),
-                         [['Counter(data)']])
+        note = re.search(r'<div class="col-tally-note"([^>]*)>', tally)
+        self.assertIsNotNone(note)
+        self.assertEqual(exps_in(note.group(1)), [['Counter(data)']])
 
     def test_values_that_cannot_be_counted_hand_over_nothing(self):
         lst = [{'a': 1}, {'a': 2}]
@@ -13383,15 +13416,15 @@ class TestAggValues(unittest.TestCase):
         # with each row's own idea of the middle in between; Histogram last,
         # since it is the whole column at once rather than one number out of it.
         self.assertEqual([label for label, _ in COMPUTE_AGGS],
-                         ['#Unique', '#Present', '#Missing', '#NaN',
+                         ['# Unique', '# Present', '# Missing', '# NaN',
                           'Sum', 'Min', 'Min Idx', 'Min Item',
                           'Mean', 'Stddev (Pop)', 'Stddev (Sample)', 'Median',
                           'Percentile', 'Percentile', 'Max', 'Max Idx',
                           'Max Item', 'Histogram'])
 
     def test_each_aggregation_answers(self):
-        for label, expected in [('#Unique', 4), ('#Present', 5), ('#Missing', 0),
-                                ('#NaN', 0), ('Sum', 14),
+        for label, expected in [('# Unique', 4), ('# Present', 5), ('# Missing', 0),
+                                ('# NaN', 0), ('Sum', 14),
                                 ('Min', 1), ('Min Idx', 1), ('Mean', 2.8),
                                 ('Median', 3), ('Max', 5), ('Max Idx', 4)]:
             with self.subTest(label):
@@ -13414,13 +13447,13 @@ class TestAggValues(unittest.TestCase):
 
     def test_present_and_missing_count_the_nones(self):
         values = [1, None, 3, None]
-        self.assertEqual(self.value('#Present', values), 2)
-        self.assertEqual(self.value('#Missing', values), 2)
+        self.assertEqual(self.value('# Present', values), 2)
+        self.assertEqual(self.value('# Missing', values), 2)
 
     def test_a_column_of_strings_still_has_a_min_and_a_count(self):
         values = ['pear', 'apple', 'pear']
         self.assertEqual(self.value('Min', values), 'apple')
-        self.assertEqual(self.value('#Unique', values), 2)
+        self.assertEqual(self.value('# Unique', values), 2)
 
     def test_numpy_resolves_without_the_file_importing_it(self):
         # The user's own program has no numpy in it; the preview still answers.
@@ -13434,8 +13467,8 @@ class TestAggValues(unittest.TestCase):
                                     lambda code: eval(code, {}, {})), 1)
 
     def test_nan_counts_the_nans(self):
-        self.assertEqual(self.value('#NaN', [1.0, float('nan'), 3.0]), 1)
-        self.assertEqual(self.value('#NaN', [1.0, 2.0]), 0)
+        self.assertEqual(self.value('# NaN', [1.0, float('nan'), 3.0]), 1)
+        self.assertEqual(self.value('# NaN', [1.0, 2.0]), 0)
 
     def test_a_row_aggregation_answers_with_the_row_the_column_picked(self):
         # The column is not the list here: the answer is the row the least of
@@ -13492,7 +13525,7 @@ class TestAggNonAnswers(unittest.TestCase):
         self.no_answer('Mean', ['a', 'b'])
 
     def test_unhashable_values_cannot_be_counted_distinctly(self):
-        self.no_answer('#Unique', [{'a': 1}, {'a': 2}])
+        self.no_answer('# Unique', [{'a': 1}, {'a': 2}])
 
     def test_a_column_of_nothing_but_none_has_no_min(self):
         self.no_answer('Min', [None, None])
@@ -14781,9 +14814,11 @@ class TestComputeCodeRendering(ComputePanelCase):
     there is no cell for them to preview."""
 
     def code_rows(self, panel):
-        return re.findall(r'<div class="col-compute-row col-compute-code[^"]*".'
-                          r'*?(?=<div class="col-compute-row|$)', panel,
-                          re.DOTALL)
+        # A code row holds no other div, so its own </div> is the first one
+        # after it opens -- and the rows sit at the end of the panel, where
+        # a lookahead for the next row would run on into the Tally list.
+        return re.findall(r'<div class="col-compute-row col-compute-code[^"]*"'
+                          r'.*?</div>', panel, re.DOTALL)
 
     def test_both_are_listed_after_the_aggregations(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -15008,7 +15043,7 @@ class TestFreeAggregationRendering(ComputePanelCase):
 
     def test_the_empty_row_says_what_it_is_for(self):
         lst, model = tally_model(COMPUTE_LIST)
-        self.assertIn('placeholder="Add aggregation"', self.panel(model, lst))
+        self.assertIn('placeholder="Expr"', self.panel(model, lst))
 
     def test_the_box_says_what_the_dollars_mean(self):
         # The same thing the column search box says of its own.
@@ -15560,25 +15595,39 @@ class SortPanelCase(unittest.TestCase):
 
 
 class TestSortPanelRendering(SortPanelCase):
-    """Four rows: two that rewrite the line, two that write a new one."""
+    """One row per direction that rewrites the line, each with a `+` aside
+    that writes the sorted list as a new line instead."""
 
-    def test_it_lists_the_four_rows_in_order(self):
+    def rewriting(self, panel):
+        """The checkbox rows, one per direction."""
+        return self.rows(panel)[0::2]
+
+    def new_code(self, panel):
+        """Each direction's `+` aside, in the same order."""
+        return self.rows(panel)[1::2]
+
+    def test_it_lists_the_two_directions_each_with_a_new_code_aside(self):
         lst, model = sort_model()
-        self.assertEqual(self.names(self.panel(model, lst)),
-                         ['Asc', 'Desc', 'Asc (new code)', 'Desc (new code)'])
+        panel = self.panel(model, lst)
+        self.assertEqual(self.names(panel), ['Asc', 'Desc'])
+        self.assertEqual(
+            [('col-compute-row-aside' in row) for row in self.rows(panel)],
+            [False, True, False, True])
+        for row in self.new_code(panel):
+            self.assertIn('col-sort-code', row)
+            self.assertIn('data-tooltip="Insert as new code"', row)
 
     def test_only_the_rewriting_rows_have_a_checkbox(self):
         lst, model = sort_model()
         rows = self.rows(self.panel(model, lst))
         self.assertEqual([('col-tally-check' in row) for row in rows],
-                         [True, True, False, False])
+                         [True, False, True, False])
 
     def test_the_new_code_rows_hand_over_the_line_they_write(self):
         lst, model = sort_model()
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn("sorted(data, key=lambda item: item[&#x27;b&#x27;])",
-                      rows[2])
-        self.assertIn('reverse=True', rows[3])
+        asc, desc = self.new_code(self.panel(model, lst))
+        self.assertIn("sorted(data, key=lambda item: item[&#x27;b&#x27;])", asc)
+        self.assertIn('reverse=True', desc)
 
     def test_every_row_hands_its_expression_out_to_the_right(self):
         # A tooltip over a menu row would otherwise cover the rows around it.
@@ -15588,11 +15637,10 @@ class TestSortPanelRendering(SortPanelCase):
 
     def test_the_rewriting_rows_hand_over_what_they_would_make_the_line(self):
         lst, model = sort_model()
-        rows = self.rows(self.panel(model, lst))
+        asc, desc = self.rewriting(self.panel(model, lst))
         self.assertIn(
-            exp_attr("sorted(json.load(f), key=lambda item: item['b'])"),
-            rows[0])
-        self.assertIn('reverse=True', rows[1])
+            exp_attr("sorted(json.load(f), key=lambda item: item['b'])"), asc)
+        self.assertIn('reverse=True', desc)
 
     def test_a_checked_row_still_names_its_own_sort(self):
         # The row names an order, not the click; dragging Asc off a line that
@@ -15600,51 +15648,48 @@ class TestSortPanelRendering(SortPanelCase):
         lst, model = sort_model(
             span=("sorted(json.load(f), key=lambda item: item['b'])",
                   4, 7, 4, 56))
-        rows = self.rows(self.panel(model, lst))
+        asc, _desc = self.rewriting(self.panel(model, lst))
         self.assertIn(
-            exp_attr("sorted(json.load(f), key=lambda item: item['b'])"),
-            rows[0])
+            exp_attr("sorted(json.load(f), key=lambda item: item['b'])"), asc)
 
     def test_with_no_span_they_have_no_expression_to_hand_over(self):
         lst, model = sort_model(span=None)
-        rows = self.rows(self.panel(model, lst))
-        self.assertNotIn('snc-py-exps', rows[0])
-        self.assertNotIn('snc-py-exps', rows[1])
+        for row in self.rewriting(self.panel(model, lst)):
+            self.assertNotIn('snc-py-exps', row)
 
     def test_the_direction_the_line_sorts_in_is_the_checked_row(self):
         lst, model = sort_model(
             span=("sorted(json.load(f), key=lambda item: item['b'])",
                   4, 7, 4, 56))
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn('checked', rows[0])
-        self.assertNotIn('checked', rows[1])
+        asc, desc = self.rewriting(self.panel(model, lst))
+        self.assertIn('checked', asc)
+        self.assertNotIn('checked', desc)
 
     def test_an_unsorted_line_checks_neither(self):
         lst, model = sort_model()
-        rows = self.rows(self.panel(model, lst))
-        self.assertNotIn('checked', rows[0])
-        self.assertNotIn('checked', rows[1])
+        for row in self.rewriting(self.panel(model, lst)):
+            self.assertNotIn('checked', row)
 
     def test_with_no_span_the_rewriting_rows_are_inert(self):
         # A loop variable is bound by its statement, not written on it, so
         # there is no expression to wrap.
         lst, model = sort_model(span=None)
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn('unselectable', rows[0])
-        self.assertIn('unselectable', rows[1])
-        self.assertNotIn('SortClick', rows[0])
+        for row in self.rewriting(self.panel(model, lst)):
+            self.assertIn('unselectable', row)
+            self.assertNotIn('SortClick', row)
 
     def test_the_new_code_rows_still_work_without_a_span(self):
         lst, model = sort_model(span=None)
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn('SortCodeClick', rows[2])
-        self.assertNotIn('unselectable', rows[2])
+        for row in self.new_code(self.panel(model, lst)):
+            self.assertIn('SortCodeClick', row)
+            self.assertNotIn('unselectable', row)
 
     def test_a_list_with_no_source_has_no_line_to_write(self):
         lst, model = sort_model(span=None, source=None)
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn('unselectable', rows[2])
-        self.assertNotIn('SortCodeClick', rows[2])
+        for row in self.new_code(self.panel(model, lst)):
+            self.assertIn('unselectable', row)
+            self.assertNotIn('SortCodeClick', row)
+            self.assertNotIn('snc-py-exps', row)
 
     def test_the_trigger_reads_as_a_flyout_like_compute(self):
         lst, model = sort_model()
@@ -15899,10 +15944,8 @@ class TestSubcolMenuRendering(SubcolPanelCase):
     def test_the_row_sits_under_remove_column(self):
         menu = self.header(self.model(open_submenu=False))
         self.assertEqual(
-            re.findall(r'>(Remove Column|Subcolumns|Sort|Group By This Column|Compute)<',
-                       menu),
-            ['Remove Column', 'Subcolumns', 'Sort', 'Group By This Column',
-             'Compute'])
+            re.findall(r'>(Remove|Subcolumns|Sort|Group By|Compute)<', menu),
+            ['Remove', 'Subcolumns', 'Sort', 'Group By', 'Compute'])
 
     def test_the_panel_is_only_there_when_the_submenu_is_open(self):
         self.assertNotIn('col-subcol-panel',
@@ -15941,7 +15984,7 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         panel = self.panel(self.model())
         free = [r for r in self.rows(panel) if 'col-subcol-free' in r]
         self.assertEqual(len(free), 1)
-        self.assertIn('placeholder="Add subcolumn"', free[0])
+        self.assertIn('placeholder="Subcolumn"', free[0])
         self.assertIn('disabled', free[0])
         self.assertNotIn('SubcolToggle', free[0])
 
@@ -15973,7 +16016,7 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         model = self.model({'$': {}}, lst=[1, 2, 3])
         panel = self.panel(model, lst=[1, 2, 3])
         self.assertEqual(self.names(panel), ['Show all', 'Hide all'])
-        self.assertIn('placeholder="Add subcolumn"', panel)
+        self.assertIn('placeholder="Subcolumn"', panel)
 
 
 from table_visualizer import SplatColumnClick, UnsplatColumnClick
@@ -16026,9 +16069,9 @@ class TestExpandListItemsRow(ExpandRowCase):
         # Subcolumns because splatting is what a splat's sub-columns are read
         # against -- the coarser question of the two.
         self.assertEqual(
-            re.findall(rf'>(Remove Column|{EXPAND_ROW}|Subcolumns|Sort)<',
+            re.findall(rf'>(Remove|{EXPAND_ROW}|Subcolumns|Sort)<',
                        self.menu(self.model())),
-            ['Remove Column', EXPAND_ROW, 'Subcolumns', 'Sort'])
+            ['Remove', EXPAND_ROW, 'Subcolumns', 'Sort'])
 
     def test_it_is_not_offered_where_the_cells_are_not_lists(self):
         self.assertNotIn(EXPAND_ROW,
@@ -16088,10 +16131,10 @@ class TestCollapseListsRow(ExpandRowCase):
 
     def test_it_takes_the_expand_rows_place(self):
         self.assertEqual(
-            re.findall(rf'>(Remove Column|{EXPAND_ROW}|{COLLAPSE_ROW}'
+            re.findall(rf'>(Remove|{EXPAND_ROW}|{COLLAPSE_ROW}'
                        rf'|Subcolumns|Sort)<',
                        self.menu(self.model({f'*{self.SPLIT}': {}}))),
-            ['Remove Column', COLLAPSE_ROW, 'Subcolumns', 'Sort'])
+            ['Remove', COLLAPSE_ROW, 'Subcolumns', 'Sort'])
 
     def test_a_column_of_lists_offers_the_expansion_instead(self):
         menu = self.menu(self.model())
@@ -17072,10 +17115,8 @@ class TestGroupByRow(unittest.TestCase):
             visualize(lst, model, mock_get_visualizer,
                       lambda code: eval(code, {}, {'data': lst})))
         menu = th[th.index('col-menu-panel'):]
-        self.assertEqual(re.findall(r'>(Remove Column|Sort|Group By This Column|Compute)<',
-                                    menu),
-                         ['Remove Column', 'Sort', 'Group By This Column',
-                          'Compute'])
+        self.assertEqual(re.findall(r'>(Remove|Sort|Group By|Compute)<', menu),
+                         ['Remove', 'Sort', 'Group By', 'Compute'])
 
     def test_it_hands_over_the_line_it_writes(self):
         lst, model = group_by_model()
@@ -17342,50 +17383,62 @@ class ConvertPanelCase(unittest.TestCase):
 
 
 class TestConvertPanelRendering(ConvertPanelCase):
-    """Eight rows: four that rewrite the column, four that write another one
-    beside it."""
+    """One row per type that rewrites the column, each with an aside that
+    writes another column beside it instead."""
 
-    def test_it_lists_the_eight_rows_in_order(self):
+    def rewriting(self, panel):
+        """The checkbox rows, one per type."""
+        return self.rows(panel)[0::2]
+
+    def new_column(self, panel):
+        """Each type's new-column aside, in the same order."""
+        return self.rows(panel)[1::2]
+
+    def test_it_lists_the_four_types_each_with_a_new_column_aside(self):
         lst, model = convert_model()
-        self.assertEqual(self.names(self.panel(model, lst)),
-                         ['int', 'float', 'str', 'bool',
-                          'int (new column)', 'float (new column)',
-                          'str (new column)', 'bool (new column)'])
+        panel = self.panel(model, lst)
+        self.assertEqual(self.names(panel), ['int', 'float', 'str', 'bool'])
+        self.assertEqual(
+            [('col-compute-row-aside' in row) for row in self.rows(panel)],
+            [False, True] * 4)
+        for row in self.new_column(panel):
+            self.assertIn('data-tooltip="Insert as a new column"', row)
 
     def test_only_the_rewriting_rows_have_a_checkbox(self):
         lst, model = convert_model()
         rows = self.rows(self.panel(model, lst))
         self.assertEqual([('col-tally-check' in row) for row in rows],
-                         [True] * 4 + [False] * 4)
+                         [True, False] * 4)
 
     def test_an_unconverted_column_checks_nothing(self):
         lst, model = convert_model()
-        for row in self.rows(self.panel(model, lst))[:4]:
+        for row in self.rewriting(self.panel(model, lst)):
             self.assertNotIn('checked', row)
 
     def test_the_type_the_column_already_reads_as_is_the_checked_row(self):
         lst, model = convert_model(columns=["int($['n'])"])
-        rows = self.rows(self.panel(model, lst))
+        rows = self.rewriting(self.panel(model, lst))
         self.assertIn('checked', rows[0])
-        for row in rows[1:4]:
+        for row in rows[1:]:
             self.assertNotIn('checked', row)
 
     def test_every_row_hands_over_the_converted_column(self):
         lst, model = convert_model()
-        rows = self.rows(self.panel(model, lst))
+        rows = self.rewriting(self.panel(model, lst))
         self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[0])
         self.assertIn(exp_attr("[str(item['n']) for item in data]"), rows[2])
 
     def test_the_new_column_rows_hand_over_the_same_expression(self):
         lst, model = convert_model()
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[4])
+        rows = self.new_column(self.panel(model, lst))
+        self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[0])
+        self.assertIn(exp_attr("[str(item['n']) for item in data]"), rows[2])
 
     def test_a_checked_row_still_names_the_column_it_describes(self):
         # The row names a type, not the click; dragging int off a column that
         # already reads as one hands over the column as it stands.
         lst, model = convert_model(columns=["int($['n'])"])
-        rows = self.rows(self.panel(model, lst))
+        rows = self.rewriting(self.panel(model, lst))
         self.assertIn(exp_attr("[int(item['n']) for item in data]"), rows[0])
 
     def test_a_splat_hands_over_the_elements_it_spread(self):
@@ -17423,19 +17476,24 @@ class TestConvertPanelRendering(ConvertPanelCase):
         # Two columns would share one identity, and the second would be a cell
         # nothing could tell from the first.
         lst, model = convert_model(columns=["$['n']", "int($['n'])"])
-        rows = self.rows(self.panel(model, lst))
-        self.assertIn('unselectable', rows[0])
-        self.assertNotIn('ConvertTypeToggle', rows[0])
-        self.assertIn('unselectable', rows[4])
-        self.assertNotIn('ConvertTypeColumnClick', rows[4])
-        self.assertNotIn('unselectable', rows[1])
+        panel = self.panel(model, lst)
+        rewriting, new_column = self.rewriting(panel), self.new_column(panel)
+        self.assertIn('unselectable', rewriting[0])
+        self.assertNotIn('ConvertTypeToggle', rewriting[0])
+        self.assertNotIn('unselectable', rewriting[1])
+        # Neither is the aside: its click would land on nothing, and so it
+        # dims and hands over no code, just as the checkbox row does.
+        self.assertIn('unselectable', new_column[0])
+        self.assertNotIn('ConvertTypeColumnClick', new_column[0])
+        self.assertNotIn('snc-py-exps', new_column[0])
+        self.assertNotIn('unselectable', new_column[1])
 
     def test_the_trigger_reads_as_a_flyout_like_sort(self):
         lst, model = convert_model()
         th = _first_column_header(
             visualize(lst, model, mock_get_visualizer,
                       lambda code: eval(code, {}, {'data': lst})))
-        self.assertIn('>Convert Type<', th)
+        self.assertIn('>Change Type<', th)
         self.assertIn('col-convert-trigger', th)
 
     def test_it_sits_between_group_by_and_compute(self):
@@ -18024,7 +18082,10 @@ class TestColumnDollarIIsTheRowIndex(unittest.TestCase):
         model['_source_span'] = ('data', 0, 4)
         panel = _render_sort_panel('$ * $i', model)
         self.assertNotIn('snc-mouse-down', panel)
-        self.assertEqual(panel.count('unselectable'), 4)
+        self.assertNotIn('snc-py-exps', panel)
+        # Both checkbox rows dim; each direction's `+` aside is held inert by
+        # having no handle at all (its dimming is TestSortPanelRendering's).
+        self.assertEqual(panel.count('col-sort-row unselectable'), 2)
 
     def test_sorting_by_a_plain_column_still_is(self):
         lst = [1, 2, 3]
@@ -18996,7 +19057,10 @@ class TestRowScopedOpsGoInert(unittest.TestCase):
         for target in self.targets(self.SPLAT):
             with self.subTest(target=target):
                 panel = _render_sort_panel(target, model)
-                self.assertEqual(panel.count('unselectable'), 4)
+                # Both checkbox rows dim; each direction's `+` aside is held
+                # inert by having no handle at all.
+                self.assertEqual(panel.count('col-sort-row unselectable'), 2)
+                self.assertNotIn('snc-mouse-down', panel)
                 self.assertNotIn('snc-py-exps', panel)
                 self.assertNotIn('SortClick', panel)
                 self.assertNotIn('SortCodeClick', panel)
@@ -19939,12 +20003,12 @@ class TestAggregationLegend(DollarLegendCase):
 
     def test_a_list_says_what_it_always_said(self):
         out = self.render(self.LIST, submenu='compute')
-        self.assertEqual(box_tooltip(out, 'placeholder="Add aggregation"'),
+        self.assertEqual(box_tooltip(out, 'placeholder="Expr"'),
                          _compute_scope(_LIST_BINDS).legend)
 
     def test_a_dict_names_a_dict(self):
         out = self.render(self.DICT, submenu='compute')
-        self.assertEqual(box_tooltip(out, 'placeholder="Add aggregation"'),
+        self.assertEqual(box_tooltip(out, 'placeholder="Expr"'),
                          _compute_scope(_DICT_BINDS).legend)
 
     def test_the_cell_label_says_the_same_thing_the_menu_did(self):
@@ -19973,7 +20037,7 @@ class TestSubcolLegend(SubcolPanelCase):
 
     def test_the_box_carries_the_legend_for_where_it_sits(self):
         panel = self.panel(self.model())
-        self.assertEqual(box_tooltip(panel, 'placeholder="Add subcolumn"'),
+        self.assertEqual(box_tooltip(panel, 'placeholder="Subcolumn"'),
                          _subcol_scope(self.SPLIT, _LIST_BINDS).legend)
 
     def test_a_top_level_plain_column_calls_the_outer_run_the_row(self):
@@ -20395,14 +20459,13 @@ class TestAddColumnBesideMenu(AddColumnBesideCase):
                           menu)
 
     def test_the_rows_sit_below_remove_column(self):
-        # Beside Remove Column, ahead of everything that asks after the rows:
-        # the three rows that decide which columns exist, together.
+        # Beside Remove, ahead of everything that asks after the rows: the
+        # three rows that decide which columns exist, together.
         menu = _first_column_header(self.render(self.model()))
         self.assertEqual(
-            re.findall(r'>(Add Column Before|Add Column After|Remove Column'
-                       r'|Subcolumns|Sort)<', menu),
-            ['Remove Column', 'Add Column Before', 'Add Column After',
-             'Subcolumns', 'Sort'])
+            re.findall(r'>(Insert Left|Insert Right|Remove|Subcolumns|Sort)<',
+                       menu),
+            ['Remove', 'Insert Left', 'Insert Right', 'Subcolumns', 'Sort'])
 
     def test_a_sub_column_offers_them_too(self):
         split = "$.split(',')"

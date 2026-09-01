@@ -8071,14 +8071,6 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
     Only computed while the menu is open, which is the one time the whole column
     is worth evaluating.
     """
-    def title_html(expr):
-        # The three headers are the section's grab handles: each hands over the
-        # code for what it names, so what the user reads is what they can drag
-        # into the file.
-        return ''
-        # return (f'<div class="col-tally-title"><span class="col-tally-title-text"'
-                # f'{py_exp_attrs(PyExp(expr, TALLY_IMPORTS))}>Tally</span></div>')
-
     source_expr = model.get('_source_expr')
     # The two chips the tally opens itself: resting on the tally is not a way
     # of leaving a menu the tally put there.
@@ -8094,8 +8086,10 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         note_expr = (_tally_counter_expr(col, source_expr, _model_binds(model),
                                          model.get('columns') or {})
                      if tally == TALLY_TOO_MANY and source_expr else None)
-        return (f'<div class="col-tally"{dwell}>{title_html(note_expr)}'
-                f'<div class="col-tally-note">{_TALLY_NOTES[tally]}</div>'
+        note_attrs = ('' if note_expr is None else
+                      py_exp_attrs(PyExp(note_expr, TALLY_IMPORTS)))
+        return (f'<div class="col-tally"{dwell}>'
+                f'<div class="col-tally-note"{note_attrs}>{_TALLY_NOTES[tally]}</div>'
                 f'</div>')
     tally_expr, items_expr, counts_expr = (
         _tally_exprs(col, model, tally, source_expr, eval_in_scope)
@@ -8216,26 +8210,33 @@ def _render_column_tally(col, model, lst, eval_in_scope=None) -> str:
         f'</div>'
         f'</div>'
     )
-    # The filter box stays even when it has hidden everything: it's the way
-    # back to the values.
-    # if rows:
+    # The two headers are the section's grab handles: each hands over the
+    # code for what it names, so what the user reads is what they can drag
+    # into the file. Tally leads with the values it lists and offers the whole
+    # count under them. Headers over nothing hand over nothing.
+    if rows:
+        items_attrs = py_exp_attrs([PyExp(items_expr, TALLY_IMPORTS),
+                                    PyExp(tally_expr, TALLY_IMPORTS)])
+        counts_attrs = py_exp_attrs(PyExp(counts_expr, TALLY_IMPORTS),
+                                    align="right")
+    else:
+        items_attrs = counts_attrs = ''
+    # The header stays even when the boxes have hidden everything: the count
+    # box lives in it, and the boxes are the way back to the values.
     body = (
         f'<div class="col-tally-list-header">'
-        f'<span class="col-tally-item-header"'
-        f'{py_exp_attrs(PyExp(items_expr, TALLY_IMPORTS))}>Tally</span>'
+        f'<span class="col-tally-item-header"{items_attrs}>Tally</span>'
         # Counts sits at the panel's right edge, so its tooltip reads
         # leftwards rather than off the side of the menu.
-        f'<span class="col-tally-count-header"'
-        f'{py_exp_attrs(PyExp(counts_expr, TALLY_IMPORTS), align="right")}'
+        f'<span class="col-tally-count-header"{counts_attrs}'
         f'>Counts {count_html}</span>'
         f'</div>'
-        f'<div class="col-tally-list">'
-        f'{"".join(rows)}'
-        f'</div>'
     )
-    # else:
-    #     body = '<div class="col-tally-note">No values match</div>'
-    return (f'<div class="col-tally"{dwell}>{title_html(tally_expr)}'
+    if rows:
+        body += f'<div class="col-tally-list">{"".join(rows)}</div>'
+    else:
+        body += '<div class="col-tally-note">No values match</div>'
+    return (f'<div class="col-tally"{dwell}>'
             f'{body}{filter_html}{controls_html}'
             f'</div>')
 
@@ -8330,7 +8331,8 @@ def _render_sort_panel(col, model) -> str:
 
 
         row_alt_html = (
-            f'<div class="col-compute-row col-sort-code col-compute-row-aside"'
+            f'<div class="col-compute-row col-sort-code col-compute-row-aside'
+            f'{"" if code else " unselectable"}"'
             f'{py_exp_attrs(code, align="right")}>'
             f'<span class="col-compute-toggle" {click_attr} data-tooltip="Insert as new code">{ICONS['plus']}</span>'
             f'</span>'
@@ -8668,13 +8670,16 @@ def _render_convert_panel(col, model) -> str:
         # writes replaces any conversion the column already has rather than
         # nesting inside it, the way the checkboxes do.
         seg, _ident = _convert_target(col, to)
-        click_attr = (
+        inert = not _convert_writable(columns, col, seg)
+        click_attr = '' if inert else (
             f' snc-mouse-down="'
             f'{html.escape(repr(ConvertTypeColumnClick(col=col, to=to)))}"')
-        code = _convert_values_expr(columns, col, to, source_expr, binds)
+        code = (None if inert else
+                _convert_values_expr(columns, col, to, source_expr, binds))
 
         row_alt_html = (
-            f'<div class="col-compute-row col-convert-row col-compute-row-aside"'
+            f'<div class="col-compute-row col-convert-row col-compute-row-aside'
+            f'{" unselectable" if inert else ""}"'
             f'{py_exp_attrs(code, align="right")}>'
             f'<span class="col-compute-toggle" {click_attr} data-tooltip="Insert as a new column">{ICONS['column-right']}</span>'
             f'</span>'
@@ -8996,7 +9001,8 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
         # Beside Remove Column: the rows that decide which columns exist,
         # ahead of the three that ask questions about the rows. Expand comes
         # first of them, because it decides what a sub-column would even be
-        # read against -- the whole list, or one element of it.        _render_column_restar(col, model, lst, eval_in_scope),
+        # read against -- the whole list, or one element of it.
+        _render_column_restar(col, model, lst, eval_in_scope),
         _render_column_subcols(col, model, lst, get_visualizer,
                                eval_in_scope),
         _render_column_sort(col, model),

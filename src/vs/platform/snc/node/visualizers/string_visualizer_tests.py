@@ -16715,7 +16715,9 @@ class TestLazyRepetitionOptions(unittest.TestCase):
         model = init_model("hello world")
         model['search'] = search
         model['hoverIdx'] = 6
-        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
+        # Dropdown ids are keyed by match as well as segment
+        # (repetition-{match_index}-{segment_index}); only the open one renders.
+        model['openDropdown'] = {'id': 'repetition-0-1', 'segmentIndex': 1}
         return visualize("hello world", model, None, None)
 
     def test_lazy_star_is_the_selected_option_and_the_label(self):
@@ -16743,7 +16745,7 @@ class TestRepetitionOptionTooltips(unittest.TestCase):
         model = init_model("hello world")
         model['search'] = r"r'hello.*world'"
         model['hoverIdx'] = 6
-        model['openDropdown'] = {'id': 'repetition-1', 'segmentIndex': 1}
+        model['openDropdown'] = {'id': 'repetition-0-1', 'segmentIndex': 1}
         html = visualize("hello world", model, None, None)
         for value, label in REPETITION_OPTIONS:
             with self.subTest(option=value):
