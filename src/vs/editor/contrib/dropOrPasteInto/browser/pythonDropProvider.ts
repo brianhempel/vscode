@@ -23,6 +23,7 @@ import { studyLog } from '../../../../platform/snc/common/sncStudyLog.js';
 
 const urllibImport = 'import urllib.request';
 const csvImport = 'import csv';
+const jsonImport = 'import json';
 const pandasImport = 'import pandas as pd';
 
 /** Kind of the "read this into a string" drop edit, shared with its callers. */
@@ -33,12 +34,14 @@ export const sncPyExpDropEditKind = HierarchicalKind.Empty.append('text', 'pytho
 
 /**
  * A file to read from disk, or a URL to read over the network. A spreadsheet is
- * worth reading as the table it is rather than as its bytes, so the tabular
- * formats get their own reads; everything else is text.
+ * worth reading as the table it is rather than as its bytes, and JSON as the
+ * value it encodes, so the structured formats get their own reads; everything
+ * else is text.
  */
 type ReadSource =
 	| { readonly type: 'text'; readonly path: string }
 	| { readonly type: 'csv'; readonly path: string }
+	| { readonly type: 'json'; readonly path: string }
 	| { readonly type: 'excel'; readonly path: string }
 	| { readonly type: 'url'; readonly url: string };
 
@@ -46,6 +49,7 @@ type ReadSource =
 const readKinds = {
 	text: { variablePrefix: 'str', importStatement: undefined, phrase: 'open().read()' },
 	csv: { variablePrefix: 'rows', importStatement: csvImport, phrase: 'csv.reader()' },
+	json: { variablePrefix: 'data', importStatement: jsonImport, phrase: 'json.load()' },
 	excel: { variablePrefix: 'sheets', importStatement: pandasImport, phrase: 'read_excel()' },
 	url: { variablePrefix: 'str', importStatement: urllibImport, phrase: 'urlopen().read()' },
 } as const satisfies Record<ReadSource['type'], { variablePrefix: string; importStatement: string | undefined; phrase: string }>;
@@ -53,12 +57,15 @@ const readKinds = {
 const excelExtensions = ['.xlsx', '.xlsm', '.xlsb', '.xls'];
 
 /** Which read a dropped file's name asks for. */
-function fileReadType(path: string): 'text' | 'csv' | 'excel' {
+function fileReadType(path: string): 'text' | 'csv' | 'json' | 'excel' {
 	const lower = path.toLowerCase();
 	if (excelExtensions.some(extension => lower.endsWith(extension))) {
 		return 'excel';
 	}
-	return lower.endsWith('.csv') ? 'csv' : 'text';
+	if (lower.endsWith('.csv')) {
+		return 'csv';
+	}
+	return lower.endsWith('.json') ? 'json' : 'text';
 }
 
 function pythonStringLiteral(value: string): string {
@@ -72,6 +79,8 @@ function readExpression(source: ReadSource): string {
 			return `open(${pythonStringLiteral(source.path)}).read()`;
 		case 'csv':
 			return `list(csv.reader(open(${pythonStringLiteral(source.path)}, newline='')))`;
+		case 'json':
+			return `json.load(open(${pythonStringLiteral(source.path)}))`;
 		case 'excel': {
 			// Every sheet, because which one holds the data isn't ours to guess.
 			const path = pythonStringLiteral(source.path);
@@ -146,8 +155,9 @@ function importPlacements(model: ITextModel, importStatements: readonly string[]
 /**
  * Drops a file or a URL into Python as a line that reads it.
  *
- * A `.csv` comes in as its rows and a spreadsheet as its sheets, since that is
- * what the file is; anything else is read as text. URLs are read with
+ * A `.csv` comes in as its rows, a `.json` as its parsed value, and a
+ * spreadsheet as its sheets, since that is what the file is; anything else is
+ * read as text. URLs are read with
  * `urllib.request`; the runner caches the response by URL so a rerun on every
  * keystroke doesn't refetch. See `url_cache.py`.
  */
