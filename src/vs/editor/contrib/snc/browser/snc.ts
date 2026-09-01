@@ -1621,35 +1621,51 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// since each move costs a full program run.
 		const dragTrackingEl = startEl?.closest('[snc-notify-mouse-is-up]') ?? null;
 
-		// Where the pointer sits inside grouped text (snc-idx-start), resolved
-		// up front so the walk below can give the group the same nearest-
-		// element precedence as an explicit listener. Handled only as a
-		// post-walk fallback, a click on grouped chars inside a table bubbled
-		// past the string to the list visualizer's DeselectChildren mousedown
-		// and unfocused the child instead of placing the cursor.
+		// Where the pointer sits, resolved to the nearest indexed char element
+		// (snc-idx / snc-idx-start) up front, so the walk below can give it
+		// the same nearest-element precedence as an explicit listener. The
+		// pixel seams between char spans (and the empty area beside a line)
+		// hit-test to a plain container, but the caret still snaps to the
+		// nearest char -- and handled only as a post-walk fallback, a click
+		// on those pixels inside a table bubbled past the string to the list
+		// visualizer's DeselectChildren mousedown and unfocused the child
+		// instead of placing the cursor.
 		const caretRange = document.caretRangeFromPoint(ev.clientX, ev.clientY);
-		let caretGroupEl: Element | null = null;
-		if (caretRange && caretRange.startContainer.nodeType === Node.TEXT_NODE) {
-			let g: Element | null = caretRange.startContainer.parentElement;
-			while (g && g !== this.domNode) {
-				if (g.hasAttribute('snc-idx-start')) {
-					caretGroupEl = g;
-					break;
-				}
-				g = g.parentElement;
+		let caretNode: Node | null = caretRange?.startContainer ?? null;
+		if (caretNode && caretNode.nodeType !== Node.TEXT_NODE && caretNode.childNodes.length > 0) {
+			// A hit on the seam between spans can resolve to the parent with
+			// an offset between its children; take the child at the seam.
+			caretNode = caretNode.childNodes[Math.min(caretRange!.startOffset, caretNode.childNodes.length - 1)];
+		}
+		let caretIdxEl: Element | null = null;
+		let g: Element | null = !caretNode ? null
+			: caretNode.nodeType === Node.ELEMENT_NODE ? caretNode as Element
+			: caretNode.parentElement;
+		while (g && g !== this.domNode) {
+			if (g.hasAttribute('snc-idx-start') || g.hasAttribute('snc-idx')) {
+				caretIdxEl = g;
+				break;
 			}
+			g = g.parentElement;
 		}
 		const dispatchGroupedTextEvent = (groupEl: Element): boolean => {
-			if (!caretRange) { return false; }
 			// Moves over grouped text are drag-only, like the snc-idx shorthand
 			// -- except a grouped match interior (snc-hover-moves) hears idle
 			// hovers too: hovering a match is how its labels appear.
 			if (attr_name === 'snc-mouse-move' && !dragTrackingEl && !groupEl.hasAttribute('snc-hover-moves')) {
 				return false;
 			}
-			const textNode = caretRange.startContainer;
+			const textNode = groupEl.firstChild;
+			if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+				return false;
+			}
 			const textLen = textNode.textContent?.length ?? 1;
-			const offset = Math.min(caretRange.startOffset, textLen - 1);
+			// The caret carries the char offset only when it actually resolved
+			// into this group's text; a seam hit beside the group means its
+			// first char.
+			const offset = caretRange && caretRange.startContainer === textNode
+				? Math.min(caretRange.startOffset, textLen - 1)
+				: 0;
 			const charIndex = parseInt(groupEl.getAttribute('snc-idx-start') ?? '0') + offset;
 			let pythonEventStr: string = {
 				'snc-mouse-move': `MouseMove(${charIndex})`,
@@ -1668,6 +1684,25 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.onPointerEvent(pythonEventStr, ev, charRange.getBoundingClientRect());
 			return true;
 		};
+
+		// A pointer event that lands inside the same visualizer as the caret's
+		// nearest char -- on the pixel seam between two spans, or in the empty
+		// area past the end of a line -- belongs to that char. Start the walk
+		// there; everything from the real target on up still gets its turn.
+		if (caretIdxEl && startEl && startEl.contains(caretIdxEl)
+			&& startEl.closest('.visualizer-container') === caretIdxEl.closest('.visualizer-container')) {
+			el = caretIdxEl;
+		}
+
+		// A click inside a focused visualizer that no listener claims stops at
+		// the visualizer's edge instead of bubbling out: whatever an enclosing
+		// visualizer would make of it (the list visualizer's DeselectChildren,
+		// say), it is not a click on THAT visualizer. Small previews keep
+		// bubbling -- the mousedown that pins their focus is handled outside
+		// them.
+		const mousedownBoundaryEl = attr_name === 'snc-mouse-down'
+			? startEl?.closest('.visualizer-container:not(.small)') ?? null
+			: null;
 
 		while (el && el != this.domNode) {
 			if (el.hasAttribute(attr_name) || el.hasAttribute(`snc-idx`)) {
@@ -1706,7 +1741,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				pythonEventStr = this.wrapWithChildKeys(pythonEventStr, el.parentElement, this.domNode);
 				this.onPointerEvent(pythonEventStr, ev);
 				return;
-			} else if (el === caretGroupEl) {
+			} else if (el.hasAttribute('snc-idx-start')) {
 				// The grouped text under the pointer beats any listener above
 				// it, exactly as an explicit listener here would. A gated move
 				// keeps walking: an ancestor row may be mid-drag and tracking
@@ -1715,14 +1750,16 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					return;
 				}
 			}
+			if (el === mousedownBoundaryEl) {
+				return;
+			}
 			el = el.parentElement;
 		}
 
 		// Fallback: the grouped text under the pointer was not on the target's
-		// ancestor chain (a click in the empty area beside a line lands on the
-		// container while the caret snaps into the nearest text) and nothing
-		// nearer claimed the event.
-		if (caretGroupEl && dispatchGroupedTextEvent(caretGroupEl)) {
+		// ancestor chain (the caret snapped into text the target does not
+		// contain) and nothing nearer claimed the event.
+		if (caretIdxEl && caretIdxEl.hasAttribute('snc-idx-start') && dispatchGroupedTextEvent(caretIdxEl)) {
 			return;
 		}
 
