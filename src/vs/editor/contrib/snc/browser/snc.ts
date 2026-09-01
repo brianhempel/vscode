@@ -20,6 +20,7 @@ import { IMainProcessService } from '../../../../platform/ipc/common/mainProcess
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { FileAccess, Schemas } from '../../../../base/common/network.js';
+import { isMacintosh } from '../../../../base/common/platform.js';
 import { IHostService } from '../../../../workbench/services/host/browser/host.js';
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -5248,7 +5249,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// below -- nothing in Python reads them, and keeping them out of the
 		// payload makes identical moves *identical*, so repeats can be deduped
 		// instead of each costing a program run.
-		const eventJSON = { type: ev.type, buttons: ev.buttons, detail: ev.detail, altKey: ev.altKey, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey, shiftKey: ev.shiftKey };
+		//
+		// On a Mac, ctrl + the primary button IS the right click -- the OS
+		// opens the context menu for it, and a user with a trackpad has no
+		// other way to make one. The ctrl in it is spent on that, so it must
+		// not also read as the Index tool override, which would turn every
+		// such click into a fresh slice selection instead of the click on a
+		// segment it was.
+		const isMacSecondaryClick = isMacintosh && ev.ctrlKey && ev.button === 0 && ev.type === 'mousedown';
+		const eventJSON = { type: ev.type, buttons: ev.buttons, detail: ev.detail, altKey: ev.altKey, ctrlKey: ev.ctrlKey && !isMacSecondaryClick, metaKey: ev.metaKey, shiftKey: ev.shiftKey };
 		const logEventJSON = { ...eventJSON, button: ev.button, offsetY: ev.clientY - rect.top, elementHeight: rect.height, timeStamp: ev.timeStamp };
 
 		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
