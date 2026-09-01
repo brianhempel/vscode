@@ -4592,7 +4592,10 @@ class TestActionButtonsRendering(unittest.TestCase):
         cls = output[trigger_start + len('<span class="'):trigger_end]
         self.assertNotIn('dimmed', cls)
 
-    def test_question_enabled_without_search(self):
+    def test_question_dimmed_without_search(self):
+        # Every row is dimmed without a search, so the trigger is too: a
+        # button that lights up under the mouse and then does nothing is
+        # worse than one that says so.
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = None
@@ -4602,7 +4605,69 @@ class TestActionButtonsRendering(unittest.TestCase):
         trigger_start = output.rfind('<span class="snc-dropdown-trigger', 0, q_pos)
         trigger_end = output.find('"', trigger_start + len('<span class="'))
         cls = output[trigger_start + len('<span class="'):trigger_end]
-        self.assertNotIn('dimmed', cls)
+        self.assertIn('dimmed', cls)
+
+    # --- A click on a menu button fires its first live row ---
+
+    def _menu_button_event(self, output, label):
+        """The mousedown event on the hover-menu button labeled *label*, or
+        None if the button carries none."""
+        import html as _html
+        import re as _re
+        label_pos = output.find(f'<span class="text">{label}</span>')
+        self.assertGreater(label_pos, -1, f"{label} button should be present")
+        trigger_pos = output.rfind('<span class="snc-dropdown-trigger', 0, label_pos)
+        m = _re.search(r'<span ([^>]*class="action-button[^>]*)>', output[trigger_pos:label_pos])
+        self.assertIsNotNone(m, f"{label} trigger should hold an action-button")
+        attrs = _re.search(r'snc-mouse-down="([^"]*)"', m.group(1))
+        return _html.unescape(attrs.group(1)) if attrs else None
+
+    def test_loop_button_click_loops_without_indices(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertEqual(self._menu_button_event(output, 'Loop'),
+                         "ActionButtonClick(action='loop_no_idx', copy=False)")
+
+    def test_loop_button_does_nothing_in_first_match_mode(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIsNone(self._menu_button_event(output, 'Loop'))
+
+    def test_question_button_click_is_any(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertEqual(self._menu_button_event(output, 'Any/All'),
+                         "ActionButtonClick(action='any', copy=False)")
+
+    def test_question_button_does_nothing_without_search(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = None
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIsNone(self._menu_button_event(output, 'Any/All'))
+
+    def test_join_button_click_joins_with_the_empty_separator(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertEqual(self._menu_button_event(output, 'Join'),
+                         "ActionButtonClick(action=\"join:''\", copy=False)")
+
+    def test_join_button_does_nothing_in_first_match_mode(self):
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        model['first_match'] = True
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIsNone(self._menu_button_event(output, 'Join'))
 
     def test_count_enabled_without_search(self):
         lst = [10, 20, 30]

@@ -10896,9 +10896,77 @@ class TestActionButtonRendering(unittest.TestCase):
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         import re as _re
-        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span class="action-button">[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>[^<]*<span class="text">Loop', html_output)
+        m = _re.search(r'<span class="snc-dropdown-trigger ?([^"]*)"><span [^>]*class="action-button"[^>]*>[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>[^<]*<span class="text">Loop', html_output)
         self.assertIsNotNone(m, "Loop trigger should be present")
         self.assertNotIn('dimmed', m.group(1).split())
+
+    # ---- A click on a menu button fires its first live row ------------------
+
+    def _menu_button_event(self, html_output, label):
+        """The mousedown event on the hover-menu button labeled *label*, or None
+        if the button carries none."""
+        import re as _re
+        label_pos = html_output.find(f'<span class="text">{label}</span>')
+        self.assertGreater(label_pos, -1, f"{label} button should be present")
+        trigger_pos = html_output.rfind('<span class="snc-dropdown-trigger', 0, label_pos)
+        m = _re.search(r'<span ([^>]*)class="action-button"', html_output[trigger_pos:label_pos])
+        self.assertIsNotNone(m, f"{label} trigger should hold an action-button")
+        attrs = _re.search(r'snc-mouse-down="([^"]*)"', m.group(1))
+        return _html.unescape(attrs.group(1)) if attrs else None
+
+    def test_loop_button_click_loops_over_matched_strings(self):
+        """With every Loop row live, a click on the button itself takes the first."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertEqual(self._menu_button_event(html_output, 'Loop'),
+                         "ActionButtonClick(action='loop_match_strings', copy=False)")
+
+    def test_loop_button_click_skips_a_dimmed_first_row(self):
+        """A replace predicate dims 'Over matched strings', so the click falls
+        through to 'Over mapped'."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['replace_visible'] = True
+        model['replace_text'] = "$[0].upper()"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertEqual(self._menu_button_event(html_output, 'Loop'),
+                         "ActionButtonClick(action='loop', copy=False)")
+
+    def test_loop_button_does_nothing_when_every_row_is_dimmed(self):
+        """First-match mode dims both rows: the button carries no event, and the
+        trigger is dimmed so it doesn't light up under the mouse."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'1"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIsNone(self._menu_button_event(html_output, 'Loop'))
+
+    def test_any_all_button_click_is_any(self):
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertEqual(self._menu_button_event(html_output, 'Any/All'),
+                         "ActionButtonClick(action='any', copy=False)")
+
+    def test_any_all_button_does_nothing_without_a_search(self):
+        model = init_model(self.value)
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        self.assertIsNone(self._menu_button_event(html_output, 'Any/All'))
+        import re as _re
+        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span [^>]*class="action-button"[^>]*>[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>[^<]*<span class="text">Any/All', html_output)
+        self.assertIsNotNone(m, "Any/All trigger should be present")
+        self.assertIn('dimmed', m.group(1).split())
+
+    def test_menu_button_hands_over_the_code_its_click_writes(self):
+        """The button previews the row it stands in for, like any other button."""
+        model = init_model(self.value)
+        model['search'] = r"r'hello'"
+        model['_source_expr'] = 'x'
+        html_output = visualize(self.value, model, None, None, max_width=400)
+        import re as _re
+        m = _re.search(r'<span snc-mouse-down="ActionButtonClick\(action=&#x27;any&#x27;, copy=False\)"'
+                       r' class="action-button" data-action-expr=', html_output)
+        self.assertIsNotNone(m)
 
     def test_loop_match_strings_disabled_in_replace_mode(self):
         """The 'Over matched strings' loop row is dimmed when a replace/map/filter predicate is set.
@@ -10995,7 +11063,7 @@ class TestActionButtonRendering(unittest.TestCase):
         model['search'] = r"r'hello'"
         html_output = visualize(self.value, model, None, None, max_width=400)
         import re as _re
-        m = _re.search(r'<span class="snc-dropdown-trigger ([^"]*)"><span class="action-button">[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>\s*<span class="text">Any/All', html_output)
+        m = _re.search(r'<span class="snc-dropdown-trigger ?([^"]*)"><span [^>]*class="action-button"[^>]*>[^<]*<svg[^<]*(?:<[^>]*>[^<]*)*?</svg>\s*<span class="text">Any/All', html_output)
         self.assertIsNotNone(m, "Any/All trigger should be present")
         self.assertNotIn('dimmed', m.group(1).split())
 
@@ -16312,6 +16380,26 @@ class TestFetchMenuRender(unittest.TestCase):
     def test_a_dimmed_row_hands_over_nothing(self):
         out = self.render('hello world')
         self.assertNotIn('urlopen', out)
+
+    def button_event(self, out):
+        """The mousedown event on the Fetch button itself, or None."""
+        m = re.search(r'<span class="[^"]*"><span ([^>]*)class="action-button"[^>]*>'
+                      r'<span class="text">Fetch</span>', out)
+        self.assertIsNotNone(m)
+        e = re.search(r'snc-mouse-down="([^"]*)"', m.group(1))
+        return _html.unescape(e.group(1)) if e else None
+
+    def test_a_click_on_the_button_reads_a_url_as_a_string(self):
+        out = self.render(self.URL, var_and_exp=('url1', 'url1'))
+        self.assertEqual(self.button_event(out), repr(FetchClick(source='url', fmt='text')))
+
+    def test_a_click_on_the_button_reads_a_file_as_a_string(self):
+        out = self.render(self.path, var_and_exp=('path1', 'path1'))
+        self.assertEqual(self.button_event(out), repr(FetchClick(source='file', fmt='text')))
+
+    def test_a_click_on_the_button_does_nothing_for_a_string_naming_nowhere(self):
+        out = self.render('hello world')
+        self.assertIsNone(self.button_event(out))
 
     def test_the_menu_is_a_hover_menu_with_hover_submenus(self):
         # The CSS opens the submenus (a hover menu is a static clone the front

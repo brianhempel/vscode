@@ -9754,12 +9754,13 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
             return True
         return bool(_preview_expr(model, action, eval_in_scope))
 
-    def action_btn(label, action, enabled=True, title='', extra_classes=''):
+    def action_btn(label, action, enabled=True, title='', extra_classes='',
+                   linked=False):
         enabled = enabled and writes_code(action)
         cls = 'action-button'
         if not enabled:
             cls += ' dimmed'
-        if linked_action == action:
+        if linked or linked_action == action:
             cls += ' linked'
         if extra_classes:
             cls += ' ' + extra_classes
@@ -9788,6 +9789,26 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
             f'</div>'
         )
+
+    def menu_button(label, panel, rows, title='', linked=False):
+        """A button whose menu opens on hover, and what a click on it does.
+
+        The menu is open by the time the button could be clicked, so the button
+        itself used to be inert. A click now takes the first live row of
+        *rows* ((action, enabled) pairs, in menu order), previewing its code the
+        way a plain button does. With no live row the whole trigger is dimmed,
+        so it neither lights up under the mouse nor answers a click.
+        """
+        default = next((action for action, enabled in rows
+                        if enabled and writes_code(action)), None)
+        if default is None:
+            title_attr = f' title="{html.escape(title)}"' if title else ''
+            button = f'<span class="action-button"{title_attr}>{label}</span>'
+            trigger_cls = 'snc-dropdown-trigger dimmed'
+        else:
+            button = action_btn(label, default, True, title, linked=linked)
+            trigger_cls = 'snc-dropdown-trigger'
+        return f'<span class="{trigger_cls}">{button}{panel}</span>'
 
     parts = []
 
@@ -9821,55 +9842,44 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
 
     # 4. Loop dropdown (hover-menu, panel always rendered with data-hover-menu)
     loop_enabled = pick_array if pick_mode else not (has_search and first)
-    loop_trigger_cls = 'snc-dropdown-trigger' + ('' if loop_enabled else ' dimmed')
     # An array pick is a projection of a row range, so its elements have no
     # meaningful "original index": for a column like len($) they aren't the rows
     # at all, and for a post-band pick the offset lives inside the next(...).
     orig_idx_enabled = loop_enabled and not pick_array
-    loop_rows = ''.join([
-        dropdown_row('No indices', 'loop_no_idx', loop_enabled),
-        dropdown_row('Original indices', 'loop_orig_idx', orig_idx_enabled),
-        dropdown_row('New indices', 'loop_new_idx', loop_enabled),
-    ])
-    parts.append(
-        f'<span class="{loop_trigger_cls}">'
-        f'<span class="action-button" title="For loop over matches">'
-        f'{ICONS["loop"]}<span class="text">Loop</span>'
-        f'</span>'
+    loop_rows = [('loop_no_idx', loop_enabled),
+                 ('loop_orig_idx', orig_idx_enabled),
+                 ('loop_new_idx', loop_enabled)]
+    loop_labels = {'loop_no_idx': 'No indices',
+                   'loop_orig_idx': 'Original indices',
+                   'loop_new_idx': 'New indices'}
+    loop_panel = (
         f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{loop_rows}'
+        f'{"".join(dropdown_row(loop_labels[a], a, e) for a, e in loop_rows)}'
         f'</div>'
-        f'</span>'
     )
+    parts.append(menu_button(
+        f'{ICONS["loop"]}<span class="text">Loop</span>', loop_panel, loop_rows,
+        title='For loop over matches'))
 
     # 5. ? (Any/All) dropdown (hover-menu). Show a live True/False preview of
     # the boolean each option would evaluate to (like the string visualizer).
-    pred_trigger_cls = 'snc-dropdown-trigger'
     any_val, all_val = _compute_predicate_previews(model, eval_in_scope)
     any_suffix = _predicate_suffix(any_val)
     all_suffix = _predicate_suffix(all_val)
     pred_enabled = has_search and not pick_mode
     pred_all_enabled = pred_enabled and not first
-    pred_rows = ''.join([
-        dropdown_row(f'Any{any_suffix}', 'any', pred_enabled),
-        dropdown_row(f'If Any{any_suffix}', 'if_any', pred_enabled),
-        dropdown_row(f'All{all_suffix}', 'all', pred_all_enabled),
-        dropdown_row(f'If All{all_suffix}', 'if_all', pred_all_enabled),
-    ])
-    # Dimmed for pick mode only. Without a search the trigger has always stayed
-    # undimmed (just its rows dim), so leave that alone.
-    if pick_mode:
-        pred_trigger_cls += ' dimmed'
-    parts.append(
-        f'<span class="{pred_trigger_cls}">'
-        f'<span class="action-button" title="Boolean queries">'
-        f'{ICONS["exists"]}<span class="text">Any/All</span>'
-        f'</span>'
+    pred_rows = [('any', pred_enabled), ('if_any', pred_enabled),
+                 ('all', pred_all_enabled), ('if_all', pred_all_enabled)]
+    pred_labels = {'any': f'Any{any_suffix}', 'if_any': f'If Any{any_suffix}',
+                   'all': f'All{all_suffix}', 'if_all': f'If All{all_suffix}'}
+    pred_panel = (
         f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-        f'{pred_rows}'
+        f'{"".join(dropdown_row(pred_labels[a], a, e) for a, e in pred_rows)}'
         f'</div>'
-        f'</span>'
     )
+    parts.append(menu_button(
+        f'{ICONS["exists"]}<span class="text">Any/All</span>', pred_panel, pred_rows,
+        title='Boolean queries'))
 
     # 6. Delete
     delete_lbl = (
@@ -9892,11 +9902,6 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     join_enabled = (pick_array if pick_mode else
                     (not (has_search and first)
                      or _is_plain_slice_search(model, eval_in_scope)))
-    join_trigger_cls = 'snc-dropdown-trigger' + ('' if join_enabled else ' dimmed')
-    join_btn_cls = 'action-button'
-    if linked_action == 'join':
-        join_btn_cls += ' linked'
-
     join_presets = ["''", "' '", "'\\n'", "','", "'\\t'"]
     rows = []
     for sep_expr in join_presets:
@@ -9932,16 +9937,15 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         f'</div>'
     )
 
-    parts.append(
-        f'<span class="{join_trigger_cls}">'
-        f'<span class="{join_btn_cls}" title="Join list items into a string">'
-        f'<span class="text">Join</span>'
-        f'</span>'
+    join_panel = (
         f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
         f'{"".join(rows)}'
         f'</div>'
-        f'</span>'
     )
+    parts.append(menu_button(
+        '<span class="text">Join</span>', join_panel,
+        [(f'join:{sep}', join_enabled) for sep in join_presets],
+        title='Join list items into a string', linked=linked_action == 'join'))
 
     # 8. Find Indices (disabled for single-index searches — the index is already known)
     indices_lbl = (

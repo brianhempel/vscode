@@ -3923,7 +3923,13 @@ def _readings(expr: str, also=()):
 
 def _action_btn(label: str, action: str, enabled: bool = True,
                 expr: str = '', linked: bool = False, also=()) -> str:
-    event = repr(ActionButtonClick(action=action, copy=False))
+    return _event_btn(label, repr(ActionButtonClick(action=action, copy=False)),
+                      enabled, expr, linked, also)
+
+
+def _event_btn(label: str, event: str, enabled: bool = True,
+               expr: str = '', linked: bool = False, also=()) -> str:
+    """A button in the action bar: what it says, what it sends, what it writes."""
     cls = 'action-button'
     if not enabled:
         cls += ' dimmed'
@@ -3981,6 +3987,27 @@ def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '',
                   also=()) -> str:
     return _menu_row(label, repr(ActionButtonClick(action=action, copy=False)),
                      enabled, expr, also)
+
+
+def _menu_button(label: str, panel: str, default=None,
+                 linked: bool = False) -> str:
+    """A button whose menu opens on hover, and what a click on it does.
+
+    The menu is already open by the time the button could be clicked, so the
+    button itself used to be inert. Now a click takes *default*: the first row
+    of the menu that is live, as (event, what it writes, its other readings),
+    the way a plain button carries its own. With no live row there is nothing
+    a click could do, so the whole trigger is dimmed and doesn't light up under
+    the mouse.
+    """
+    if default is None:
+        button = f'<span class="action-button">{label}</span>'
+        cls = 'snc-dropdown-trigger dimmed'
+    else:
+        event, expr, also = default
+        button = _event_btn(label, event, True, expr, linked=linked, also=also)
+        cls = 'snc-dropdown-trigger'
+    return f'<span class="{cls}">{button}{panel}</span>'
 
 
 def _every_row_action_exps(model: dict, action: str, eval_in_scope,
@@ -4133,15 +4160,19 @@ def _render_fetch_button(model: dict, value: str, every_row_exps=None) -> str:
     live = {'url': _names_a_url(value), 'file': _names_a_file(value)}
 
     rows = []
+    default = None
     for source, label, formats in FETCH_MENUS:
         enabled = bool(source_expr) and live[source]
         format_rows = []
         for fmt, fmt_label, _, _ in formats:
             code = _fetch_code(source_expr, source, fmt) if enabled else None
+            event = repr(FetchClick(source=source, fmt=fmt))
+            also = _fetch_row_exps(source, fmt, every_row_exps) if code else ()
             format_rows.append(_menu_row(
-                html.escape(fmt_label), repr(FetchClick(source=source, fmt=fmt)),
-                enabled, code[1] if code else '',
-                also=_fetch_row_exps(source, fmt, every_row_exps) if code else ()))
+                html.escape(fmt_label), event, enabled,
+                code[1] if code else '', also=also))
+            if code and default is None:
+                default = (event, code[1], also)
         rows.append(
             f'<div class="snc-dropdown-trigger fetch-submenu'
             f'{"" if enabled else " dimmed"}">'
@@ -4158,12 +4189,7 @@ def _render_fetch_button(model: dict, value: str, every_row_exps=None) -> str:
         f'<div class="snc-dropdown-panel left fetch-menu-panel has-submenu"'
         f' snc-dropdown-align="left" data-hover-menu>{"".join(rows)}</div>'
     )
-    enabled = bool(source_expr) and any(live.values())
-    return (
-        f'<span class="snc-dropdown-trigger{"" if enabled else " dimmed"}">'
-        f'<span class="action-button"><span class="text">Fetch</span></span>'
-        f'{panel}</span>'
-    )
+    return _menu_button('<span class="text">Fetch</span>', panel, default)
 
 
 def _ctx_is_index_or_slice(ctx: dict | None) -> bool:
@@ -4254,6 +4280,14 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
                              expr(action) if enabled else '',
                              also=also(action) if enabled else ())
 
+    def first_live(rows):
+        """What a click on the menu's button does: its first live row."""
+        for action, enabled in rows:
+            if enabled:
+                return (repr(ActionButtonClick(action=action, copy=False)),
+                        expr(action), also(action))
+        return None
+
     # The 'loop' action loops over `val` (transformed) when has_replace, else over
     # `mtch` (match objects). Mirror the find_or_map button's label switch
     # (Match Objects <-> Map Matches) on replace_visible so opening the replace box
@@ -4265,12 +4299,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         f'{loop_row(over_match_label, "loop", loop_enabled)}'
         f'</div>'
     )
-    loop_btn = (
-        f'<span class="snc-dropdown-trigger {"" if loop_enabled or loop_match_strings_enabled else "dimmed"}">'
-        f'<span class="action-button">{ICONS['loop']}<span class="text">Loop</span></span>'
-        f'{loop_panel}</span>'
-    )
-    parts.append(loop_btn)
+    parts.append(_menu_button(
+        f'{ICONS["loop"]}<span class="text">Loop</span>', loop_panel,
+        first_live([('loop_match_strings', loop_match_strings_enabled),
+                    ('loop', loop_enabled)])))
 
     # Predicate dropdown (Any/If Any/All/If All)
     any_val, all_val = _compute_predicate_previews(
@@ -4301,12 +4333,10 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
         f'{predicate_row(f"If All{all_suffix}", "if_all", all_enabled)}'
         f'</div>'
     )
-    predicate_btn = (
-        f'<span class="snc-dropdown-trigger {"" if any_enabled or all_enabled else "dimmed"}">'
-        f'<span class="action-button">{ICONS["exists"]}<span class="text">Any/All</span></span>'
-        f'{predicate_panel}</span>'
-    )
-    parts.append(predicate_btn)
+    parts.append(_menu_button(
+        f'{ICONS["exists"]}<span class="text">Any/All</span>', predicate_panel,
+        first_live([('any', any_enabled), ('if_any', any_enabled),
+                    ('all', all_enabled), ('if_all', all_enabled)])))
 
     # Delete is disabled in Pick mode (user is composing an extraction
     # expression via segment chips) and when the Replace box is open
