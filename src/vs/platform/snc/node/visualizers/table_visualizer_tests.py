@@ -73,8 +73,8 @@ from table_visualizer import (
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
     ColumnKeyDown, ExpandToggle, PinFocus,
     CELL_KEY_SEP, SUBCOL_SEP,
-    CopyToClipboard, ChangeSelectedText,
-    save_columns_config,
+    CopyToClipboard, ChangeSelectedText, ColumnResize,
+    save_columns_config, get_col_width_style,
     _get_column_suggestions, _get_all_possible_columns,
     Row, _rows, _row_at, _sample_indices, _split_splat, _is_valid_python_expression,
     _table_child_value_getter, _leaf_columns, _leaf_for, _column_groups,
@@ -2669,6 +2669,48 @@ class TestColumnConfig(unittest.TestCase):
             take_line_config(),
             ([{'expr': '$'}, {'expr': "$['name']"}, {'expr': "$['x']"}], True))
 
+    def test_a_column_resize_saves_its_width_with_the_column(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        update(make_column_mouse_event(repr(ColumnResize(col="$['name']", width=120))),
+               None, model, lst, mock_get_visualizer)
+        self.assertEqual(
+            take_line_config(),
+            ([{'expr': '$'}, {'expr': "$['name']", 'width': 120}], True))
+        self.assertEqual(model['columns']["$['name']"], {'width': 120})
+
+    def test_a_sub_column_resize_saves_into_the_splat_cols(self):
+        lst = {'a': [{'who': 'x'}]}
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=[{'expr': '*$v', 'cols': ["$['who']"]}])
+        leaf = f"*$v{SUBCOL_SEP}$['who']"
+        update(make_column_mouse_event(repr(ColumnResize(col=leaf, width=77))),
+               None, model, lst, mock_get_visualizer)
+        self.assertEqual(
+            take_line_config(),
+            ([{'expr': '*$v', 'cols': [{'expr': "$['who']", 'width': 77}]}], True))
+        self.assertEqual(get_col_width_style(leaf, model),
+                         ' style="min-width: 77px; max-width: 77px; overflow: hidden;"')
+
+    def test_a_saved_width_loads_and_renders(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=[{'expr': "$['name']", 'width': 120}, "$['age']"])
+        self.assertEqual(model['columns'],
+                         {"$['name']": {'width': 120}, "$['age']": {}})
+        html_str = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('min-width: 120px; max-width: 120px', html_str)
+        # Reading is not a change.
+        self.assertFalse(take_line_config()[1])
+
+    def test_a_hand_edited_width_that_is_not_a_size_is_ignored(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=[{'expr': "$['name']", 'width': 'wide'},
+                                         {'expr': '$', 'width': -5}])
+        self.assertEqual(model['columns'], {"$['name']": {}, '$': {}})
+        self.assertEqual(get_col_width_style("$['name']", model), '')
+
 
 class TestColumnVisualize(unittest.TestCase):
     """Test HTML rendering of column management controls in table mode."""
@@ -2691,6 +2733,20 @@ class TestColumnVisualize(unittest.TestCase):
         self.assertIn(
             f'DropdownToggle(dropdown_id={html.escape(repr(menu_id(model)))})',
             output)
+
+    def test_each_header_after_the_first_has_a_left_handle_for_its_neighbour(self):
+        # A boundary is grabbable from either side, and each side belongs to
+        # the header it is in: the right handle resizes its own column, the
+        # left handle the column before it. So the first header has no left
+        # handle, and every other header's left handle names its neighbour.
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=["$['name']", "$['age']"])
+        output = visualize(lst, model, mock_get_visualizer, None)
+        left = re.findall(r'<span snc-resize-col="([^"]*)"[^>]*class="col-handle col-resize-handle col-resize-left"',
+                          output)
+        self.assertEqual(left, [html.escape(repr(ColumnResize(col="$['name']", width=0)))])
+        self.assertIn(f'data-resize-col="{repr(html.escape("$[\'name\']"))}"', output)
 
     def test_table_headers_have_drag_handle(self):
         lst = [{'name': 'Alice'}]
@@ -11733,6 +11789,18 @@ class TestNestedColumnsRoundTrip(unittest.TestCase):
             entry = {'expr': '*$.x', 'cols': [entry]}
         cols = _columns_from_slots(['*$.x'], parse_slot_cols([entry]))
         self.assertLessEqual(_header_depth(cols), MAX_SPLAT_DEPTH + 1)
+
+    def test_a_width_rides_on_the_slot(self):
+        cols = {'$.name': {'width': 120},
+                '*$.teams': {'width': 90, 'cols': {'$.title': {'width': 40},
+                                                   '$.size': {}}}}
+        slots = _slots_from_columns(cols)
+        self.assertEqual(slots,
+                         [{'expr': '$.name', 'width': 120},
+                          {'expr': '*$.teams', 'width': 90,
+                           'cols': [{'expr': '$.title', 'width': 40}, '$.size']}])
+        model = init_model([], mock_get_visualizer, slots_config=slots)
+        self.assertEqual(model['columns'], cols)
 
 
 class TestNestedRendering(unittest.TestCase):

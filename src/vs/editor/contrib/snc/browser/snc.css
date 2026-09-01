@@ -1411,6 +1411,10 @@
 
 .list-visualizer th.col-header {
 	text-align: left;
+	/* The resize handle is absolutely positioned against its header cell, so
+	   every header cell has to be the anchor -- not just the pinned ones the
+	   sticky-header rule above happens to make relative. */
+	position: relative;
 }
 
 .list-visualizer .col-handle {
@@ -1426,14 +1430,53 @@
 	pointer-events: none;
 }
 
+/* A column boundary is grabbable from either side, six pixels each way (the
+   header's own padding, so it covers no control), and each side is a handle
+   in the header it lies in: the right-edge handle resizes its own column, the
+   left-edge one the column before it. So the pointer lights the controls of
+   whichever header it is actually over, and never has to cross the line to
+   find the handle. The line the user sees stays hairline, on the edge.
+
+   Hit-testable always, unlike the other handles: revealed only once its
+   header was hovered, the handle would be a target one move late. Hovering
+   it hovers its header, which is what reveals it. */
 .list-visualizer .col-resize-handle {
 	cursor: ew-resize;
-  position: absolute;
-  left: 100%;
-  width: 2px;
-  height: 100%;
-  border-left: 1px solid var(--snc-accent);
-  z-index: 100;
+	pointer-events: auto;
+	position: absolute;
+	top: 0;
+	width: 7px;
+	padding: 0;
+	height: 100%;
+	z-index: 100;
+}
+
+/* Each reaches one pixel past its cell: the cells' collapsed border lies
+   between their padding boxes, and a handle stopping at its own edge would
+   leave that line itself dead. The two meet over it. */
+.list-visualizer .col-resize-right {
+	right: -1px;
+}
+
+.list-visualizer .col-resize-left {
+	left: -1px;
+}
+
+.list-visualizer .col-resize-handle::after {
+	content: '';
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 1px;
+	background: var(--snc-accent);
+}
+
+.list-visualizer .col-resize-right::after {
+	right: 0;
+}
+
+.list-visualizer .col-resize-left::after {
+	left: 0;
 }
 
 .col-header:hover > .col-header-inner > .col-handle {
@@ -1468,6 +1511,11 @@
 	align-items: center;
 	gap: 3px;
 	width: 100%;
+	/* A resized column's header clips here rather than on the <th>: the <th>
+	   anchors the resize handle, which hangs past the cell's edge, and an
+	   overflow clip on the anchor would cut the handle in half. This wrapper
+	   isn't positioned, so it clips the flow content and leaves the handle. */
+	overflow: hidden;
 }
 
 .snc-dropdown-trigger > .open { /* hmmm, only some list col buttons have the .open class */

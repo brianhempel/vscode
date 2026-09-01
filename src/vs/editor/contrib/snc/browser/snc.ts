@@ -2720,11 +2720,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const resiable_col_handles = Array.from(this.domNode.querySelectorAll<HTMLElement>('.col-resize-handle')).filter(dom.isHTMLElement);
 
 		for (const handle of resiable_col_handles) {
-			const col = handle.closest<HTMLElement>('.col-header');
-			const table = col?.closest<HTMLElement>('.list-table-scroll');
-			if (!col || !table) { continue; }
+			const header = handle.closest<HTMLElement>('.col-header');
+			const table = header?.closest<HTMLElement>('.list-table-scroll');
+			if (!header || !table) { continue; }
 
-			const col_attr = col.dataset['col']!;
+			// A header's left-edge handle resizes the column BEFORE it (see
+			// _render_column_header), named in data-resize-col; the right-edge
+			// handle resizes the header's own column.
+			const col_attr = handle.dataset['resizeCol'] ?? header.dataset['col']!;
+			const col = handle.dataset['resizeCol'] === undefined ? header
+				: table.querySelector<HTMLElement>('th[data-col="' + CSS.escape(col_attr) + '"]');
+			if (!col) { continue; }
 			const cells = Array.from(table.querySelectorAll<HTMLElement>('td[data-col="' + CSS.escape(col_attr) + '"]'));
 
 			let currWidth = 0;
@@ -2765,8 +2771,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				[...cells, col!].forEach(cell => {
 					cell.style.maxWidth = `${currWidth}px`;
 					cell.style.minWidth = `${currWidth}px`;
-					cell.style.overflow = 'hidden';
 				});
+				// The header clips through .col-header-inner instead (see
+				// get_col_width_style): a clip on the <th> would cut off the
+				// handle being dragged.
+				cells.forEach(cell => { cell.style.overflow = 'hidden'; });
 			};
 
 

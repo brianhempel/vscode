@@ -28,6 +28,9 @@ Columns shown in the table are configurable and persisted:
 
 1. THE LINE'S #%click COMMENT (see visualizer_utils, "Per-line config"):
    - A slot list; the runner hands it to init_model as `slots_config`
+   - A slot is a bare expr, or {"expr": ..., "width": px, "cols": [...]}:
+     `width` is a column the user dragged to a size, `cols` a splat's
+     sub-columns (see _slots_from_columns)
    - Highest priority: user-customized columns, for this line only
    - A save goes into the line's config store; the runner turns it into a
      rewrite of the comment
@@ -711,6 +714,40 @@ def _col_subs(columns, col: str) -> dict:
     return (columns.get(col) or {}).get('cols') or {}
 
 
+def _leaf_config(columns, leaf_expr: str) -> 'dict | None':
+    """The config dict of the column a LEAF draws, or None when there is no
+    such column.
+
+    A leaf's identity is its path from the root joined by SUBCOL_SEP (see
+    _leaf_columns), so this walks that path down through each level's `cols`.
+    The dict handed back is the live one, so a caller may write into it --
+    which is how a resize lands where the columns are saved from.
+    """
+    if not isinstance(columns, dict):
+        return None
+    config = None
+    for step in leaf_expr.split(SUBCOL_SEP):
+        if step not in columns:
+            return None
+        config = columns[step]
+        if config is None:
+            config = columns[step] = {}
+        columns = config.get('cols') or {}
+    return config
+
+
+def _valid_width(width) -> 'int | None':
+    """A column width as saved, or None when what is there is not one.
+
+    A hand-edited comment is a real input: a width has to be a positive
+    integer number of pixels (bool is an int in Python, so it is refused by
+    name) or it is as though none were saved.
+    """
+    if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
+        return None
+    return width
+
+
 def _col_add(columns, col: str, config=None) -> bool:
     """Append a column. False when it is already there -- a duplicate would be
     a second cell with the first one's identity."""
@@ -781,19 +818,40 @@ def _col_move(columns, frm: int, to: int) -> bool:
 def _slots_from_columns(columns) -> list:
     """The columns map as the slot list the saved config stores.
 
-    A plain column stays a bare string, so a table with no splat saves exactly
-    what it always did; only a splat carrying sub-columns needs the object
-    form.
+    A plain column stays a bare string, so a table with nothing configured
+    saves exactly what it always did; a splat carrying sub-columns, or a
+    column the user resized, needs the object form -- `cols` for the one,
+    `width` (in pixels) for the other.
     """
     slots = []
     for col, config in (columns or {}).items():
         subs = (config or {}).get('cols') or {}
-        slots.append({'expr': col, 'cols': _slots_from_columns(subs)}
-                     if subs else col)
+        width = _valid_width((config or {}).get('width'))
+        if not subs and width is None:
+            slots.append(col)
+            continue
+        slot = {'expr': col}
+        if width is not None:
+            slot['width'] = width
+        if subs:
+            slot['cols'] = _slots_from_columns(subs)
+        slots.append(slot)
     return slots
 
 
-def _columns_from_slots(exprs, slot_cols, depth: int = 0) -> dict:
+def _slot_widths(slots_config) -> dict:
+    """Each root slot's saved column width, keyed by slot expr -- only the
+    slots that carry a usable one."""
+    out = {}
+    for entry in (slots_config or []):
+        if isinstance(entry, dict) and 'expr' in entry:
+            width = _valid_width(entry.get('width'))
+            if width is not None:
+                out[entry['expr']] = width
+    return out
+
+
+def _columns_from_slots(exprs, slot_cols, depth: int = 0, slot_widths=None) -> dict:
     """Build the columns map from what the saved config gave up.
 
     Recursive, because a splat's sub-column may splat in turn and `cols` has
@@ -806,6 +864,9 @@ def _columns_from_slots(exprs, slot_cols, depth: int = 0) -> dict:
     for expr in exprs:
         subs = slot_cols.get(expr) or []
         config = {}
+        width = (slot_widths or {}).get(expr)
+        if width is not None:
+            config['width'] = width
         if subs and depth < MAX_SPLAT_DEPTH:
             config['cols'] = _sub_columns_from_entries(subs, depth + 1)
         _col_add(columns, expr, config)
@@ -824,6 +885,9 @@ def _sub_columns_from_entries(entries, depth: int) -> dict:
             continue
         expr = entry['expr']
         config = {}
+        width = _valid_width(entry.get('width'))
+        if width is not None:
+            config['width'] = width
         nested = entry.get('cols')
         if nested and depth < MAX_SPLAT_DEPTH:
             config['cols'] = _sub_columns_from_entries(nested, depth + 1)
@@ -7812,7 +7876,9 @@ def _resolve_columns(lst, get_visualizer, slots_config):
     """
     if slots_config is not None:
         exprs, slot_children = parse_slots(slots_config)
-        return _columns_from_slots(exprs, parse_slot_cols(slots_config)), slot_children
+        return (_columns_from_slots(exprs, parse_slot_cols(slots_config),
+                                    slot_widths=_slot_widths(slots_config)),
+                slot_children)
 
     # The defaults never propose a splat, so they never propose sub-columns.
     return _columns_from_slots(_default_columns(lst, get_visualizer), {}), {}
@@ -7894,7 +7960,6 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         'handledKeys': handled_keys,
         'display_mode': 'table',
         'columns': columns,
-        'column_widths': {},
         '_source_expr': source_expr,
         **config_fields,
         **_COLUMN_MGMT_DEFAULTS,
@@ -9030,8 +9095,16 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
 
 def _render_column_header(col, model, lst, eval_in_scope=None,
                           span_attrs='', extra_classes='', label=None,
-                          get_visualizer=None, read_only=False):
+                          get_visualizer=None, read_only=False,
+                          resize_prev=None):
     """Render a normal column header with drag handle, column name, and ▾ menu.
+
+    *resize_prev* is the column drawn immediately before this one in its
+    header row, or None at the row's start. A column boundary is grabbable
+    from either side, and each side belongs to the header it is in -- so
+    hovering just right of the line lights that column's controls, not its
+    neighbour's. This header's right edge resizes *col*; its left edge, when
+    there is a *resize_prev*, resizes that.
 
     *read_only* (clickacode.readOnlyVisualizers) draws the name alone: no handle to
     reorder by, no click to edit, no ▾ -- every one of those writes config or
@@ -9053,6 +9126,15 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     drag_over_event = repr(ColumnDragOver(col=col))
     drag_end_event = repr(ColumnDragEnd(col=col))
     resize_event = repr(ColumnResize(col=col, width=0)) # The width is set by JS
+    # The left handle names the column it resizes twice: once in the event,
+    # and once in data-resize-col for the front-end, which has to find that
+    # column's cells to size while the drag is in flight (see
+    # setupResizableColumns in snc.ts).
+    left_resize_html = ('' if resize_prev is None else
+        f'<span snc-resize-col="{html.escape(repr(ColumnResize(col=resize_prev, width=0)))}" '
+        f'data-resize-col="{repr(html.escape(resize_prev))}" '
+        f'data-tooltip="Resize" '
+        f'class="col-handle col-resize-handle col-resize-left"></span>')
 
     drag_from = model.get('column_drag_from')
     drag_over = model.get('column_drag_over')
@@ -9132,10 +9214,11 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     if extra_classes:
         th_classes.append(extra_classes)
     return (
-        f'<th class="{" ".join(th_classes)}"{span_attrs} data-col="{repr(html.escape(col))}" {get_col_width_style(col, model)}'
+        f'<th class="{" ".join(th_classes)}"{span_attrs} data-col="{repr(html.escape(col))}" {get_col_width_style(col, model, clip=False)}'
         f'{track_move}'
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span class="col-header-inner">'
+        f'{left_resize_html}'
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
         f'class="col-handle col-drag-handle">⣿</span>'
@@ -9146,7 +9229,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'{menu_html}'
         f'<span snc-resize-col="{html.escape(resize_event)}"'
         f'data-tooltip="Resize" '
-        f'class="col-handle col-resize-handle"></span>'
+        f'class="col-handle col-resize-handle col-resize-right"></span>'
         f'</span>'
         f'</th>'
     )
@@ -10661,14 +10744,22 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
 
-def get_col_width_style(col, model):
-    column_widths = model.get('column_widths')
-    width = column_widths.get(col)
+def get_col_width_style(col, model, clip=True):
+    """The inline style pinning a leaf column to the width the user dragged it
+    to, or '' when it was never resized. The width lives in the column's config
+    (and so in the line's #%click comment), not in transient view state.
 
+    A body cell clips its content to the width. A header cell must not
+    (`clip=False`): its resize handle hangs past the cell's edge, and the cell
+    is the handle's positioning anchor, so a clip there would cut the handle
+    in half. The header's inner wrapper does its clipping instead (CSS).
+    """
+    config = _leaf_config(model.get('columns'), col)
+    width = _valid_width((config or {}).get('width'))
     if width is None:
         return ''
-
-    return f' style="min-width: {width}px; max-width: {width}px; overflow: hidden;"'
+    overflow = ' overflow: hidden;' if clip else ''
+    return f' style="min-width: {width}px; max-width: {width}px;{overflow}"'
 
 def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, every_row_exps=None):
     children = model.get('children', {})
@@ -10776,6 +10867,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     for level, cells in enumerate(header_rows):
         if level:
             strs.append('<tr>')
+        # The header drawn just before this one in the row -- what its left
+        # resize handle grabs. None past the add-column box or an edit box:
+        # neither is a column with a width.
+        resize_prev = None
         for cell in cells:
             span_attrs = ''
             # A cell the box is drawn under has to span it too, or it stops
@@ -10796,10 +10891,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                                    if n_header - level > 1 else '')))
             if box and not beside[1]:
                 strs.append(box)
+                resize_prev = None
             if model.get('editing_column') == cell.expr and not read_only:
                 strs.append(_render_column_input(
                     lst, model, get_visualizer, is_editing=True,
                     span_attrs=span_attrs))
+                resize_prev = None
             else:
                 # A sub-column is a column: it gets the same header, so the
                 # same menu -- search, tally, sort and Compute all key on the
@@ -10811,9 +10908,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     extra_classes='col-subheader' if level else None,
                     label=cell.label if level else None,
                     get_visualizer=get_visualizer,
-                    read_only=read_only))
+                    read_only=read_only,
+                    resize_prev=resize_prev))
+                resize_prev = cell.expr
             if box and beside[1]:
                 strs.append(box)
+                resize_prev = None
 
         if level == 0:
             # Both sit at the right end of the top row, where there is nothing
@@ -12158,7 +12258,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['grouped_compute_tab_selected'] = grouped
 
         case ColumnResize(col=col, width=width):
-            model['column_widths'][col] = width
+            config = _leaf_config(model.get('columns'), col)
+            width = _valid_width(width)
+            if config is not None and width is not None:
+                config['width'] = width
+                _save_slots(model)
 
 
     if is_nested(var_and_exp):
