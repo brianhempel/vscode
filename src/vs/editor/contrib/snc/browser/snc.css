@@ -1634,7 +1634,10 @@
 	.col-search-input {
 		box-sizing: border-box;
 		/*min-width: 150px;*/
-		padding-right: calc(4.5ch); /* for "AND" */
+		/* Room for the chips over its right end. A first guess only: the
+		   chips vary, so the real figure is measured after each render
+		   (reserveRoomForOverlaidControls in snc.ts). */
+		padding-right: calc(4.5ch);
 	}
 
 	/* --- The tally: each of the column's values and how many rows have it ---

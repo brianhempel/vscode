@@ -2119,6 +2119,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.hoistSegmentLabels();
 		this.hoistNestedToolbars();
 		this.setupResizableColumns();
+		this.reserveRoomForOverlaidControls();
 		this.updateLayoutMode();
 
 		// Scroll any element marked for scroll-into-view (e.g. selected autocomplete item)
@@ -2729,6 +2730,39 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.hoistedSegmentLabelListeners.push(
 				dom.addDisposableListener(scroller, 'scroll', () => this.repositionHoistedSegmentLabels())
 			);
+		}
+	}
+
+	/**
+	 * Keep an input's text clear of the controls painted over its right end:
+	 * the Find box's toggles, the Replace box's preview, a column search's
+	 * operator and compose chips. Each is an absolutely positioned sibling of
+	 * its input inside a .search-box-wrapper, which CSS cannot size the
+	 * input's padding to -- so the room is measured after each render, for
+	 * whatever the controls turn out to be. Capped so a long preview cannot
+	 * squeeze the text out of its own box.
+	 *
+	 * The hoisted panels are searched as well as the widget: a column's search
+	 * box sits in its ▾ menu, which has been lifted out of the widget by the
+	 * time this runs.
+	 */
+	private reserveRoomForOverlaidControls(): void {
+		const roots: ParentNode[] = [this.domNode, ...this.hoistedDropdowns.map((entry) => entry.panel)];
+		const wrappers = roots.flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>('.search-box-wrapper')));
+		for (const wrapper of wrappers) {
+			const input = wrapper.querySelector<HTMLInputElement>(':scope > input');
+			if (!input) { continue; }
+			const win = dom.getWindow(wrapper);
+			let reserve = 0;
+			for (const child of Array.from(wrapper.children)) {
+				if (child === input || !dom.isHTMLElement(child)) { continue; }
+				const style = win.getComputedStyle(child);
+				if (style.position !== 'absolute') { continue; }
+				reserve = Math.max(reserve, child.offsetWidth + (parseFloat(style.right) || 0));
+			}
+			if (reserve > 0) {
+				input.style.paddingRight = `${Math.min(reserve + 4, wrapper.clientWidth * 0.6)}px`;
+			}
 		}
 	}
 
