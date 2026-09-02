@@ -1102,12 +1102,25 @@
 		opacity: 0.7;
 	}
 
-	/* An element the user has opened draws a block of its own -- a table, a
-	   character grid. Inline-block keeps it in the row between the parens
-	   instead of breaking out of the span holding it. */
-	> [snc-child-key]:has(> .visualizer-container) {
+	/* An element that draws a block of its own -- a string's preview box, or
+	   opened, a table or a character grid. Inline-block keeps it in the row
+	   between the parens instead of breaking out of the span holding it. The
+	   block usually sits inside the element's drag handle (see _render_element),
+	   so that handle has to be a box too, or the block escapes it just the same
+	   -- the rule for a handle inside a container doesn't reach a tuple at the
+	   top level, which is no container. */
+	> [snc-child-key]:has(> .visualizer-container),
+	> [snc-child-key]:has(> .py-exp-grab > .visualizer-container),
+	> [snc-child-key] > .py-exp-grab:has(> .visualizer-container) {
 		display: inline-block;
 		vertical-align: top;
+	}
+
+	/* A preview is a short box: centred on the parens, which read as its
+	   brackets. An opened element is tall, and its top is where it starts. */
+	> [snc-child-key]:has(> .visualizer-container.small),
+	> [snc-child-key]:has(> .py-exp-grab > .visualizer-container.small) {
+		vertical-align: middle;
 	}
 }
 
