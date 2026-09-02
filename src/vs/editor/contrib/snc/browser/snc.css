@@ -2643,12 +2643,19 @@
    The active table also leaves room at the right for the .tool-toolbar, which
    hangs off the row's right edge (left: calc(100% + 5px), 24px wide + outline),
    so a wide table's toolbar stays inside the widget rather than past the
-   editor's edge. */
+   editor's edge. The room is padding on the container, NOT a shorter
+   percentage on the table: the widget and the container shrink to fit the
+   table, so a percentage here resolves against the table's own width, and
+   "100% - 30px" of itself made every active table 30px narrower than its
+   content -- scrolling with the whole editor free beside it. Padding on the
+   container instead makes the widget 30px wider than the table when there
+   is room, and the 100% below is of what is left when there is not. */
 .monaco-editor .snc-visualization-widget > .list-visualizer > .snc-tool-and-visualizer {
 	max-width: 100%;
 }
-.monaco-editor .snc-visualization-widget > .list-visualizer:not(.small) > .snc-tool-and-visualizer {
-	max-width: calc(100% - 30px);
+.monaco-editor .snc-visualization-widget > .list-visualizer:not(.small) {
+	padding-right: 30px;
+	box-sizing: border-box;
 }
 
 /* =============================================================================
