@@ -176,6 +176,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// updateContent wipes domNode.innerHTML, so this is re-appended each render.
 	private linkChainEl: HTMLElement | null = null;
 	private moveThrottleTimer: any = null;
+	// A box drawn over the character a mousedown at the pointer would land
+	// on, so the user can see it before pressing. Purely front-end: resolved
+	// by the same caret hit-test the dispatcher uses, and never sent to
+	// Python. Lives in the widget root (which innerHTML replaces on render,
+	// so the field is reset there) rather than as a class on a char span:
+	// plain text renders as grouped runs, where the char is a text offset,
+	// not an element.
+	private hoverCaretEl: HTMLElement | null = null;
 	private readonly moveThrottleDelay = 16;
 	// Where the pointer last was with a button held. A modifier pressed or
 	// released while the pointer is stationary produces no mousemove of its
@@ -412,12 +420,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				return;
 			}
 			if (this.handleAddAtCursor(ev)) { return; }
+			this.setHoverCaret(null);
 			this.dispatch_mouse_python_event('snc-mouse-down', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mousemove', (ev: MouseEvent) => {
 			if (ev.buttons !== 0) {
 				this.lastDragPointer = { x: ev.clientX, y: ev.clientY, buttons: ev.buttons };
 			}
+			this.updateHoverTarget(ev);
 			if (this.moveThrottleTimer) { return; }
 			this.moveThrottleTimer = setTimeout(() => { this.moveThrottleTimer = null; }, this.moveThrottleDelay);
 			this.dispatch_mouse_python_event('snc-mouse-move', ev);
@@ -438,6 +448,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_mouse_python_event('snc-mouse-out', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mouseleave', (ev: MouseEvent) => {
+			this.setHoverCaret(null);
 			this.dispatch_mouse_python_event('snc-mouse-out', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'keydown', (ev: KeyboardEvent) => {
@@ -1607,6 +1618,137 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		return pythonEventStr;
 	}
 
+	/**
+	 * Where the pointer sits, resolved to the nearest indexed char element
+	 * (snc-idx / snc-idx-start). The pixel seams between char spans (and the
+	 * empty area beside a line) hit-test to a plain container, but the caret
+	 * still snaps to the nearest char. Shared by the dispatcher and the hover
+	 * feedback so both agree on which char a press would land on.
+	 */
+	private resolveCaretIdxEl(ev: MouseEvent): { caretRange: globalThis.Range | null; caretIdxEl: Element | null } {
+		const caretRange = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+		let caretNode: Node | null = caretRange?.startContainer ?? null;
+		if (caretNode && caretNode.nodeType !== Node.TEXT_NODE && caretNode.childNodes.length > 0) {
+			// A hit on the seam between spans can resolve to the parent with
+			// an offset between its children; take the child at the seam.
+			caretNode = caretNode.childNodes[Math.min(caretRange!.startOffset, caretNode.childNodes.length - 1)];
+		}
+		let caretIdxEl: Element | null = null;
+		let g: Element | null = !caretNode ? null
+			: caretNode.nodeType === Node.ELEMENT_NODE ? caretNode as Element
+			: caretNode.parentElement;
+		while (g && g !== this.domNode) {
+			if (g.hasAttribute('snc-idx-start') || g.hasAttribute('snc-idx')) {
+				caretIdxEl = g;
+				break;
+			}
+			g = g.parentElement;
+		}
+		return { caretRange, caretIdxEl };
+	}
+
+	/**
+	 * A pointer event that lands inside the same visualizer as the caret's
+	 * nearest char -- on the pixel seam between two spans, or in the empty
+	 * area past the end of a line -- belongs to that char.
+	 */
+	private caretIdxElClaimsPointer(startEl: Element, caretIdxEl: Element): boolean {
+		return startEl.contains(caretIdxEl)
+			&& startEl.closest('.visualizer-container') === caretIdxEl.closest('.visualizer-container');
+	}
+
+	/**
+	 * The client rect of the character a mousedown at this pointer position
+	 * would be delivered to, following the dispatcher's walk: the caret's
+	 * nearest indexed element when it claims the pointer, else the nearest
+	 * indexed ancestor of the real target. A per-char span (snc-idx) is the
+	 * char; grouped text (snc-idx-start) holds many, and the caret's text
+	 * offset picks one, exactly as dispatchGroupedTextEvent does. Nothing to
+	 * show when an explicit snc-mouse-down listener (a segment toggle, a
+	 * handle, a button) would claim the press first.
+	 */
+	private findHoverCharRect(ev: MouseEvent): DOMRect | null {
+		const node = ev.target as Node | null;
+		const startEl: Element | null = !node ? null
+			: node.nodeType === Node.ELEMENT_NODE ? node as Element
+			: node.parentElement;
+		if (!startEl) { return null; }
+		const { caretRange, caretIdxEl } = this.resolveCaretIdxEl(ev);
+		const groupedCharRect = (groupEl: Element): DOMRect | null => {
+			const textNode = groupEl.firstChild;
+			if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+				return null;
+			}
+			const textLen = textNode.textContent?.length ?? 1;
+			const offset = caretRange && caretRange.startContainer === textNode
+				? Math.min(caretRange.startOffset, textLen - 1)
+				: 0;
+			const charRange = document.createRange();
+			charRange.setStart(textNode, offset);
+			charRange.setEnd(textNode, Math.min(offset + 1, textLen));
+			return charRange.getBoundingClientRect();
+		};
+		let el: Element | null = caretIdxEl && this.caretIdxElClaimsPointer(startEl, caretIdxEl) ? caretIdxEl : startEl;
+		while (el && el !== this.domNode) {
+			if (el.hasAttribute('snc-mouse-down')) {
+				return null;
+			}
+			if (el.hasAttribute('snc-idx')) {
+				return el.getBoundingClientRect();
+			}
+			if (el.hasAttribute('snc-idx-start')) {
+				return groupedCharRect(el);
+			}
+			el = el.parentElement;
+		}
+		// The dispatcher's fallback: grouped text the caret snapped into that
+		// the target does not contain.
+		if (caretIdxEl && caretIdxEl.hasAttribute('snc-idx-start')) {
+			return groupedCharRect(caretIdxEl);
+		}
+		return null;
+	}
+
+	/**
+	 * Refresh the hover feedback for a pointer move. Only a focused, expanded
+	 * visualizer previews: a press on a small preview or an unfocused widget
+	 * pins focus rather than selecting, and mid-drag the live selection is
+	 * the feedback.
+	 */
+	private updateHoverTarget(ev: MouseEvent): void {
+		if (ev.buttons !== 0 || !this.isFocused()) {
+			this.setHoverCaret(null);
+			return;
+		}
+		const target = ev.target as Node | null;
+		const targetEl = target && target.nodeType === Node.ELEMENT_NODE ? target as Element : target?.parentElement ?? null;
+		if (targetEl && (targetEl.closest('.visualizer-container.small') || targetEl.closest('[snc-notify-mouse-is-up]'))) {
+			this.setHoverCaret(null);
+			return;
+		}
+		const rect = this.findHoverCharRect(ev);
+		this.setHoverCaret(rect && rect.width > 0 ? rect : null);
+	}
+
+	private setHoverCaret(rect: DOMRect | null): void {
+		if (!rect) {
+			this.hoverCaretEl?.remove();
+			this.hoverCaretEl = null;
+			return;
+		}
+		if (!this.hoverCaretEl) {
+			this.hoverCaretEl = document.createElement('div');
+			this.hoverCaretEl.className = 'snc-hover-caret';
+			this.domNode.appendChild(this.hoverCaretEl);
+		}
+		const host = this.domNode.getBoundingClientRect();
+		const style = this.hoverCaretEl.style;
+		style.left = `${rect.left - host.left}px`;
+		style.top = `${rect.top - host.top}px`;
+		style.width = `${rect.width}px`;
+		style.height = `${rect.height}px`;
+	}
+
 	private dispatch_mouse_python_event(attr_name: string, ev: MouseEvent, forceDispatch = false): void {
 		// Only the focused visualizer receives events. A non-focused widget's
 		// first mousedown pins focus (handled in the mousedown listener); all
@@ -1649,24 +1791,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// on those pixels inside a table bubbled past the string to the list
 		// visualizer's DeselectChildren mousedown and unfocused the child
 		// instead of placing the cursor.
-		const caretRange = document.caretRangeFromPoint(ev.clientX, ev.clientY);
-		let caretNode: Node | null = caretRange?.startContainer ?? null;
-		if (caretNode && caretNode.nodeType !== Node.TEXT_NODE && caretNode.childNodes.length > 0) {
-			// A hit on the seam between spans can resolve to the parent with
-			// an offset between its children; take the child at the seam.
-			caretNode = caretNode.childNodes[Math.min(caretRange!.startOffset, caretNode.childNodes.length - 1)];
-		}
-		let caretIdxEl: Element | null = null;
-		let g: Element | null = !caretNode ? null
-			: caretNode.nodeType === Node.ELEMENT_NODE ? caretNode as Element
-			: caretNode.parentElement;
-		while (g && g !== this.domNode) {
-			if (g.hasAttribute('snc-idx-start') || g.hasAttribute('snc-idx')) {
-				caretIdxEl = g;
-				break;
-			}
-			g = g.parentElement;
-		}
+		const { caretRange, caretIdxEl } = this.resolveCaretIdxEl(ev);
 		const dispatchGroupedTextEvent = (groupEl: Element): boolean => {
 			// Moves over grouped text are drag-only, like the snc-idx shorthand
 			// -- except a grouped match interior (snc-hover-moves) hears idle
@@ -1708,8 +1833,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// nearest char -- on the pixel seam between two spans, or in the empty
 		// area past the end of a line -- belongs to that char. Start the walk
 		// there; everything from the real target on up still gets its turn.
-		if (caretIdxEl && startEl && startEl.contains(caretIdxEl)
-			&& startEl.closest('.visualizer-container') === caretIdxEl.closest('.visualizer-container')) {
+		if (caretIdxEl && startEl && this.caretIdxElClaimsPointer(startEl, caretIdxEl)) {
 			el = caretIdxEl;
 		}
 
@@ -2103,6 +2227,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		const trustedHtml = ttPolicy?.createHTML(html) ?? html;
 		this.domNode.innerHTML = trustedHtml as string;
+		this.hoverCaretEl = null;
 		this.lastRenderedHtml = html;
 		if (this.isLiveOnly()) {
 			this.stripCodeAffordances(this.domNode);

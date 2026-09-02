@@ -709,3 +709,18 @@ body.snc-alt-down .visualizer-container.pick-tool-selected .chr.segment-selected
 body.snc-ctrl-down .visualizer-container.pick-tool-selected .chr.segment-selected {
 	background: transparent;
 }
+
+/* Hover feedback, drawn by snc.ts and never sent to Python: a box over the
+   character a mousedown at the pointer would select, since a press on the
+   seam between spans or the space past a line's end snaps to the nearest
+   char. Positioned in the widget root's coordinates (it is absolutely
+   positioned), so it works over grouped text where the char is a text
+   offset rather than an element. Grey, at the cue tier, so it never
+   competes with the literal/fuzzy color a real selection gets. */
+.snc-visualization-widget > .snc-hover-caret {
+	position: absolute;
+	background: rgba(128, 128, 128, 0.25);
+	border-radius: 2px;
+	pointer-events: none;
+	z-index: 5;
+}
