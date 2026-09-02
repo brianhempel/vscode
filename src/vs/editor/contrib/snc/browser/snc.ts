@@ -268,7 +268,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	// How long the mouse must rest on a snc-py-exps handle before its expression
 	// tooltip appears.
-	private static readonly PY_EXP_TOOLTIP_SHOW_DELAY_MS = 300;
+	private static readonly PY_EXP_TOOLTIP_SHOW_DELAY_MS = 700;
 
 	// How long the mouse must rest on an action button or a data-tooltip element
 	// before its tooltip appears.
