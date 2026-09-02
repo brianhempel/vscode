@@ -140,6 +140,8 @@ function describeEventTarget(node: Node | null, root: Element): unknown {
 
 class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private static readonly BLOCK_LAYOUT_THRESHOLD_PX = 150;
+	/** Root of a table visualizer; a widget holding one always takes block layout. */
+	private static readonly DATA_STRUCTURE_SELECTOR = '.list-table-scroll';
 	private static readonly MIN_AVAILABLE_WIDTH_PX = 200;
 	private readonly editor: ICodeEditor;
 	private readonly domNode: HTMLElement;
@@ -2300,7 +2302,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	private updateLayoutMode(): void {
 		const rect = this.domNode.getBoundingClientRect();
-		this.useBlockLayout = rect.width > VisualizationWidget.BLOCK_LAYOUT_THRESHOLD_PX || rect.height > VisualizationWidget.BLOCK_LAYOUT_THRESHOLD_PX;
+		// A data structure (a table, however few rows it has) reads as a block
+		// of its own, never as a tail on the code line -- size alone would let
+		// an empty or one-row table sit at the end of the line.
+		const hasDataStructure = this.domNode.querySelector(VisualizationWidget.DATA_STRUCTURE_SELECTOR) !== null;
+		this.useBlockLayout = hasDataStructure
+			|| rect.width > VisualizationWidget.BLOCK_LAYOUT_THRESHOLD_PX
+			|| rect.height > VisualizationWidget.BLOCK_LAYOUT_THRESHOLD_PX;
 		this.domNode.classList.toggle('snc-visualization-widget-block-layout', this.useBlockLayout);
 	}
 
