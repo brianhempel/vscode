@@ -2411,7 +2411,9 @@ def _subs_at(columns, target: str, create: bool = False) -> 'dict | None':
 
 
 def _add_derived_column(model, cell_col: str, expr: str) -> None:
-    """Code made in a cell, as a column of the table.
+    """Code made in a cell, as a column of the table -- put in right after the
+    column the cell was in, where the eye already is, rather than at the far
+    right.
 
     A cell's expression is one every row answers, so code derived from it is a
     column. A cell under a splat shows one ELEMENT, though, so code derived
@@ -2421,16 +2423,30 @@ def _add_derived_column(model, cell_col: str, expr: str) -> None:
     """
     columns = model['columns']
     leaf = _leaf_for(columns, cell_col)
-    if leaf is None or leaf.splat is None:
-        _col_add(columns, expr)
-        return
     path = cell_col.split(SUBCOL_SEP)
+    if leaf is None or leaf.splat is None:
+        # A column of the table, right after the one its cell was in -- the
+        # top-level column, when the cell was in a plain sub-column of one.
+        _col_insert(columns, expr, _index_after(columns, path[0]))
+        return
     # A splat drawing its own column is its new sub-column's parent; a
     # sub-column's parent is whatever it is itself a sub-column of.
-    parent = (cell_col if path[-1] == leaf.splat
-              else SUBCOL_SEP.join(path[:-1]))
-    subs = _subs_at(columns, parent, create=True)
-    _col_add(columns if subs is None else subs, expr)
+    if path[-1] == leaf.splat:
+        subs = _subs_at(columns, cell_col, create=True)
+        _col_add(columns if subs is None else subs, expr)
+        return
+    subs = _subs_at(columns, SUBCOL_SEP.join(path[:-1]), create=True)
+    if subs is None:
+        _col_insert(columns, expr, _index_after(columns, path[0]))
+        return
+    _col_insert(subs, expr, _index_after(subs, path[-1]))
+
+
+def _index_after(columns, name: str) -> int:
+    """The position just past *name* in a columns map -- where a column that
+    came from it belongs -- or the end when it is not there."""
+    keys = list(columns or [])
+    return keys.index(name) + 1 if name in keys else len(keys)
 
 
 def _subcol_candidates(col: str, lst, model, get_visualizer,

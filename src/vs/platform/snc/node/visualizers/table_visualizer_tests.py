@@ -6340,6 +6340,38 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         self.assertIn("len($['name'])", new_model['columns'],
                        "NewCode expr should be added as a new column")
 
+    def test_a_derived_column_lands_right_after_the_column_it_came_from(self):
+        # Not at the far right: what a cell spawns belongs beside the column
+        # it was read from, where the eye already is.
+        nc_vis = self._make_newcode_vis([('result', "len($['name'])")])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, get_vis,
+                           slots_config=['$', "$['name']", "$['age']"])
+        model['focused_child'] = "0\x00$['name']"
+        event = make_child_mouse_event("0\x00$['name']", 'X')
+        new_model, _ = update(event, ('x', 'x'), model, lst, get_vis)
+
+        self.assertEqual(list(new_model['columns']),
+                         ['$', "$['name']", "len($['name'])", "$['age']"])
+
+    def test_a_column_derived_under_a_splat_lands_right_after_its_sub_column(self):
+        nc_vis = self._make_newcode_vis([('result', "len($['who'])")])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'teams': [{'who': 'ann', 'age': 3}]}]
+        model = init_model(lst, get_vis, slots_config=[
+            {'expr': "*$['teams']", 'cols': ["$['who']", "$['age']"]}, '$'])
+        sub = f"*$['teams']{SUBCOL_SEP}$['who']"
+        model['focused_child'] = f"0.0\x00{sub}"
+        event = make_child_mouse_event(f"0.0\x00{sub}", 'X')
+        new_model, _ = update(event, ('x', 'x'), model, lst, get_vis)
+
+        self.assertEqual(
+            {col: list(cfg.get('cols') or []) for col, cfg in new_model['columns'].items()},
+            {"*$['teams']": ["$['who']", "len($['who'])", "$['age']"], '$': []})
+
     def test_child_newcode_tuple_not_inserted_to_buffer(self):
         nc_vis = self._make_newcode_vis([('filtered', '[x for x in $]')])
         get_vis = self._get_vis_for(nc_vis)
