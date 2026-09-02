@@ -437,6 +437,19 @@ class TestChildrenRenderAsChildren(unittest.TestCase):
         _, out = self.render(value, model)
         self.assertIn('list-table-scroll', out)
 
+    def test_a_focused_child_closes_when_the_tuple_itself_is_not_focused(self):
+        # The line the tuple is on lost focus (the user clicked into another
+        # line's visualizer): its opened element closes with it, the way a
+        # table's cell does. The element stays the focused child, so clicking
+        # back into the line finds it open again.
+        value = (1, [{'a': 1}, {'a': 2}])
+        model = init_model(value, _get_visualizer, var_and_exp=('t', 't'))
+        model['focused_child'] = '$[1]'
+        out = visualize(value, model, _get_visualizer, None,
+                        var_and_exp=('t', 't'), small=True)
+        self.assertNotIn('list-table-scroll', out)
+        self.assertEqual(model['focused_child'], '$[1]')
+
     def test_a_nested_tuple_still_reads_as_a_tuple(self):
         # A tuple costs a repr's worth of room to draw properly, so unlike a
         # table it has no reason to collapse when nobody is looking at it.

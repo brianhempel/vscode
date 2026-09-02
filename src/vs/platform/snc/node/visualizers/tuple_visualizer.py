@@ -265,10 +265,12 @@ def visualize(value, model: dict, get_visualizer=None, eval_in_scope=None,
               every_row_exps=None):
     """`([subvis], [subvis], [subvis])`, or `Point(x=[subvis], y=[subvis])`.
 
-    *small* is accepted and deliberately unused for the tuple's own layout: it
-    says the line isn't the focused one, and a tuple drawn properly is already
-    about the size of its repr, so there is nothing smaller to fall back to. It
-    reaches the elements as their own `small` (see `_render_element`).
+    *small* is deliberately unused for the tuple's own layout: it says the
+    line isn't the focused one, and a tuple drawn properly is already about
+    the size of its repr, so there is nothing smaller to fall back to. It
+    reaches the elements, though: an element opened by the user closes when
+    its line loses focus, the way a table's cell does, and opens again when
+    the line gets it back (see `_render_element`).
 
     *every_row_exps* is how a table above says what a value in one of its cells
     also reads as, taken down every row -- see `_render_element`. Absent when
@@ -302,7 +304,7 @@ def visualize(value, model: dict, get_visualizer=None, eval_in_scope=None,
                          f'<span class="punct">=</span>')
         parts.append(_render_element(element, expr, model, get_visualizer,
                                      eval_in_scope, max_width, max_height,
-                                     len(elements), every_row_exps))
+                                     len(elements), every_row_exps, small=small))
     hidden = len(value) - len(elements)
     if hidden > 0:
         parts.append(_punct(f', +{hidden}'))
@@ -316,7 +318,8 @@ def visualize(value, model: dict, get_visualizer=None, eval_in_scope=None,
 
 
 def _render_element(element, expr: str, model: dict, get_visualizer, eval_in_scope,
-                    max_width, max_height, count: int, every_row_exps=None) -> str:
+                    max_width, max_height, count: int, every_row_exps=None,
+                    small: bool = False) -> str:
     """One element, drawn by whichever visualizer reads its type.
 
     Handed its own access-path expression rather than wrapped in one, so a child
@@ -353,7 +356,7 @@ def _render_element(element, expr: str, model: dict, get_visualizer, eval_in_sco
     child_html = child_vis.visualize(
         element, child_model, get_visualizer, eval_in_scope,
         max_width=_child_width(max_width, count), max_height=max_height,
-        small=(expr != model.get('focused_child')),
+        small=small or (expr != model.get('focused_child')),
         var_and_exp=(None, child_expr) if child_expr else None, **inner)
     if every_row_exps is not None and child_expr:
         child_html = add_drag_readings(child_html, child_expr,
