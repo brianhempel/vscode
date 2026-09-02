@@ -80,13 +80,13 @@ export interface IProcessResult {
 }
 
 /**
- * The setting behind read-only visualizers. When on, a visualizer is a view
+ * The setting behind live-only visualizers. When on, a visualizer is a view
  * and nothing more: every affordance that would write to the file -- action
  * buttons, drag handles, column and field menus, the link chain -- is left out
- * of the render (Python's side, see visualizer_utils.set_read_only) and
+ * of the render (Python's side, see visualizer_utils.set_live_only) and
  * refused if it somehow arrives (the editor's side, see SNCController).
  */
-export const SNC_READ_ONLY_VISUALIZERS_SETTING = 'clickacode.readOnlyVisualizers';
+export const SNC_LIVE_ONLY_VISUALIZERS_SETTING = 'clickacode.liveOnlyVisualizers';
 
 export interface IProcessOptions {
 	timeout?: number; // Optional timeout in milliseconds
@@ -97,7 +97,7 @@ export interface IProcessOptions {
 	loopSelections?: Record<string, number>; // header line -> iteration (0-based) the loop is pinned to; unpinned loops render every iteration
 	stdin?: string; // The console document, replayed through the program's stdin
 	stdinEof?: boolean; // Whether the document ends the stream; false makes a read past its end starve rather than see EOF
-	readOnly?: boolean; // Render visualizers without any code-writing affordance and send no code-changing command; see SNC_READ_ONLY_VISUALIZERS_SETTING
+	liveOnly?: boolean; // Render visualizers without any code-writing affordance and send no code-changing command; see SNC_LIVE_ONLY_VISUALIZERS_SETTING
 	/**
 	 * The widget newly warmed workers should pause just before -- the one the
 	 * user last interacted with. Absent means don't warm any: with nothing being

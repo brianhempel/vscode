@@ -14,7 +14,7 @@ import { Selection, SelectionDirection } from '../../../common/core/selection.js
 import { EditorOption } from '../../../common/config/editorOptions.js';
 import { IModelContentChangedEvent } from '../../../common/textModelEvents.js';
 import { IModelDeltaDecoration, ITextModel, TrackedRangeStickiness } from '../../../common/model.js';
-import { ILoopReport, IProcessOptions, IVisualizationItem, LoopPath, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, SNC_READ_ONLY_VISUALIZERS_SETTING, UiEvent, UiEventSpec } from '../../../../platform/snc/common/snc.js';
+import { ILoopReport, IProcessOptions, IVisualizationItem, LoopPath, NewCodeEdit, SNCCommand, SNCStreamMessage, SNCTimingData, SNC_PY_EXP_MIME, SNC_LIVE_ONLY_VISUALIZERS_SETTING, UiEvent, UiEventSpec } from '../../../../platform/snc/common/snc.js';
 import { IPythonImportInsertion, pythonImportInsertion } from '../../../../platform/snc/common/pythonImports.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -160,12 +160,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// the first mousedown is intercepted as an "expand" request instead of
 	// being dispatched as a Python event.
 	private readonly isFocused: () => boolean;
-	// Whether visualizers are read-only (clickacode.readOnlyVisualizers). Python
+	// Whether visualizers are live-only (clickacode.liveOnlyVisualizers). Python
 	// already renders without the code-writing affordances; this is the
 	// widget's own refusal, for anything that slips through -- a drag, an
 	// action tooltip, a "+", the link chain -- and for the attributes it strips
 	// off the HTML it is handed (see updateContent).
-	private readonly isReadOnly: () => boolean;
+	private readonly isLiveOnly: () => boolean;
 	private readonly onExpandRequest: () => void;
 	// Invoked when the user clicks the link-chain icon in the widget's lower-left
 	// corner (unlink when currently linked, relink otherwise).
@@ -272,7 +272,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	private dwellTimer: any = null;
 	private dwellTarget: Element | null = null;
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, isReadOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, isLiveOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -283,7 +283,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onInputEvent = onInputEvent;
 		this.onInsertNewVar = onInsertNewVar;
 		this.isFocused = isFocused;
-		this.isReadOnly = isReadOnly;
+		this.isLiveOnly = isLiveOnly;
 		this.onExpandRequest = onExpandRequest;
 		this.onLinkChainClick = onLinkChainClick;
 		this.clipboardService = clipboardService;
@@ -493,7 +493,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Allow snc-input elements to accept snc-py-exps drops
 		this._register(dom.addDisposableListener(this.domNode, 'dragover', (ev: DragEvent) => {
-			if (this.isReadOnly()) { return; }
+			if (this.isLiveOnly()) { return; }
 			const input = this.findAncestorWithAttr(ev.target as Node, 'snc-input');
 			if (input) {
 				ev.preventDefault();
@@ -505,7 +505,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'drop', (ev: DragEvent) => {
-			if (this.isReadOnly()) { return; }
+			if (this.isLiveOnly()) { return; }
 			const input = this.findAncestorWithAttr(ev.target as Node, 'snc-input');
 			if (input && ev.dataTransfer) {
 				ev.preventDefault();
@@ -523,7 +523,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 		// Tooltip on hover for action buttons with data-action-expr
 		this._register(dom.addDisposableListener(this.domNode, 'mouseover', (ev: MouseEvent) => {
-			const btn = this.isReadOnly() ? null : this.findAncestorWithAttr(ev.target as Node, 'data-action-expr');
+			const btn = this.isLiveOnly() ? null : this.findAncestorWithAttr(ev.target as Node, 'data-action-expr');
 			if (btn && btn.getAttribute('data-action-expr')) {
 				clearTimeout(this.actionTooltipHideTimer);
 				if (btn !== this.actionTooltipTarget) {
@@ -670,8 +670,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				// a mouseup -- which won't come, dragend coming instead.
 				this.unfocusedDragPress = null;
 				const pyExpEl = this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps', stopAt);
-				if (pyExpEl && this.isReadOnly()) {
-					// Nothing leaves a read-only visualizer as code.
+				if (pyExpEl && this.isLiveOnly()) {
+					// Nothing leaves a live-only visualizer as code.
 					ev.preventDefault();
 					return;
 				}
@@ -708,7 +708,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}
 			}),
 			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
-				const pyExpEl = this.isReadOnly() ? null : this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps', stopAt);
+				const pyExpEl = this.isLiveOnly() ? null : this.findAncestorWithAttr(ev.target as Node, 'snc-py-exps', stopAt);
 				const inDraggableZone = pyExpEl ? this.isInDraggableZone(ev.target as Node, pyExpEl) : false;
 
 				if (inDraggableZone) {
@@ -1905,7 +1905,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 * Returns true if the event was handled.
 	 */
 	private handleAddAtCursor(ev: MouseEvent): boolean {
-		if (!ev.target || this.isReadOnly()) { return false; }
+		if (!ev.target || this.isLiveOnly()) { return false; }
 		let el: Element | null = (ev.target as Node).nodeType === Node.ELEMENT_NODE
 			? (ev.target as Element)
 			: (ev.target as Node).parentElement;
@@ -2102,7 +2102,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const trustedHtml = ttPolicy?.createHTML(html) ?? html;
 		this.domNode.innerHTML = trustedHtml as string;
 		this.lastRenderedHtml = html;
-		if (this.isReadOnly()) {
+		if (this.isLiveOnly()) {
 			this.stripCodeAffordances(this.domNode);
 		}
 
@@ -2973,7 +2973,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Take every code-handing attribute off a read-only render, so that even
+	 * Take every code-handing attribute off a live-only render, so that even
 	 * HTML that still carries one (a visualizer that doesn't know about the
 	 * setting, say) has no handle to drag, no action to hover, and no shortcut
 	 * into a code box. Python leaves these out already; this is the editor
@@ -3002,8 +3002,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 *               it re-establishes a link.
 	 */
 	setLinkChain(state: 'hidden' | 'linked' | 'unlinked'): void {
-		// Linking writes a line of code; a read-only visualizer offers no chain.
-		if (state === 'hidden' || this.isReadOnly()) {
+		// Linking writes a line of code; a live-only visualizer offers no chain.
+		if (state === 'hidden' || this.isLiveOnly()) {
 			if (this.linkChainEl) {
 				this.linkChainEl.remove();
 				this.linkChainEl = null;
@@ -3527,13 +3527,21 @@ const SNC_WIDGETS_VISIBLE_KEY = 'snc.widgetsVisible';
  * hidden, so it is what brings them back. Sits next to the find widget's
  * corner as an overlay widget, so it never occupies a line of code; it is
  * faded until hovered so it does not compete with the text under it.
+ *
+ * Beside it, a badge says when the visualizers are live-only (see
+ * SNC_LIVE_ONLY_VISUALIZERS_SETTING): a mode the user is in, so it is shown
+ * where the eye is rather than on every widget. The badge only says so -- it
+ * is not a control; the setting is changed in Settings or by its command.
  */
 class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 	private static nextId = 0;
 	private readonly id = `snc.toggleWidgetsButton.${ToggleWidgetsButton.nextId++}`;
 	private readonly domNode: HTMLElement;
+	private readonly button: HTMLElement;
 	private readonly icon: HTMLElement;
+	private readonly liveOnlyBadge: HTMLElement;
 	private readonly hover = this._register(new DisposableStore());
+	private readonly badgeHover = this._register(new DisposableStore());
 
 	constructor(
 		private readonly editor: ICodeEditor,
@@ -3542,17 +3550,29 @@ class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 	) {
 		super();
 		this.domNode = document.createElement('div');
-		this.domNode.className = 'snc-toggle-widgets-button';
-		this.domNode.setAttribute('role', 'button');
-		this.domNode.tabIndex = 0;
+		this.domNode.className = 'snc-editor-corner';
+
+		this.liveOnlyBadge = document.createElement('div');
+		this.liveOnlyBadge.className = 'snc-live-only-badge';
+		this.liveOnlyBadge.hidden = true;
+		const badgeIcon = document.createElement('span');
+		badgeIcon.className = ThemeIcon.asClassName(Codicon.lock);
+		this.liveOnlyBadge.appendChild(badgeIcon);
+		this.domNode.appendChild(this.liveOnlyBadge);
+
+		this.button = document.createElement('div');
+		this.button.className = 'snc-toggle-widgets-button';
+		this.button.setAttribute('role', 'button');
+		this.button.tabIndex = 0;
 		this.icon = document.createElement('span');
-		this.domNode.appendChild(this.icon);
-		this._register(dom.addDisposableListener(this.domNode, 'click', e => {
+		this.button.appendChild(this.icon);
+		this.domNode.appendChild(this.button);
+		this._register(dom.addDisposableListener(this.button, 'click', e => {
 			e.preventDefault();
 			e.stopPropagation();
 			onToggle();
 		}));
-		this._register(dom.addDisposableListener(this.domNode, 'keydown', (e: KeyboardEvent) => {
+		this._register(dom.addDisposableListener(this.button, 'keydown', (e: KeyboardEvent) => {
 			if (e.key === 'Enter' || e.key === ' ') {
 				e.preventDefault();
 				onToggle();
@@ -3567,14 +3587,28 @@ class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 			? localize('sncHideWidgets', "Hide Clickacode Visualizers")
 			: localize('sncShowWidgets', "Show Clickacode Visualizers");
 		this.icon.className = ThemeIcon.asClassName(widgetsVisible ? Codicon.eye : Codicon.eyeClosed);
-		this.domNode.classList.toggle('snc-widgets-hidden', !widgetsVisible);
-		this.domNode.setAttribute('aria-label', label);
-		this.domNode.setAttribute('aria-pressed', String(!widgetsVisible));
+		this.button.classList.toggle('snc-widgets-hidden', !widgetsVisible);
+		this.button.setAttribute('aria-label', label);
+		this.button.setAttribute('aria-pressed', String(!widgetsVisible));
 		this.hover.clear();
-		this.hover.add(this.hoverService.setupDelayedHover(this.domNode, {
+		this.hover.add(this.hoverService.setupDelayedHover(this.button, {
 			content: label,
 			style: HoverStyle.Pointer,
 		}));
+	}
+
+	/** Show the badge exactly while the visualizers are live-only. */
+	setLiveOnly(liveOnly: boolean): void {
+		this.liveOnlyBadge.hidden = !liveOnly;
+		this.badgeHover.clear();
+		if (liveOnly) {
+			const label = localize('sncLiveOnlyBadge', "Live-only visualizers: nothing here writes code into the file. Change under Settings > Clickacode.");
+			this.liveOnlyBadge.setAttribute('aria-label', label);
+			this.badgeHover.add(this.hoverService.setupDelayedHover(this.liveOnlyBadge, {
+				content: label,
+				style: HoverStyle.Pointer,
+			}));
+		}
 	}
 
 	getId(): string {
@@ -3946,8 +3980,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// The affordances are in the rendered HTML, so a change to the
 			// setting is a re-render: rerun, and hide the chains right away
 			// (they are the editor's own chrome, not Python's).
-			if (e.affectsConfiguration(SNC_READ_ONLY_VISUALIZERS_SETTING)) {
+			if (e.affectsConfiguration(SNC_LIVE_ONLY_VISUALIZERS_SETTING)) {
 				this.updateLinkChrome();
+				this.toggleWidgetsButton?.setLiveOnly(this.isLiveOnly());
 				this.scheduleRun();
 			}
 		}));
@@ -4114,6 +4149,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.toggleWidgetsButton = new ToggleWidgetsButton(this.editor, this.hoverService, () => this.toggleWidgetsVisible());
 			}
 			this.toggleWidgetsButton.setVisible(this.widgetsVisible);
+			this.toggleWidgetsButton.setLiveOnly(this.isLiveOnly());
 		} else if (this.toggleWidgetsButton) {
 			this.toggleWidgetsButton.dispose();
 			this.toggleWidgetsButton = null;
@@ -4443,19 +4479,19 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * linked, unlink it; otherwise (re)establish a link.
 	 */
 	/**
-	 * Whether visualizers are read-only (clickacode.readOnlyVisualizers): views that
+	 * Whether visualizers are live-only (clickacode.liveOnlyVisualizers): views that
 	 * hand out no code. Python renders without the affordances when told so
-	 * (see IProcessOptions.readOnly); here it also decides what the editor
+	 * (see IProcessOptions.liveOnly); here it also decides what the editor
 	 * refuses -- every command but a copy to the clipboard, the "+" in a
 	 * tooltip, the link chain -- so that no path from a visualizer to the file
 	 * stays open whatever the HTML says.
 	 */
-	private isReadOnly(): boolean {
-		return this.configurationService.getValue<boolean>(SNC_READ_ONLY_VISUALIZERS_SETTING) === true;
+	private isLiveOnly(): boolean {
+		return this.configurationService.getValue<boolean>(SNC_LIVE_ONLY_VISUALIZERS_SETTING) === true;
 	}
 
 	private onLinkChainClick(line: number, visIndex: number): void {
-		if (this.isReadOnly()) {
+		if (this.isLiveOnly()) {
 			return;
 		}
 		const editorModel = this.editor.getModel();
@@ -4554,7 +4590,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const key = `${lineNumber}:${visIndex}`;
 				// Chain icon and arrow are shown only for the active (focused)
 				// visualizer, keeping unfocused previews uncluttered.
-				if (!supported || focusedLine !== lineNumber || this.isReadOnly()) {
+				if (!supported || focusedLine !== lineNumber || this.isLiveOnly()) {
 					widget.setLinkChain('hidden');
 					this.removeLinkArrow(key);
 					continue;
@@ -5219,7 +5255,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							(pythonEventStr, ev) => { this.onKeyboardEvent(lineNumber, visIndex, pythonEventStr, ev); },
 							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); },
 							() => this.effectiveFocusedLine() === lineNumber,
-							() => this.isReadOnly(),
+							() => this.isLiveOnly(),
 							() => this.requestExpand(lineNumber),
 							(expression, imports) => { this.insertNewVarFromExpression(lineNumber, expression, imports); },
 							() => { this.onLinkChainClick(lineNumber, visIndex); },
@@ -5476,11 +5512,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * Handle commands from visualizers (Elm-style commands)
 	 */
 	private handleCommand(command: SNCCommand): void {
-		// Python sends none of these under read-only, but the setting can flip
+		// Python sends none of these under live-only, but the setting can flip
 		// while a run is in flight, and a visualizer that doesn't know the
-		// setting might still ask. Nothing that changes the file gets through.
-		if (this.isReadOnly() && command.type !== 'CopyToClipboard') {
-			console.log('SNC: read-only visualizers, ignoring command', command.type);
+		// setting might still ask. Nothing that changes the code gets through;
+		// the line's #%click comment is the one part of the file a live-only
+		// visualizer may write, since it holds only the visualizer's own view.
+		if (this.isLiveOnly() && command.type !== 'CopyToClipboard' && command.type !== 'SetConfigComment') {
+			console.log('SNC: live-only visualizers, ignoring command', command.type);
 			return;
 		}
 		studyLog.log('snc.command', { runId: this.currentRunId, trigger: this.currentRunId ? this.runTriggerById.get(this.currentRunId) : undefined, command: command.type === 'CopyToClipboard' ? { ...command, text: truncateForLog(command.text) } : command }, this.editor.getModel()?.uri.toString());
@@ -5688,7 +5726,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 */
 	private insertNewVarFromExpression(lineNumber: number, expression: string, imports?: readonly string[]): void {
 		const model = this.editor.getModel();
-		if (!model || this.isReadOnly()) {
+		if (!model || this.isLiveOnly()) {
 			return;
 		}
 		studyLog.log('widget.insertNewVar', { line: lineNumber, expression, imports }, model.uri.toString());
@@ -7016,7 +7054,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				stdin,
 				stdinEof,
 				loopSelections: this.loopSelectionsByLine(),
-				readOnly: this.isReadOnly(),
+				liveOnly: this.isLiveOnly(),
 				...(focusedLine !== null ? { focusedLine } : {}),
 				...(this.lastInteractedWidget ? { checkpoint3WarmAt: this.lastInteractedWidget } : {}),
 				...(resumeAtStep !== undefined ? { checkpoint3ResumeAtStep: resumeAtStep } : {})

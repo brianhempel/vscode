@@ -149,7 +149,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import is_read_only
+from visualizer_utils import is_live_only
 from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
                               opens_block, with_pass_body,
                               Dollar, DollarScope,
@@ -4573,13 +4573,13 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # can't be dragged out. Same wrapper the generic visualizers use, for the
     # same reason -- no content of its own to hover.
     #
-    # Read-only visualizers (clickacode.readOnlyVisualizers) draw the same preview
+    # Read-only visualizers (clickacode.liveOnlyVisualizers) draw the same preview
     # even when focused: everything the focused render adds -- the selection
     # anchors, the search box, the action buttons -- exists to build code, and
-    # under read-only none of it may be offered. What is left is the text, the
+    # under live-only none of it may be offered. What is left is the text, the
     # expand bar, and the counts (which py_exp_attrs leaves bare).
-    read_only = is_read_only()
-    if small or read_only:
+    live_only = is_live_only()
+    if small or live_only:
         # Non-focused preview: wrap the string in leading/trailing ' quotes so
         # it reads as a string literal. Each newline after the first gets a
         # leading space so subsequent lines align vertically under the first
@@ -4618,7 +4618,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # it, and that is all this has to carry. The expand toggle sits inside
         # the handle but opts out of it (see render_expand_toggle), so a slipped
         # click on the chevron isn't read as a drag of the string.
-        # A read-only focused string is already focused: nothing to pin, and
+        # A live-only focused string is already focused: nothing to pin, and
         # no keys to handle.
         handlers = ('' if not small else
                     f'snc-key-down="{html.escape(repr(KeyDown()))}" snc-mouse-down="{html.escape(repr(PinFocus()))}" ')

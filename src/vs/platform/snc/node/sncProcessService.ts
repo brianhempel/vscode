@@ -183,7 +183,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 	 * executed the program up to one widget, so anything that changes what the
 	 * prefix does or emits — the code, the file it caches network reads beside,
 	 * the focused line (which changes every widget's HTML), the loop pins, the
-	 * console document, read-only mode, and which widget to stop at — has to
+	 * console document, live-only mode, and which widget to stop at — has to
 	 * match for the worker to be usable at all.
 	 */
 	private checkpoint3Key: string = '';
@@ -922,7 +922,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			filePath: options.filePath ?? null,
 			focusedLine: options.focusedLine ?? null,
 			loopSelections: options.loopSelections ?? {},
-			readOnly: options.readOnly ?? false,
+			liveOnly: options.liveOnly ?? false,
 			stdin: options.stdin ?? '',
 			stdinEof: options.stdinEof ?? false,
 			warmAt: warmAt ?? null,
@@ -934,7 +934,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 			models_and_events: options.modelsAndEventsJson || '',
 			focused_line: options.focusedLine ?? null,
 			loop_selections: options.loopSelections ?? {},
-			read_only: options.readOnly ?? false,
+			live_only: options.liveOnly ?? false,
 			stdin: options.stdin ?? '',
 			stdin_eof: options.stdinEof ?? false,
 			checkpoint3: { line: warmAt.line, visIndex: warmAt.visIndex },
@@ -981,7 +981,7 @@ export class SNCProcessService extends Disposable implements ISNCProcessService 
 				models_and_events: options.modelsAndEventsJson || '',
 				focused_line: options.focusedLine ?? null,
 				loop_selections: options.loopSelections ?? {},
-				read_only: options.readOnly ?? false,
+				live_only: options.liveOnly ?? false,
 				stdin: options.stdin ?? '',
 				// Default false so a read past the end starves — which is what
 				// opens the console — rather than seeing a spurious EOF.

@@ -2248,8 +2248,8 @@ class TestFieldBoxLegend(unittest.TestCase):
 
 
 
-class TestReadOnly(unittest.TestCase):
-    """Under clickacode.readOnlyVisualizers the object shows its fields and values,
+class TestLiveOnly(unittest.TestCase):
+    """Under clickacode.liveOnlyVisualizers the object shows its fields and values,
     with none of the controls that edit which fields it shows or hand out
     code."""
 
@@ -2258,12 +2258,12 @@ class TestReadOnly(unittest.TestCase):
                  'add-icon', 'snc-input', 'snc-key-down', 'snc-hover-hidden')
 
     def setUp(self):
-        from visualizer_utils import set_read_only
-        set_read_only(True)
+        from visualizer_utils import set_live_only
+        set_live_only(True)
 
     def tearDown(self):
-        from visualizer_utils import set_read_only
-        set_read_only(False)
+        from visualizer_utils import set_live_only
+        set_live_only(False)
 
     def render(self, small=False, **overrides):
         obj = TestObj()

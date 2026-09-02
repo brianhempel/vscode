@@ -39,7 +39,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_read_only, is_read_only  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -617,14 +617,14 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     # A save is a change to the file: the line's trailing comment is rewritten
     # by the editor, and this model already reflects what it will say.
     #
-    # Not under read-only visualizers (clickacode.readOnlyVisualizers): a save is a
-    # change to the file, and nothing a visualizer does may change the file
-    # then -- nor may any other command that would, which is every one but a
-    # copy to the clipboard. The front-end refuses them too; this is the side
-    # that knows not to ask.
-    if is_read_only():
+    # Under live-only visualizers (clickacode.liveOnlyVisualizers) that comment
+    # is the ONE change to the file a visualizer may ask for: what it holds is
+    # the visualizer's own view of the value -- columns, widths, fields -- and
+    # nothing the program computes. Every command that would write code is
+    # dropped, which is every one but a copy to the clipboard. The front-end
+    # refuses them too; this is the side that knows not to ask.
+    if is_live_only():
         commands = [c for c in commands if type(c).__name__ == 'CopyToClipboard']
-        config_dirty = False
     if config_dirty:
         commands.append(SetConfigComment(
             format_config_comment(line_slots) if line_slots is not None else None))
@@ -943,7 +943,7 @@ def _install_run(cmd: Dict[str, Any]) -> None:
 
     _current_run_id = cmd.get('run_id', '')
     _focused_line = cmd.get('focused_line')
-    set_read_only(bool(cmd.get('read_only', False)))
+    set_live_only(bool(cmd.get('live_only', False)))
     models_and_events = _parse_models_and_events(cmd.get('models_and_events', ''))
 
 
@@ -2386,7 +2386,7 @@ def execute_code(
     return result
 
 
-def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None, loop_selections: Optional[Dict[str, int]] = None, read_only: bool = False, checkpoint3_target: Optional[Tuple[int, int]] = None) -> None:
+def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, focused_line: Optional[int] = None, globals_dict: Optional[Dict[str, Any]] = None, import_code: Any = None, stdin_text: str = '', stdin_eof: bool = False, replay_output: Optional[List[Tuple[str, str, int]]] = None, loop_selections: Optional[Dict[str, int]] = None, live_only: bool = False, checkpoint3_target: Optional[Tuple[int, int]] = None) -> None:
     """Execute a run with the given code object and models/events.
 
     If globals_dict is provided (e.g. pre-populated with imports for checkpoint 2),
@@ -2402,9 +2402,9 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
     `loop_selections` is `{loop_line: iteration}` from the editor's sliders;
     see `_loop_selections`.
 
-    `read_only` is the editor's clickacode.readOnlyVisualizers setting: visualizers
+    `live_only` is the editor's clickacode.liveOnlyVisualizers setting: visualizers
     render without any affordance that would change the file, and no command
-    that would change it is sent. See visualizer_utils.set_read_only.
+    that would change it is sent. See visualizer_utils.set_live_only.
 
     `checkpoint3_target` makes this a warm: run with `run_id` empty, holding
     everything, and stop at that widget's log site to wait for a run. See
@@ -2425,7 +2425,7 @@ def _execute_run(code_object: Any, models_and_events_json: str, run_id: str, foc
         _held = []
     _current_run_id = run_id
     _focused_line = focused_line
-    set_read_only(read_only)
+    set_live_only(live_only)
 
     models_and_events = _parse_models_and_events(models_and_events_json)
 
@@ -2621,7 +2621,7 @@ def _warm_to_checkpoint3(cmd: Dict[str, Any], code: str, body_code: Any,
                  focused_line=cmd.get('focused_line'), globals_dict=globals_dict,
                  stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
                  replay_output=import_output, loop_selections=cmd.get('loop_selections'),
-                 read_only=bool(cmd.get('read_only', False)),
+                 live_only=bool(cmd.get('live_only', False)),
                  checkpoint3_target=(target_line, target_site))
 
     if _held is not None:
@@ -2788,7 +2788,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
                      import_code=run_import_code,
                      stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
                      replay_output=replay_output, loop_selections=cmd.get('loop_selections'),
-                     read_only=bool(cmd.get('read_only', False)))
+                     live_only=bool(cmd.get('live_only', False)))
         sys.exit(0)
 
     elif cmd.get('type') == 'run':
@@ -2830,7 +2830,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
         _execute_run(code_object, m_and_e_json, run_id, focused_line=focused_line, import_code=import_code,
                      stdin_text=cmd.get('stdin', ''), stdin_eof=bool(cmd.get('stdin_eof', False)),
                      loop_selections=cmd.get('loop_selections'),
-                     read_only=bool(cmd.get('read_only', False)))
+                     live_only=bool(cmd.get('live_only', False)))
         sys.exit(0)
 
     else:

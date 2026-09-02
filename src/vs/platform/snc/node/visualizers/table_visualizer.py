@@ -59,7 +59,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, List, Tuple, Optional
 
 from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
-from visualizer_utils import is_read_only
+from visualizer_utils import is_live_only
 from visualizer_utils import (
     ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
@@ -9055,8 +9055,13 @@ def _column_dwell_attr(model, *, opens: 'str | None' = None, owns=()) -> str:
 
 
 def _render_column_menu(col, model, lst, eval_in_scope=None,
-                        get_visualizer=None):
+                        get_visualizer=None, live_only=False):
     """Render the rows of the per-column ▾ menu.
+
+    *live_only* keeps the rows that decide which columns exist and how one is
+    read -- Remove, Insert, Expand and Subcolumns -- which change only the
+    line's config. The rest search, sort, convert, compute and tally, and
+    those write code (or lead there), so a live-only table doesn't offer them.
 
     State-driven (no data-hover-menu), so the TypeScript side hoists the panel out
     of the table's overflow container instead of cloning it on hover. Flyout-aligned:
@@ -9066,7 +9071,7 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
     """
     remove_event = repr(RemoveColumnClick(col=col))
     rows = [
-        _render_column_search_row(col, model),
+        '' if live_only else _render_column_search_row(col, model),
         f'<div class="snc-dropdown-option"{_column_dwell_attr(model)}>'
         f'<span snc-mouse-down="{html.escape(remove_event)}" '
         f'class="snc-dropdown-option-label">Remove</span>'
@@ -9086,16 +9091,19 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
         _render_column_restar(col, model, lst, eval_in_scope),
         _render_column_subcols(col, model, lst, get_visualizer,
                                eval_in_scope),
-        _render_column_sort(col, model),
-        _render_column_group_by(col, model),
-        # Above Compute: it says how the column READS, which is a question
-        # every row below it -- what the column adds up to, what it is
-        # searched and tallied on -- then asks of the converted values.
-        _render_column_convert(col, model),
-        _render_column_compute(col, model, lst, eval_in_scope),
-        '<div class="col-compute-sep"></div>',
-        _render_column_tally(col, model, lst, eval_in_scope),
     ]
+    if not live_only:
+        rows += [
+            _render_column_sort(col, model),
+            _render_column_group_by(col, model),
+            # Above Compute: it says how the column READS, which is a question
+            # every row below it -- what the column adds up to, what it is
+            # searched and tallied on -- then asks of the converted values.
+            _render_column_convert(col, model),
+            _render_column_compute(col, model, lst, eval_in_scope),
+            '<div class="col-compute-sep"></div>',
+            _render_column_tally(col, model, lst, eval_in_scope),
+        ]
     # Says what a click outside the menu means, so the front end doesn't have to
     # know which of these panels is a menu or what closing one entails. The
     # submenus are hoisted panels of their own, so "outside" is outside all of
@@ -9111,7 +9119,7 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
 
 def _render_column_header(col, model, lst, eval_in_scope=None,
                           span_attrs='', extra_classes='', label=None,
-                          get_visualizer=None, read_only=False,
+                          get_visualizer=None, live_only=False,
                           resize_prev=None):
     """Render a normal column header with drag handle, column name, and ▾ menu.
 
@@ -9122,9 +9130,10 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     neighbour's. This header's right edge resizes *col*; its left edge, when
     there is a *resize_prev*, resizes that.
 
-    *read_only* (clickacode.readOnlyVisualizers) draws the name alone: no handle to
-    reorder by, no click to edit, no ▾ -- every one of those writes config or
-    code. The filtered styling stays, since the filter still narrows the rows.
+    *live_only* (clickacode.liveOnlyVisualizers) keeps everything here -- the
+    handles to reorder and resize by, the click to edit, the ▾ -- since all of
+    it changes only the line's config; the ▾ menu is what it trims, to the rows
+    that do the same (see _render_column_menu).
 
     The header shows the expression as written, dollar and all: it is the same
     text double-clicking it puts in the box, so there is nothing to translate
@@ -9174,18 +9183,6 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
     if is_filtered:
         th_classes.append('col-filtered')
 
-    if read_only:
-        if extra_classes:
-            th_classes.append(extra_classes)
-        return (
-            f'<th class="{" ".join(th_classes)}"{span_attrs} data-col="{repr(html.escape(col))}">'
-            f'<span class="col-header-inner">'
-            f'<span class="col-name">'
-            f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
-            f'</span>'
-            f'</th>'
-        )
-
     source_expr = model.get('_source_expr')
     py_exp_attr = ('' if source_expr is None
                    else py_exp_attrs(_column_header_exps(
@@ -9213,7 +9210,7 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(toggle_event)}" '
         f'data-tooltip="Column actions" '
         f'class="{" ".join(menu_classes)}">▾</span>'
-        f'{_render_column_menu(col, model, lst, eval_in_scope, get_visualizer) if menu_open else ""}'
+        f'{_render_column_menu(col, model, lst, eval_in_scope, get_visualizer, live_only=live_only) if menu_open else ""}'
         f'</span>'
     )
 
@@ -10730,7 +10727,7 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
     reads = [_column_values(leaf.expr, lst, model, eval_in_scope) if asked[ci]
              else None
              for ci, leaf in enumerate(leaves)]
-    add_box = None if is_read_only() else _add_box_leaf(model, columns)
+    add_box = _add_box_leaf(model, columns)
 
     rows = []
     for level, spec in enumerate(levels):
@@ -10786,15 +10783,15 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     search = model.get('search')
     has_search = search is not None and search != ''
-    # Read-only visualizers (clickacode.readOnlyVisualizers): the rows are drawn and
+    # Read-only visualizers (clickacode.liveOnlyVisualizers): the rows are drawn and
     # nothing that writes code or config is -- no toolbar, no column menus or
     # (+), no row handles or menus, no search or action bar, no pick regions.
     # The drag handles go quiet on their own (see py_exp_attrs). A search left
     # in the model from before still narrows the rows: that is a view.
-    read_only = is_read_only()
+    live_only = is_live_only()
     # There is nothing to pick out of a small (unfocused) preview. With a search
     # pick is first-match-only; without one the whole table is one band.
-    pick_mode = (model.get('tool') == 'pick') and not small and not read_only
+    pick_mode = (model.get('tool') == 'pick') and not small and not live_only
     # Deliberately not _first_match_mode: the tool's half is gated on there
     # being a pick on screen to explain it, and a preview has none. The user's
     # half is not gated -- a preview of a first-match table is still one.
@@ -10837,9 +10834,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     table_div_style = f'min-height: {actual_min_height}px; max-height: {actual_max_height}px;{actual_max_width}'
 
-    # The keys commit and cancel the column box, which read-only never opens.
-    key_handler = ('' if read_only else
-                   f'snc-key-down="{html.escape(repr(ColumnKeyDown()))}" snc-mouse-down="{html.escape(repr(DeselectChildren()))}"')
+    # The keys commit and cancel the column box.
+    key_handler = f'snc-key-down="{html.escape(repr(ColumnKeyDown()))}" snc-mouse-down="{html.escape(repr(DeselectChildren()))}"'
     small_class = ' small' if small else ''
     expandable_class = ' is-expandable' if can_expand else ''
     has_focused_child_class = ' has-focused-child' if focused_child else ''
@@ -10855,7 +10851,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
     # The tool toolbar only makes sense on the focused visualizer; in small mode
     # there is no room for it and it would compete with the real focus.
-    if not small and not read_only:
+    if not small and not live_only:
         strs.append(_render_tool_toolbar(model))
 
     is_dragging_class = 'list-table-is-dragging' if model.get('column_drag_from') is not None or model.get('column_drag_over') is not None else ''
@@ -10879,7 +10875,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # Where Add Column Before / After put the box: beside the column it was
     # asked for, in that column's own header row, so the new column is written
     # where it is going to be drawn.
-    beside = None if read_only else _add_beside_target(model)
+    beside = _add_beside_target(model)
     for level, cells in enumerate(header_rows):
         if level:
             strs.append('<tr>')
@@ -10908,7 +10904,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             if box and not beside[1]:
                 strs.append(box)
                 resize_prev = None
-            if model.get('editing_column') == cell.expr and not read_only:
+            if model.get('editing_column') == cell.expr:
                 strs.append(_render_column_input(
                     lst, model, get_visualizer, is_editing=True,
                     span_attrs=span_attrs))
@@ -10924,7 +10920,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                     extra_classes='col-subheader' if level else None,
                     label=cell.label if level else None,
                     get_visualizer=get_visualizer,
-                    read_only=read_only,
+                    live_only=live_only,
                     resize_prev=resize_prev))
                 resize_prev = cell.expr
             if box and beside[1]:
@@ -10940,7 +10936,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             # Unless it is already drawn beside the column it was asked for --
             # an anchor the table no longer has falls back to here, so the box
             # is drawn exactly once wherever it ends up.
-            if model.get('adding_column') and beside is None and not read_only:
+            if model.get('adding_column') and beside is None:
                 strs.append(_render_column_input(lst, model, get_visualizer,
                                                  is_editing=False,
                                                  span_attrs=full_span))
@@ -10950,7 +10946,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # Which drawn column the open box takes the place of, and how deep it hangs
     # -- the cells below have to leave it a column's worth of room, or every
     # column to its right slides off the values it names.
-    add_box = None if read_only else _add_box_leaf(model, columns)
+    add_box = _add_box_leaf(model, columns)
 
     if len(lst) == 0:
 
@@ -11081,7 +11077,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             strs.append(_render_row_index_cell(
                 model, lst, i, span_attrs=span_attr,
                 overlay=pick_overlay(i, PICK_IDX_COLUMN), parts=row_exprs,
-                widgets=not small and not pick_here and not read_only))
+                widgets=not small and not pick_here and not live_only))
 
         for ci, leaf in enumerate(leaves):
             col = leaf.expr
@@ -11198,13 +11194,13 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         strs.append(f'</div>')
 
 
-    if not small and not read_only:
+    if not small:
         strs.append(_render_add_column_header(
             lst, model, get_visualizer))
 
     strs.append('</div>')
 
-    if not small and not read_only:
+    if not small and not live_only:
         strs.append(_render_search_box(model, lst, eval_in_scope, small=False, focused_child=focused_child))
 
     strs.append('</div>')

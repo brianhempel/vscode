@@ -16153,17 +16153,17 @@ class TestActionsReadDownEveryRow(unittest.TestCase):
 
 
 
-class TestReadOnly(unittest.TestCase):
-    """Under clickacode.readOnlyVisualizers the focused string is a plain preview:
+class TestLiveOnly(unittest.TestCase):
+    """Under clickacode.liveOnlyVisualizers the focused string is a plain preview:
     the text and the expand bar, none of the machinery that builds code."""
 
     def setUp(self):
-        from visualizer_utils import set_read_only
-        set_read_only(True)
+        from visualizer_utils import set_live_only
+        set_live_only(True)
 
     def tearDown(self):
-        from visualizer_utils import set_read_only
-        set_read_only(False)
+        from visualizer_utils import set_live_only
+        set_live_only(False)
 
     def render(self, value, small=False):
         model = init_model(value)
@@ -16181,7 +16181,7 @@ class TestReadOnly(unittest.TestCase):
 
     def test_focused_render_keeps_the_expand_bar_for_a_tall_string(self):
         # The counts don't come with it: they ride the search box, which a
-        # read-only render doesn't draw.
+        # live-only render doesn't draw.
         out = self.render("a\nb\nc\nd\ne\nf")
         self.assertIn('expand-and-len', out)
         self.assertNotIn('tiny-len', out)

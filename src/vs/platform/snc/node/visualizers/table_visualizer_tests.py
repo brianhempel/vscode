@@ -22013,24 +22013,31 @@ class TestRowMenuToggle(unittest.TestCase):
 
 
 
-class TestReadOnly(unittest.TestCase):
-    """Under clickacode.readOnlyVisualizers the table shows its rows and nothing that
-    writes code or config: no column menus, no (+), no row handles or menus,
-    no search or action bar, no tool toolbar, no drag handles."""
+class TestLiveOnly(unittest.TestCase):
+    """Under clickacode.liveOnlyVisualizers the table shows its rows and keeps
+    the controls that only change its own config (what the line's #%click
+    comment holds): the column handles to reorder and resize by, the ▾ menu
+    trimmed to the rows that decide which columns exist, and the (+) and its
+    box, which take a Python expression. Nothing that writes code: no row
+    handles or menus, no search or action bar, no tool toolbar, no dragging
+    an expression out."""
 
-    FORBIDDEN = ('snc-py-exps', 'data-action-expr', 'col-menu', 'col-add',
-                 'col-handle', 'row-handle', 'row-menu', 'search-div',
-                 'tool-toolbar', 'action-button', 'draggable="true"', 'py-exp-grab',
-                 'snc-add-at-cursor', 'col-input', 'snc-dropdown-trigger',
-                 'snc-key-down')
+    FORBIDDEN = ('snc-py-exps', 'data-action-expr', 'row-handle', 'row-menu',
+                 'search-div', 'tool-toolbar', 'action-button',
+                 'draggable="true"', 'py-exp-grab', 'snc-add-at-cursor')
+
+    # The ▾ menu rows that write code or ask questions of the rows, none of
+    # which a live-only table offers.
+    MENU_FORBIDDEN = ('col-search-area', 'col-sort', 'col-convert',
+                      'class="snc-dropdown-trigger col-compute"', 'col-tally')
 
     def setUp(self):
-        from visualizer_utils import set_read_only
-        set_read_only(True)
+        from visualizer_utils import set_live_only
+        set_live_only(True)
 
     def tearDown(self):
-        from visualizer_utils import set_read_only
-        set_read_only(False)
+        from visualizer_utils import set_live_only
+        set_live_only(False)
 
     def render(self, lst, small=False, **model_overrides):
         model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
@@ -22050,17 +22057,53 @@ class TestReadOnly(unittest.TestCase):
 
     def test_focused_render_keeps_the_expand_bar(self):
         # The count doesn't come with it: it rides the search box, which a
-        # read-only render doesn't draw.
+        # live-only render doesn't draw.
         out = self.render([1, 2, 3])
         self.assertIn('expand-and-len', out)
         self.assertNotIn('tiny-len', out)
 
-    def test_an_open_column_box_or_menu_is_not_drawn(self):
+    def test_the_column_handles_and_menu_stay(self):
+        out = self.render([{'a': 1, 'b': 'x'}])
+        self.assertIn('col-drag-handle', out)
+        self.assertIn('col-resize-handle', out)
+        self.assertIn('col-menu-trigger', out)
+        self.assertIn('col-add-trigger', out)
+
+    def test_the_column_menu_keeps_only_the_rows_that_decide_which_columns_exist(self):
         lst = [{'a': 1}]
-        out = self.render(lst, adding_column=True, column_input_value='$.a',
-                          openDropdown={'id': 'col-menu:$.a'})
+        model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
+        out = self.render(lst, openDropdown={'id': menu_id(model)})
+        self.assertIn('col-menu-panel', out)
+        for marker in ('>Remove<', '>Insert Left<', '>Insert Right<', 'col-subcol'):
+            self.assertIn(marker, out, marker)
+        for marker in self.MENU_FORBIDDEN + self.FORBIDDEN:
+            self.assertNotIn(marker, out, marker)
+
+    def test_the_open_column_box_is_drawn(self):
+        # A new column is a Python expression, which is config, not code.
+        out = self.render([{'a': 1}], adding_column=True, column_input_value='$.a')
+        self.assertIn('col-input', out)
+        self.assertIn('snc-key-down', out)
         for marker in self.FORBIDDEN:
             self.assertNotIn(marker, out, marker)
+
+    def test_a_resize_still_saves_the_columns(self):
+        # The one thing a live-only visualizer may change in the file is its
+        # line's #%click comment, and a resize is saved there like any edit.
+        for p in _module_patches:
+            p.stop()
+        try:
+            set_line_config(None)
+            lst = [{'a': 1}]
+            model = init_model(lst, mock_get_visualizer)
+            update(make_column_mouse_event(repr(ColumnResize(col="$['a']", width=90))),
+                   None, model, lst, mock_get_visualizer)
+            self.assertEqual(take_line_config(),
+                             ([{'expr': '$'}, {'expr': "$['a']", 'width': 90}], True))
+        finally:
+            set_line_config(None)
+            for p in _module_patches:
+                p.start()
 
     def test_pick_tool_is_not_drawn(self):
         lst = [1, 2, 3]

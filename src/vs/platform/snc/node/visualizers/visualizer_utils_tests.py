@@ -1553,25 +1553,25 @@ class TestDollarScope(unittest.TestCase):
 
 
 
-class TestReadOnly(unittest.TestCase):
-    """The read-only switch (clickacode.readOnlyVisualizers): nothing a visualizer
+class TestLiveOnly(unittest.TestCase):
+    """The live-only switch (clickacode.liveOnlyVisualizers): nothing a visualizer
     renders may hand code to the editor. The shared helpers that write drag
     handles and action-button expressions are where most of them come from, so
     they go quiet under the flag and every visualizer built on them follows."""
 
     def setUp(self):
-        from visualizer_utils import set_read_only
-        set_read_only(True)
+        from visualizer_utils import set_live_only
+        set_live_only(True)
 
     def tearDown(self):
-        from visualizer_utils import set_read_only
-        set_read_only(False)
+        from visualizer_utils import set_live_only
+        set_live_only(False)
 
     def test_flag_is_off_by_default_and_toggles(self):
-        from visualizer_utils import set_read_only, is_read_only
-        self.assertTrue(is_read_only())
-        set_read_only(False)
-        self.assertFalse(is_read_only())
+        from visualizer_utils import set_live_only, is_live_only
+        self.assertTrue(is_live_only())
+        set_live_only(False)
+        self.assertFalse(is_live_only())
 
     def test_py_exp_attrs_writes_nothing(self):
         self.assertEqual(py_exp_attrs('x[0]'), '')

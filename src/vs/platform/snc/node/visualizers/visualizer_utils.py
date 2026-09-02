@@ -1250,24 +1250,24 @@ def imports_for_code(code: str) -> tuple:
     return tuple(line for pattern, line in _CODE_NEEDS if pattern.search(bare))
 
 
-# Whether the editor asked for read-only visualizers (the
-# `clickacode.readOnlyVisualizers` setting). Set by python_runner once per run, before
+# Whether the editor asked for live-only visualizers (the
+# `clickacode.liveOnlyVisualizers` setting). Set by python_runner once per run, before
 # any visualizer draws. Under it nothing a visualizer renders may hand code to
 # the editor: the shared helpers below write no drag handles and no
 # action-button expressions, and each visualizer leaves out the controls of its
 # own that would write code or config (menus, boxes, buttons). Whatever only
 # changes the visualizer's own view -- expanding, scrolling, focusing a nested
 # value -- is still offered.
-_read_only: bool = False
+_live_only: bool = False
 
 
-def set_read_only(flag: bool) -> None:
-    global _read_only
-    _read_only = bool(flag)
+def set_live_only(flag: bool) -> None:
+    global _live_only
+    _live_only = bool(flag)
 
 
-def is_read_only() -> bool:
-    return _read_only
+def is_live_only() -> bool:
+    return _live_only
 
 
 class PyExp(NamedTuple):
@@ -1314,7 +1314,7 @@ def py_exp_attrs(exprs, *, draggable: bool = True,
     offer can drop this in unconditionally -- and pass None among several for
     the one reading it hasn't got.
     """
-    if _read_only:
+    if _live_only:
         return ''
     if isinstance(exprs, (str, PyExp)) or exprs is None:
         exprs = [exprs]
@@ -1352,7 +1352,7 @@ def wrap_drag_grab(inner_html: str, var_and_exp) -> str:
     no access-path expression via var_and_exp.
     """
     expr = var_and_exp[1] if var_and_exp else None
-    if not expr or _read_only:
+    if not expr or _live_only:
         return inner_html
     return (f'<span{py_exp_attrs(expr)} '
             f'class="py-exp-grab">{inner_html}</span>')

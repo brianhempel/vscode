@@ -2267,20 +2267,21 @@ class TestHandledEventReporting(unittest.TestCase):
         self.assertNotIn('mousemove', item['html'])
 
 
-class TestReadOnly(unittest.TestCase):
-    """A run asked for with `read_only` (clickacode.readOnlyVisualizers) renders no
-    handles and sends the editor no command that would change the file."""
+class TestLiveOnly(unittest.TestCase):
+    """A run asked for with `live_only` (clickacode.liveOnlyVisualizers) renders no
+    code handles and sends the editor no command that would change the code --
+    the one file change it may ask for is the line's #%click comment."""
 
     SRC = "x = 5\n"
 
     def setUp(self):
-        # The flag is process-wide and these tests end on a read-only run, so
+        # The flag is process-wide and these tests end on a live-only run, so
         # without this every visualizer test that runs after them in the same
         # pytest process renders with its affordances suppressed.
-        from visualizer_utils import set_read_only
-        self.addCleanup(set_read_only, False)
+        from visualizer_utils import set_live_only
+        self.addCleanup(set_live_only, False)
 
-    def _run(self, read_only, visualizers=None):
+    def _run(self, live_only, visualizers=None):
         import_code, body_code = split_leading_imports(self.SRC)
         saved = python_runner._visualizers
         if visualizers is not None:
@@ -2288,17 +2289,17 @@ class TestReadOnly(unittest.TestCase):
         try:
             with capture_stream_messages() as msgs:
                 python_runner._execute_run(body_code, '', 'run-1', import_code=import_code,
-                                           read_only=read_only)
+                                           live_only=live_only)
         finally:
             python_runner._visualizers = saved
         return msgs.all()
 
     def test_flag_is_reset_between_runs(self):
-        from visualizer_utils import is_read_only
+        from visualizer_utils import is_live_only
         self._run(True)
-        self.assertTrue(is_read_only())
+        self.assertTrue(is_live_only())
         self._run(False)
-        self.assertFalse(is_read_only())
+        self.assertFalse(is_live_only())
 
     def test_generic_visualizer_has_no_handle(self):
         html_with = [m['item']['html'] for m in self._run(False) if m.get('type') == 'item'][0]
@@ -2307,7 +2308,7 @@ class TestReadOnly(unittest.TestCase):
         self.assertNotIn('snc-py-exps', html_without)
         self.assertIn('snc-generic-visualizer', html_without)
 
-    def test_commands_that_change_code_are_dropped(self):
+    def test_the_config_comment_is_the_one_file_change_allowed(self):
         class SavingVis:
             def can_visualize(value): return isinstance(value, int)
             def init_model(value, get_visualizer): return {}
@@ -2321,4 +2322,4 @@ class TestReadOnly(unittest.TestCase):
             return [c['type'] for m in msgs if m.get('type') == 'item'
                     for c in m['item'].get('commands', [])]
         self.assertEqual(commands(self._run(False, [SavingVis])), ['SetConfigComment'])
-        self.assertEqual(commands(self._run(True, [SavingVis])), [])
+        self.assertEqual(commands(self._run(True, [SavingVis])), ['SetConfigComment'])

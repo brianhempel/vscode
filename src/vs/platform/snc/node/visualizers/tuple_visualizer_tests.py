@@ -799,17 +799,17 @@ class TestConfig(unittest.TestCase):
 
 
 
-class TestReadOnly(unittest.TestCase):
-    """Under clickacode.readOnlyVisualizers a tuple's parens and elements carry no
+class TestLiveOnly(unittest.TestCase):
+    """Under clickacode.liveOnlyVisualizers a tuple's parens and elements carry no
     drag handles."""
 
     def setUp(self):
-        from visualizer_utils import set_read_only
-        set_read_only(True)
+        from visualizer_utils import set_live_only
+        set_live_only(True)
 
     def tearDown(self):
-        from visualizer_utils import set_read_only
-        set_read_only(False)
+        from visualizer_utils import set_live_only
+        set_live_only(False)
 
     def test_no_handles(self):
         value = (1, 'a')
