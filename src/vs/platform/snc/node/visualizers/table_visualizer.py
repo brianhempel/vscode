@@ -11163,9 +11163,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                          else {})
 
                 if hasattr(cell_vis, 'visualize_els'):
-                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp, **inner)
+                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)
                 else:
-                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=80, small=child_small, var_and_exp=child_var_and_exp, **inner)]
+                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)]
                 if outer_reads and cell_expr:
                     cell_htmls = [add_drag_readings(h, cell_expr, outer_reads)
                                   for h in cell_htmls]
