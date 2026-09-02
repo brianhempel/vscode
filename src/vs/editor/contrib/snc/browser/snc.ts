@@ -2806,7 +2806,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				// 	eventJSON: { type: 'unlink' },
 				// };
 
-				const augmented_e = { ...e, resizeWidth: currWidth, target: handle };
+				// Whole pixels: the deltas are subpixel, and Python saves the
+				// width as an integer.
+				const augmented_e = { ...e, resizeWidth: Math.round(currWidth), target: handle };
 				// Forced past the focus gate: a resize works on a non-focused
 				// table without pinning focus (see the mousedown listener).
 				this.dispatch_mouse_python_event('snc-resize-col', augmented_e, true);

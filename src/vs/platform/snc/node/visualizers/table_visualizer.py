@@ -740,12 +740,16 @@ def _valid_width(width) -> 'int | None':
     """A column width as saved, or None when what is there is not one.
 
     A hand-edited comment is a real input: a width has to be a positive
-    integer number of pixels (bool is an int in Python, so it is refused by
-    name) or it is as though none were saved.
+    number of pixels (bool is an int in Python, so it is refused by name) or
+    it is as though none were saved. Whole pixels: the drag that produces one
+    accumulates subpixel pointer deltas, so what arrives is rarely whole, and
+    a fraction of a pixel is not worth a longer comment.
     """
-    if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
+    if isinstance(width, bool) or not isinstance(width, (int, float)):
         return None
-    return width
+    if not math.isfinite(width) or width <= 0:
+        return None
+    return int(round(width))
 
 
 def _col_add(columns, col: str, config=None) -> bool:

@@ -2703,6 +2703,15 @@ class TestColumnConfig(unittest.TestCase):
         # Reading is not a change.
         self.assertFalse(take_line_config()[1])
 
+    def test_a_fractional_width_is_rounded(self):
+        # The drag accumulates subpixel pointer deltas, so the width a resize
+        # arrives with is rarely whole; it is saved as whole pixels.
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        update(make_column_mouse_event(repr(ColumnResize(col="$['name']", width=152.51))),
+               None, model, lst, mock_get_visualizer)
+        self.assertEqual(model['columns']["$['name']"], {'width': 153})
+
     def test_a_hand_edited_width_that_is_not_a_size_is_ignored(self):
         lst = [{'name': 'Alice'}]
         model = init_model(lst, mock_get_visualizer,
