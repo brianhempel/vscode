@@ -22083,6 +22083,8 @@ class TestLiveOnly(unittest.TestCase):
         model = init_model(lst, mock_get_visualizer, var_and_exp=('data', 'data'))
         out = self.render(lst, openDropdown={'id': menu_id(model)})
         self.assertIn('col-menu-panel', out)
+        # The panel's top is padded for the search row; without one, it says so.
+        self.assertIn('col-menu-panel col-menu-no-search', out)
         for marker in ('>Remove<', '>Insert Left<', '>Insert Right<', 'col-subcol'):
             self.assertIn(marker, out, marker)
         for marker in self.MENU_FORBIDDEN + self.FORBIDDEN:

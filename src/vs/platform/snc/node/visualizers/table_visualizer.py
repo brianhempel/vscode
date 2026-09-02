@@ -9113,8 +9113,12 @@ def _render_column_menu(col, model, lst, eval_in_scope=None,
     # submenus are hoisted panels of their own, so "outside" is outside all of
     # them -- clicking in Sort or Compute is not clicking away from this.
     dismiss = repr(ColumnMenuDismiss())
+    # The panel pads its top for the search row, which sits over it; with no
+    # search row there is nothing to pad for (see .col-menu-no-search).
+    panel_classes = 'snc-dropdown-panel flyout col-menu-panel' + (
+        ' col-menu-no-search' if live_only else '')
     return (
-        f'<div class="snc-dropdown-panel flyout col-menu-panel" '
+        f'<div class="{panel_classes}" '
         f'snc-dropdown-align="flyout" snc-dismiss="{html.escape(dismiss)}">'
         + ''.join(rows)
         + '</div>'

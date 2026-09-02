@@ -1576,8 +1576,13 @@
 .col-menu-panel {
 	max-height: fit-content;
 
+	/* Room for the search row, which is absolutely positioned over the top.
+	   A live-only menu has no search row, so it takes the room back. */
 	&.flyout {
 		padding-top: 34px;
+	}
+	&.flyout.col-menu-no-search {
+		padding-top: 3px; /* .snc-dropdown-panel's own */
 	}
 
 	/* Separates the search from the action rows above it. */
