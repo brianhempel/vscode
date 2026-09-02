@@ -2910,7 +2910,7 @@
 /* Sits in the overlay-widget corner beside where the find widget appears.
    Faded until hovered so it does not compete with the code beneath it;
    opaque while the widgets are hidden so it is easy to find them again. */
-/* The corner strip: the live-only badge, then the eye. The editor sets
+/* The corner strip: the editing badge, then the eye. The editor sets
    top/right inline (clear of the minimap and scrollbar); the margin insets
    the strip from that corner. */
 .monaco-editor .snc-editor-corner {
@@ -2921,11 +2921,12 @@
 	z-index: 10;
 }
 
-/* Says the visualizers are live-only. Not a control, and drawn as none: the
-   eye's box (border, background, hover lift) is what says "press me", so the
-   badge has no box at all -- a bare icon at the eye's size, with no pointer
-   cursor. Only the hover text, which says where the setting is. */
-.monaco-editor .snc-live-only-badge {
+/* Says the visualizers can write code (not live-only). Not a control, and
+   drawn as none: the eye's box (border, background, hover lift) is what says
+   "press me", so the badge has no box at all -- a bare icon at the eye's
+   size, with no pointer cursor. Only the hover text, which says where the
+   setting is. */
+.monaco-editor .snc-editing-badge {
 	width: 22px;
 	height: 22px;
 	display: flex;
@@ -2936,11 +2937,11 @@
 	color: var(--vscode-icon-foreground);
 }
 
-.monaco-editor .snc-live-only-badge[hidden] {
+.monaco-editor .snc-editing-badge[hidden] {
 	display: none;
 }
 
-.monaco-editor .snc-live-only-badge .codicon {
+.monaco-editor .snc-editing-badge .codicon {
 	font-size: 14px;
 }
 

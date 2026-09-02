@@ -3530,10 +3530,12 @@ const SNC_WIDGETS_VISIBLE_KEY = 'snc.widgetsVisible';
  * corner as an overlay widget, so it never occupies a line of code; it is
  * faded until hovered so it does not compete with the text under it.
  *
- * Beside it, a badge says when the visualizers are live-only (see
- * SNC_LIVE_ONLY_VISUALIZERS_SETTING): a mode the user is in, so it is shown
- * where the eye is rather than on every widget. The badge only says so -- it
- * is not a control; the setting is changed in Settings or by its command.
+ * Beside it, a wrench says when the visualizers can write code -- that is,
+ * when they are NOT live-only (see SNC_LIVE_ONLY_VISUALIZERS_SETTING). The
+ * writing mode is the one worth flagging, since it is the one that changes
+ * the file; and it is a mode the user is in, so it is shown where the eye is
+ * rather than on every widget. The badge only says so -- it is not a
+ * control; the setting is changed in Settings or by its command.
  */
 class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 	private static nextId = 0;
@@ -3541,7 +3543,7 @@ class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 	private readonly domNode: HTMLElement;
 	private readonly button: HTMLElement;
 	private readonly icon: HTMLElement;
-	private readonly liveOnlyBadge: HTMLElement;
+	private readonly editingBadge: HTMLElement;
 	private readonly hover = this._register(new DisposableStore());
 	private readonly badgeHover = this._register(new DisposableStore());
 
@@ -3554,13 +3556,13 @@ class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 		this.domNode = document.createElement('div');
 		this.domNode.className = 'snc-editor-corner';
 
-		this.liveOnlyBadge = document.createElement('div');
-		this.liveOnlyBadge.className = 'snc-live-only-badge';
-		this.liveOnlyBadge.hidden = true;
+		this.editingBadge = document.createElement('div');
+		this.editingBadge.className = 'snc-editing-badge';
+		this.editingBadge.hidden = true;
 		const badgeIcon = document.createElement('span');
-		badgeIcon.className = ThemeIcon.asClassName(Codicon.lock);
-		this.liveOnlyBadge.appendChild(badgeIcon);
-		this.domNode.appendChild(this.liveOnlyBadge);
+		badgeIcon.className = ThemeIcon.asClassName(Codicon.wrench);
+		this.editingBadge.appendChild(badgeIcon);
+		this.domNode.appendChild(this.editingBadge);
 
 		this.button = document.createElement('div');
 		this.button.className = 'snc-toggle-widgets-button';
@@ -3599,14 +3601,14 @@ class ToggleWidgetsButton extends Disposable implements IOverlayWidget {
 		}));
 	}
 
-	/** Show the badge exactly while the visualizers are live-only. */
+	/** Show the wrench exactly while the visualizers are NOT live-only. */
 	setLiveOnly(liveOnly: boolean): void {
-		this.liveOnlyBadge.hidden = !liveOnly;
+		this.editingBadge.hidden = liveOnly;
 		this.badgeHover.clear();
-		if (liveOnly) {
-			const label = localize('sncLiveOnlyBadge', "Live-only visualizers: nothing here writes code into the file. Change under Settings > Clickacode.");
-			this.liveOnlyBadge.setAttribute('aria-label', label);
-			this.badgeHover.add(this.hoverService.setupDelayedHover(this.liveOnlyBadge, {
+		if (!liveOnly) {
+			const label = localize('sncEditingBadge', "Visualizers can write code into the file. To make them live-only, change the setting under Settings > Clickacode.");
+			this.editingBadge.setAttribute('aria-label', label);
+			this.badgeHover.add(this.hoverService.setupDelayedHover(this.editingBadge, {
 				content: label,
 				style: HoverStyle.Pointer,
 			}));
