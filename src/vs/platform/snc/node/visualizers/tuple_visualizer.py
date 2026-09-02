@@ -43,10 +43,10 @@ from typing import Any, List, Tuple
 from visualizer_utils import (
     ChildEvent,
     add_drag_readings, aggregate_handled_keys, child_nesting_kwargs,
-    compose_dollar_expr, eval_dollar_expr, is_nested, nest_child_command,
-    parse_slots, replace_dollars_in_py_exp, route_child_event, too_deep,
-    truncate_str, wants_kwarg, wrap_child_html, wrap_drag_grab,
-    CHILD_SOURCE_BINDER,
+    compose_dollar_expr, error_html, eval_dollar_expr, is_nested,
+    nest_child_command, parse_slots, replace_dollars_in_py_exp,
+    route_child_event, too_deep, truncate_str, wants_kwarg, wrap_child_html,
+    wrap_drag_grab, CHILD_SOURCE_BINDER,
 )
 
 
@@ -173,12 +173,18 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
         return model
 
     for _, expr, element in _elements(value):
-        child_vis = get_visualizer(element)
-        # A child visualizer that doesn't name the nesting params in its
-        # init_model gets {} back and isn't handed them.
-        extra = child_nesting_kwargs(model, expr, child_vis.init_model)
-        model['children'][expr] = child_vis.init_model(
-            element, get_visualizer, eval_in_scope=eval_in_scope, **extra)
+        try:
+            child_vis = get_visualizer(element)
+            # A child visualizer that doesn't name the nesting params in its
+            # init_model gets {} back and isn't handed them.
+            extra = child_nesting_kwargs(model, expr, child_vis.init_model)
+            model['children'][expr] = child_vis.init_model(
+                element, get_visualizer, eval_in_scope=eval_in_scope, **extra)
+        except Exception:
+            # A child that can't build a model for the element can't draw it
+            # either: the render asks again and, when it raises again, draws
+            # the error in the element's slot (see _render_element).
+            pass
 
     model['handledKeys'] = aggregate_handled_keys(model['children'])
     return model
@@ -336,28 +342,38 @@ def _render_element(element, expr: str, model: dict, get_visualizer, eval_in_sco
     if get_visualizer is None:
         return html.escape(repr(element))
 
-    child_vis = get_visualizer(element)
-    child_model = model.get('children', {}).get(expr)
-    if child_model is None:
-        extra = child_nesting_kwargs(model, expr, child_vis.init_model)
-        child_model = child_vis.init_model(element, get_visualizer,
-                                           eval_in_scope=eval_in_scope, **extra)
-        # Kept, so a later event runs against this model -- with the nesting
-        # this one asked for -- rather than the bare fallback route_child_event
-        # builds for a child its parent has none for.
-        if child_model is not None:
-            model.setdefault('children', {})[expr] = child_model
-
     child_expr = _element_expr(model, expr)
-    inner = {}
-    if every_row_exps is not None and wants_kwarg(child_vis.visualize, 'every_row_exps'):
-        inner['every_row_exps'] = functools.partial(_nested_every_row_exps,
-                                                    every_row_exps, expr)
-    child_html = child_vis.visualize(
-        element, child_model, get_visualizer, eval_in_scope,
-        max_width=_child_width(max_width, count), max_height=max_height,
-        small=small or (expr != model.get('focused_child')),
-        var_and_exp=(None, child_expr) if child_expr else None, **inner)
+    child_var_and_exp = (None, child_expr) if child_expr else None
+    try:
+        child_vis = get_visualizer(element)
+        child_model = model.get('children', {}).get(expr)
+        if child_model is None:
+            extra = child_nesting_kwargs(model, expr, child_vis.init_model)
+            child_model = child_vis.init_model(element, get_visualizer,
+                                               eval_in_scope=eval_in_scope, **extra)
+            # Kept, so a later event runs against this model -- with the
+            # nesting this one asked for -- rather than the bare fallback
+            # route_child_event builds for a child its parent has none for.
+            if child_model is not None:
+                model.setdefault('children', {})[expr] = child_model
+
+        inner = {}
+        if every_row_exps is not None and wants_kwarg(child_vis.visualize, 'every_row_exps'):
+            inner['every_row_exps'] = functools.partial(_nested_every_row_exps,
+                                                        every_row_exps, expr)
+        child_html = child_vis.visualize(
+            element, child_model, get_visualizer, eval_in_scope,
+            max_width=_child_width(max_width, count), max_height=max_height,
+            small=small or (expr != model.get('focused_child')),
+            var_and_exp=child_var_and_exp, **inner)
+    except Exception as e:
+        # The child couldn't draw the element it was handed. The error takes
+        # the element's slot, in red, and the rest of the tuple goes on
+        # drawing -- otherwise one broken child costs the user the whole
+        # tuple, and the table above it. Not wrapped as a child: there is no
+        # model behind it for an event to reach. It still offers the
+        # element's expression, since what raised is the thing to look at.
+        return wrap_drag_grab(error_html(e), child_var_and_exp)
     if every_row_exps is not None and child_expr:
         child_html = add_drag_readings(child_html, child_expr,
                                        every_row_exps(expr))

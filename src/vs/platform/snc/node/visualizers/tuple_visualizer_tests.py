@@ -833,5 +833,73 @@ class TestLiveOnly(unittest.TestCase):
         self.assertNotIn('snc-py-exps', out)
         self.assertNotIn('py-exp-grab', out)
 
+
+class _RaisingVis(_GenericVis):
+    """A child that can't draw its element."""
+    def __init__(self, raise_in='visualize'):
+        self.raise_in = raise_in
+
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        if self.raise_in == 'init_model':
+            raise RuntimeError('no model for you')
+        return None
+
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None,
+                  max_height=None, small=False, var_and_exp=None):
+        if self.raise_in == 'visualize':
+            raise RuntimeError('boom')
+        return super().visualize(value, model, get_visualizer, eval_in_scope, max_width,
+                                 max_height, small, var_and_exp)
+
+
+class TestElementErrors(unittest.TestCase):
+    """An element whose visualizer raises is drawn as the error, in red, in the
+    slot the element would have taken -- the rest of the tuple goes on
+    drawing. Otherwise one broken child costs the user the whole tuple, and
+    the table above it too."""
+
+    def _get_vis(self, raising):
+        return lambda v: _tuple_vis if isinstance(v, tuple) else (
+            raising if isinstance(v, str) else _generic_vis)
+
+    def test_a_child_that_raises_while_drawing_shows_the_error_in_its_slot(self):
+        from visualizer_utils import ERROR_RED
+        get_vis = self._get_vis(_RaisingVis('visualize'))
+        value = (1, 'x')
+        model = init_model(value, get_vis)
+        out = visualize(value, model, get_vis)
+        self.assertIn('RuntimeError: boom', out)
+        self.assertIn(ERROR_RED, out)
+        # The element that drew still reads, and the tuple is still a tuple.
+        self.assertEqual(text_of(out).replace('RuntimeError: boom', 'E'), '(1, E)')
+
+    def test_a_child_that_raises_in_init_model_shows_the_error_in_its_slot(self):
+        get_vis = self._get_vis(_RaisingVis('init_model'))
+        value = (1, 'x')
+        model = init_model(value, get_vis)
+        out = visualize(value, model, get_vis)
+        self.assertIn('RuntimeError: no model for you', out)
+        self.assertEqual(text_of(out).replace('RuntimeError: no model for you', 'E'), '(1, E)')
+
+    def test_the_error_reads_as_the_error_visualizer_does(self):
+        from visualizer_utils import UncaughtError
+        import error_visualizer
+        get_vis = self._get_vis(_RaisingVis('visualize'))
+        value = ('x',)
+        out = visualize(value, init_model(value, get_vis), get_vis)
+        try:
+            raise RuntimeError('boom')
+        except RuntimeError as e:
+            expected = error_visualizer.visualize(UncaughtError(e))
+        self.assertIn(expected, out)
+
+    def test_the_error_element_still_hands_over_its_expression(self):
+        get_vis = self._get_vis(_RaisingVis('visualize'))
+        value = (1, 'x')
+        model = init_model(value, get_vis, var_and_exp=('t', 't'))
+        out = visualize(value, model, get_vis, var_and_exp=('t', 't'))
+        self.assertIn(exp_attr('t[1]'), out)
+
+
 if __name__ == '__main__':
     unittest.main()

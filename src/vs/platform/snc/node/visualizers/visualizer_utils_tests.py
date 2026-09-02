@@ -1586,5 +1586,52 @@ class TestLiveOnly(unittest.TestCase):
         self.assertEqual(add_drag_readings(child, 'x[0]', ['[item for item in x]']), '<b>1</b>')
         self.assertEqual(defer_drag_grab(child, 'x[0]'), '<b>1</b>')
 
+
+class TestErrorHtml(unittest.TestCase):
+    """What an exception reads as wherever one is drawn: red `Type: message`,
+    the way the error visualizer draws the one that ended the run. A table cell
+    or a tuple element that raised draws the same thing, so the two can't come
+    to read differently."""
+
+    def _raised(self, exc_type, *args):
+        try:
+            raise exc_type(*args)
+        except BaseException as e:
+            return e
+
+    def test_reads_type_and_message(self):
+        from visualizer_utils import error_html
+        out = error_html(self._raised(ValueError, "invalid literal for int() with base 10: 'x'"))
+        self.assertIn(html.escape("ValueError: invalid literal for int() with base 10: 'x'"), out)
+
+    def test_is_red(self):
+        from visualizer_utils import error_html, ERROR_RED
+        self.assertIn(ERROR_RED, error_html(self._raised(ZeroDivisionError, 'division by zero')))
+
+    def test_bare_type_name_when_there_is_no_message(self):
+        from visualizer_utils import error_html
+        out = error_html(self._raised(ValueError))
+        self.assertIn('ValueError', out)
+        self.assertNotIn('ValueError:', out)
+
+    def test_escapes_html_in_the_message(self):
+        from visualizer_utils import error_html
+        out = error_html(self._raised(TypeError, "'<' not supported between 'int' & 'str'"))
+        self.assertIn('&lt;', out)
+        self.assertNotIn("<'", out)
+        self.assertIn('&amp;', out)
+
+    def test_survives_an_exception_whose_str_raises(self):
+        from visualizer_utils import error_html, ERROR_RED
+
+        class Hostile(Exception):
+            def __str__(self):
+                raise RuntimeError('no str for you')
+
+        out = error_html(Hostile())
+        self.assertIn('Hostile', out)
+        self.assertIn(ERROR_RED, out)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1509,6 +1509,18 @@
   width: 10px;
   overflow: hidden;
   white-space: pre;
+  /* A narrow column keeps its handles: the name gives way first (see
+     .col-name), and this and the ▾ stay whole until there is no room for even
+     them. The auto margin pairs with the ▾'s: a header wider than the name
+     may grow to has free space, and the two margins split it so the name
+     stays centered between handles pinned to the edges. */
+  flex-shrink: 0;
+  margin-right: auto;
+}
+
+.list-visualizer .col-header-inner > .col-menu-trigger {
+	flex-shrink: 0;
+	margin-left: auto;
 }
 
 .list-table-scroll:not(.list-table-is-dragging) > table .col-header:hover > .col-header-inner > .col-drag-handle,
@@ -1568,6 +1580,17 @@
   font-weight: 400;
   flex-grow: 1;
   text-align: center;
+  /* The name is what a narrow column cuts, with an ellipsis, so the ⣿ and ▾
+     beside it stay whole: min-width: 0 lets a flex item shrink below its
+     text. The name arrives whole from Python and is cut only here, where the
+     column's width is known. The max-width is the one cap on a column that
+     was never resized, so a long expression can't widen the table without
+     end -- about what 50 characters came to when the cut was made in Python. */
+  min-width: 0;
+  max-width: 50ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .editor-instance .snc-hover-hidden-parent .snc-hover-hidden.col-menu.active {

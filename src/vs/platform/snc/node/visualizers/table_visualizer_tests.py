@@ -2311,6 +2311,27 @@ def menu_id(model, kind='col-menu', index=0):
     return _menu_id(kind, _menu_targets(model['columns'])[index])
 
 
+class TestColumnHeaderNameIsCutByCss(unittest.TestCase):
+    """A long column expression reaches the header whole. Where it is cut is
+    the width the column has -- the resize handle's business, so the name is
+    clipped with an ellipsis by CSS (see .col-name) rather than at a character
+    count here, and it gives way before the ⣿ and ▾ do."""
+
+    def test_header_renders_the_whole_expression(self):
+        long_col = "$['" + 'a_field_with_a_very_long_name_' * 3 + "']"
+        self.assertGreater(len(long_col), 60)
+        lst = [{long_col[3:-2]: 1}]
+        model = init_model(lst, mock_get_visualizer)
+        self.assertIn(long_col, model['columns'])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        m = re.search(r'<th class="[^"]*col-header[^"]*"[^>]*data-col="[^"]*a_field[^"]*".*?</th>',
+                      out, re.DOTALL)
+        assert m is not None, 'no header for the long column'
+        th = m.group(0)
+        self.assertIn(f'class="col-name">{html.escape(long_col)}</span>', th)
+        self.assertNotIn('…', th)
+
+
 class TestColumnMenu(unittest.TestCase):
     """The per-column ▾ menu: a click-toggled, state-driven dropdown pinned to the
     right edge of each header. Remove Column lives here rather than as a bare × in
@@ -22126,6 +22147,155 @@ class TestLiveOnly(unittest.TestCase):
         out = self.render([1, 2], small=True)
         for marker in self.FORBIDDEN:
             self.assertNotIn(marker, out, marker)
+
+
+class _RaisingVis:
+    """A child that can't draw: what a broken (or merely surprised) visualizer
+    does to the cell it was handed."""
+    def __init__(self, raise_in='visualize'):
+        self.raise_in = raise_in
+    def can_visualize(self, value):
+        return isinstance(value, str)
+    def init_model(self, value, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        if self.raise_in == 'init_model':
+            raise RuntimeError('no model for you')
+        return {'handledKeys': []}
+    def visualize(self, value, model, get_visualizer, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None):
+        if self.raise_in == 'visualize':
+            raise RuntimeError('boom')
+        return f'<span>{html.escape(value)}</span>'
+    def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        return (model, [])
+
+
+class TestCellErrors(unittest.TestCase):
+    """A cell that can't be worked out says why, in red, where the value would
+    have been -- rather than going quietly blank, which reads as "no value"
+    when the truth is "your column raised". The other cells go on drawing.
+
+    Two ways a cell fails: the column expression raises on the row (the
+    `int($[2])` of a row whose third field isn't a number), and the child
+    visualizer the value was handed to raises while drawing it. Both draw the
+    same red `Type: message` the error visualizer draws for an uncaught
+    exception, so an error reads the same everywhere it appears."""
+
+    def _err(self, exc_type, *args):
+        try:
+            raise exc_type(*args)
+        except BaseException as e:
+            return e
+
+    def test_a_column_that_raises_shows_the_error_in_its_cell(self):
+        from visualizer_utils import ERROR_RED
+        lst = [['1', 'a', '2'], ['3', 'b', 'x']]
+        model = init_model(lst, mock_get_visualizer, slots_config=['$[0]', 'int($[2])'])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn(html.escape("ValueError: invalid literal for int() with base 10: 'x'"), out)
+        self.assertIn(ERROR_RED, out)
+        # The row that worked still shows its number.
+        self.assertIn('<span child-expr=>2</span>', out)
+
+    def test_the_error_reads_as_the_error_visualizer_does(self):
+        from visualizer_utils import UncaughtError
+        import error_visualizer
+        lst = [['x']]
+        model = init_model(lst, mock_get_visualizer, slots_config=['int($[0])'])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        try:
+            int('x')
+        except ValueError as e:
+            expected = error_visualizer.visualize(UncaughtError(e))
+        self.assertIn(expected, out)
+
+    def test_the_error_cell_hands_over_the_cells_expression(self):
+        # What raised is the thing to look at, so the cell offers the code
+        # that raised the way a value cell offers the code that produced it.
+        lst = [['3', 'b', 'x'], ['1', 'a', '2']]
+        eval_in_scope = lambda code: eval(code, {'data': lst})
+        model = init_model(lst, mock_get_visualizer, eval_in_scope=eval_in_scope,
+                           var_and_exp=('data', 'data'),
+                           slots_config=['$[0]', 'int($[2])'])
+        out = visualize(lst, model, mock_get_visualizer, eval_in_scope)
+        self.assertIn(['int(data[0][2])'], exps_in(out))
+
+    def test_the_error_message_is_escaped(self):
+        lst = [[1]]
+        model = init_model(lst, mock_get_visualizer, slots_config=["$[0] < 'a'"])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn(html.escape("TypeError: '<' not supported between instances of 'int' and 'str'"), out)
+        self.assertNotIn("'<' not supported", out)
+
+    def test_a_field_the_row_hasnt_got_is_blank_not_an_error(self):
+        # Sparse rows are ordinary data: the columns a table picks for itself
+        # are the keys its rows have, and a row without one has nothing to
+        # say about it. Only a column that computes something has an error
+        # worth reading.
+        from visualizer_utils import ERROR_RED
+        lst = [{'a': {'b': 1}, 'c': 2}, {'c': 3}]
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=["$['a']", "$['a']['b']", "$['c']", "$.missing"])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn(ERROR_RED, out)
+        self.assertNotIn('KeyError', out)
+        self.assertNotIn('AttributeError', out)
+        self.assertRegex(out, r'<td[^>]*></td>')
+
+    def test_a_computation_over_a_field_the_row_hasnt_got_shows_the_error(self):
+        # `int($[2])` on a row with two fields: the row is short, and that is
+        # why the cell is empty -- so the cell says so.
+        lst = [['1', 'a', '2'], ['3', 'b']]
+        model = init_model(lst, mock_get_visualizer, slots_config=['int($[2])'])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('IndexError: list index out of range', out)
+
+    def test_reads_field_knows_an_access_path_from_a_computation(self):
+        from table_visualizer import _reads_field
+        for expr in ["$['a']", '$[2]', '$.name', "$v['x']['y']", '$k', '$', '$$[0]', '$.a.b[0]']:
+            with self.subTest(expr=expr):
+                self.assertTrue(_reads_field(expr))
+        for expr in ['int($[2])', "$['a'] + 1", '$[$i]', '$[f()]', 'len($)', '-$[0]', '$[0:2]', '', None]:
+            with self.subTest(expr=expr):
+                self.assertFalse(_reads_field(expr))
+
+    def test_a_none_cell_is_still_blank(self):
+        # None is a value the row has, not a failure to have one.
+        from visualizer_utils import ERROR_RED
+        lst = [[None], [1]]
+        model = init_model(lst, mock_get_visualizer, slots_config=['$[0]'])
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertNotIn(ERROR_RED, out)
+        self.assertNotIn('NoneType', out)
+
+    def test_a_child_visualizer_that_raises_while_drawing_shows_the_error_in_its_cell(self):
+        from visualizer_utils import ERROR_RED
+        raising = _RaisingVis('visualize')
+        get_vis = lambda v: raising if isinstance(v, str) else mock_get_visualizer(v)
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, get_vis, slots_config=["$['name']", "$['age']"])
+        out = visualize(lst, model, get_vis, None)
+        self.assertIn('RuntimeError: boom', out)
+        self.assertIn(ERROR_RED, out)
+        self.assertIn('<span child-expr=>30</span>', out)
+
+    def test_a_child_visualizer_that_raises_in_init_model_shows_the_error_in_its_cell(self):
+        raising = _RaisingVis('init_model')
+        get_vis = lambda v: raising if isinstance(v, str) else mock_get_visualizer(v)
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, get_vis, slots_config=["$['name']", "$['age']"])
+        out = visualize(lst, model, get_vis, None)
+        self.assertIn('RuntimeError: no model for you', out)
+        self.assertIn('<span child-expr=>30</span>', out)
+
+    def test_a_raising_child_cell_still_hands_over_its_expression(self):
+        raising = _RaisingVis('visualize')
+        get_vis = lambda v: raising if isinstance(v, str) else mock_get_visualizer(v)
+        lst = [{'name': 'Alice'}]
+        eval_in_scope = lambda code: eval(code, {'data': lst})
+        model = init_model(lst, get_vis, eval_in_scope=eval_in_scope,
+                           var_and_exp=('data', 'data'), slots_config=["$['name']"])
+        out = visualize(lst, model, get_vis, eval_in_scope)
+        self.assertIn(["data[0]['name']"], exps_in(out))
+
 
 if __name__ == '__main__':
     unittest.main()

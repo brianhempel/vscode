@@ -945,6 +945,35 @@ class UncaughtError:
     exception: BaseException
 
 
+def error_text(exception: BaseException) -> str:
+    """`TypeError: unsupported operand ...`, or a bare type name when the
+    exception carries no message."""
+    type_name = type(exception).__name__
+    try:
+        message = str(exception)
+    except Exception:
+        # A broken __str__ shouldn't cost the user the name of what went wrong.
+        message = ''
+    return f'{type_name}: {message}' if message else type_name
+
+
+def error_html(exception: BaseException) -> str:
+    """An exception as red text.
+
+    What the error visualizer draws for the one that ended the run, and what a
+    table cell or a tuple element draws for one raised on the way to drawing
+    it -- the column expression that failed on this row, or the child
+    visualizer that couldn't draw the value it was handed. One drawing rather
+    than one per place, so an error reads the same wherever it appears.
+
+    pre-wrap inline rather than in snc.css: assertion messages arrive
+    multi-line, and this has to render right wherever it is nested.
+    """
+    return (f'<span class="snc-error-visualizer" '
+            f'style="color: {ERROR_RED}; white-space: pre-wrap;">'
+            f'{html.escape(error_text(exception))}</span>')
+
+
 @dataclass(frozen=True, slots=True)
 class ChildEvent:
     """Envelope wrapping a child visualizer's event for parent routing."""

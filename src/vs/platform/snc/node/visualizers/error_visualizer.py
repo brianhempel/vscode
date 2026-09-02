@@ -11,9 +11,8 @@ Sorts first among the built-in visualizers, so it sees the wrapper before the
 catch-all object visualizer does.
 """
 
-import html
-
-from visualizer_utils import ERROR_RED, UncaughtError
+from visualizer_utils import UncaughtError, error_html
+from visualizer_utils import error_text as _error_text
 
 
 def can_visualize(value):
@@ -23,19 +22,10 @@ def can_visualize(value):
 def error_text(value):
     """`TypeError: unsupported operand ...`, or a bare type name when the
     exception carries no message."""
-    exception = value.exception
-    type_name = type(exception).__name__
-    try:
-        message = str(exception)
-    except Exception:
-        # A broken __str__ shouldn't cost the user the name of what went wrong.
-        message = ''
-    return f'{type_name}: {message}' if message else type_name
+    return _error_text(value.exception)
 
 
 def visualize(value):
-    # pre-wrap inline rather than in snc.css: assertion messages arrive
-    # multi-line, and a visualizer should render right on its own.
-    return (f'<span class="snc-error-visualizer" '
-            f'style="color: {ERROR_RED}; white-space: pre-wrap;">'
-            f'{html.escape(error_text(value))}</span>')
+    # The drawing lives in visualizer_utils: a table cell or a tuple element
+    # that raised draws the same thing, so an error reads the same everywhere.
+    return error_html(value.exception)

@@ -76,6 +76,7 @@ from visualizer_utils import (
     get_full_class_name, truncate_str, truncate_repr, wrap_drag_grab,
     parse_slots, save_slots_at_path, peek_line_config,
     child_nesting_kwargs, too_deep, wants_kwarg, compose_dollar_expr,
+    error_html,
     nerd_font_icon, render_tool_toolbar,
     render_expand_toggle, EXPANDED_PANE_MAX_HEIGHT,
     ICONS,
@@ -3230,6 +3231,31 @@ TALLY_COUNT_OP_DEFAULT = '>='
 
 
 @functools.lru_cache(maxsize=None)
+def _reads_field(expr: 'str | None') -> bool:
+    """Whether *expr* does nothing but read a field off the row: `$['a']`,
+    `$[2]`, `$.name`, `$v['x']['y']` -- subscripts and attributes down to the
+    dollar and nothing else.
+
+    What decides whether a cell that raised is blank or red. The columns a
+    table picks for itself are the keys its rows have, and a row without one
+    of them is ordinary data -- sparse JSON is nothing but such rows -- so a
+    field the row hasn't got is drawn as nothing, the way it always was. A
+    column that COMPUTES something and fails has something to say, and says
+    it in the cell (see _visualize_table).
+    """
+    if not expr:
+        return False
+    try:
+        node = ast.parse(DOLLARS_RE.sub('_dlr_', expr), mode='eval').body
+    except (SyntaxError, ValueError):
+        return False
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Constant):
+            return False
+        node = node.value
+    return isinstance(node, ast.Name) and node.id == '_dlr_'
+
+
 def _is_pure_ref(expr: 'str | None') -> bool:
     """Whether *expr* can be evaluated again for free.
 
@@ -7966,13 +7992,19 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
             except Exception:
                 cell_value = None
             if cell_value is not None:
-                cell_vis = get_visualizer(cell_value)
-                # A cell visualizer that doesn't name the nesting params in its
-                # init_model gets {} back and isn't handed them.
-                extra = child_nesting_kwargs(config_fields, col,
-                                             cell_vis.init_model)
-                children[f"{row.key}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
-                    cell_value, get_visualizer, eval_in_scope=eval_in_scope, **extra)
+                try:
+                    cell_vis = get_visualizer(cell_value)
+                    # A cell visualizer that doesn't name the nesting params
+                    # in its init_model gets {} back and isn't handed them.
+                    extra = child_nesting_kwargs(config_fields, col,
+                                                 cell_vis.init_model)
+                    children[f"{row.key}{CELL_KEY_SEP}{col}"] = cell_vis.init_model(
+                        cell_value, get_visualizer, eval_in_scope=eval_in_scope, **extra)
+                except Exception:
+                    # A child that can't build a model for the value can't
+                    # draw it either: the render asks again and, when it
+                    # raises again, draws the error in the cell.
+                    pass
 
     handled_keys = aggregate_handled_keys(children, _OWN_KEYS)
     return {
@@ -9243,10 +9275,15 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'<span snc-mouse-down="{html.escape(drag_start_event)}" '
         f'data-tooltip="Drag to reorder" '
         f'class="col-handle col-drag-handle">⣿</span>'
+        # The whole name, however long: how much of it shows is a matter of
+        # the width the column has, so it is cut where the column is -- by
+        # CSS, with an ellipsis (see .col-name) -- and not at a character
+        # count here, which would cut a wide column's name and leave a narrow
+        # one's spilling.
         f'<span snc-mouse-down="{html.escape(click_event)}"'
         f'{py_exp_attr} '
         f'class="col-name">'
-        f'{html.escape(truncate_str(col if label is None else label, 50))}</span>'
+        f'{html.escape(col if label is None else label)}</span>'
         f'{menu_html}'
         f'<span snc-resize-col="{html.escape(resize_event)}"'
         f'data-tooltip="Resize" '
@@ -11102,38 +11139,47 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             if not row.starts_at(leaf.depth):
                 continue
             composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
+            cell_span = leaf_span(leaf.depth)
+            td_open = (f'<td data-col="{repr(html.escape(col))}" '
+                       f'{get_col_width_style(col, model)} {cell_span}>')
             try:
                 cell_value = _leaf_cell_value(leaf, row, lst, source_expr,
                                               eval_in_scope, read_through)
-            except Exception:
+                cell_error = None
+            except Exception as e:
+                # The column raised on this row -- `int($[2])` over a row
+                # whose third field isn't a number. Drawn as the error rather
+                # than left blank: blank reads as "no value here", and the
+                # truth is that the user's expression failed on this row.
+                # Unless the column only reads a field, when "no value here"
+                # is the truth (see _reads_field).
                 cell_value = None
+                cell_error = None if _reads_field(leaf.sub or leaf.expr) else e
 
-            if cell_value is not None:
-                cell_vis = get_visualizer(cell_value)
+            if cell_value is None and cell_error is None:
+                strs.append(f'{td_open}{pick_overlay(i, f"col_{ci}")}</td>')
+                continue
+
+            # A leaf nothing splatted reads the same expression per cell as
+            # per root row, and its cell is only ever drawn on the row that
+            # worked that list out -- so it is read back rather than
+            # substituted a second time. A splat's cell names the ELEMENT
+            # it is showing, which is a different question, and asks it.
+            cell_expr = (
+                None if source_expr is None
+                else (cell_exprs[ci]
+                      if cell_exprs is not None and leaf.splat is None
+                      else _leaf_cell_expr(leaf, source_expr, row, lst,
+                                           from_end)))
+
+            # The parent doesn't wrap children for drag: each is handed its
+            # access-path expression and decides for itself, so a child with
+            # its own handles keeps them instead of being covered by one.
+            child_var_and_exp = (None, cell_expr) if cell_expr else None
+
+            if cell_error is None:
                 cell_model = children.get(composite_key)
-                if cell_model is None:
-                    extra = child_nesting_kwargs(model, col,
-                                                 cell_vis.init_model)
-                    cell_model = cell_vis.init_model(cell_value, get_visualizer,
-                                                     eval_in_scope=eval_in_scope, **extra)
                 child_small = small or (composite_key != focused_child)
-
-                # A leaf nothing splatted reads the same expression per cell as
-                # per root row, and its cell is only ever drawn on the row that
-                # worked that list out -- so it is read back rather than
-                # substituted a second time. A splat's cell names the ELEMENT
-                # it is showing, which is a different question, and asks it.
-                cell_expr = (
-                    None if source_expr is None
-                    else (cell_exprs[ci]
-                          if cell_exprs is not None and leaf.splat is None
-                          else _leaf_cell_expr(leaf, source_expr, row, lst,
-                                               from_end)))
-
-                # The parent doesn't wrap children for drag: each is handed its
-                # access-path expression and decides for itself, so a child with
-                # its own handles keeps them instead of being covered by one.
-                child_var_and_exp = (None, cell_expr) if cell_expr else None
 
                 # And the other readings of whatever it draws inside: the same
                 # reach down every row (see _cell_inner_exps). None under a
@@ -11156,33 +11202,50 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 cell_every_row = _cell_every_row(
                     columns, col_row_expr, source_expr, _model_binds(model),
                     every_row_exps, leaf.splat is None)
-                draw_cell = getattr(cell_vis, 'visualize_els', None) or cell_vis.visualize
-                inner = ({'every_row_exps': cell_every_row}
-                         if cell_every_row is not None
-                         and wants_kwarg(draw_cell, 'every_row_exps')
-                         else {})
+                try:
+                    cell_vis = get_visualizer(cell_value)
+                    if cell_model is None:
+                        extra = child_nesting_kwargs(model, col,
+                                                     cell_vis.init_model)
+                        cell_model = cell_vis.init_model(cell_value, get_visualizer,
+                                                         eval_in_scope=eval_in_scope, **extra)
+                    draw_cell = getattr(cell_vis, 'visualize_els', None) or cell_vis.visualize
+                    inner = ({'every_row_exps': cell_every_row}
+                             if cell_every_row is not None
+                             and wants_kwarg(draw_cell, 'every_row_exps')
+                             else {})
 
-                if hasattr(cell_vis, 'visualize_els'):
-                    cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)
+                    if hasattr(cell_vis, 'visualize_els'):
+                        cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)
+                    else:
+                        cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)]
+                except Exception as e:
+                    # The child couldn't draw the value it was handed. The
+                    # error takes the cell, and the rest of the table goes on
+                    # drawing -- otherwise one broken child costs the user
+                    # every other cell.
+                    cell_error = e
                 else:
-                    cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)]
-                if outer_reads and cell_expr:
-                    cell_htmls = [add_drag_readings(h, cell_expr, outer_reads)
-                                  for h in cell_htmls]
+                    if outer_reads and cell_expr:
+                        cell_htmls = [add_drag_readings(h, cell_expr, outer_reads)
+                                      for h in cell_htmls]
 
-                # A column drawn once for a group has to span it -- otherwise
-                # the cell occupies the first row only and every row under it
-                # shifts left.
-                cell_span = leaf_span(leaf.depth)
-                strs.append(f'<td data-col="{repr(html.escape(col))}" {get_col_width_style(col, model)} {cell_span}>')
+            # A column drawn once for a group has to span it -- otherwise
+            # the cell occupies the first row only and every row under it
+            # shifts left.
+            strs.append(td_open)
+            if cell_error is not None:
+                # Not wrapped as a child: there is no model behind an error
+                # for an event to reach. It still offers the cell's
+                # expression, since what raised is the thing to look at.
+                strs.append(wrap_drag_grab(error_html(cell_error),
+                                           child_var_and_exp))
+            else:
                 strs.append(wrap_child_prefix(composite_key))
                 strs.extend(cell_htmls)
                 strs.append(wrap_child_suffix)
-                strs.append(pick_overlay(i, f'col_{ci}'))
-                strs.append('</td>')
-            else:
-                cell_span = leaf_span(leaf.depth)
-                strs.append(f'<td data-col="{repr(html.escape(col))}" {get_col_width_style(col, model)} {cell_span}>{pick_overlay(i, f"col_{ci}")}</td>')
+            strs.append(pick_overlay(i, f'col_{ci}'))
+            strs.append('</td>')
 
         strs.append('</tr>')
 
