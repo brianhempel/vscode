@@ -6234,6 +6234,37 @@ def _name_context_for_source(source_expr: str) -> tuple[bool, str]:
     return False, "result"
 
 
+def _search_dollar_expr(search: str) -> str:
+    """The search box's text as a dollar expression.
+
+    The box lets the row go unsaid -- `> 4` is a question about `$` -- so a
+    term with no dollar in it gets the one it meant. A term starting with a
+    method call joins up tight (`$.upper()`), anything else with a space.
+    """
+    if not needs_implicit_dollar(search):
+        return search
+    text = search.lstrip()
+    return '$' + text if text.startswith('.') else '$ ' + text
+
+
+def _extract_cond(model: dict, ctx: dict) -> 'str | None':
+    """The search Extract reads its columns through, in dollar form.
+
+    A predicate over all the matches, and nothing else. That search says WHICH
+    ROWS, so the columns can be read off exactly those and the answer is the
+    table as drawn minus the rows the user just filtered out.
+
+    A POSITION -- `3`, `1:4`, `[0, 2]`, `1:[3, 5]` -- names rows by where they
+    sit rather than by anything a column can be asked alongside, so there is no
+    condition to read them through. Find One names one row rather than a table.
+    A pick is already answered above. All of those go on extracting the table
+    as drawn.
+    """
+    if not ctx.get('is_predicate') or ctx.get('is_first'):
+        return None
+    return _search_dollar_expr(model.get('search'))
+
+
 def _get_search_context(model: dict, var_and_exp=None,
                         *, source_expr: str = None, eval_in_scope=None) -> dict | None:
     """The search context, plus whether the container is a dict.
@@ -6247,7 +6278,8 @@ def _get_search_context(model: dict, var_and_exp=None,
                               eval_in_scope=eval_in_scope)
     if ctx is not None:
         ctx['is_dict'] = bool(model.get('_is_dict'))
-        ctx['table_rows_expr'] = _table_rows_expr(model, ctx['source_expr'])
+        ctx['table_rows_expr'] = _table_rows_expr(model, ctx['source_expr'],
+                                                  cond=_extract_cond(model, ctx))
     return ctx
 
 
@@ -6638,9 +6670,10 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
     # "the rows before the match, ignoring the search" is not a thing. So it
     # declines rather than putting Filter's line under a second live button.
     #
-    # Otherwise it is the table as drawn, which the columns say and no search
-    # changes -- including with the tool up and nothing picked yet, where there
-    # is no question about the match to be had.
+    # Otherwise it is the table as drawn -- through the search, when there is
+    # one to read it through. Which rows those are is settled where the search
+    # is understood (_extract_cond) and the condition rides in the same
+    # comprehension the columns do, so this stays one expression off the model.
     if action == 'extract':
         if ctx.get('is_pick_only'):
             return generate_action('filter', ctx)
@@ -7434,6 +7467,23 @@ def _pick_band_rows(source_expr: str, start: str | None, stop: str | None,
     return f'{source_expr}[{start or ""}:{stop or ""}]'
 
 
+def _pick_bound_expr(expr: str, source_expr: str, item_expr: str,
+                     binds: 'dict | None') -> str:
+    """A dollar expression written against the loop target a comprehension
+    binds.
+
+    A column and the search box's own predicate are the same kind of thing here
+    -- both are written in row scope -- so both are bound the same way, and a
+    predicate that ends up beside the columns cannot read its dollars
+    differently than they read theirs.
+
+    `$$` is the whole list, not the sublist a region is a band of.
+    """
+    return replace_dollars_in_py_exp(
+        expr, _column_dollars(source_expr, item_expr), index_exp='i',
+        bindings=_PICK_INNER_DICT_BINDS if _is_dict_binds(binds) else None)
+
+
 def _pick_element_expr(col_id: str, columns, source_expr: str, item_expr: str,
                        binds: 'dict | None') -> tuple | None:
     """(what one row of this column contributes, whether it names the row's
@@ -7447,30 +7497,37 @@ def _pick_element_expr(col_id: str, columns, source_expr: str, item_expr: str,
     col = _pick_column_expr(col_id, columns)
     if col is None:
         return None
-    # `$$` is the whole list, not the sublist this region is a band of.
-    inner = replace_dollars_in_py_exp(
-        col, _column_dollars(source_expr, item_expr), index_exp='i',
-        bindings=_PICK_INNER_DICT_BINDS if _is_dict_binds(binds) else None)
-    return (inner, dollar_expr_names_index(col))
+    return (_pick_bound_expr(col, source_expr, item_expr, binds),
+            dollar_expr_names_index(col))
 
 
 def _pick_comprehension(elt: str, rows: str, start: str | None,
-                        names_index: bool, is_dict: bool) -> str:
-    """`elt` read off every row of `rows`."""
+                        names_index: bool, is_dict: bool,
+                        cond: 'str | None' = None) -> str:
+    """`elt` read off every row of `rows` -- every row the search kept, when
+    there is a *cond* to keep them by.
+
+    The condition rides in this comprehension rather than filtering the rows
+    into a list first: one pass, one loop variable in the line the user is
+    handed, and -- when anything here names the row's number -- an enumerate
+    that goes on counting off the WHOLE run rather than off the matches.
+    """
     target = _PICK_INNER_DICT_TARGET if is_dict else _PICK_INNER_VAR
+    where = f' if {cond}' if cond else ''
     if not names_index:
-        return f'[{elt} for {target} in {rows}]'
+        return f'[{elt} for {target} in {rows}{where}]'
     # `$i` is the row's number in the whole list, not its place in this band, so
     # the count starts where the band does.
     from_row = '' if not start or start == '0' else f', {start}'
     # A tuple target needs its own parens inside the enumerate pair.
     unpacked = f'({target})' if ',' in target else target
-    return f'[{elt} for i, {unpacked} in enumerate({rows}{from_row})]'
+    return f'[{elt} for i, {unpacked} in enumerate({rows}{from_row}){where}]'
 
 
 def _pick_range_expr(col_id: str, columns, source_expr: str,
                      start: str | None, stop: str | None,
-                     binds: 'dict | None' = None) -> str | None:
+                     binds: 'dict | None' = None,
+                     cond: 'str | None' = None) -> str | None:
     """Expression for one column over the row range [start, stop).
 
     start/stop are Python source snippets, or None for the ends of the list.
@@ -7495,13 +7552,21 @@ def _pick_range_expr(col_id: str, columns, source_expr: str,
     if inner == item_expr:
         # The identity column (a bare $, which is the default) maps each row to
         # itself, so the sublist is already the answer -- no comprehension.
+        # A *cond* is dropped along with it, which is the right answer for the
+        # only caller that passes one: reading a table of nothing but its own
+        # rows through the search would write Filter's line under a second
+        # name, and _table_rows_expr declines on seeing the source come back.
         return rows
-    return _pick_comprehension(inner, rows, start, names_index, is_dict)
+    if cond:
+        names_index = names_index or dollar_expr_names_index(cond)
+        cond = _pick_bound_expr(cond, source_expr, item_expr, binds)
+    return _pick_comprehension(inner, rows, start, names_index, is_dict, cond)
 
 
 def _pick_zip_expr(col_ids, columns, source_expr: str,
                    start: str | None, stop: str | None,
-                   binds: 'dict | None' = None) -> str | None:
+                   binds: 'dict | None' = None,
+                   cond: 'str | None' = None) -> str | None:
     """Several columns over the SAME run of rows, as one list of tuples.
 
     Picking two columns asks what their cells say about each other, and that is
@@ -7519,7 +7584,10 @@ def _pick_zip_expr(col_ids, columns, source_expr: str,
     elt = '(' + ', '.join(inner for inner, _ in parts) + ')'
     names_index = any(names for _, names in parts)
     rows = _pick_band_rows(source_expr, start, stop, is_dict)
-    return _pick_comprehension(elt, rows, start, names_index, is_dict)
+    if cond:
+        names_index = names_index or dollar_expr_names_index(cond)
+        cond = _pick_bound_expr(cond, source_expr, item_expr, binds)
+    return _pick_comprehension(elt, rows, start, names_index, is_dict, cond)
 
 
 def _pick_match_expr(col_id: str, columns) -> str | None:
@@ -7681,8 +7749,8 @@ def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
     return None
 
 
-def _table_records_expr(col_ids, columns, source_expr,
-                        binds) -> 'str | None':
+def _table_records_expr(col_ids, columns, source_expr, binds,
+                        cond: 'str | None' = None) -> 'str | None':
     """Every row as a dict of what its columns read, when all they read is keys.
 
     The rows of such a table ARE records and their keys are on screen, so
@@ -7710,11 +7778,17 @@ def _table_records_expr(col_ids, columns, source_expr,
         elem, _names_index = _pick_element_expr(col_id, columns, source_expr,
                                                 _PICK_INNER_VAR, binds)
         pairs.append(f'{key}: {elem}')
+    # No enumerate unless the SEARCH asks for one: no column that got here can
+    # (see above), so the row's number is the search's business alone.
+    names_index = bool(cond) and dollar_expr_names_index(cond)
+    if cond:
+        cond = _pick_bound_expr(cond, source_expr, _PICK_INNER_VAR, binds)
     return _pick_comprehension('{' + ', '.join(pairs) + '}', source_expr,
-                               None, False, False)
+                               None, names_index, False, cond)
 
 
-def _table_dict_expr(col_ids, columns, source_expr, binds) -> 'str | None':
+def _table_dict_expr(col_ids, columns, source_expr, binds,
+                     cond: 'str | None' = None) -> 'str | None':
     """A dict extracts as a dict: keyed the way it is keyed, valued by whatever
     the columns other than the key read.
 
@@ -7735,13 +7809,21 @@ def _table_dict_expr(col_ids, columns, source_expr, binds) -> 'str | None':
         return None
     elt = elems[0] if len(elems) == 1 else '(' + ', '.join(elems) + ')'
     rows = f'{_atomize(source_expr)}.items()'
-    binding = (f'i, (k, v) in enumerate({rows})'
-               if any(dollar_expr_names_index(col) for col in values)
+    names_index = any(dollar_expr_names_index(col)
+                      for col in values + ([cond] if cond else []))
+    binding = (f'i, (k, v) in enumerate({rows})' if names_index
                else f'k, v in {rows}')
-    return f'{{k: {elt} for {binding}}}'
+    where = ''
+    if cond:
+        # The pair is bound `k, v` here rather than by a pick's inner names, so
+        # the search reads its dollars the way this comprehension's own columns
+        # just did.
+        where = f' if {_column_item_expr(cond, source_expr, binds=binds)}'
+    return f'{{k: {elt} for {binding}{where}}}'
 
 
-def _table_rows_expr(model: dict, source_expr: 'str | None') -> 'str | None':
+def _table_rows_expr(model: dict, source_expr: 'str | None',
+                     *, cond: 'str | None' = None) -> 'str | None':
     """Every row read across the columns -- the table on screen, as code.
 
     The column twin of _row_tuple_expr: that one is one row across the columns,
@@ -7777,13 +7859,15 @@ def _table_rows_expr(model: dict, source_expr: 'str | None') -> 'str | None':
     if not col_ids:
         return None
     if _is_dict_binds(binds):
-        return _table_dict_expr(col_ids, columns, source_expr, binds)
-    records = _table_records_expr(col_ids, columns, source_expr, binds)
+        return _table_dict_expr(col_ids, columns, source_expr, binds, cond)
+    records = _table_records_expr(col_ids, columns, source_expr, binds, cond)
     if records is not None:
         return records
-    expr = (_pick_range_expr(col_ids[0], columns, source_expr, None, None, binds)
+    expr = (_pick_range_expr(col_ids[0], columns, source_expr, None, None,
+                             binds, cond)
             if len(col_ids) == 1
-            else _pick_zip_expr(col_ids, columns, source_expr, None, None, binds))
+            else _pick_zip_expr(col_ids, columns, source_expr, None, None,
+                                binds, cond))
     return None if expr == source_expr else expr
 
 
@@ -10064,10 +10148,14 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     # needs no search; unlike Count it is live during a pick, because a pick is
     # exactly a selection of cells. Asked of generate_action rather than worked
     # out here, so the button dims on precisely what a click would decline.
+    # A search that finds rows narrows it to those rows, so the title says so:
+    # `first` is already forced for the searches that name one row or one
+    # region rather than filtering (see _resolve_first_and_index).
     extract_label = '<span class="text">Extract</span>'
     parts.append(action_btn(extract_label, 'extract',
                             bool(_preview_expr(model, 'extract', eval_in_scope)),
-                            "Every row's cells"))
+                            "Matching rows' cells" if has_search and not first
+                            else "Every row's cells"))
 
     # 3. Filter / Find One
     filter_lbl = (
@@ -12388,9 +12476,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['pick_expr'] = None
                 # Which action materialises a PICK turns on whether there
                 # is a search, and whether there is one has just changed. Only
-                # a pick's link: outside the tool Extract means the whole
-                # table, and a search is none of its business -- re-pointing
-                # there would rewrite the user's line into a filter.
+                # a pick's link: outside the tool the two hand over different
+                # things -- Filter the rows, Extract their cells -- so
+                # re-pointing there would swap the user's line for another
+                # one. Extract's own line narrows to the matches on its own.
                 if (model.get('tool') == 'pick'
                         and model.get('linked_action') in ('filter', 'extract')):
                     model['linked_action'] = _link_action_for(model)

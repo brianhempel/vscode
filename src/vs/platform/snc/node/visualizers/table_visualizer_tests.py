@@ -8077,6 +8077,7 @@ from table_visualizer import _table_rows_expr, _link_action_for
 EXTRACT_PEOPLE = [{'name': 'ada', 'age': 36}, {'name': 'grace', 'age': 45}]
 EXTRACT_COLUMNS = ["$['name']", "$['age'] * 2"]
 EXTRACT_CELLS = "[(x['name'], x['age'] * 2) for x in people]"
+EXTRACT_SEARCH = "$['age'] > 40"
 
 
 def extract_eval(code):
@@ -8140,9 +8141,13 @@ class TestExtractAction(unittest.TestCase):
         _model, cmds = self._click(extract_model())
         self.assertEqual(self._written(cmds), [('people_cells', EXTRACT_CELLS)])
 
-    def test_a_search_is_filters_business_not_this_ones(self):
-        _model, cmds = self._click(extract_model(search="$['age'] > 40"))
-        self.assertEqual(self._written(cmds), [('people_cells', EXTRACT_CELLS)])
+    def test_a_search_narrows_it_to_the_rows_that_matched(self):
+        _model, cmds = self._click(extract_model(search=EXTRACT_SEARCH))
+        self.assertEqual(
+            self._written(cmds),
+            [('people_cells',
+              "[(x['name'], x['age'] * 2) for x in people "
+              "if x['age'] > 40]")])
 
     def test_a_table_with_nothing_to_extract_writes_nothing(self):
         _model, cmds = self._click(extract_model(columns=['$']))
@@ -8156,6 +8161,77 @@ class TestExtractAction(unittest.TestCase):
                               eval_in_scope=lambda c: eval(c, {'d': dict(d)}))
         self.assertEqual(self._written(cmds),
                          [('d_cells', '{k: v for k, v in d.items()}')])
+
+
+class TestExtractFollowsTheSearch(unittest.TestCase):
+    """A search in the box narrows what Extract hands over.
+
+    The rows the search matched, read through the same columns -- as ONE
+    comprehension, so `$i` goes on counting rows off the whole list the way the
+    table on screen does, and there is no second loop variable in the line the
+    user is handed.
+
+    Only a predicate over all the matches. A position (`3`, `1:4`, `[0, 2]`)
+    names rows by where they sit rather than by anything a column can be asked
+    alongside, and Find One names one row rather than a table -- neither is a
+    filter the columns can be read through, so both go on extracting the table
+    as drawn.
+    """
+
+    def _written(self, model, value=None, name='people', ev=None):
+        value = EXTRACT_PEOPLE if value is None else value
+        _model, cmds = update(make_action_button_event('extract'), (name, name),
+                              model, value, mock_get_visualizer_dict_tables,
+                              eval_in_scope=ev or extract_eval)
+        return [(c[0], c[1]) for c in cmds if isinstance(c, tuple)]
+
+    def _expr(self, **fields):
+        written = self._written(extract_model(**fields))
+        return written[0][1] if written else None
+
+    def test_the_predicate_rides_in_the_same_comprehension(self):
+        self.assertEqual(
+            self._expr(search=EXTRACT_SEARCH),
+            "[(x['name'], x['age'] * 2) for x in people if x['age'] > 40]")
+
+    def test_records_stay_records(self):
+        self.assertEqual(
+            self._expr(columns=["$['name']", "$['age']"], search=EXTRACT_SEARCH),
+            "[{'name': x['name'], 'age': x['age']} for x in people "
+            "if x['age'] > 40]")
+
+    def test_a_dict_stays_a_dict(self):
+        d = {'ada': 36, 'grace': 45}
+        model = init_model(d, mock_get_visualizer, var_and_exp=('d', 'd'))
+        model['search'] = '$v > 40'
+        self.assertEqual(
+            self._written(model, value=d, name='d',
+                          ev=lambda c: eval(c, {'d': dict(d)})),
+            [('d_cells', '{k: v for k, v in d.items() if v > 40}')])
+
+    def test_a_search_asking_the_row_number_gets_the_enumerate(self):
+        # `$i` is the row's place in the WHOLE list -- what the table draws --
+        # so the count runs over the list and the predicate sits after it.
+        self.assertEqual(
+            self._expr(search='$i > 0'),
+            "[(x['name'], x['age'] * 2) for i, x in enumerate(people) "
+            "if i > 0]")
+
+    def test_find_one_is_one_row_not_a_table(self):
+        self.assertEqual(self._expr(search=EXTRACT_SEARCH, first_match=True),
+                         EXTRACT_CELLS)
+
+    def test_a_position_is_not_a_filter(self):
+        self.assertEqual([self._expr(search='0:1'), self._expr(search='1')],
+                         [EXTRACT_CELLS, EXTRACT_CELLS])
+
+    def test_a_table_of_nothing_but_its_rows_still_declines(self):
+        # The line would be Filter's under a second name, which is what it
+        # already is with no search at all -- so the button dims either way.
+        model = extract_model(columns=['$'], search=EXTRACT_SEARCH)
+        ctx = _get_search_context(model, ('people', 'people'),
+                                  eval_in_scope=extract_eval)
+        self.assertIsNone(generate_action('extract', ctx))
 
 
 class TestExtractReadsTheShapeItIsGiven(unittest.TestCase):
@@ -8313,21 +8389,22 @@ class TestExtractLinkRouting(unittest.TestCase):
             got.append(model['linked_action'])
         self.assertEqual(got, ['extract', 'filter'])
 
-    def test_a_link_outside_the_pick_tool_is_left_alone(self):
+    def test_a_link_outside_the_pick_tool_stays_extracts(self):
         # Which action materialises a PICK turns on the search. Outside the
-        # tool Extract means the whole table, so typing in the search box must
-        # not hand its line to Filter -- and must not rewrite it.
+        # tool the two mean different things -- Filter hands over the rows,
+        # Extract the cells -- so typing in the search box must not hand the
+        # user's line to Filter. It narrows Extract's own line instead.
         model = make_pick_model(search=None, tool='normal')
         model['linked_action'] = 'extract'
         model['linked_source_expr'] = 'strs'
-        # The line the link already wrote, so a refresh that agrees with it is
-        # the no-op _emit_linked_update makes it -- as in the running app.
+        # The line the link already wrote, so the only rewrite that can show up
+        # here is the search narrowing it -- as in the running app.
         model['last_linked_expr'] = '[(x, len(x)) for x in strs]'
         model, cmds = self._send(model, make_search_input_event('len($) > 4'))
         self.assertEqual(
             (model['linked_action'],
              [c.expression for c in cmds if isinstance(c, ChangeSelectedText)]),
-            ('extract', []))
+            ('extract', ['[(x, len(x)) for x in strs if len(x) > 4]']))
 
     def test_the_search_appearing_and_going_moves_the_link(self):
         model = make_pick_model(search=None)
