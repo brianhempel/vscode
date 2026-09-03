@@ -2228,6 +2228,92 @@ class TestHandledEventReporting(unittest.TestCase):
         self.assertEqual(item['handledEventIds'], [7, 8])
         self.assertIn('mousemove,mouseup', item['html'])
 
+    def test_each_update_is_reported_with_the_model_before_and_after(self):
+        # For the study log: one entry per `update` call, with the model as it
+        # went in and came out, even when the visualizer mutates it in place.
+        model = self._items([])[0]['model']
+        item = self._items([{'line': 1, 'visIndex': 0, 'model': model,
+                             'events': [self._event(7, 'mousemove'), self._event(8, 'mouseup')]}])[0]
+        self.assertEqual(item['updates'], [
+            {'event': self._event(7, 'mousemove'), 'modelBefore': {'seen': []},
+             'modelAfter': {'seen': ['mousemove']}, 'commands': []},
+            {'event': self._event(8, 'mouseup'), 'modelBefore': {'seen': ['mousemove']},
+             'modelAfter': {'seen': ['mousemove', 'mouseup']}, 'commands': []},
+        ])
+
+    def test_an_item_with_no_updates_has_no_updates_key(self):
+        self.assertNotIn('updates', self._items([])[0])
+
+    def test_a_note_json_cannot_encode_is_stringified_not_fatal(self):
+        # The item is written with json.dumps inside a try that swallows
+        # failures, so an unencodable note would drop the whole item -- html,
+        # commands, the events it retired -- with nothing to show for it.
+        from visualizer_utils import study_note
+
+        class BadNoteVis(self.SeenVis):
+            def update(event, var_and_exp, model, value, get_visualizer):
+                study_note(picked={'a', 'b'})
+                return {'seen': model['seen'] + [event['eventJSON']['type']]}, []
+        saved = self.SeenVis
+        self.SeenVis = BadNoteVis
+        try:
+            model = self._items([])[0]['model']
+            items = self._items([{'line': 1, 'visIndex': 0, 'model': model,
+                                  'events': [self._event(7, 'mouseup')]}])
+        finally:
+            self.SeenVis = saved
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['handledEventIds'], [7])
+        picked = items[0]['updates'][0]['notes']['picked']
+        self.assertIsInstance(picked, str)
+        self.assertIn('a', picked)
+
+    def test_an_update_that_raises_still_gets_an_entry(self):
+        from visualizer_utils import study_note
+
+        class RaisingVis(self.SeenVis):
+            def update(event, var_and_exp, model, value, get_visualizer):
+                study_note(action='about-to-fail')
+                raise ValueError('nope')
+        saved = self.SeenVis
+        self.SeenVis = RaisingVis
+        try:
+            model = self._items([])[0]['model']
+            item = self._items([{'line': 1, 'visIndex': 0, 'model': model,
+                                 'events': [self._event(7, 'mouseup')]}])[0]
+        finally:
+            self.SeenVis = saved
+        self.assertEqual(len(item['updates']), 1)
+        entry = item['updates'][0]
+        self.assertEqual(entry['error'], 'ValueError: nope')
+        self.assertEqual(entry['notes'], {'action': 'about-to-fail'})
+        self.assertEqual(entry['modelBefore'], {'seen': []})
+        self.assertNotIn('modelAfter', entry)
+        self.assertIn('ValueError', item['html'])
+
+    def test_what_update_notes_rides_on_its_entry(self):
+        # `study_note` is how handling code says what an event meant to it
+        # ("this mousemove is dragging out a segment"): it lands on that one
+        # update's entry, and never leaks into the next.
+        from visualizer_utils import study_note
+
+        class NotingVis(self.SeenVis):
+            def update(event, var_and_exp, model, value, get_visualizer):
+                if event['eventJSON']['type'] == 'mousemove':
+                    study_note(action='drag-segment')
+                    study_note(chars=3)
+                return {'seen': model['seen'] + [event['eventJSON']['type']]}, []
+        saved = self.SeenVis
+        self.SeenVis = NotingVis
+        try:
+            model = self._items([])[0]['model']
+            item = self._items([{'line': 1, 'visIndex': 0, 'model': model,
+                                 'events': [self._event(7, 'mousemove'), self._event(8, 'mouseup')]}])[0]
+        finally:
+            self.SeenVis = saved
+        self.assertEqual([u.get('notes') for u in item['updates']],
+                         [{'action': 'drag-segment', 'chars': 3}, None])
+
     def test_an_event_queued_after_dispatch_is_picked_up(self):
         # The editor keeps sending while a run is in flight; a visualizer is
         # reached long before the program ends, so the run answers the newest

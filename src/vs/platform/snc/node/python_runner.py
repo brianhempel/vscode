@@ -39,7 +39,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -358,6 +358,24 @@ class SetConfigComment:
     comment: Optional[str]
 
 
+def _json_safe(value: Any) -> Any:
+    """`value` with anything JSON can't encode replaced by its str()."""
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _model_snapshot(model: Any) -> Any:
+    """A copy of `model` as the wire would carry it, for the study log.
+
+    Through JSON rather than deepcopy: that is the form the editor logs, and
+    it detaches the copy from anything `update` mutates in place. A model the
+    encoder can't take is reported as such instead of failing the run.
+    """
+    try:
+        return json.loads(json.dumps(model, ensure_ascii=False))
+    except Exception as err:
+        return {'_unserializable': f'{type(err).__name__}: {err}'}
+
+
 def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
                        model: Any, source_code: str) -> List[Dict[str, Any]]:
     """Convert visualizer commands into the wire dicts sent to the front-end.
@@ -520,6 +538,10 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     # them. It requeues everything it doesn't see here, so an event the runner
     # declines to replay (below) survives instead of being silently dropped.
     handled_event_ids: List[Any] = []
+    # Every `update` call this item makes, for the study log (see `updates`
+    # on the item). Appended as we go, so the ones that ran before a raise
+    # are still reported.
+    updates: List[Dict[str, Any]] = []
 
     # What the line's `#%click` comment holds is this visualizer's saved config
     # (columns, fields, ...). It is installed for the visualizer to read while
@@ -581,10 +603,29 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         # changed the old events belong to a different visualizer.
         if fingerprint_matches and 'events' in item_model_and_events:
             for ev in item_model_and_events['events']:
-                model, cmds = call_with_supported_kwargs(
-                    vis.update, ev, var_and_exp, model, value, get_visualizer,
-                    eval_in_scope=eval_in_scope, source_span=span)
+                # Snapshotted before the call: `update` may mutate in place.
+                entry: Dict[str, Any] = {'event': ev, 'modelBefore': _model_snapshot(model)}
+                updates.append(entry)
+                take_study_notes()  # anything left by a call that raised
+                try:
+                    model, cmds = call_with_supported_kwargs(
+                        vis.update, ev, var_and_exp, model, value, get_visualizer,
+                        eval_in_scope=eval_in_scope, source_span=span)
+                except Exception as update_err:
+                    # The entry stays, with what it managed to note: the event
+                    # that broke a visualizer is the one worth having.
+                    entry['error'] = f'{type(update_err).__name__}: {update_err}'
+                    raise
+                finally:
+                    # Through JSON, like the models: a note the encoder can't
+                    # take would otherwise take the whole item down with it
+                    # (see _write_message), html, commands and all.
+                    notes = take_study_notes()
+                    if notes:
+                        entry['notes'] = _json_safe(notes)
                 commands.extend(cmds)
+                entry['modelAfter'] = _model_snapshot(model)
+                entry['commands'] = [type(c).__name__ for c in cmds]
                 # Reported on the item so the editor drops exactly these from
                 # its queue. Appended as we go: if `update` raises partway, the
                 # ones already applied are still applied.
@@ -645,6 +686,10 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     }
     if model is not None:
         item["model"] = model
+    # For the study log: every `update` this item ran, with the model before
+    # and after each. The editor logs them; nothing here reads them back.
+    if updates:
+        item["updates"] = updates
     # The commands ride on the item rather than following it as messages of
     # their own. The item is what retires the events it answered from the
     # editor's queue, and a run can be superseded (killed) at any instant: a

@@ -493,6 +493,16 @@ class TestMidDragModifierChanges(unittest.TestCase):
         self.assertEqual(model['anchorType'], 'fuzzy')
         self.assertEqual(model['cursorIdx'], _legacy_internal_index(6))
 
+    def test_a_mid_drag_move_notes_what_it_is_for_the_study_log(self):
+        from visualizer_utils import take_study_notes
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        take_study_notes()
+        model, _ = update(make_mouse_move_event(6, alt_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertLessEqual({'vis': 'string', 'action': 'select.drag', 'type': 'fuzzy'}.items(),
+                             take_study_notes().items())
+
     def test_alt_released_mid_drag_reverts_to_tool_type(self):
         """Releasing alt mid-drag falls back to the active tool (literal)."""
         model, _ = update(make_mouse_down_event(2, top_half=False),
@@ -588,6 +598,59 @@ class TestMidDragModifierChanges(unittest.TestCase):
 # =============================================================================
 # Chained Selections (Extend Right) Tests
 # =============================================================================
+
+class TestStudyNotes(unittest.TestCase):
+    """Every branch of update says what it did, as `vis` + `action` (area.verb)
+    plus whatever metadata names the thing acted on."""
+
+    def setUp(self):
+        from visualizer_utils import take_study_notes
+        self.take = take_study_notes
+        self.value = "hello world"
+        self.model = init_model(self.value)
+        self.var_and_exp = ('x', 'x')
+        self.take()
+
+    def _notes(self, event, model=None):
+        model, _ = update(event, self.var_and_exp,
+                          self.model if model is None else model, self.value)
+        return model, self.take()
+
+    def test_a_fresh_mousedown_starts_a_selection(self):
+        _, notes = self._notes(make_mouse_down_event(2, top_half=True))
+        self.assertLessEqual({'vis': 'string', 'action': 'select.start', 'type': 'literal'}.items(),
+                             notes.items())
+
+    def test_mouseup_ends_the_selection(self):
+        model, _ = self._notes(make_mouse_down_event(2, top_half=True))
+        _, notes = self._notes(make_mouse_up_event(5), model)
+        self.assertEqual(notes['action'], 'select.end')
+        self.assertEqual(notes['type'], 'literal')
+
+    def test_escape_with_a_selection_clears_it(self):
+        model, _ = self._notes(make_search_box_input_event("'ell'"))
+        _, notes = self._notes(make_key_down_event('Escape'), model)
+        self.assertEqual(notes['action'], 'select.clear')
+
+    def test_typing_in_the_search_box(self):
+        _, notes = self._notes(make_search_box_input_event("'ell'"))
+        self.assertLessEqual({'action': 'search.type', 'changed': True}.items(), notes.items())
+
+    def test_opening_a_dropdown_names_its_kind(self):
+        model, _ = self._notes(make_search_box_input_event("'ell'"))
+        _, notes = self._notes(make_dropdown_toggle_event('repetition-0-0'), model)
+        self.assertLessEqual({'action': 'dropdown.open', 'kind': 'repetition'}.items(), notes.items())
+
+    def test_undo_says_whether_there_was_anything_to_undo(self):
+        _, notes = self._notes(make_key_down_event('z', meta_key=True))
+        self.assertEqual(notes, {'vis': 'string', 'action': 'history.undo', 'did': False})
+
+    def test_a_tool_change_names_both_tools(self):
+        _, notes = self._notes({'pythonEventStr': repr(ToolSelect(tool='fuzzy')),
+                                'eventJSON': {'type': 'mousedown'}})
+        self.assertLessEqual({'action': 'tool.select', 'tool': 'fuzzy', 'from': 'literal'}.items(),
+                             notes.items())
+
 
 class TestChainedSelectionsExtendRight(unittest.TestCase):
     """Test chaining selections by extending from the right end."""

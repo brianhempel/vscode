@@ -149,7 +149,7 @@ from re._constants import (  # type: ignore[import]
 from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
-from visualizer_utils import is_live_only
+from visualizer_utils import is_live_only, study_note
 from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
                               opens_block, with_pass_body,
                               Dollar, DollarScope,
@@ -6587,9 +6587,18 @@ def _build_segment_replace_text(model: dict, var_and_exp, value: str,
     return '(' + ', '.join(expr for _, expr, _ in items) + ')'
 
 
+def _dropdown_kind(dropdown_id) -> str:
+    """'repetition-0-2' -> 'repetition', 'slice-label-start' -> 'slice-label':
+    which kind of dropdown, for the study log."""
+    return re.sub(r'(-(\d+|start|end|center))+$', '', dropdown_id or '')
+
+
 def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
     """
     Update model based on event. Returns (new_model, commands) tuple.
+
+    Every branch below says what it did with `study_note(action='area.verb',
+    ...)`, which the runner attaches to the study log's record of this call.
 
     Args:
         event: The UI event to process
@@ -6611,10 +6620,12 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     event_json = event['eventJSON']
     msg = make_python_event(event_json) if callable(make_python_event) else make_python_event
     model['_scroll_to_match'] = False
+    study_note(vis='string')
 
     match msg:
         case HandleMouseDown(segment_index=seg_idx, side=side, match_index=match_idx):
             # Start a handle drag on a literal segment edge
+            study_note(action='handle.drag-start', segment=seg_idx, side=side, match=match_idx)
             model['handleDrag'] = {
                 'segmentIndex': seg_idx,
                 'matchIndex': match_idx,
@@ -6634,6 +6645,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             # do NOT also start a new selection (which would just wipe the
             # change the user was editing).
             if model.get('openDropdown') is not None:
+                study_note(action='dropdown.dismiss', kind=_dropdown_kind(model['openDropdown'].get('id')))
                 _commit_open_dropdown_edit(model)
                 model['openDropdown'] = None
                 return (model, commands)
@@ -6649,7 +6661,9 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             # existing regex selection (slices and regexes don't compose).
             if anchor_type == 'index':
                 if not isinstance(idx, int):
+                    study_note(action='select.ignored', reason='no-index', type='index')
                     return (model, commands)
+                study_note(action='select.start', type='index', at=idx)
                 saved_linked = (model.get('linked_action'), model.get('linked_source_expr'))
                 saved_tool = model.get('tool', 'literal')
                 saved_expanded = model.get('expanded', False)
@@ -6677,6 +6691,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = 'right'
+                study_note(action='select.extend', direction='right', type=anchor_type, at=idx)
             elif extension is not None and extension['direction'] == 'left':
                 # Keep existing regex, start new segment extending left from the
                 # match's start, so the selection spans from cursor to anchor.
@@ -6684,6 +6699,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 model['anchorType'] = anchor_type
                 model['cursorIdx'] = idx
                 model['extendDirection'] = 'left'
+                study_note(action='select.extend', direction='left', type=anchor_type, at=idx)
             else:
                 segment = (find_segment_at_index(selection_regex, value, idx)
                            if isinstance(idx, int) else None)
@@ -6694,6 +6710,8 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['cursorIdx'] = None
                     model['extendDirection'] = None
                     model['dragging'] = False
+                    study_note(action='segment.menu-open', segment=segment['segment_index'],
+                               match=segment['match_index'], at=idx)
                     model['openDropdown'] = {
                         'id': f"segment-menu-{segment['match_index']}-{segment['segment_index']}",
                         'segmentIndex': segment['segment_index'],
@@ -6719,6 +6737,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['anchorType'] = anchor_type
                     model['cursorIdx'] = idx
                 model['extendDirection'] = None
+                study_note(action='select.start', type=anchor_type, at=idx)
 
             model['dragging'] = True
 
@@ -6727,10 +6746,16 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 # Handle drag mode: update cursor position on the drag handle
                 if event_json.get('buttons') == 0:
                     # Mouse released outside widget - finalize handle drag
+                    study_note(action='handle.drag-end', how='buttons-up')
                     model = finalize_handle_drag(model, value)
                 else:
                     model['handleDrag']['cursorIdx'] = idx
+                    study_note(action='handle.drag', at=idx)
             elif event_json.get('buttons') == 0:  # No mouse button held
+                if model.get('dragging'):
+                    study_note(action='select.end', type=model.get('anchorType'), how='buttons-up')
+                else:
+                    study_note(action='hover', at=idx)
                 model = finalize_segment(model, value)
                 # Update hover preview state from active tool + modifier overrides.
                 # Index tool: no hover preview since clicking does nothing.
@@ -6741,24 +6766,35 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             elif model.get('dragging'):
                 model['cursorIdx'] = idx
                 _apply_live_selection_type(model, event_json)
+                study_note(action='select.drag', type=model.get('anchorType'), at=idx)
+            else:
+                study_note(action='mouse.idle-move', at=idx)
 
         case MouseUp(index=idx):
             if model.get('handleDrag') is not None:
                 # Finalize handle drag
+                study_note(action='handle.drag-end', at=idx)
                 model['handleDrag']['cursorIdx'] = idx
                 model = finalize_handle_drag(model, value)
             elif model.get('dragging'):
                 model['cursorIdx'] = idx
                 _apply_live_selection_type(model, event_json)
+                study_note(action='select.end', type=model.get('anchorType'), at=idx)
                 model = finalize_segment(model, value)
+            else:
+                study_note(action='mouse.idle-up', at=idx)
 
         case NotifyMouseIsUp():
             # No index: the release happened where nothing was listening, so
             # finalize from wherever the drag last was.
             if model.get('handleDrag') is not None:
+                study_note(action='handle.drag-end', how='outside')
                 model = finalize_handle_drag(model, value)
             elif model.get('dragging'):
+                study_note(action='select.end', type=model.get('anchorType'), how='outside')
                 model = finalize_segment(model, value)
+            else:
+                study_note(action='mouse.idle-up', how='outside')
 
         case KeyDown():
             key = event_json.get('key')
@@ -6768,52 +6804,67 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             if key == 'Enter':
                 if model.get('openDropdown'):
                     # Enter on an open dropdown: commit buffered edits, close.
+                    study_note(action='dropdown.commit', kind=_dropdown_kind(model['openDropdown'].get('id')))
                     _commit_open_dropdown_edit(model)
                     model['openDropdown'] = None
                 elif model.get('linked_action'):
                     model['linked_action'] = _default_action(model, eval_in_scope)
+                    study_note(action='link.set-action', to=model['linked_action'], key='Enter')
                 else:
+                    study_note(action='code.action', key='Enter', wrote=False)
                     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
-                        _, result = _generate_default_action(model, ctx, eval_in_scope)
+                        act, result = _generate_default_action(model, ctx, eval_in_scope)
+                        study_note(codeAction=act)
                         if result:
+                            study_note(wrote=True)
                             commands.append(new_code_command(result, code_imports))
 
             elif key == 'Backspace' and meta_key:
                 if model.get('openDropdown'):
+                    study_note(action='dropdown.commit', kind=_dropdown_kind(model['openDropdown'].get('id')))
                     _commit_open_dropdown_edit(model)
                     model['openDropdown'] = None
                 # Same gating as the Delete action button: Pick mode and an
                 # open Replace box both indicate the user is composing
                 # something else; firing Delete would discard that work.
                 elif model.get('tool') == 'pick' or model.get('replace_visible'):
-                    pass
+                    study_note(action='key.ignored', key='cmd-backspace',
+                               reason='pick' if model.get('tool') == 'pick' else 'replace-open')
                 elif model.get('linked_action'):
                     model['linked_action'] = 'delete'
+                    study_note(action='link.set-action', to='delete', key='cmd-backspace')
                 else:
+                    study_note(action='code.action', codeAction='delete', key='cmd-backspace', wrote=False)
                     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
+                            study_note(wrote=True)
                             commands.append(new_code_command(result, code_imports))
 
             elif key == 'r' and meta_key:
                 if model.get('linked_action'):
                     model['linked_action'] = 'replace'
+                    study_note(action='link.set-action', to='replace', key='cmd-r')
                 else:
+                    study_note(action='code.action', codeAction='replace', key='cmd-r', wrote=False)
                     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('replace', ctx)
                         if result:
+                            study_note(wrote=True)
                             commands.append(new_code_command(result, code_imports))
 
             elif key == 'Escape':
                 # Close dropdown if open, otherwise clear selections
                 if model.get('openDropdown'):
+                    study_note(action='dropdown.close', kind=_dropdown_kind(model['openDropdown'].get('id')), key='Escape')
                     model['openDropdown'] = None
                 else:
                     # Clear all selections (save to undo first so it's recoverable)
                     current_regex = model.get('search')
+                    study_note(action='select.clear', had=bool(current_regex or model.get('anchorIdx') is not None))
                     if current_regex or model.get('anchorIdx') is not None:
                         model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
                         model['redoHistory'] = []
@@ -6825,6 +6876,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             elif key == 'z' and meta_key and not shift_key:
                 # Cmd-Z: Undo
                 undo_history = model.get('undoHistory', [])
+                study_note(action='history.undo', did=bool(undo_history))
                 if undo_history:
                     # Push current to redo
                     model['redoHistory'] = model.get('redoHistory', []) + [model.get('search')]
@@ -6839,6 +6891,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             elif key == 'z' and meta_key and shift_key:
                 # Cmd-Shift-Z: Redo
                 redo_history = model.get('redoHistory', [])
+                study_note(action='history.redo', did=bool(redo_history))
                 if redo_history:
                     # Push current to undo
                     model['undoHistory'] = model.get('undoHistory', []) + [model.get('search')]
@@ -6850,15 +6903,20 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     model['cursorIdx'] = None
                     model['dragging'] = False
 
+            else:
+                study_note(action='key.ignored', key=key, meta=meta_key, shift=shift_key)
+
         case DropdownToggle(dropdown_id=did):
             # Toggle dropdown open/closed - committing buffered edits in either
             # case (re-clicking the same trigger commits + closes; switching to
             # a different dropdown commits the old one before opening the new).
             open_dropdown = model.get('openDropdown')
             if open_dropdown and open_dropdown.get('id') == did:
+                study_note(action='dropdown.close', kind=_dropdown_kind(did))
                 _commit_open_dropdown_edit(model)
                 model['openDropdown'] = None
             else:
+                study_note(action='dropdown.open', kind=_dropdown_kind(did), id=did)
                 if open_dropdown:
                     _commit_open_dropdown_edit(model)
                 # Open this dropdown, extract match + segment index from ID.
@@ -6914,6 +6972,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
 
         case DropdownSelect(dropdown_id=did, option_value=option):
             # Select an option from a dropdown
+            study_note(action='dropdown.select', kind=_dropdown_kind(did), option=option)
             open_dropdown = model.get('openDropdown')
             if open_dropdown and open_dropdown.get('id') == did:
                 segment_index = open_dropdown.get('segmentIndex', 0)
@@ -6925,6 +6984,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
 
                     if did.startswith('fuzzy-pattern-'):
                         # Fuzzy pattern dropdown: option is a character class
+                        study_note(action='segment.set-pattern', segment=segment_index, pattern=option)
                         model['search'] = replace_segment_pattern(
                             current_regex, segment_index, option)
                     elif did.startswith('segment-menu-'):
@@ -6933,6 +6993,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                         # realized span, so look its highlight up.
                         match_index = open_dropdown.get('matchIndex', 0)
                         if option == 'remove':
+                            study_note(action='segment.remove', segment=segment_index, match=match_index)
                             model['search'] = remove_segment(
                                 current_regex, segment_index, value, match_index)
                         else:
@@ -6943,10 +7004,12 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                                 seg_start, seg_end, seg_type, _, _, _, _ = grabbed[0]
                                 click_idx = open_dropdown.get('clickIdx')
                                 if option == 'split' and seg_type == 'literal' and isinstance(click_idx, int):
+                                    study_note(action='segment.split', segment=segment_index, at=click_idx)
                                     model['search'] = split_literal_segment(
                                         current_regex, segment_index, value,
                                         seg_start, click_idx, seg_end)
                                 elif option == 'convert' and seg_type == 'literal':
+                                    study_note(action='segment.convert', segment=segment_index, to='fuzzy')
                                     # Re-infer a fuzzy over the span. A side
                                     # that abuts a neighbor segment is anchored
                                     # by it (None); an open side gets the
@@ -6963,18 +7026,21 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                                 elif option == 'convert':
                                     # Fuzzy -> literal: bake in this
                                     # occurrence's matched text.
+                                    study_note(action='segment.convert', segment=segment_index, to='literal')
                                     model['search'] = resize_literal_segment(
                                         current_regex, segment_index, value,
                                         seg_start, seg_end)
                     else:
                         # Repetition dropdown: option is a quantifier ('1', '?', '*', '+')
                         new_quantifier = '' if option == '1' else option
+                        study_note(action='segment.set-repetition', segment=segment_index, quantifier=option)
                         model['search'] = replace_segment_repetition(
                             current_regex, segment_index, new_quantifier)
             # Close the dropdown
             model['openDropdown'] = None
 
         case RepetitionInput(dropdown_id=did, field=field, value=val):
+            study_note(action='dropdown.input', kind='repetition', field=field, value=val)
             # Buffer the typed value into openDropdown state. The actual regex
             # update happens on commit (when the dropdown closes), so a
             # transient invalid value never makes the segment disappear.
@@ -6988,6 +7054,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     open_dropdown['rangeMax'] = val
 
         case SliceLabelInput(side=side, value=val):
+            study_note(action='dropdown.input', kind='slice-label', side=side, value=val)
             # Buffer the typed expression into openDropdown state. The slice
             # is rewritten on commit (close), not on each keystroke.
             open_dropdown = model.get('openDropdown')
@@ -7000,6 +7067,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             new_regex = _toggle_search_flag(current_regex or '``', '1')
             if _is_flags_only(new_regex) and not get_search_flags(new_regex):
                 new_regex = None
+            study_note(action='flag.toggle', flag='first-match', on='1' in get_search_flags(new_regex or ''))
             model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
             model['redoHistory'] = []
             model['search'] = new_regex
@@ -7009,15 +7077,18 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             new_regex = _toggle_search_flag(current_regex or '``', 'i')
             if _is_flags_only(new_regex) and not get_search_flags(new_regex):
                 new_regex = None
+            study_note(action='flag.toggle', flag='ignore-case', on='i' in get_search_flags(new_regex or ''))
             model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
             model['redoHistory'] = []
             model['search'] = new_regex
 
         case CaptureGroupsToggle():
             current_regex = model.get('search')
+            study_note(action='flag.toggle', flag='capture-groups', on=None)
             if current_regex:
                 new_regex = _toggle_search_flag(current_regex, 'c')
                 turning_on = 'c' in get_search_flags(new_regex)
+                study_note(on=turning_on)
                 if turning_on:
                     new_regex = ensure_all_groups(new_regex)
                 else:
@@ -7037,6 +7108,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             # colon syntax (5:10).
             current_regex = model.get('search')
             new_regex = val if val else None
+            study_note(action='search.type', changed=new_regex != current_regex, value=val)
             if new_regex != current_regex:
                 model['_scroll_to_match'] = True
                 model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
@@ -7049,15 +7121,19 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
 
         case ReplaceToggle():
             model['replace_visible'] = not model.get('replace_visible', False)
+            study_note(action='replace.toggle', visible=model['replace_visible'])
 
         case ExpandToggle():
             model['expanded'] = not model.get('expanded', False)
+            study_note(action='expand.toggle', expanded=model['expanded'])
 
         case ReplaceBoxInput(value=val):
             model['replace_text'] = val if val else None
+            study_note(action='replace.type', value=val)
 
         case Unlink():
             # Stash the action so the chain icon can resume it on relink.
+            study_note(action='link.unlink', was=model.get('linked_action'))
             model['unlinked_action'] = model.get('linked_action')
             model['linked_action'] = None
             model['linked_source_expr'] = None
@@ -7071,6 +7147,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             # Toggle the segment in the selection list (preserving canonical
             # order via _segment_rank), then rebuild the Replace text.
             current = list(model.get('selectedSegments') or [])
+            study_note(action='pick.toggle', segment=seg_id, on=seg_id not in current)
             if seg_id in current:
                 current.remove(seg_id)
             else:
@@ -7088,6 +7165,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             model['replace_visible'] = True
 
         case ToolSelect(tool=t):
+            study_note(action='tool.select', tool=t, **{'from': model.get('tool', 'literal')})
             if t in ('literal', 'fuzzy', 'index', 'pick'):
                 old_tool = model.get('tool', 'literal')
                 model['tool'] = t
@@ -7137,17 +7215,22 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             model['openDropdown'] = None
             result = _fetch_code(_fetch_source_expr(model, var_and_exp),
                                  source, fmt)
+            study_note(action='code.fetch', source=source, fmt=fmt, wrote=bool(result))
             if result:
                 commands.append(new_code_command(result, code_imports))
 
         case ActionButtonClick(action=action, copy=copy):
             _commit_open_dropdown_edit(model)
             model['openDropdown'] = None
+            study_note(action=('copy.action' if copy else 'link.set-action'
+                               if model.get('linked_action') else 'code.action'),
+                       codeAction=action, wrote=False)
             if model.get('linked_action') and not copy:
                 ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
                 result = generate_action(action, ctx) if ctx else None
+                study_note(wrote=bool(result))
                 # Only adopt the action once it has generated something: a
                 # dead click (e.g. Substrs on an index search) must not wedge
                 # the link onto an action that generates nothing, which would
@@ -7161,11 +7244,13 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                 if ctx:
                     if copy and action in ('if_any', 'if_all'):
                         bool_expr = generate_copy_expr_for_if(action, ctx)
+                        study_note(wrote=bool(bool_expr))
                         if bool_expr:
                             commands.append(CopyToClipboard(text=bool_expr))
                         return (model, commands)
                     result = generate_action(action, ctx)
                     if result:
+                        study_note(wrote=True)
                         if copy:
                             commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
@@ -7283,6 +7368,7 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
         return
     # Mirror how _get_search_context derives source_expr so the linked-update
     # block (which re-resolves via source_expr) rebuilds the same context.
+    study_note(autoLink=action)
     model['linked_action'] = action
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr
@@ -7314,6 +7400,7 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
     except SyntaxError:
         return
     model['last_linked_expr'] = expr
+    study_note(linkedUpdate=model.get('linked_action'))
     commands.append(ChangeSelectedText(
         expression=expr,
         suggested_var_name=suggest_name if rename else None,

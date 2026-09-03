@@ -1189,11 +1189,13 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
                   model: dict, commands: list, *, eval_in_scope=None) -> None:
     """Handle a Relink event: record the link in *model* and, where the link
     implies code, append the command that writes it to *commands*."""
+    study_note(action='link.relink', mode=mode, outcome='none')
     owned = parse_owned_line(cfg, text, var_and_exp) if mode == 'takeover' else None
     if owned and not model.get('unlinked_action'):
         # Fresh model over an existing generated line: adopt the line as-is
         # (parse it into the model) instead of clobbering it.
         if adopt_linked_line(cfg, owned, var_and_exp, model, eval_in_scope=eval_in_scope):
+            study_note(outcome='adopted')
             return
 
     action = relink_action(cfg, model, mode, text)
@@ -1212,16 +1214,19 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
         # Resuming a link on a line we wrote: bring it up to date with the
         # visualizer's current state, keeping the var name.
         written = result[1]
+        study_note(outcome='updated')
         commands.append(cfg.change_selected_text(expression=written,
                                                  suggested_var_name=None))
     elif result and mode == 'insert':
         written = result[1]
+        study_note(outcome='inserted')
         config = (cfg.new_code_config(action, ctx, model)
                   if cfg.new_code_config else None)
         commands.append(new_code_command(result, cfg.code_imports,
                                          config=config))
 
     if source_expr and (result or mode == 'takeover'):
+        study_note(linked=action)
         model['linked_action'] = action
         model['linked_source_expr'] = source_expr
         model['unlinked_action'] = None
@@ -1297,6 +1302,32 @@ def set_live_only(flag: bool) -> None:
 
 def is_live_only() -> bool:
     return _live_only
+
+
+# What the current `update` call wants the study log to know about itself.
+# The event alone says "MouseMove"; the code handling it knows that this move
+# is dragging out a string segment, and says so here. The runner empties the
+# store before each update and attaches what it finds afterwards to that
+# update's `vis.update` record, so a nested visualizer's notes land on the
+# parent update they ran inside.
+_study_notes: Dict[str, Any] = {}
+
+
+def study_note(**info: Any) -> None:
+    """Attach `info` to the study log's record of the current update call.
+
+    Keys given twice in one update keep the later value. Values should be
+    JSON-encodable (strings, numbers, lists, dicts).
+    """
+    _study_notes.update(info)
+
+
+def take_study_notes() -> Dict[str, Any]:
+    """Hand back what was noted since the last take, and reset. The runner's."""
+    global _study_notes
+    notes = _study_notes
+    _study_notes = {}
+    return notes
 
 
 class PyExp(NamedTuple):
@@ -1554,6 +1585,8 @@ def route_child_event(
     child_key = msg.child_key
     is_mousedown = (event_json or {}).get('type') == 'mousedown'
     is_focused = model.get('focused_child') == child_key
+    # Outermost first, so a note a nested visualizer makes says where it was.
+    _study_notes.setdefault('childPath', []).append(child_key)
 
     if not is_focused:
         # Non-focused children do not receive events. The FIRST mousedown on a
@@ -1563,6 +1596,9 @@ def route_child_event(
         # in a focused sibling, doesn't accidentally yank focus.
         if is_mousedown:
             model['focused_child'] = child_key
+            study_note(action='child.focus')
+        else:
+            study_note(action='child.dropped')
         return (model, [])
 
     # Focused child: dispatch the event normally. focused_child is already
@@ -1576,6 +1612,8 @@ def route_child_event(
         child_model = child_vis.init_model(child_value, get_visualizer,
                                            eval_in_scope=eval_in_scope)
 
+    # The child's own update overwrites this with what it did.
+    study_note(action='child.route')
     inner_event = {'pythonEventStr': msg.py_ev_str, 'eventJSON': event_json}
     new_child_model, commands = child_vis.update(
         inner_event, var_and_exp, child_model, child_value, get_visualizer,

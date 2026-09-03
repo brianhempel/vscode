@@ -515,6 +515,17 @@ class TestUpdate(unittest.TestCase):
         self.assertIs(new_model, model)
         self.assertEqual(cmds, [])
 
+    def test_update_notes_the_child_path_for_the_study_log(self):
+        from visualizer_utils import take_study_notes
+        value = (1, [2, 3])
+        model = init_model(value, _get_visualizer, var_and_exp=('t', 't'))
+        event = make_mouse_down_event(
+            repr(ChildEvent(child_key='$[1]', py_ev_str='None')))
+        take_study_notes()
+        update(event, ('t', 't'), model, value, _get_visualizer)
+        self.assertEqual(take_study_notes(),
+                         {'vis': 'tuple', 'action': 'child.focus', 'childPath': ['$[1]']})
+
     def test_the_first_mousedown_on_an_unfocused_child_pins_focus(self):
         value = (1, [2, 3])
         model = init_model(value, _get_visualizer, var_and_exp=('t', 't'))

@@ -7073,7 +7073,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 					// split them (see IVisualizationItem.commands). They are for
 					// the editor, not for the model, so the stored item goes
 					// without them; they are applied once, below.
-					const { commands: itemCommands, ...item } = msg.item;
+					const { commands: itemCommands, updates: itemUpdates, ...item } = msg.item;
+					for (const update of itemUpdates ?? []) {
+						studyLog.log('vis.update', {
+							runId: msg.runId, line: item.line, visIndex: item.visIndex, step: item.execution_step,
+							event: { id: update.event.id, type: update.event.eventJSON?.type, pythonEventStr: update.event.pythonEventStr },
+							modelBefore: update.modelBefore, modelAfter: update.modelAfter, commands: update.commands,
+							notes: update.notes, error: update.error,
+						}, this.editor.getModel()?.uri.toString());
+					}
 
 					// replace prior items as new ones come in
 					let found = false;

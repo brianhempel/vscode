@@ -412,6 +412,56 @@ class TestUpdate(unittest.TestCase):
         self.assertIn('handledKeys', new_model)
 
 
+class TestStudyNotes(unittest.TestCase):
+    """Every branch of update says what it did, as `vis` + `action` (area.verb)
+    plus whatever metadata names the thing acted on."""
+
+    def setUp(self):
+        from visualizer_utils import take_study_notes
+        self.take = take_study_notes
+        self.take()
+
+    def test_starting_to_add_a_column(self):
+        lst = [{'a': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        update(make_column_mouse_event(repr(AddColumnClick())), ('x', 'x'), model, lst,
+               mock_get_visualizer)
+        self.assertEqual(self.take(), {'vis': 'table', 'action': 'column.add-start'})
+
+    def test_toggling_a_column_says_which_way(self):
+        lst = [{'a': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        update(make_column_mouse_event(repr(ColumnToggle(expr="$['a']"))), ('x', 'x'), model, lst,
+               mock_get_visualizer)
+        notes = self.take()
+        self.assertEqual(notes['action'], 'column.toggle')
+        self.assertEqual(notes['column'], "$['a']")
+        self.assertIn(notes['on'], (True, False))
+
+    def test_a_routed_child_event_records_the_path(self):
+        lst = ["hello"]
+        model = init_model(lst, mock_get_visualizer)
+        model['focused_child'] = '0\x00$'
+        update(make_child_mouse_event('0\x00$', 'MouseDown(index=0)'), ('x', 'x'), model, lst,
+               mock_get_visualizer)
+        notes = self.take()
+        self.assertEqual(notes['childPath'], ['0\x00$'])
+        self.assertEqual(notes['action'], 'child.route')
+
+    def test_a_mousedown_on_an_unfocused_child_pins_focus(self):
+        lst = ["hello"]
+        model = init_model(lst, mock_get_visualizer)
+        update(make_child_mouse_event('0\x00$', 'MouseDown(index=0)'), ('x', 'x'), model, lst,
+               mock_get_visualizer)
+        self.assertEqual(self.take()['action'], 'child.focus')
+
+    def test_typing_a_search(self):
+        lst = [{'a': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        update(make_search_input_event("$['a'] == 1"), ('x', 'x'), model, lst, mock_get_visualizer)
+        self.assertLessEqual({'vis': 'table', 'action': 'search.type'}.items(), self.take().items())
+
+
 class TestNestedComposition(unittest.TestCase):
     """Test list of lists works (nested composition)."""
 

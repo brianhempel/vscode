@@ -45,8 +45,8 @@ from visualizer_utils import (
     add_drag_readings, aggregate_handled_keys, child_nesting_kwargs,
     compose_dollar_expr, error_html, eval_dollar_expr, is_nested,
     nest_child_command, parse_slots, replace_dollars_in_py_exp,
-    route_child_event, too_deep, truncate_str, wants_kwarg, wrap_child_html,
-    wrap_drag_grab, CHILD_SOURCE_BINDER,
+    route_child_event, study_note, too_deep, truncate_str, wants_kwarg,
+    wrap_child_html, wrap_drag_grab, CHILD_SOURCE_BINDER,
 )
 
 
@@ -207,7 +207,10 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None,
     event_json = event.get('eventJSON')
     msg = make_python_event(event_json) if callable(make_python_event) else make_python_event
 
+    # For the study log: what the routing below does is noted by the child.
+    study_note(vis='tuple')
     if not isinstance(msg, ChildEvent) or get_visualizer is None:
+        study_note(action='key.ignored')
         return (model, [])
 
     new_model, child_cmds = route_child_event(

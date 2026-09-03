@@ -30,6 +30,12 @@ export interface IVisualizationItem {
 	 */
 	commands?: SNCCommand[];
 	/**
+	 * Every `update` call the visualizer made while producing this item, in
+	 * order, for the study log. Stripped from the item on arrival: the editor
+	 * logs them and nothing else reads them.
+	 */
+	updates?: IVisualizerUpdate[];
+	/**
 	 * Which iteration of which loops the value was produced under: one
 	 * `[headerLine, iteration]` per enclosing loop, outermost first. A function
 	 * body counts as a loop over its calls (`[defLine, callNumber]`).
@@ -38,6 +44,20 @@ export interface IVisualizationItem {
 }
 
 export type LoopPath = [number, number][];
+
+/** One `update` call in a visualizer, as the runner reports it. */
+export interface IVisualizerUpdate {
+	event: UiEvent;
+	modelBefore: unknown;
+	/** Absent, along with `commands`, when the call raised. */
+	modelAfter?: unknown;
+	/** Type names of the commands this call returned. */
+	commands?: string[];
+	/** `ExcName: message` when the call raised; the runner's error box follows as the item's html. */
+	error?: string;
+	/** What the handling code said about itself via `study_note(...)`, if anything. */
+	notes?: Record<string, unknown>;
+}
 
 /**
  * A loop (or function) finished running under `path`, having run `count`

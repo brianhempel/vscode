@@ -59,7 +59,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, List, Tuple, Optional
 
 from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
-from visualizer_utils import is_live_only
+from visualizer_utils import is_live_only, study_note
 from visualizer_utils import (
     ChildEvent, Unlink, Relink,
     route_child_event, aggregate_handled_keys,
@@ -3065,6 +3065,7 @@ def _commit_column_input(model: dict, value, get_visualizer, eval_in_scope,
             commit_val = capped[sel_idx]
 
     if model.get('adding_column'):
+        study_note(action='column.add', column=commit_val)
         if commit_val:
             _add_beside(model, commit_val)
             if has_rows:
@@ -3074,6 +3075,7 @@ def _commit_column_input(model: dict, value, get_visualizer, eval_in_scope,
         model['selected_suggestion_index'] = None
     elif model.get('editing_column') is not None:
         old_name = _named_column(model, model['editing_column'])
+        study_note(action='column.rename', column=old_name, to=commit_val)
         if commit_val and old_name is not None and _rename_column(
                 model, old_name, commit_val, eval_in_scope):
             if has_rows:
@@ -7160,6 +7162,7 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
     except SyntaxError:
         return
     model['last_linked_expr'] = expr
+    study_note(linkedUpdate=model.get('linked_action'))
     commands.append(ChangeSelectedText(
         expression=expr,
         suggested_var_name=suggest_name if rename else None,
@@ -11507,9 +11510,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     # visualizer a moment later must not scroll the table back to the cell.
     model.pop('_scroll_to_cell', None)
 
+    # Every branch below says what it did with `study_note(action='area.verb',
+    # ...)`, which the runner attaches to the study log's record of this call.
+    study_note(vis='table')
+
     if isinstance(msg, ChildEvent):
         is_agg = _parse_agg_child_key(msg.child_key) is not None
         row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
+        study_note(cell={'row': row_key, 'column': cell_col, 'agg': is_agg})
         new_model, commands = route_child_event(
             event, model, value,
             child_value_getter=lambda key: _table_child_value_getter(key, value, model, eval_in_scope),
@@ -11611,6 +11619,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # Mapped above and headed for the outermost table.
                 filtered_commands.append(cmd)
             elif is_new_code(cmd) and not is_agg:
+                study_note(derivedColumn=cmd[1])
                 new_col = _add_derived_column(new_model, cell_col, cmd[1])
                 # The result shows up in the cell the column adds beside the
                 # visualizer, on this row -- which a wide visualizer may well
@@ -11635,6 +11644,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
     match msg:
         case AddColumnClick():
+            study_note(action='column.add-start')
             _close_column_menus(model)
             model['adding_column'] = True
             model['column_input_value'] = ''
@@ -11647,6 +11657,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # elsewhere.
         case ColumnToggle(expr=expr):
             expr = expr.strip()
+            study_note(action='column.toggle', column=expr, on=bool(expr) and expr not in model['columns'])
             if expr:
                 if expr in model['columns']:
                     _drop_column(model, expr, eval_in_scope)
@@ -11658,6 +11669,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # this reason: they are true of every table rather than detected off
         # this one, so asking to see the fields is not asking for them.
         case ColumnShowAll():
+            study_note(action='column.show-all')
             for expr in _table_field_candidates(value, get_visualizer):
                 _col_add(model['columns'], expr)
             _save_columns(model)
@@ -11667,6 +11679,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # So a column the user wrote goes -- it is one of the fields as far as
         # the menu is concerned -- and `$` stays.
         case ColumnHideAll():
+            study_note(action='column.hide-all')
             spared = set(_table_row_candidates(value))
             for expr in list(model['columns']):
                 if expr not in spared:
@@ -11674,6 +11687,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             _save_columns(model)
 
         case AddColumnAtClick(col=named, after=after):
+            study_note(action='column.add-start', column=named, after=after)
             _close_column_menus(model)
             target = _named_column(model, named)
             model['adding_column'] = (True if target is None
@@ -11682,6 +11696,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['editing_column'] = None
 
         case ColumnInput(value=val):
+            study_note(action='column.input', value=val)
             model['column_input_value'] = val
             if val and get_visualizer is not None:
                 suggestions = _get_column_suggestions(value, get_visualizer, model.get('columns', []), val)
@@ -11690,7 +11705,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['selected_suggestion_index'] = None
 
         case ColumnSelect(name=name):
+            study_note(action='column.select', name=name)
             if model.get('adding_column'):
+                study_note(action='column.add', column=name, via='suggestion')
                 _add_beside(model, name)
                 model['adding_column'] = False
                 model['column_input_value'] = ''
@@ -11698,6 +11715,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_slots(model)
             elif model.get('editing_column') is not None:
                 old_name = _named_column(model, model['editing_column'])
+                study_note(action='column.rename', column=old_name, to=name, via='suggestion')
                 if old_name is not None:
                     _rename_column(model, old_name, name, eval_in_scope)
                 model['editing_column'] = None
@@ -11708,9 +11726,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case ColumnClick(col=named):
             _close_column_menus(model)
             detail = event_json.get('detail', 1)
+            study_note(action='column.click', column=named, detail=detail)
             if detail >= 2:
                 target = _named_column(model, named)
                 if target is not None:
+                    study_note(action='column.edit-start', column=target)
                     model['editing_column'] = target
                     # A sub-column is edited as the expression it is, not as
                     # the composed identity it is keyed by.
@@ -11722,8 +11742,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case RemoveColumnClick(col=named):
             _close_column_menus(model)
             removed_col = _named_column(model, named)
+            study_note(action='column.remove', column=removed_col, removed=False)
             if removed_col is not None and _drop_column(model, removed_col,
                                                         eval_in_scope):
+                study_note(removed=True)
                 # The box was open on the column that just went; the others
                 # keep their names, so nothing else has to be adjusted.
                 if model.get('editing_column') == removed_col:
@@ -11733,6 +11755,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_slots(model)
 
         case ColumnDragStart(col=named):
+            study_note(action='column.drag-start', column=named)
             _close_column_menus(model)
             target = _named_column(model, named)
             if target is not None:
@@ -11740,8 +11763,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['column_drag_over'] = target
 
         case ColumnDragOver(col=named):
+            study_note(action='column.drag-over', column=named, dragging=model.get('column_drag_from'))
             if model.get('column_drag_from') is not None:
                 if event_json.get('buttons', 0) == 0:
+                    study_note(action='column.drag-cancel')
                     model['column_drag_from'] = None
                     model['column_drag_over'] = None
                 else:
@@ -11751,6 +11776,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             drag_from = model.get('column_drag_from')
             from_target = _named_column(model, drag_from)
             to_target = _named_column(model, named)
+            study_note(action='column.drag-end', column=from_target, to=to_target, moved=False)
             if (from_target is not None and to_target is not None
                     and from_target != to_target):
                 # Within one parent this reorders; across a splat boundary it
@@ -11758,6 +11784,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # A refusal (a sigil column being adopted) leaves everything
                 # exactly as it was.
                 if _move_target(model['columns'], from_target, to_target):
+                    study_note(moved=True)
                     # Column order is term order in the composed search.
                     _recompose_search(model, eval_in_scope)
                     if has_rows:
@@ -11768,8 +11795,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case ColumnKeyDown():
             key = event_json.get('key', '')
             is_input_active = model.get('adding_column') or model.get('editing_column') is not None
+            study_note(action='key.ignored', key=key, meta=bool(event_json.get('metaKey', False)))
 
             if key == 'ArrowDown' and is_input_active:
+                study_note(action='column.suggest-next')
                 suggestions = _get_column_suggestions(value, get_visualizer, model.get('columns', []), model.get('column_input_value', '')) if get_visualizer else []
                 if suggestions:
                     cur = model.get('selected_suggestion_index')
@@ -11779,6 +11808,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         model['selected_suggestion_index'] = (cur + 1) % min(len(suggestions), 10)
 
             elif key == 'ArrowUp' and is_input_active:
+                study_note(action='column.suggest-prev')
                 suggestions = _get_column_suggestions(value, get_visualizer, model.get('columns', []), model.get('column_input_value', '')) if get_visualizer else []
                 if suggestions:
                     cur = model.get('selected_suggestion_index')
@@ -11790,6 +11820,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
             elif key in ('Enter', 'Tab'):
                 if is_input_active:
+                    study_note(via=key)
                     _commit_column_input(model, value, get_visualizer,
                                          eval_in_scope, has_rows)
                 elif key == 'Enter':
@@ -11797,6 +11828,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if dd and dd.get('id') == 'action-join':
                         custom_sep = dd.get('customSep', "''")
                         action = 'join'
+                        study_note(action='code.action', codeAction='join', joinSep=custom_sep, key='Enter', wrote=False)
                         ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                         if ctx is None:
                             ctx = _get_whole_list_context(model, var_and_exp)
@@ -11804,17 +11836,21 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             ctx['join_separator'] = custom_sep
                             result = generate_action(action, ctx)
                             if result:
+                                study_note(wrote=True)
                                 commands.append(new_code_command(result, code_imports))
                         model['openDropdown'] = None
                     elif model.get('search') or model.get('pick_expr'):
                         if model.get('linked_action'):
                             model['linked_action'] = _link_action_for(model)
+                            study_note(action='link.set-action', to=model['linked_action'], key='Enter')
                         else:
+                            study_note(action='code.action', codeAction=_link_action_for(model), key='Enter', wrote=False)
                             ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                             if ctx:
                                 action = _link_action_for(model)
                                 result = generate_action(action, ctx)
                                 if result:
+                                    study_note(wrote=True)
                                     commands.append(new_code_command(
                                         result, code_imports,
                                         config=_inherited_config(
@@ -11824,11 +11860,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             elif key == 'Backspace' and event_json.get('metaKey', False):
                 if model.get('linked_action'):
                     model['linked_action'] = 'delete'
+                    study_note(action='link.set-action', to='delete', key='cmd-backspace')
                 else:
+                    study_note(action='code.action', codeAction='delete', key='cmd-backspace', wrote=False)
                     ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                     if ctx:
                         result = generate_action('delete', ctx)
                         if result:
+                            study_note(wrote=True)
                             commands.append(new_code_command(
                                 result, code_imports,
                                 config=_inherited_config('delete', ctx, model,
@@ -11837,31 +11876,40 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             elif key == 'Escape':
                 if model.get('col_search_dropdown'):
                     # Innermost first: a chip menu sits inside the column menu.
+                    study_note(action='menu.escape', closed='submenu', id=model.get('col_search_dropdown'))
                     model['col_search_dropdown'] = None
                 elif model.get('openDropdown'):
+                    study_note(action='menu.escape', closed='dropdown', id=model['openDropdown'].get('id'))
                     model['openDropdown'] = None
                     _reset_tally_view(model)
                 elif model.get('tool') == 'pick':
+                    study_note(action='menu.escape', closed='pick')
                     model['tool'] = 'normal'
                     model['picked'] = None
                     model['pick_expr'] = None
                 else:
+                    study_note(action='menu.escape', closed='column-input',
+                               was=('adding' if model.get('adding_column') else
+                                    'editing' if model.get('editing_column') is not None else None))
                     model['adding_column'] = False
                     model['editing_column'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
 
         case ColumnInputBlur():
+            study_note(action='column.blur', via='blur')
             _commit_column_input(model, value, get_visualizer, eval_in_scope,
                                  has_rows)
 
         case ColumnSearchInput(col=named, value=val):
+            study_note(action='search.column', column=named, value=val)
             col = _named_column(model, named)
             if col is not None:
                 _set_column_search(model, col, text=val)
                 _recompose_search(model, eval_in_scope)
 
         case ColumnSearchOpSelect(col=named, op=op):
+            study_note(action='search.column-op', column=named, op=op)
             col = _named_column(model, named)
             if col is not None and op in COLUMN_SEARCH_OPS:
                 text = _column_search_row(model, col)['text'].strip()
@@ -11883,6 +11931,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _recompose_search(model, eval_in_scope)
 
         case ColumnSearchComposeSelect(col=named, compose=compose):
+            study_note(action='search.column-compose', column=named, compose=compose)
             col = _named_column(model, named)
             if col is not None and compose in COLUMN_SEARCH_COMPOSE:
                 _set_column_search(model, col, compose=compose)
@@ -11894,6 +11943,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case SortClick(col=named, direction=direction):
             col = _named_row_column(model, named)
             span = model.get('_source_span')
+            study_note(action='sort.toggle', column=col, direction=direction, wrote=False)
             # A column naming `$i` has no sort to write, and neither has one
             # that splats -- see _render_sort_panel, which draws no handle for
             # either. Checked here too, since a click can arrive from a panel
@@ -11908,12 +11958,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 wanted = (None if _sort_checked(text, col, direction, binds)
                           else direction)
                 expr = _sort_expr(text, col, wanted, binds)
+                study_note(sort=wanted, wrote=expr != text)
                 if expr != text:
                     commands.append(ChangeSourceExpr(expr, *coords))
 
         # One line written, unlike checking a box, which invites the next -- so
         # this closes the menu the way the Compute code rows do.
         case SortCodeClick(col=named, direction=direction):
+            study_note(action='code.sort', column=named, direction=direction)
             col = _named_row_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and dollar_expr_names_index(col):
@@ -11937,6 +11989,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # The list, named -- the line the table is showing has no say in it,
         # the same way the Compute rows ask after the whole column.
         case GroupByClick(col=named):
+            study_note(action='code.group-by', column=named)
             # A splat has no one value per row to cut the rows up by, so it
             # answers None here and the click writes nothing -- the same answer
             # _render_column_group_by draws, reached the same way.
@@ -11960,6 +12013,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # than being worked out a second time here, so the row that was clicked
         # and the line that lands cannot describe different rows.
         case RowActionClick(row=i, action=action):
+            study_note(action='code.row-action', row=i, rowAction=action)
             source_expr = model.get('_source_expr')
             in_range = isinstance(i, int) and 0 <= i < len(value)
             code = (_row_action_code(action, model, value, i)
@@ -11978,11 +12032,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # what it has become.
         case ConvertTypeToggle(col=named, to=to):
             col = _named_column(model, named)
+            study_note(action='column.convert', column=col, to=to)
             if col is not None and to in CONVERT_TYPES:
                 # Clicking the type the column already reads as takes the
                 # conversion off, so one row is both the way in and the way out.
                 wanted = (None if _converted_type(col.split(SUBCOL_SEP)[-1]) == to
                           else to)
+                study_note(convert=wanted)
                 _seg, converted = _convert_target(col, wanted)
                 if _convert_column(model, col, wanted, eval_in_scope):
                     _repoint_column_menus(model, col, converted)
@@ -11992,6 +12048,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # One column written, unlike checking a box, which invites the next --
         # so this closes the menu the way the Sort code rows do.
         case ConvertTypeColumnClick(col=named, to=to):
+            study_note(action='column.convert-column', column=named, to=to)
             col = _named_column(model, named)
             if col is not None and to in CONVERT_TYPES:
                 seg, _converted = _convert_target(col, to)
@@ -12010,10 +12067,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # checking several aggregations in a row is the whole point.
         case ComputeToggle(col=named, expr=expr, per_group=per_group):
             col = _named_column(model, named)
+            study_note(action='compute.toggle', column=col, expr=expr, perGroup=per_group)
             if col is None:
                 pass
             elif not per_group:
                 exprs = _column_computes(model, col)
+                study_note(on=expr not in exprs)
                 if expr in exprs:
                     exprs.remove(expr)
                 else:
@@ -12027,6 +12086,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 already = ({e for e, read in
                             _group_agg_columns(model['columns'], leaf).items()
                             if read == expr} if leaf is not None else set())
+                study_note(on=not already)
                 changed = False
                 for gone in already:
                     changed |= _drop_column(model,
@@ -12050,6 +12110,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ComputeHoleInput(col=named, expr=expr, hole=hole, value=text,
                               previous=previous):
+            study_note(action='compute.hole', column=named, expr=expr, hole=hole, value=text, previous=previous)
             col = _named_column(model, named)
             if col is not None:
                 exprs = _column_computes(model, col)
@@ -12077,6 +12138,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ComputeExprKeyDown():
             key = event_json.get('key', '')
+            study_note(action='compute.key', key=key)
             if key == 'Enter':
                 # Written: the cell is already there, and the menu has nothing
                 # more to say about it.
@@ -12088,6 +12150,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case ComputeExprInput(col=named, expr=expr, value=text,
                               previous=previous):
+            study_note(action='compute.input', column=named, expr=expr, value=text, previous=previous)
             col = _named_column(model, named)
             if col is not None:
                 exprs = _column_computes(model, col)
@@ -12104,6 +12167,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # One line written, unlike checking a box, which invites the next -- so
         # this closes the menu the way an action button's dropdown closes.
         case ComputeCodeClick(col=named, expr=expr):
+            study_note(action='code.compute', column=named, expr=expr)
             col = _named_column(model, named)
             source_expr = model.get('_source_expr')
             if col is not None and source_expr is not None:
@@ -12122,6 +12186,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # something else now, and the row that was clicked has become the other
         # one -- there is nothing left to click a second time.
         case SplatColumnClick(col=named):
+            study_note(action='column.splat', column=named)
             col = _named_column(model, named)
             if col is not None and _can_expand_column(col, value, model,
                                                       eval_in_scope):
@@ -12130,6 +12195,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                                          eval_in_scope)
 
         case UnsplatColumnClick(col=named):
+            study_note(action='column.unsplat', column=named)
             col = _named_column(model, named)
             if col is not None and _can_collapse_column(col, model):
                 _close_column_menus(model)
@@ -12141,9 +12207,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # loses its sub-columns moves in the target space the ids are made of.
         case SubcolToggle(col=named, expr=expr):
             col = _named_column(model, named)
+            study_note(action='subcol.toggle', column=col, expr=expr)
             if col is not None and expr.strip():
                 subs = _subs_at(model['columns'], col, create=True)
                 if subs is not None:
+                    study_note(on=expr not in subs)
                     if expr in subs:
                         _drop_subcolumn(model, col, expr, eval_in_scope)
                     else:
@@ -12151,6 +12219,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_subcolumns(model, col)
 
         case SubcolShowAll(col=named):
+            study_note(action='subcol.show-all', column=named)
             col = _named_column(model, named)
             if col is not None:
                 subs = _subs_at(model['columns'], col, create=True)
@@ -12161,6 +12230,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _save_subcolumns(model, col)
 
         case SubcolHideAll(col=named):
+            study_note(action='subcol.hide-all', column=named)
             col = _named_column(model, named)
             if col is not None:
                 for expr in list(_subs_at(model['columns'], col) or {}):
@@ -12169,6 +12239,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case SubcolExprInput(col=named, expr=expr, value=text,
                              previous=previous):
+            study_note(action='subcol.input', column=named, expr=expr, value=text, previous=previous)
             col = _named_column(model, named)
             if col is not None:
                 subs = _subs_at(model['columns'], col, create=True)
@@ -12189,6 +12260,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case SubcolExprKeyDown():
             key = event_json.get('key', '')
+            study_note(action='subcol.key', key=key)
             if key == 'Enter':
                 _close_column_menus(model)
             elif key == 'Escape':
@@ -12199,8 +12271,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # is the whole point of it.
         case TallyItemToggle(col=named, literal=literal):
             col = _named_column(model, named)
+            study_note(action='tally.toggle', column=col, literal=literal)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
+                study_note(on=literal not in selected)
                 if literal in selected:
                     selected = [lit for lit in selected if lit != literal]
                 else:
@@ -12215,6 +12289,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # All and None reach only as far as the filter box has left on show, so
         # with an empty box they mean every value and none of them.
         case TallySelectAll(col=named):
+            study_note(action='tally.select-all', column=named)
             col = _named_column(model, named)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
@@ -12227,6 +12302,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _recompose_search(model, eval_in_scope)
 
         case TallySelectNone(col=named):
+            study_note(action='tally.select-none', column=named)
             col = _named_column(model, named)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
@@ -12240,20 +12316,24 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case TallyExcludeToggle(col=named):
             col = _named_column(model, named)
+            study_note(action='tally.exclude', column=col)
             if col is not None:
                 selected, exclude = _tally_selection(_column_search_row(model, col))
+                study_note(exclude=not exclude)
                 # Rewriting the same selection the other way round flips the
                 # operator and leaves the values alone.
                 _write_tally_selection(model, col, selected, not exclude)
                 _recompose_search(model, eval_in_scope)
 
         case TallyFilterInput(col=named, value=val):
+            study_note(action='tally.filter', column=named, value=val)
             # Display only: it decides which rows the menu lists, and never
             # what the column search says.
             if _named_column(model, named) is not None:
                 model['tally_filter'] = val
 
         case TallySortSelect(col=named, sort=sort):
+            study_note(action='tally.sort', column=named, sort=sort)
             # Display only too, though the order does reach the search: a
             # selection is written in the order it was listed in, so it reads
             # the way the list the user clicked through read.
@@ -12262,18 +12342,21 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 model['col_search_dropdown'] = None
 
         case TallyCountFilterInput(col=named, value=val):
+            study_note(action='tally.count-filter', column=named, value=val)
             # Display only, like the box beside it: which rows the menu lists,
             # never what the column search says.
             if _named_column(model, named) is not None:
                 model['tally_count_filter'] = val
 
         case TallyCountOpSelect(col=named, op=op):
+            study_note(action='tally.count-op', column=named, op=op)
             if _named_column(model, named) is not None and op in TALLY_COUNT_OPS:
                 model['tally_count_op'] = op
                 model['col_search_dropdown'] = None
 
         case ColumnSearchDropdownToggle(dropdown_id=did):
             current = model.get('col_search_dropdown')
+            study_note(action='menu.submenu-toggle', id=did, open=current != did)
             model['col_search_dropdown'] = None if current == did else did
 
         # Set rather than toggled: dwelling says which submenu the pointer is
@@ -12281,13 +12364,16 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # before. Only rendered where it would change something, so arriving
         # here always does.
         case ColumnSubmenuDwell(dropdown_id=did):
+            study_note(action='menu.submenu-dwell', id=did)
             model['col_search_dropdown'] = did
 
         case ColumnMenuDismiss():
+            study_note(action='menu.dismiss')
             _close_column_menus(model)
 
         case SearchBoxInput(value=val):
             had_search = bool(model.get('search'))
+            study_note(action='search.type', value=val, changed=(val or None) != model.get('search'))
             model['search'] = val if val else None
             model['_scroll_to_match'] = True
             # Every keystroke, so the column menus and the tally checkmarks are
@@ -12312,10 +12398,13 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case FirstMatchToggle():
             # Pick works over the first match only, so the toggle is inert while
             # pick is active (and renders dimmed to say so).
+            study_note(action='flag.toggle', flag='first-match', on=model.get('first_match', False))
             if model.get('tool') != 'pick':
                 model['first_match'] = not model.get('first_match', False)
+                study_note(on=model['first_match'])
 
         case ToolSelect(tool=t):
+            study_note(action='tool.select', tool=t, **{'from': model.get('tool', 'normal')})
             if t in ('normal', 'pick'):
                 model['tool'] = t
                 model['openDropdown'] = None
@@ -12331,8 +12420,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         model['linked_action'] = _link_action_for(model)
 
         case PickToggle(region_id=region_id):
+            study_note(action='pick.toggle', region=region_id)
             if model.get('tool') == 'pick':
                 picked = list(model.get('picked') or [])
+                study_note(on=region_id not in picked)
                 if region_id in picked:
                     picked.remove(region_id)
                 else:
@@ -12348,12 +12439,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # false until the bar is there to be clicked, and the render reads
             # it back the same way.
             model['expanded'] = not model.get('expanded', False)
+            study_note(action='expand.toggle', expanded=model['expanded'])
 
         case LoadMoreRows():
             # Undeclared until clicked, for the reason `expanded` is -- and it
             # only ever grows, so a page loaded stays loaded until the model is
             # rebuilt.
             model['shown_rows'] = _shown_rows(model) + ROWS_PER_PAGE
+            study_note(action='rows.load-more', shown=model['shown_rows'])
 
         case DropdownToggle(dropdown_id=did):
             current = model.get('openDropdown')
@@ -12362,11 +12455,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             model['col_search_dropdown'] = None
             _reset_tally_view(model)
             if current is not None and current.get('id') == did:
+                study_note(action='dropdown.close', id=did)
                 model['openDropdown'] = None
             else:
+                study_note(action='dropdown.open', id=did)
                 model['openDropdown'] = {'id': did}
 
         case JoinSeparatorInput(value=val):
+            study_note(action='dropdown.input', id='action-join', value=val)
             dd = model.get('openDropdown')
             if dd and dd.get('id') == 'action-join':
                 dd['customSep'] = val
@@ -12377,6 +12473,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if action.startswith('join:'):
                 join_sep = action[5:]
                 action = 'join'
+            study_note(action=('copy.action' if copy else 'link.set-action'
+                               if model.get('linked_action') else 'code.action'),
+                       codeAction=action, joinSep=join_sep, wrote=False)
             if model.get('linked_action') and not copy:
                 model['linked_action'] = action
                 ctx = _get_search_context(model, var_and_exp,
@@ -12392,6 +12491,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if join_sep is not None:
                         ctx['join_separator'] = join_sep
                     result = generate_action(action, ctx)
+                    study_note(wrote=bool(result))
                     if result:
                         _emit_linked_update(result[1], model, commands,
                                             suggest_name=result[0], rename=True)
@@ -12403,6 +12503,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     if join_sep is not None:
                         ctx['join_separator'] = join_sep
                     result = generate_action(action, ctx)
+                    study_note(wrote=bool(result))
                     if result:
                         if copy:
                             commands.append(CopyToClipboard(text=with_pass_body(result[1])))
@@ -12423,6 +12524,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
 
         case Unlink():
             # Stash the action so the chain icon can resume it on relink.
+            study_note(action='link.unlink', was=model.get('linked_action'))
             model['unlinked_action'] = model.get('linked_action')
             model['linked_action'] = None
             model['linked_source_expr'] = None
@@ -12433,14 +12535,17 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                           eval_in_scope=eval_in_scope)
 
         case DeselectChildren():
+            study_note(action='child.deselect', was=model.get('focused_child'))
             model['focused_child'] = None
 
         case SelectGroupedComputeTab(grouped=grouped):
+            study_note(action='compute.tab', grouped=grouped)
             model['grouped_compute_tab_selected'] = grouped
 
         case ColumnResize(col=col, width=width):
             config = _leaf_config(model.get('columns'), col)
             width = _valid_width(width)
+            study_note(action='column.resize', column=col, width=width)
             if config is not None and width is not None:
                 config['width'] = width
                 _save_slots(model)
@@ -12530,6 +12635,7 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, value=None,
         ast.parse(with_pass_body(prefix + expr))
     except SyntaxError:
         return
+    study_note(autoLink=action)
     model['linked_action'] = action
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr

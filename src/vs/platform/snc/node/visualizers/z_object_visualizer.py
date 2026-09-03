@@ -48,7 +48,7 @@ import html
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-from visualizer_utils import is_live_only
+from visualizer_utils import is_live_only, study_note
 from visualizer_utils import (
     ChildEvent, Unlink,
     wrap_child_html, route_child_event, aggregate_handled_keys,
@@ -410,6 +410,7 @@ def _commit_field_input(model: dict, value, full_class_name) -> None:
             commit_val = capped[sel_idx]
 
     if model.get('adding_field'):
+        study_note(action='field.add', field=commit_val)
         if commit_val:
             model['fields'].append(commit_val)
             if full_class_name:
@@ -419,7 +420,9 @@ def _commit_field_input(model: dict, value, full_class_name) -> None:
         model['selected_suggestion_index'] = None
     elif model.get('editing_index') is not None:
         idx = model['editing_index']
+        study_note(action='field.rename', to=commit_val)
         if commit_val and 0 <= idx < len(model['fields']):
+            study_note(field=model['fields'][idx])
             model['fields'][idx] = commit_val
             if full_class_name:
                 _save_slots(model)
@@ -449,6 +452,10 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
 
     if msg is None:
         return (model, commands)
+
+    # Every branch below says what it did with `study_note(action='area.verb',
+    # ...)`, which the runner attaches to the study log's record of this call.
+    study_note(vis='object')
 
     if isinstance(msg, ChildEvent) and get_visualizer is not None:
         _obj_ref = value
@@ -486,11 +493,13 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
 
     match msg:
         case AddFieldClick():
+            study_note(action='field.add-start')
             model['adding_field'] = True
             model['input_value'] = ''
             model['editing_index'] = None
 
         case FieldInput(value=val):
+            study_note(action='field.input', value=val)
             model['input_value'] = val
             # Auto-highlight first matching suggestion so user can Tab/Enter immediately
             if val and value is not None:
@@ -500,7 +509,9 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                 model['selected_suggestion_index'] = None
 
         case FieldSelect(accessor=accessor):
+            study_note(action='field.select', field=accessor)
             if model.get('adding_field'):
+                study_note(action='field.add', field=accessor, via='suggestion')
                 model['fields'].append(accessor)
                 model['adding_field'] = False
                 model['input_value'] = ''
@@ -509,6 +520,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
             elif model.get('editing_index') is not None:
                 idx = model['editing_index']
                 if 0 <= idx < len(model['fields']):
+                    study_note(action='field.rename', field=model['fields'][idx], to=accessor, via='suggestion')
                     model['fields'][idx] = accessor
                 model['editing_index'] = None
                 model['input_value'] = ''
@@ -516,8 +528,10 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                     _save_slots(model)
 
         case RemoveFieldClick(index=idx):
+            study_note(action='field.remove', index=idx)
             if 0 <= idx < len(model['fields']):
                 removed_accessor = model['fields'].pop(idx)
+                study_note(field=removed_accessor)
                 # Clean up child model for the removed field
                 children = model.get('children', {})
                 children.pop(removed_accessor, None)
@@ -532,14 +546,17 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                     _save_slots(model)
 
         case DragStart(index=idx):
+            study_note(action='field.drag-start', index=idx)
             if 0 <= idx < len(model['fields']):
                 model['drag_from_index'] = idx
                 model['drag_over_index'] = idx
 
         case DragOver(index=idx):
+            study_note(action='field.drag-over', index=idx, dragging=model.get('drag_from_index'))
             if model.get('drag_from_index') is not None:
                 if event_json.get('buttons', 0) == 0:
                     # Mouse released outside a DragEnd target — cancel drag
+                    study_note(action='field.drag-cancel')
                     model['drag_from_index'] = None
                     model['drag_over_index'] = None
                 else:
@@ -547,9 +564,11 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
 
         case DragEnd(index=idx):
             drag_from = model.get('drag_from_index')
+            study_note(action='field.drag-end', **{'from': drag_from}, to=idx, moved=False)
             if drag_from is not None and 0 <= drag_from < len(model['fields']):
                 target = idx
                 if drag_from != target:
+                    study_note(moved=True)
                     field = model['fields'].pop(drag_from)
                     model['fields'].insert(target, field)
                     if full_class_name:
@@ -559,9 +578,11 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
 
         case FieldClick(index=idx):
             detail = event_json.get('detail', 1)
+            study_note(action='field.click', index=idx, detail=detail)
             if detail >= 2:
                 # Double-click: start editing this field
                 if 0 <= idx < len(model['fields']):
+                    study_note(action='field.edit-start', field=model['fields'][idx])
                     model['editing_index'] = idx
                     model['input_value'] = model['fields'][idx]
                     model['adding_field'] = False
@@ -571,6 +592,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
             is_input_active = model.get('adding_field') or model.get('editing_index') is not None
 
             if key == 'ArrowDown' and is_input_active:
+                study_note(action='field.suggest-next')
                 # Compute suggestions to know the count
                 suggestions = _get_autocomplete_suggestions(value, model.get('fields', []), model.get('input_value', '')) if value is not None else []
                 if suggestions:
@@ -581,6 +603,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                         model['selected_suggestion_index'] = (cur + 1) % min(len(suggestions), 10)
 
             elif key == 'ArrowUp' and is_input_active:
+                study_note(action='field.suggest-prev')
                 suggestions = _get_autocomplete_suggestions(value, model.get('fields', []), model.get('input_value', '')) if value is not None else []
                 if suggestions:
                     cur = model.get('selected_suggestion_index')
@@ -591,19 +614,26 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                         model['selected_suggestion_index'] = (cur - 1) % count
 
             elif key in ('Enter', 'Tab'):
+                study_note(via=key)
                 _commit_field_input(model, value, full_class_name)
 
             elif key == 'Escape':
+                study_note(action='field.escape')
                 model['adding_field'] = False
                 model['editing_index'] = None
                 model['input_value'] = ''
                 model['selected_suggestion_index'] = None
                 model['focused_child'] = None
 
+            else:
+                study_note(action='key.ignored', key=key)
+
         case FieldInputBlur():
+            study_note(action='field.blur', via='blur')
             _commit_field_input(model, value, full_class_name)
 
         case DeselectChildren():
+            study_note(action='child.deselect', was=model.get('focused_child'))
             model['focused_child'] = None
 
     return (model, commands)

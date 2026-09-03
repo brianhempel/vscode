@@ -80,6 +80,7 @@ Only Python files, untitled buffers and SNC stdin documents (`*.snc*`) get file 
 | `editor.focus` / `editor.blur` | Text focus; `blur` includes `activeElement` (e.g. `div.snc-visualization-widget...` when focus went into a visualizer). |
 | `editor.cursor` | **Coalesced**: `selection`, `position`, `empty`, `source`, `reason`, `coalesced` (records suppressed since last). Logged when the cursor line or selection-emptiness changes, else at most every 300 ms, plus a trailing record 300 ms after the last move. |
 | `editor.scroll` | **Coalesced** (500 ms, same rule): `scrollTop`, `scrollLeft`, `visibleRanges`. |
+| `editor.fileDrop` | A file or URL was shift-dropped into the editor as a read: `sources` (`{type, path}` for files with `type` one of `text`/`csv`/`json`/`excel`, or `{type: 'url', url}`), `lines` (the assignments inserted), `imports`, `position`. (The edit follows as `file.userEdit`, like `editor.pyExpDrop`.) |
 | `editor.pyExpDrop` | A py-exp dragged from a visualizer was dropped into the editor: `expr`, `imports`, `position`. (The edit itself follows as `file.userEdit` — the drop provider's edit is applied by the editor, not SNC.) |
 
 ### Visualizer widgets
@@ -113,11 +114,28 @@ Only Python files, untitled buffers and SNC stdin documents (`*.snc*`) get file 
 | `run.warning` | `runId`, `warning`. |
 | `run.cancelled` | `runId`, `by` (`superseded:<trigger of the new run>`, `overtaken:<trigger>`, or `cancelCurrentRun`), `elapsedMs`. |
 | `run.item` | A widget's item arrived and did something worth noting: `line`, `visIndex`, `step`, `handledEventIds` (queued events this item applied, now retired), `commands` (types of the commands it carried), `stillQueued` (events it declined, to be retried), `dropped` (`declined-twice` when this was already the retry and they were thrown away). Plain items -- neither events nor commands -- are not logged one by one; `run.end`'s `itemCount`/`items` has them. |
+| `vis.update` | One call of a visualizer's `update`, as the runner reports it on the item: `runId`, `line`, `visIndex`, `step`, `event` (`id`, `type`, `pythonEventStr`), `modelBefore`, `modelAfter` (JSON snapshots, so an in-place mutation still shows both), `commands` (type names returned), `notes` (what the handling code said about itself, below), `error` (`ExcName: message` when `update` raised; `modelAfter` and `commands` are then absent, and the item's html is the runner's error box). Logged before that item's `run.item`; several per item when a run replayed several queued events. A nested visualizer's update is inside its parent's, not a record of its own. A model JSON can't encode shows as `{_unserializable}`. |
 | `run.eventsDropped` | The end-of-run sweep threw queued events away: `reason` (`widget-not-reached`: the run ended without ever reaching the widget, so it is not part of this execution), `widgets: [{line, visIndex, events}]`. |
 | `run.startFailed` | IPC call to start failed: `error`. |
 | `snc.command` | A command Python sent back: `runId`, `trigger`, `command` (full `SNCCommand`: `NewCode` edits + imports, `ChangeSelectedText`, `ChangeSourceExpr`, `SetConfigComment`, `CopyToClipboard`). The model edit it causes is the next `file.sncEdit`. |
 
 `trigger` values: `initial`, `edit`, `cursor-line`, `expand`, `stdin`, `loop-slider`, `editor-visible`, `widget:mousedown` / `widget:mouseup` / `widget:mousemove` / `widget:mouseout` / `widget:keydown` / `widget:input`, `queued-events` (a retry for events a run declined), `scheduled`.
+
+#### `vis.update` notes
+
+Every branch of every visualizer's `update` calls `study_note(**info)` (from `visualizer_utils`) to say what it did; the runner attaches the merged dict to that update's record as `notes`. The event alone says `MouseMove`; the notes say `select.drag` of a `fuzzy` segment.
+
+Fixed keys:
+
+| key | meaning |
+|---|---|
+| `vis` | Which visualizer handled it: `string`, `table`, `object`, `tuple`. A nested visualizer overwrites its parent's. |
+| `action` | `area.verb`, lowercase, hyphenated: `select.start`, `column.remove`, `code.sort`, `tally.toggle`, `key.ignored`, ... The most specific branch reached wins (a `ColumnKeyDown` starts as `key.ignored` and becomes `column.add` if Enter commits a name). |
+| `childPath` | Child keys the event was routed through, outermost first, when it went to a nested visualizer. The parent notes `child.route` (or `child.focus` / `child.dropped` for an unfocused child) and the child's own update overwrites `action`. |
+
+Areas: `select`, `handle`, `hover`, `mouse` (string selections); `dropdown`, `segment`, `flag`, `search`, `replace`, `expand`, `tool`, `pick`, `history` (string chrome); `column`, `subcol`, `compute`, `sort`, `tally`, `menu`, `rows` (table); `field` (object); `link` (`set-action`, `unlink`, `relink`), `code` (a line written: `action`, `fetch`, `sort`, `group-by`, `row-action`, `compute`, `join`), `copy`, `key`, `child`.
+
+The rest is per-action metadata, named after what it is: `column`, `segment`, `field`, `type` (selection type), `at` (string index), `to`/`from`, `on` (a toggle's new state), `wrote` (whether code was actually produced), `codeAction` (the action name a `code.*` / `link.set-action` used), `key`. Two keys are set by the shared helpers rather than by a branch: `linkedUpdate` (the linked line was rewritten, value = the linked action) and `autoLink` (a first interaction inserted and linked a line), plus `outcome`/`linked` on `link.relink` and `derivedColumn` when a cell's code became a table column.
 
 ## Analysis
 

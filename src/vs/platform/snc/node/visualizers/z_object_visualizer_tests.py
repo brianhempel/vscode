@@ -558,6 +558,16 @@ class TestUpdate(unittest.TestCase):
         self.assertEqual(new_model, model)
         self.assertEqual(commands, [])
 
+    def test_update_notes_what_it_did_for_the_study_log(self):
+        from visualizer_utils import take_study_notes
+        obj = TestObj()
+        model = init_model(obj)
+        take_study_notes()
+        update(make_mouse_down_event(repr(AddFieldClick())), ('x', 'x'), model, obj)
+        self.assertEqual(take_study_notes(), {'vis': 'object', 'action': 'field.add-start'})
+        update(make_key_down_event('Escape'), ('x', 'x'), model, obj)
+        self.assertEqual(take_study_notes(), {'vis': 'object', 'action': 'field.escape'})
+
     def test_add_field_click_sets_adding_true(self):
         """AddFieldClick event sets adding_field=True and clears input."""
         obj = TestObj()

@@ -238,6 +238,8 @@ export class PythonReadDropProvider implements DocumentDropEditProvider {
 
 		const { inlineText, separateEdits } = importPlacements(model, imports, position);
 
+		studyLog.log('editor.fileDrop', { sources, lines, imports, position: [position.lineNumber, position.column] }, model.uri.toString());
+
 		return {
 			edits: [{
 				insertText: inlineText + lines.join('\n'),
