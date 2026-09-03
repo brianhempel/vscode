@@ -1839,6 +1839,18 @@ class TestTableRendering(unittest.TestCase):
         # carries the column's name and (if resized) its width.
         self.assertRegex(output, r'<td[^>]*></td>') # missing cell
 
+    def test_none_value_is_drawn_not_left_blank(self):
+        # A field that IS there and holds None is a value like any other; only
+        # a field the row hasn't got is drawn as nothing.
+        lst = [{'a': None}, {'a': 1}]
+        model = init_model(lst, mock_get_visualizer)
+        output = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn('<span>None</span>', output)
+        self.assertNotRegex(output, r'<td[^>]*></td>')
+        # And it gets a child model of its own, like every other cell.
+        self.assertTrue(any(key.endswith("$['a']") and key.startswith('0')
+                            for key in model['children']))
+
     def test_string_list_renders_as_table(self):
         lst = ["hello", "world"]
         model = init_model(lst, mock_get_visualizer)
@@ -9561,7 +9573,7 @@ from table_visualizer import (
     _column_values_expr, _tally_exprs, _column_tally_rows, _tally_lists,
     _column_binding, _column_cell_expr, _column_values, _binds_for,
     _get_matching_indices, _render_action_buttons, _render_tool_toolbar,
-    _agg_value, ROW_AGGS, NO_ANSWER, _tally, _tally_counter_expr,
+    _agg_value, ROW_AGGS, NO_THING, _tally, _tally_counter_expr,
     _get_whole_list_context, _agg_col_code, _agg_row_index_code,
     TALLY_UNHASHABLE,
     _tally_row_count_expr,
@@ -11376,7 +11388,7 @@ class TestDictActionsAreDimmed(unittest.TestCase):
     def test_a_list_row_aggregation_still_answers(self):
         lst = [{'a': 3}, {'a': 1}]
         self.assertIsNot(_agg_value(ROW_AGGS[0], [3, 1], None, lst, "$['a']"),
-                         NO_ANSWER)
+                         NO_THING)
 
     def test_the_row_aggregation_code_reads_the_items(self):
         self.assertEqual(_agg_col_code(ROW_AGGS[0], '$v', 'd',
@@ -13332,7 +13344,7 @@ class TestTallyHeadersHandOverTheirExpressions(unittest.TestCase):
 # === Column compute tests ===
 
 from table_visualizer import (
-    COMPUTE_AGGS, HISTOGRAM_AGG, HISTOGRAM_BINS_TOOLTIP, NO_ANSWER,
+    COMPUTE_AGGS, HISTOGRAM_AGG, HISTOGRAM_BINS_TOOLTIP, NO_THING,
     _agg_holes, _agg_fill, _agg_shape, _agg_set_hole, _agg_imports, _agg_expr,
     _agg_value, _agg_code, _agg_name, _format_agg_value,
     _agg_row_index_code, _agg_is_row, _agg_is_histogram, _agg_hist_svg,
@@ -13931,12 +13943,12 @@ class TestAggValues(unittest.TestCase):
 
     def test_a_row_aggregation_with_no_list_to_read_has_no_answer(self):
         self.assertIs(_agg_value(agg_named('Min Item'), [30, 10, 20]),
-                      NO_ANSWER)
+                      NO_THING)
 
     def test_rows_that_cannot_be_compared_pick_none(self):
         # min raises rather than coercing, which np.argmin would not have.
         self.assertIs(_agg_value(agg_named('Min Item'), None, None, [1, 'a']),
-                      NO_ANSWER)
+                      NO_THING)
 
     def test_a_histogram_answers_past_the_names_it_writes_into(self):
         # The aggregation carries the line everyone types by hand, so what it
@@ -13957,7 +13969,7 @@ class TestAggNonAnswers(unittest.TestCase):
     an exception out of a render."""
 
     def no_answer(self, label, values):
-        self.assertIs(_agg_value(agg_named(label), values), NO_ANSWER)
+        self.assertIs(_agg_value(agg_named(label), values), NO_THING)
 
     def test_an_empty_column_has_no_min(self):
         self.no_answer('Min', [])
@@ -13979,22 +13991,22 @@ class TestAggNonAnswers(unittest.TestCase):
         # Half-typed, or never finished. Nothing to compute, and nothing said
         # about it either.
         self.assertIs(_agg_value('np.percentile($, {{}})', COMPUTE_LIST),
-                      NO_ANSWER)
+                      NO_THING)
         self.assertIs(_agg_value('np.percentile($, {{abc}})', COMPUTE_LIST),
-                      NO_ANSWER)
+                      NO_THING)
 
     def test_an_expression_that_does_not_parse(self):
-        self.assertIs(_agg_value('min($', COMPUTE_LIST), NO_ANSWER)
+        self.assertIs(_agg_value('min($', COMPUTE_LIST), NO_THING)
 
     def test_a_bins_box_holding_something_other_than_a_count(self):
         for template in ('counts, edges = np.histogram($, bins={{}})',
                          'counts, edges = np.histogram($, bins={{abc}})',
                          'counts, edges = np.histogram($, bins={{0}})'):
             with self.subTest(template):
-                self.assertIs(_agg_value(template, COMPUTE_LIST), NO_ANSWER)
+                self.assertIs(_agg_value(template, COMPUTE_LIST), NO_THING)
 
     def test_a_column_of_strings_has_no_histogram(self):
-        self.assertIs(_agg_value(HISTOGRAM_AGG, ['pear', 'apple']), NO_ANSWER)
+        self.assertIs(_agg_value(HISTOGRAM_AGG, ['pear', 'apple']), NO_THING)
 
 
 class TestAggCode(unittest.TestCase):
@@ -14128,7 +14140,7 @@ class TestAggHistogramSvg(unittest.TestCase):
     def test_an_answer_that_is_not_a_pair_of_arrays_draws_nothing(self):
         # A cell that can't draw its answer reads it, rather than raising out
         # of a render.
-        for answer in (2.8, None, NO_ANSWER, ('a', 'b'), (1, 2, 3)):
+        for answer in (2.8, None, NO_THING, ('a', 'b'), (1, 2, 3)):
             with self.subTest(repr(answer)):
                 self.assertEqual(_agg_hist_svg(answer), '')
 
@@ -19816,7 +19828,7 @@ class TestDictAggregationExpressions(unittest.TestCase):
                              {0: 0, 1: ('a', 1), 2: 'a', 3: 1}[offered.index(entry)])
 
     def test_min_item_finds_the_row_number_of_a_dict(self):
-        # dicts have no `.index`, so this answered NO_ANSWER and the row drew
+        # dicts have no `.index`, so this answered NO_THING and the row drew
         # with no index at all.
         self.assertEqual(_agg_row_index(self.D, ('b', 2)), 1)
 
@@ -20867,7 +20879,7 @@ class TestEveryLegendTokenActuallyBinds(unittest.TestCase):
         got = self.cells(value, columns_for(tokens), name)
         for token in tokens:
             with self.subTest(parent=parent, token=token, legend=legend):
-                # NO_ANSWER never appears here: an unbound run raises inside
+                # NO_THING never appears here: an unbound run raises inside
                 # eval_dollar_expr, which is what this is looking for.
                 self.assertIn(token, got)
 

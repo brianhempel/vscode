@@ -5484,11 +5484,12 @@ def _compute_scope(binds: 'dict | None' = None,
                else 'the whole original list', source_expr),
     )
 
-# A question this column can't answer -- an empty column, a mean of strings, a
-# box holding something that isn't a number. Its own object rather than None,
-# which an aggregation is free to return, or a string, which `min` of a column
-# of strings is free to return.
-NO_ANSWER = object()
+# Nothing here: a question this column can't answer -- an empty column, a mean
+# of strings, a box holding something that isn't a number -- or a field the
+# row hasn't got. Its own object rather than None, which an aggregation is
+# free to return and a cell is free to hold, or a string, which `min` of a
+# column of strings is free to return.
+NO_THING = object()
 
 _HOLE_RE = re.compile(r'\{\{(.*?)\}\}')
 
@@ -5640,7 +5641,7 @@ def _agg_row_index_code(item_code: str, source_expr: str,
 
 def _agg_row_index(lst, item, template: str = None, col: str = None,
                    eval_in_scope=None):
-    """Where a row aggregation's row sits in the list, or NO_ANSWER -- the same
+    """Where a row aggregation's row sits in the list, or NO_THING -- the same
     question _agg_row_index_code writes down, asked here."""
     by_index = _agg_by_index(template, col, ROW_AGG_INDEXES) if col else None
     if by_index is not None:
@@ -5655,7 +5656,7 @@ def _agg_row_index(lst, item, template: str = None, col: str = None,
             return list(lst.items()).index(item)
         return lst.index(item)
     except Exception:
-        return NO_ANSWER
+        return NO_THING
 
 
 
@@ -5789,7 +5790,7 @@ def _numpy():
 
 def _agg_eval(body: str, column_expr: str, values, lst, eval_in_scope=None):
     """One aggregation body asked of a column and the list it came out of, or
-    NO_ANSWER. *column_expr* is what `$` stands for and `_lst` what `$$` does.
+    NO_THING. *column_expr* is what `$` stands for and `_lst` what `$$` does.
 
     Evaluated in the user's scope, so a column expression that named the
     program's own values has already been read by the time we get here -- but
@@ -5816,16 +5817,16 @@ def _agg_eval(body: str, column_expr: str, values, lst, eval_in_scope=None):
             warnings.simplefilter('error')
             return agg(_numpy(), math, values, lst)
     except Exception:
-        return NO_ANSWER
+        return NO_THING
 
 
 def _agg_value(template: str, values: list, eval_in_scope=None, lst=None,
                col: str = '$'):
-    """An aggregation's answer for a column's values, or NO_ANSWER.
+    """An aggregation's answer for a column's values, or NO_THING.
 
     *lst* is the list the column was read out of, which is what a row
     aggregation orders; one that isn't handed a list has nothing to answer
-    with, which is NO_ANSWER like any other question it can't answer.
+    with, which is NO_THING like any other question it can't answer.
 
     *col* is what a row aggregation reads off each row -- it asks its question
     row by row rather than of every value at once -- so it is read here against
@@ -8149,8 +8150,8 @@ def init_model(lst, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
                 cell_value = _leaf_cell_value(leaf, row, lst, source_expr,
                                               eval_in_scope, read_through)
             except Exception:
-                cell_value = None
-            if cell_value is not None:
+                cell_value = NO_THING
+            if cell_value is not NO_THING:
                 try:
                     cell_vis = get_visualizer(cell_value)
                     # A cell visualizer that doesn't name the nesting params
@@ -9067,7 +9068,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
             answer = _agg_value(template, values, eval_in_scope, lst, reads)
             # A question this column can't answer isn't worth checking -- but one
             # already checked stays clickable, or there'd be no way to uncheck it.
-            unanswered = answer is NO_ANSWER
+            unanswered = answer is NO_THING
             inert = unanswered and not checked
             classes = ('col-compute-row' + (' checked' if checked else '')
                     + (' unselectable' if inert else ''))
@@ -9150,7 +9151,7 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
     # typing to it.
     for i, template in enumerate(_compute_free_rows(model, col)):
         answer = _agg_value(template, values, eval_in_scope, lst, reads)
-        unanswered = answer is NO_ANSWER
+        unanswered = answer is NO_THING
         # Through _agg_column_expr like the catalog's rows, so a box holding
         # something written the way Min Item is hands over what it computed.
         code = (None if unanswered or source_expr is None
@@ -10584,15 +10585,15 @@ def _agg_child_value(key: str, lst, model, eval_in_scope=None):
         return _agg_display_value(_agg_value(template, values, eval_in_scope))
     item = _agg_value(template, None, eval_in_scope, lst,
                       _agg_row_reads(asking_col, columns) or asking_col)
-    if item is NO_ANSWER:
-        return NO_ANSWER
+    if item is NO_THING:
+        return NO_THING
     idx = _agg_row_index(lst, item, template,
                          _agg_row_reads(asking_col, columns), eval_in_scope)
     shown = _leaf_for(columns, shown_col)
     return _agg_display_value(_column_cell_value(
         _leaf_row_expr(shown) if shown is not None else shown_col,
         item, lst, eval_in_scope,
-        index=None if idx is NO_ANSWER else idx,
+        index=None if idx is NO_THING else idx,
         bindings=_row_agg_bindings(lst, item, idx)))
 
 
@@ -10668,7 +10669,7 @@ def _render_agg_answer(template, answer, key, code, model, get_visualizer,
     stays, so the value still reads as a handle and still drags -- the cell's
     is what a hover or a drag on it finds.
     """
-    if answer is NO_ANSWER:
+    if answer is NO_THING:
         return ''
     if _agg_is_histogram(template):
         drawn = _agg_hist_svg(answer)
@@ -10773,7 +10774,7 @@ def _render_agg_cell(expr, col, level, values, model, get_visualizer,
     key = _agg_child_key(col, expr, col)
     # A column whose values have changed out from under an aggregation says
     # nothing rather than dropping the cell the user put there.
-    code = (None if answer is NO_ANSWER
+    code = (None if answer is NO_THING
             else _agg_child_expr(key, source_expr, _model_binds(model),
                                  model.get('columns') or {}))
     return (
@@ -10789,7 +10790,7 @@ def _render_agg_cell(expr, col, level, values, model, get_visualizer,
 
 def _column_cell_value(col: str, item, lst, eval_in_scope=None, index=None,
                        bindings=None):
-    """One row's value for a column, or NO_ANSWER when the column can't be read
+    """One row's value for a column, or NO_THING when the column can't be read
     off that row.
 
     *lst* is what the column's `$$` names and *index* what its `$i` does -- the
@@ -10801,7 +10802,7 @@ def _column_cell_value(col: str, item, lst, eval_in_scope=None, index=None,
         return eval_dollar_expr(col, item, eval_in_scope, outer=(lst,),
                                 index=index, bindings=bindings)
     except Exception:
-        return NO_ANSWER
+        return NO_THING
 
 
 def _row_agg_bindings(lst, item, index=None) -> dict:
@@ -10811,7 +10812,7 @@ def _row_agg_bindings(lst, item, index=None) -> dict:
     from the container's own order: the pair a dict's row is, and the number the
     aggregation found it at.
     """
-    binds = {} if index is None or index is NO_ANSWER else {'i': index}
+    binds = {} if index is None or index is NO_THING else {'i': index}
     if isinstance(lst, dict) and isinstance(item, tuple) and len(item) == 2:
         binds.update({'k': item[0], 'v': item[1]})
     return binds
@@ -10845,9 +10846,9 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
     # Nothing to hand over when the aggregation has no row to point at, and
     # nothing to name the list by when it has no source.
     binds = _binds_for(lst)
-    item_code = (None if item is NO_ANSWER or source_expr is None
+    item_code = (None if item is NO_THING or source_expr is None
                  else _agg_col_code(expr, asking, source_expr, binds, columns))
-    idx_code = (None if idx is NO_ANSWER or item_code is None
+    idx_code = (None if idx is NO_THING or item_code is None
                 else _agg_row_index_code(item_code, source_expr, expr,
                                          reads, binds))
 
@@ -10857,7 +10858,7 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
              f'{py_exp_attrs(PyExp(item_code, _agg_imports(expr)))}>'
              f'{_agg_name(expr)} by {reads or asking}</div>'
              f'<div class="col-agg-label"></div>' # needed for spacing, the above is position: absolute to overflow
-             f'{"" if idx is NO_ANSWER else _format_agg_value(idx)}'
+             f'{"" if idx is NO_THING else _format_agg_value(idx)}'
              f'</div></td>']
     add_box = _add_box_leaf(model, columns)
     for cj, leaf in enumerate(leaves):
@@ -10866,13 +10867,13 @@ def _render_agg_item_row(expr, ci, level, columns, lst, model, get_visualizer,
         # row still has to line up with the columns above it.
         if add_box is not None and add_box[0] == cj:
             cells.append('<td class="col-add-blank"></td>')
-        value = (NO_ANSWER if item is NO_ANSWER
+        value = (NO_THING if item is NO_THING
                  else _column_cell_value(_leaf_row_expr(leaf), item, lst,
                                          eval_in_scope,
-                                         index=None if idx is NO_ANSWER else idx,
+                                         index=None if idx is NO_THING else idx,
                                          bindings=_row_agg_bindings(lst, item, idx)))
         key = _agg_child_key(asking, expr, col)
-        code = (None if value is NO_ANSWER or item_code is None
+        code = (None if value is NO_THING or item_code is None
                 else _agg_child_expr(key, source_expr, binds, columns))
         label = ('<div class="col-agg-label"></div>' if cj != ci else
                  f'{_agg_label_html(expr, asking, level, binds)}'
@@ -11345,11 +11346,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 # than left blank: blank reads as "no value here", and the
                 # truth is that the user's expression failed on this row.
                 # Unless the column only reads a field, when "no value here"
-                # is the truth (see _reads_field).
-                cell_value = None
+                # is the truth (see _reads_field). NO_THING rather than None:
+                # a field that is there and holds None is a value, and drawn.
+                cell_value = NO_THING
                 cell_error = None if _reads_field(leaf.sub or leaf.expr) else e
 
-            if cell_value is None and cell_error is None:
+            if cell_value is NO_THING and cell_error is None:
                 strs.append(f'{td_open}{pick_overlay(i, f"col_{ci}")}</td>')
                 continue
 
