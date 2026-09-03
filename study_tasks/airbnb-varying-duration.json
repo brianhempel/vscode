@@ -1,0 +1,190 @@
+[
+    {
+        "name": "Apartment in Windsor, Canada",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$436 for 7 nights",
+        "rating": "4.82 (181)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 1 bed, 1 bath",
+        "price": "$1,362 for 7 nights",
+        "rating": "4.83 (178)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Hotel in Detroit, Michigan",
+        "info": "1 queen bed, 1 bath",
+        "price": "$1,175 for 5 nights",
+        "rating": "4.74 (27)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Windsor, Canada",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$501 for 7 nights",
+        "rating": "4.83 (6)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Windsor, Canada",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$901 for 7 nights",
+        "rating": "4.93 (100)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 1 bed, 1 bath",
+        "price": "$1,401 for 7 nights",
+        "rating": "4.9 (179)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Windsor, Canada",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$672 for 7 nights",
+        "rating": "4.96 (323)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Room in Windsor, Canada",
+        "info": "1 queen bed, 1 bath",
+        "price": "$432 for 7 nights",
+        "rating": "4.85 (54)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Loft in Detroit, Michigan",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$798 for 7 nights",
+        "rating": "4.82 (278)",
+        "offers": [
+            "Weekly discount",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$1,647 for 7 nights",
+        "rating": "4.96 (737)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Guest suite in Windsor, Canada",
+        "info": "1 bedroom, 1 bed, 1 bath",
+        "price": "$414 for 7 nights",
+        "rating": "4.79 (272)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$1,536 for 7 nights",
+        "rating": "New",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Windsor, Canada",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$415 for 7 nights",
+        "rating": "4.7 (253)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Loft in Detroit, Michigan",
+        "info": "1 bedroom, 1 king bed, 1 bath",
+        "price": "$411 for 4 nights",
+        "rating": "4.75 (353)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Home in Windsor, Canada",
+        "info": "3 bedrooms, 4 beds, 2 baths",
+        "price": "$930 for 7 nights",
+        "rating": "5.0 (31)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Home in Windsor, Canada",
+        "info": "2 bedrooms, 2 beds, 1 bath",
+        "price": "$969 for 7 nights",
+        "rating": "4.94 (225)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Windsor, Canada",
+        "info": "2 bedrooms, 2 queen beds, 1 bath",
+        "price": "$715 for 7 nights",
+        "rating": "4.97 (172)",
+        "offers": [
+            "Weekly discount",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Room in Windsor, Canada",
+        "info": "1 queen bed, 1 bath",
+        "price": "$625 for 7 nights",
+        "rating": "4.99 (309)",
+        "offers": [
+            "Weekly discount",
+            "Free cancellation"
+        ]
+    }
+]
