@@ -572,8 +572,8 @@ class TestMidDragModifierChanges(unittest.TestCase):
 
     def test_ctrl_mid_drag_replaces_existing_regex_and_keeps_undo(self):
         """Switching to index mid-drag replaces the regex on finalize, and the
-        old pattern lands in undo history (unlike a ctrl-mousedown, which
-        resets the model up front)."""
+        old pattern lands in undo history, as it does for a fresh
+        ctrl-mousedown."""
         # Finalize 'hello' as a literal first.
         model, _ = update(make_mouse_down_event(2, top_half=True),
                          self.var_and_exp, self.model, self.value)
@@ -593,6 +593,60 @@ class TestMidDragModifierChanges(unittest.TestCase):
 
         self.assertTrue(is_slice_search(model['search']))
         self.assertEqual(model['undoHistory'][-1], r"r'hello'")
+
+
+class TestFreshSelectionKeepsUndo(unittest.TestCase):
+    """A selection started away from the existing pattern replaces it. The
+    pattern it replaced has to stay reachable: one Cmd-Z brings it back, and
+    the history from before it is still there behind it."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, init_model(self.value), self.value)
+        self.model, _ = update(make_mouse_up_event(6),
+                              self.var_and_exp, model, self.value)
+        self.assertEqual(self.model['search'], r"r'hello'")
+        self.assertEqual(self.model['undoHistory'], [None])
+
+    def test_new_selection_keeps_history_and_one_undo_restores_the_old_pattern(self):
+        # 'world' is not adjacent to 'hello' (a real space between), so this
+        # starts over rather than extending.
+        model, _ = update(make_mouse_down_event(8, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_up_event(12),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'world'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
+
+        model, _ = update(make_key_down_event('z', meta_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello'")
+        model, _ = update(make_key_down_event('z', meta_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertIsNone(model['search'])
+
+    def test_ctrl_mousedown_slice_keeps_history(self):
+        model, _ = update(make_mouse_down_event(8, top_half=True, ctrl_key=True),
+                         self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_up_event(12, ctrl_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertTrue(is_slice_search(model['search']))
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
+
+        model, _ = update(make_key_down_event('z', meta_key=True),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello'")
+
+    def test_new_selection_keeps_what_was_set_up_around_the_pattern(self):
+        model, _ = update(make_mouse_down_event(8, top_half=True),
+                         self.var_and_exp, self.model, self.value)
+        model, _ = update(make_mouse_up_event(12),
+                         self.var_and_exp, model, self.value)
+        self.assertEqual(model['linked_action'], self.model['linked_action'])
+        self.assertEqual(model['tool'], self.model['tool'])
+        self.assertEqual(model['expanded'], self.model['expanded'])
 
 
 # =============================================================================

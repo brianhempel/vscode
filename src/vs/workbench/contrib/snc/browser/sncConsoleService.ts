@@ -159,7 +159,14 @@ export class SNCConsoleService extends Disposable implements ISNCConsoleService 
 		await this.ensureStdinFile(filePath);
 		// Goes through the model rather than the disk so it's one undoable edit
 		// and the rerun happens on the same path as any other stdin change.
-		this.stateFor(filePath).modelRef?.object.textEditorModel.setValue('');
+		// An edit, not setValue: that flushes the document's whole undo stack.
+		const model = this.stateFor(filePath).modelRef?.object.textEditorModel;
+		if (!model) {
+			return;
+		}
+		model.pushStackElement();
+		model.pushEditOperations(null, [{ range: model.getFullModelRange(), text: '' }], () => null);
+		model.pushStackElement();
 	}
 
 	// -- persistence ---------------------------------------------------------

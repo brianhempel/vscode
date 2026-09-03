@@ -5459,6 +5459,29 @@ def _apply_live_selection_type(model, event_json):
     model['anchorType'] = _resolve_selection_type(model, event_json)
 
 
+def _fresh_selection_model(model: dict, value: str, *, keep_flags: bool,
+                           get_visualizer=None, eval_in_scope=None, var_and_exp=None) -> dict:
+    """The model for a selection started from scratch.
+
+    The pattern goes, and everything built on it; what the user set up around
+    it stays: linked editing, the active tool, the expand/collapse chrome, and
+    the undo history. The pattern being replaced is kept aside for
+    finalize_segment to record, so one Cmd-Z brings it back.
+    """
+    fresh = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
+    fresh['linked_action'] = model.get('linked_action')
+    fresh['linked_source_expr'] = model.get('linked_source_expr')
+    fresh['tool'] = model.get('tool', 'literal')
+    fresh['expanded'] = model.get('expanded', False)
+    fresh['undoHistory'] = model.get('undoHistory', [])
+    fresh['redoHistory'] = model.get('redoHistory', [])
+    fresh['searchBeforeDrag'] = model.get('search')
+    flags = get_search_flags(model.get('search')) if keep_flags else ''
+    if flags:
+        fresh['search'] = '``' + flags
+    return fresh
+
+
 def finalize_segment(model: dict, string_value: str) -> dict:
     """
     Finalize the in-progress segment and add it to search.
@@ -5472,13 +5495,16 @@ def finalize_segment(model: dict, string_value: str) -> dict:
     """
     # Build the new regex using the same logic as preview
     new_regex = build_preview_regex(model, string_value)
-    current_regex = model.get('search')
+    # The gesture is the undo step: a selection started from scratch emptied
+    # the pattern on mousedown (see _fresh_selection_model), and what Cmd-Z
+    # should bring back is the pattern that was there before, not the empty.
+    before = model.pop('searchBeforeDrag', model.get('search'))
 
-    # Only update regex and undo history if something changed
-    if new_regex != current_regex:
-        model['undoHistory'] = model.get('undoHistory', []) + [current_regex]
+    # Only update undo history if something changed
+    if new_regex != before:
+        model['undoHistory'] = model.get('undoHistory', []) + [before]
         model['redoHistory'] = []  # Clear redo on new action
-        model['search'] = new_regex
+    model['search'] = new_regex
 
     # Always clear in-progress state
     model['anchorIdx'] = None
@@ -6664,13 +6690,8 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     study_note(action='select.ignored', reason='no-index', type='index')
                     return (model, commands)
                 study_note(action='select.start', type='index', at=idx)
-                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'))
-                saved_tool = model.get('tool', 'literal')
-                saved_expanded = model.get('expanded', False)
-                model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-                model['linked_action'], model['linked_source_expr'] = saved_linked
-                model['tool'] = saved_tool
-                model['expanded'] = saved_expanded
+                model = _fresh_selection_model(model, value, keep_flags=False, get_visualizer=get_visualizer,
+                                               eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
                 model['anchorIdx'] = idx
                 model['anchorType'] = 'index'
                 model['cursorIdx'] = idx
@@ -6720,18 +6741,9 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                     }
                     return (model, commands)
 
-                # Fresh start: reset selection, preserving linked-editing state,
-                # search flags, active tool, and expand/collapse chrome.
-                saved_linked = (model.get('linked_action'), model.get('linked_source_expr'))
-                saved_flags = get_search_flags(model.get('search'))
-                saved_tool = model.get('tool', 'literal')
-                saved_expanded = model.get('expanded', False)
-                model = init_model(value, get_visualizer=get_visualizer, eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
-                model['linked_action'], model['linked_source_expr'] = saved_linked
-                model['tool'] = saved_tool
-                model['expanded'] = saved_expanded
-                if saved_flags:
-                    model['search'] = '``' + saved_flags
+                # Fresh start: reset the selection, keeping the search flags.
+                model = _fresh_selection_model(model, value, keep_flags=True, get_visualizer=get_visualizer,
+                                               eval_in_scope=eval_in_scope, var_and_exp=var_and_exp)
                 if isinstance(idx, int):
                     model['anchorIdx'] = idx
                     model['anchorType'] = anchor_type
