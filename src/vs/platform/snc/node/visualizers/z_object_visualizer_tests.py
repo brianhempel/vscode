@@ -18,7 +18,7 @@ import html as html_module
 from z_object_visualizer import (
     visualize, init_model, update, can_visualize,
     TRIVIAL_NAMES, DEFAULT_FIELDS_FOR_TYPE,
-    AddFieldClick, FieldInput, FieldSelect, FieldClick, KeyDown,
+    AddFieldClick, FieldInput, FieldInputBlur, FieldSelect, FieldClick, KeyDown,
     RemoveFieldClick, DragStart, DragOver, DragEnd,
     save_fields_config, _resolve_fields_and_children,
     _get_autocomplete_suggestions, _resolve_fields,
@@ -712,6 +712,55 @@ class TestUpdate(unittest.TestCase):
         self.assertEqual(new_model['input_value'], '')
         # Field should be unchanged
         self.assertEqual(new_model['fields'][0], '$.x')
+
+    def blur(self, model, obj):
+        event = {'pythonEventStr': repr(FieldInputBlur()),
+                 'eventJSON': {'type': 'blur'}}
+        with patch('z_object_visualizer.save_fields_config'):
+            new_model, _ = update(event, ('x', 'x'), model, obj)
+        return new_model
+
+    def test_leaving_the_box_for_the_editor_commits_like_enter(self):
+        # Clicking into the code is Enter, not Escape: what was typed is
+        # written. Left open, the box would ask for the focus back on every
+        # render that followed an edit to the code.
+        obj = TestObj()
+        model = init_model(obj)
+        model['fields'] = ['$.x']
+        model['adding_field'] = True
+        model['input_value'] = '$.name'
+        new_model = self.blur(model, obj)
+        self.assertIn('$.name', new_model['fields'])
+        self.assertFalse(new_model['adding_field'])
+        self.assertEqual(new_model['input_value'], '')
+
+    def test_the_same_for_a_field_being_edited(self):
+        obj = TestObj()
+        model = init_model(obj)
+        model['fields'] = ['$.x', '$.name']
+        model['editing_index'] = 0
+        model['input_value'] = '$.foo'
+        new_model = self.blur(model, obj)
+        self.assertEqual(new_model['fields'][0], '$.foo')
+        self.assertIsNone(new_model['editing_index'])
+        self.assertEqual(new_model['input_value'], '')
+
+    def test_leaving_an_empty_box_just_closes_it(self):
+        obj = TestObj()
+        model = init_model(obj)
+        model['fields'] = ['$.x']
+        model['adding_field'] = True
+        model['input_value'] = ''
+        new_model = self.blur(model, obj)
+        self.assertEqual(new_model['fields'], ['$.x'])
+        self.assertFalse(new_model['adding_field'])
+
+    def test_the_box_says_what_leaving_it_does(self):
+        obj = TestObj()
+        model = init_model(obj)
+        model['adding_field'] = True
+        out = visualize(obj, model, _get_visualizer, None)
+        self.assertIn('snc-blur="FieldInputBlur()"', out)
 
     def test_field_select_saves_config(self):
         """FieldSelect commit should call save_fields_config."""

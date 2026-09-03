@@ -116,7 +116,7 @@ function describeEventTarget(node: Node | null, root: Element): unknown {
 		const el = node instanceof Element ? node : node?.parentElement;
 		if (!el) { return undefined; }
 		const attrs: Record<string, string> = {};
-		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-idx', 'snc-mouse-down', 'snc-resize-col', 'snc-mouse-up', 'snc-mouse-move', 'snc-notify-mouse-is-up', 'snc-hover-moves', 'snc-key-down', 'snc-input', 'snc-idx-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
+		for (const name of ['data-action-expr', 'snc-py-exps', 'snc-idx', 'snc-mouse-down', 'snc-resize-col', 'snc-mouse-up', 'snc-mouse-move', 'snc-notify-mouse-is-up', 'snc-hover-moves', 'snc-key-down', 'snc-input', 'snc-blur', 'snc-idx-start', 'snc-unfocused-clickable', 'snc-add-at-cursor', 'data-tooltip', 'title']) {
 			const v = el.getAttribute(name);
 			if (v !== null) { attrs[name] = v.length > 300 ? v.slice(0, 300) + '…' : v; }
 		}
@@ -154,6 +154,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
 	private readonly onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void;
 	private readonly onInputEvent: (pythonEventStr: string, value: string, previous: string) => void;
+	private readonly onBlurEvent: (pythonEventStr: string) => void;
 	// Invoked when the user clicks the "+" button in an expression tooltip to
 	// assign that expression to a new variable on the line below.
 	private readonly onInsertNewVar: (expression: string, imports?: readonly string[]) => void;
@@ -194,13 +195,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private lastRenderedHtml: string | null = null;
 	private focusRestoreVersion = 0;
 	// Values the user has typed into an snc-input box that Python hasn't
-	// echoed back yet, oldest first, keyed by the box's snc-input attribute
-	// (stable across renders, unlike the element). Typing is local and
-	// instant; Python's answer is a whole program run later. A render whose
-	// value= is one of these *older* values is Python catching up, not
-	// Python changing its mind, and must not overwrite what's in the DOM --
-	// see keepNewerTypedValue.
-	private pendingTypedValues: { key: string; values: string[] } | null = null;
+	// echoed back yet, oldest first. Typing is local and instant; Python's
+	// answer is a whole program run later. A render whose value= is one of
+	// these *older* values is Python catching up, not Python changing its
+	// mind, and must not overwrite what's in the DOM -- see
+	// reconcileTypedValue. Keyed by the element: the box the user is typing
+	// in is kept through renders (see keepFocusedInput), so it is the one
+	// stable thing about it -- its attributes are the render's, and a compute
+	// box's snc-input carries its own text.
+	private pendingTypedValues: { el: Element; values: string[] } | null = null;
 	// The last value sent to Python from each snc-input element, for the
 	// `previous` an input event carries -- see previousInputValue.
 	private readonly lastSentInputValues = new WeakMap<Element, string>();
@@ -288,7 +291,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	private dwellTimer: any = null;
 	private dwellTarget: Element | null = null;
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string, previous: string) => void, isFocused: () => boolean, isLiveOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string, previous: string) => void, onBlurEvent: (pythonEventStr: string) => void, isFocused: () => boolean, isLiveOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -297,6 +300,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this.onPointerEvent = onPointerEvent;
 		this.onKeyboardEvent = onKeyboardEvent;
 		this.onInputEvent = onInputEvent;
+		this.onBlurEvent = onBlurEvent;
 		this.onInsertNewVar = onInsertNewVar;
 		this.isFocused = isFocused;
 		this.isLiveOnly = isLiveOnly;
@@ -504,6 +508,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this._register(dom.addDisposableListener(targetWindow, 'keyup', onModifierChangeDuringDrag, true));
 		this._register(dom.addDisposableListener(this.domNode, 'input', (ev: Event) => {
 			this.dispatch_input_event('snc-input', ev);
+		}));
+		this._register(dom.addDisposableListener(this.domNode, 'focusout', (ev: FocusEvent) => {
+			this.dispatch_blur_event(ev, this.domNode,
+				(raw, el) => this.wrapWithChildKeys(raw, el.parentElement, this.domNode));
 		}));
 
 		for (const d of this.pyExpListeners(this.domNode, this.domNode)) {
@@ -1973,58 +1981,83 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	/** Remember a value just sent to Python from an snc-input box. */
 	private noteTypedValue(inputEl: Element, value: string): void {
-		const key = inputEl.getAttribute('snc-input') ?? '';
-		if (this.pendingTypedValues && this.pendingTypedValues.key === key) {
+		if (this.pendingTypedValues && this.pendingTypedValues.el === inputEl) {
 			this.pendingTypedValues.values.push(value);
 		} else {
 			// Typing moved to another box: whatever the old one had in flight
 			// will be echoed into an unfocused box, which is harmless.
-			this.pendingTypedValues = { key, values: [value] };
+			this.pendingTypedValues = { el: inputEl, values: [value] };
 		}
 	}
 
 	/**
-	 * Reconcile a freshly rendered snc-input box with what the user has typed
-	 * into its predecessor since. `domValue` is the predecessor's value at the
-	 * moment of the render; `el` is the new element (its value is what Python
-	 * rendered).
+	 * Settle what a box kept through a render should read: what the user has
+	 * typed (its own value), or what Python rendered into its counterpart
+	 * (`rendered`).
 	 *
 	 * Invariant: while typed values are still in flight, the DOM is the source
 	 * of truth for the focused box. Every input event carries the box's whole
 	 * value, so the values we've sent form a history, oldest first:
 	 *   - Python rendered the newest one: it has caught up; nothing in flight.
 	 *   - Python rendered an older one (an event still queued, or a run
-	 *     cancelled mid-stream): stale. Put the DOM value back; the newer
+	 *     cancelled mid-stream): stale. Leave the box as it is; the newer
 	 *     event is still on its way and Python will catch up.
-	 *   - Python rendered something we never sent: it deliberately changed the
-	 *     box (cleared it on Escape, normalized it, ...). Take Python's value
-	 *     and forget the history, so the change isn't fought.
-	 * Returns true when the DOM value was kept (so the caller restores the
-	 * selection as it was, not clamped to the stale value).
+	 *   - Python rendered something we never sent, or nothing is in flight:
+	 *     it deliberately changed the box (cleared it on Escape, normalized
+	 *     it, ...). Take Python's value and forget the history, so the change
+	 *     isn't fought.
+	 * Returns true when the box's value was changed to Python's.
 	 */
-	private keepNewerTypedValue(el: HTMLInputElement | HTMLTextAreaElement, domValue: string): boolean {
-		const pending = this.pendingTypedValues;
-		const key = el.getAttribute('snc-input');
-		if (!pending || key === null || pending.key !== key) {
+	private reconcileTypedValue(el: HTMLInputElement | HTMLTextAreaElement, rendered: string): boolean {
+		const pending = this.pendingTypedValues?.el === el ? this.pendingTypedValues : null;
+		const echoed = pending ? pending.values.lastIndexOf(rendered) : -1;
+		if (pending && echoed >= 0) {
+			// Values up to and including the echoed one are acknowledged.
+			pending.values.splice(0, echoed + 1);
+			if (pending.values.length === 0) {
+				this.pendingTypedValues = null;
+			}
 			return false;
 		}
-		const rendered = el.value;
-		const newest = pending.values[pending.values.length - 1];
-		if (rendered === newest) {
-			this.pendingTypedValues = null;
+		this.pendingTypedValues = null;
+		// The next keystroke's `previous` is what Python put here, not what
+		// was last sent.
+		this.lastSentInputValues.delete(el);
+		if (el.value === rendered) {
 			return false;
 		}
-		const staleIndex = pending.values.indexOf(rendered);
-		if (staleIndex < 0) {
-			this.pendingTypedValues = null;
-			return false;
-		}
-		// Values up to and including the echoed one are acknowledged.
-		pending.values.splice(0, staleIndex + 1);
-		if (el.value !== domValue) {
-			el.value = domValue;
-		}
+		el.value = rendered;
 		return true;
+	}
+
+	/**
+	 * Put the box the user is typing in, kept through the render, in the
+	 * place of its counterpart in the new render. It takes the counterpart's
+	 * attributes -- the render may have renamed its event (a compute box's
+	 * carries its own text), re-keyed it, re-classed it, given it new room --
+	 * and reads whichever value reconcileTypedValue settles on. Moved rather
+	 * than re-inserted, so focus, caret, undo history and an IME composition
+	 * in progress all survive.
+	 */
+	private keepFocusedInput(kept: HTMLInputElement | HTMLTextAreaElement, counterpart: HTMLInputElement | HTMLTextAreaElement, selectionStart: number | null, selectionEnd: number | null): void {
+		counterpart.parentNode!.moveBefore(kept, counterpart);
+		counterpart.remove();
+		for (const name of kept.getAttributeNames()) {
+			if (!counterpart.hasAttribute(name)) {
+				kept.removeAttribute(name);
+			}
+		}
+		for (const name of counterpart.getAttributeNames()) {
+			const value = counterpart.getAttribute(name) ?? '';
+			if (kept.getAttribute(name) !== value) {
+				kept.setAttribute(name, value);
+			}
+		}
+		if (this.reconcileTypedValue(kept, counterpart.value) && selectionStart !== null) {
+			// Setting the value put the caret at the end; back where it was,
+			// clamped to the new value.
+			kept.setSelectionRange(selectionStart, selectionEnd ?? selectionStart);
+		}
 	}
 
 	private dispatch_input_event(attr_name: string, ev: Event): void {
@@ -2045,6 +2078,36 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			}
 			el = el.parentElement;
 		}
+	}
+
+	/**
+	 * Tell Python that the focus has left the widget altogether, from a box
+	 * that asked to hear of it (snc-blur) -- so that a box left open while
+	 * the user edits the code can be closed rather than handed the focus
+	 * back on every render. Focus moving within the widget or its hoisted
+	 * panels is not leaving it.
+	 *
+	 * Decided a tick later, from where the focus has actually landed: the
+	 * event's relatedTarget names where it is going only when the browser
+	 * moves it in one step, and a box a render has removed meanwhile
+	 * (Enter or Escape closed it) has not been left, it is gone.
+	 */
+	private dispatch_blur_event(ev: FocusEvent, root: HTMLElement, wrap: (raw: string, el: Element) => string): void {
+		const target = ev.target instanceof Element ? ev.target : null;
+		if (!target) { return; }
+		setTimeout(() => {
+			if (!target.isConnected) { return; }
+			const now = target.ownerDocument.activeElement;
+			if (now && (this.domNode.contains(now) || this.hoistedDropdownsContain(now))) { return; }
+			let el: Element | null = target;
+			while (el && el !== root.parentElement) {
+				if (el.hasAttribute('snc-blur')) {
+					this.onBlurEvent(wrap(el.getAttribute('snc-blur') ?? '', el));
+					return;
+				}
+				el = el.parentElement;
+			}
+		}, 0);
 	}
 
 	/**
@@ -2203,7 +2266,6 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		let savedFocusKey: string | null = null;
 		let savedSelectionStart: number | null = null;
 		let savedSelectionEnd: number | null = null;
-		let savedValue: string | null = null;
 		const savedWidgetScrollTop = this.domNode.scrollTop;
 		const savedWidgetScrollLeft = this.domNode.scrollLeft;
 		const oldScrollableElements = Array.from(this.domNode.querySelectorAll('*'))
@@ -2238,11 +2300,37 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement) {
 				savedSelectionStart = activeElement.selectionStart;
 				savedSelectionEnd = activeElement.selectionEnd;
-				savedValue = activeElement.value;
 			}
 		} else {
 			// Nothing focused in here: no typing can be in flight that matters.
 			this.pendingTypedValues = null;
+		}
+
+		// A text box the user is typing in is kept through the render rather
+		// than rebuilt: parked in a holder outside the widget while the old
+		// content comes down, then moved into the place of its counterpart in
+		// the new render (keepFocusedInput). It is never detached, so it keeps
+		// the focus -- there is no frame between this render and the focus
+		// restore below in which a keystroke could fall through to the editor.
+		// The holder sits off screen rather than hidden: a hidden box would
+		// lose the focus it is being kept for. Only a box with a caret
+		// (savedSelectionStart) is kept: a checkbox has state of its own that
+		// the render, not the user, should decide.
+		let kept: HTMLInputElement | HTMLTextAreaElement | null = null;
+		let parking: HTMLElement | null = null;
+		if (savedSelectionStart !== null
+			&& (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement)
+			&& typeof this.domNode.moveBefore === 'function') {
+			parking = this.domNode.ownerDocument.createElement('div');
+			parking.style.cssText = 'position:fixed;left:-10000px;top:0';
+			this.editor.getContainerDomNode().appendChild(parking);
+			try {
+				parking.moveBefore(activeElement, null);
+				kept = activeElement;
+			} catch {
+				parking.remove();
+				parking = null;
+			}
 		}
 
 		// Now safe to clean up the old hoisted dropdowns
@@ -2310,10 +2398,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		) as HTMLElement | null;
 		const hasScrollToMatch = this.domNode.querySelector('[snc-scroll-to-match]') !== null;
 
-		// Find the box that will get focus back (same lookup as in the rAF
-		// below) and reconcile its value right away, synchronously: the focus
-		// restore is a frame away and the user may type into the box before
-		// then, so the value it holds must already be the newer one.
+		// Put the kept box in the place of the box that will get focus back
+		// (same lookup as in the rAF below), right away, synchronously: it has
+		// the focus, and the user may type into it before the next frame.
 		const keySelector = savedFocusKey ? `[snc-focus-key="${CSS.escape(savedFocusKey)}"]` : null;
 		const findFocusTarget = (): HTMLElement | null => {
 			const keyed = keySelector
@@ -2323,11 +2410,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			const allFocusable = [...widgetFocusable, ...this.hoistedFocusable()];
 			return (keyed ?? (focusedIndex < allFocusable.length ? allFocusable[focusedIndex] : null)) as HTMLElement | null;
 		};
-		if (focusedIndex >= 0 && savedValue !== null) {
-			const target = findFocusTarget();
-			if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-				this.keepNewerTypedValue(target, savedValue);
+		if (kept && parking) {
+			const counterpart = findFocusTarget();
+			if ((counterpart instanceof HTMLInputElement || counterpart instanceof HTMLTextAreaElement)
+				&& counterpart.tagName === kept.tagName && counterpart.type === kept.type) {
+				this.keepFocusedInput(kept, counterpart, savedSelectionStart, savedSelectionEnd);
+			} else {
+				// The render has no box of its kind for it: it goes with the
+				// old content, and whatever it had in flight with it.
+				this.pendingTypedValues = null;
 			}
+			// Empty, or still holding a box the render had no place for.
+			parking.remove();
 		}
 
 		if (focusedIndex >= 0 || autoFocusEl || hasScrollToMatch) {
@@ -2347,17 +2441,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					this.scrollToFirstMatch(matchTarget);
 				}
 
-				// Autofocus: focus the [autofocus] element when it's newly appearing.
-				// Two cases honor autofocus:
-				//   1. No input was previously focused (savedSelectionStart === null) -
-				//      e.g. focus was on the outer div, so autofocus the new input.
-				//   2. An autofocus element appeared in this render but did NOT exist
-				//      in the previous one - the user just opened a popup expecting it
-				//      to take focus, so override the saved input cursor restoration.
-				// Otherwise (autofocus el is the SAME one persisting across renders, e.g.
-				// the user is typing into it), preserve the cursor via focusedIndex below.
+				// Autofocus: focus the [autofocus] element only when it's newly
+				// appearing - it wasn't in the previous render (or had no autofocus
+				// then): the user just opened a popup, or was handed a box, and
+				// expects it to take focus, even over a box they were typing in.
+				// One that is merely persisting is left alone, wherever the focus
+				// is: in it (the user is typing, and the caret is restored via
+				// focusedIndex below), elsewhere in the widget (they clicked a cell
+				// and want that, not the box they left open with its text selected),
+				// or in the code (a box left open must not pull them back on every
+				// render that follows an edit).
 				const autoFocusIsNew = !!autoFocusEl && !hadAutoFocusEl;
-				if (autoFocusEl && (savedSelectionStart === null || autoFocusIsNew)) {
+				if (autoFocusEl && autoFocusIsNew) {
 					autoFocusEl.focus({ preventScroll: true });
 					if (autoFocusEl instanceof HTMLInputElement) {
 						// Select all text if requested (e.g. editing an existing field)
@@ -2729,6 +2824,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					}
 					el = el.parentElement;
 				}
+			})
+		);
+		this.hoistedDropdownListeners.push(
+			dom.addDisposableListener(panel, 'focusout', (ev: FocusEvent) => {
+				this.dispatch_blur_event(ev, panel, wrapHoistedEvent);
 			})
 		);
 	}
@@ -5483,6 +5583,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							(pythonEventStr, ev, overrideRect?) => { this.onPointerEvent(lineNumber, visIndex, pythonEventStr, ev, overrideRect); },
 							(pythonEventStr, ev) => { this.onKeyboardEvent(lineNumber, visIndex, pythonEventStr, ev); },
 							(pythonEventStr, value, previous) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value, previous); },
+							(pythonEventStr) => { this.onBlurEvent(lineNumber, visIndex, pythonEventStr); },
 							() => this.effectiveFocusedLine() === lineNumber,
 							() => this.isLiveOnly(),
 							() => this.requestExpand(lineNumber),
@@ -5676,6 +5777,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const eventJSON = { type: 'input', value, previous };
 		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		studyLog.log('widget.input', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, value }, this.editor.getModel()?.uri.toString());
+		this.sendEventToPython(event);
+	}
+
+	/** The focus left a widget from a box that asked to hear of it (snc-blur). */
+	private onBlurEvent(lineNumber: number, visIndex: number, pythonEventStr: string): void {
+		const eventJSON = { type: 'blur' };
+		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
+		studyLog.log('widget.blur', { ...this.visInfo(lineNumber, visIndex), pythonEventStr }, this.editor.getModel()?.uri.toString());
 		this.sendEventToPython(event);
 	}
 

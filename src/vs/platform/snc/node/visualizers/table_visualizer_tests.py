@@ -71,7 +71,7 @@ from table_visualizer import (
     can_visualize, init_model, visualize, update,
     AddColumnClick, ColumnInput, ColumnSelect, ColumnClick,
     RemoveColumnClick, ColumnDragStart, ColumnDragOver, ColumnDragEnd,
-    ColumnKeyDown, ExpandToggle, PinFocus,
+    ColumnKeyDown, ColumnInputBlur, ExpandToggle, PinFocus,
     CELL_KEY_SEP, SUBCOL_SEP,
     CopyToClipboard, ChangeSelectedText, ColumnResize,
     save_columns_config, get_col_width_style,
@@ -2516,6 +2516,54 @@ class TestColumnKeyboard(unittest.TestCase):
         self.assertFalse(new_model['adding_column'])
         self.assertEqual(new_model['column_input_value'], '')
         self.assertIsNone(new_model['selected_suggestion_index'])
+
+    def blur(self, model, lst):
+        event = {'pythonEventStr': repr(ColumnInputBlur()),
+                 'eventJSON': {'type': 'blur'}}
+        with patch('table_visualizer.save_columns_config'):
+            new_model, _ = update(event, None, model, lst, mock_get_visualizer)
+        return new_model
+
+    def test_leaving_the_box_for_the_editor_commits_like_enter(self):
+        # Clicking into the code is Enter, not Escape: what was typed is
+        # written. Left open, the box would ask for the focus back on every
+        # render that followed an edit to the code.
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        model['adding_column'] = True
+        model['column_input_value'] = "$['age']"
+        new_model = self.blur(model, lst)
+        self.assertIn("$['age']", new_model['columns'])
+        self.assertFalse(new_model['adding_column'])
+        self.assertEqual(new_model['column_input_value'], '')
+
+    def test_the_same_for_a_column_being_edited(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer)
+        model['editing_column'] = col_at(model)
+        model['column_input_value'] = "$['name'].upper()"
+        new_model = self.blur(model, lst)
+        self.assertEqual(list(new_model['columns'])[0], "$['name'].upper()")
+        self.assertIsNone(new_model['editing_column'])
+        self.assertEqual(new_model['column_input_value'], '')
+
+    def test_leaving_an_empty_box_just_closes_it(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        original_cols = list(model['columns'])
+        model['adding_column'] = True
+        model['column_input_value'] = ''
+        new_model = self.blur(model, lst)
+        self.assertEqual(list(new_model['columns']), original_cols)
+        self.assertFalse(new_model['adding_column'])
+
+    def test_the_box_says_what_leaving_it_does(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer)
+        model['adding_column'] = True
+        out = visualize(lst, model, mock_get_visualizer, None)
+        self.assertIn(f'snc-blur="{html.escape(repr(ColumnInputBlur()))}"',
+                      out)
 
     def test_arrow_down_selects_first_suggestion(self):
         lst = [{'name': 'Alice', 'age': 30}]

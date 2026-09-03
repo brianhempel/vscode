@@ -194,6 +194,14 @@ class ColumnKeyDown:
     pass
 
 @dataclass(frozen=True, slots=True)
+class ColumnInputBlur:
+    """The box a column is written in lost the focus to something outside the
+    visualizer -- the code, most likely. Taken as Enter: what is in the box is
+    written. Left open, the box would ask for the focus back on every render
+    that followed an edit to the code."""
+    pass
+
+@dataclass(frozen=True, slots=True)
 class ColumnSearchInput:
     """User typed in a column's search box (inside that column's ▾ menu)."""
     col: str
@@ -3011,6 +3019,42 @@ def _siblings_of(columns, target: str) -> 'dict | None':
     if len(path) == 1:
         return columns
     return _subs_at(columns, SUBCOL_SEP.join(path[:-1]))
+
+
+def _commit_column_input(model: dict, value, get_visualizer, eval_in_scope,
+                         has_rows: bool) -> None:
+    """Write what the column box holds and close it: a new column where the
+    box was drawn, or a new name for the column being edited. A suggestion
+    the user has stepped to is what is written, over the text. Enter and Tab
+    come here, and so does leaving the box for the code. Nothing to do when
+    no box is open: a blur can arrive after the Enter that closed it."""
+    if not model.get('adding_column') and model.get('editing_column') is None:
+        return
+    sel_idx = model.get('selected_suggestion_index')
+    commit_val = model.get('column_input_value', '').strip()
+    if sel_idx is not None:
+        suggestions = _get_column_suggestions(value, get_visualizer, model.get('columns', []), model.get('column_input_value', '')) if get_visualizer else []
+        capped = suggestions[:10]
+        if 0 <= sel_idx < len(capped):
+            commit_val = capped[sel_idx]
+
+    if model.get('adding_column'):
+        if commit_val:
+            _add_beside(model, commit_val)
+            if has_rows:
+                _save_slots(model)
+        model['adding_column'] = False
+        model['column_input_value'] = ''
+        model['selected_suggestion_index'] = None
+    elif model.get('editing_column') is not None:
+        old_name = _named_column(model, model['editing_column'])
+        if commit_val and old_name is not None and _rename_column(
+                model, old_name, commit_val, eval_in_scope):
+            if has_rows:
+                _save_slots(model)
+        model['editing_column'] = None
+        model['column_input_value'] = ''
+        model['selected_suggestion_index'] = None
 
 
 def _add_beside(model: dict, expr: str) -> bool:
@@ -9656,6 +9700,7 @@ def _column_input_html(lst, model, get_visualizer, is_editing):
     return (
         f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
+        f'snc-blur="{html.escape(repr(ColumnInputBlur()))}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="Column code" '
         f'data-tooltip="{html.escape(_column_input_tooltip(model))}" '
@@ -11730,34 +11775,9 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         model['selected_suggestion_index'] = (cur - 1) % count
 
             elif key in ('Enter', 'Tab'):
-                sel_idx = model.get('selected_suggestion_index')
-                if sel_idx is not None and is_input_active:
-                    suggestions = _get_column_suggestions(value, get_visualizer, model.get('columns', []), model.get('column_input_value', '')) if get_visualizer else []
-                    capped = suggestions[:10]
-                    if 0 <= sel_idx < len(capped):
-                        commit_val = capped[sel_idx]
-                    else:
-                        commit_val = model.get('column_input_value', '').strip()
-                else:
-                    commit_val = model.get('column_input_value', '').strip()
-
-                if model.get('adding_column'):
-                    if commit_val:
-                        _add_beside(model, commit_val)
-                        if has_rows:
-                            _save_slots(model)
-                    model['adding_column'] = False
-                    model['column_input_value'] = ''
-                    model['selected_suggestion_index'] = None
-                elif model.get('editing_column') is not None:
-                    old_name = _named_column(model, model['editing_column'])
-                    if commit_val and old_name is not None and _rename_column(
-                            model, old_name, commit_val, eval_in_scope):
-                        if has_rows:
-                            _save_slots(model)
-                    model['editing_column'] = None
-                    model['column_input_value'] = ''
-                    model['selected_suggestion_index'] = None
+                if is_input_active:
+                    _commit_column_input(model, value, get_visualizer,
+                                         eval_in_scope, has_rows)
                 elif key == 'Enter':
                     dd = model.get('openDropdown')
                     if dd and dd.get('id') == 'action-join':
@@ -11816,6 +11836,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     model['editing_column'] = None
                     model['column_input_value'] = ''
                     model['selected_suggestion_index'] = None
+
+        case ColumnInputBlur():
+            _commit_column_input(model, value, get_visualizer, eval_in_scope,
+                                 has_rows)
 
         case ColumnSearchInput(col=named, value=val):
             col = _named_column(model, named)

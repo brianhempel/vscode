@@ -109,6 +109,14 @@ class KeyDown:
     pass
 
 @dataclass(frozen=True, slots=True)
+class FieldInputBlur:
+    """The field box lost the focus to something outside the visualizer -- the
+    code, most likely. Taken as Enter: what is in the box is written. Left
+    open, the box would ask for the focus back on every render that followed
+    an edit to the code."""
+    pass
+
+@dataclass(frozen=True, slots=True)
 class DeselectChildren:
     """User deselected all children of table."""
     pass
@@ -385,6 +393,41 @@ def init_model(value, get_visualizer=None, eval_in_scope=None, var_and_exp=None,
     }
 
 
+def _commit_field_input(model: dict, value, full_class_name) -> None:
+    """Write what the field box holds and close it: a new field, or a new
+    expression for the one being edited. A suggestion the user has stepped to
+    is what is written, over the text. Enter and Tab come here, and so does
+    leaving the box for the code. Nothing to do when no box is open: a blur
+    can arrive after the Enter that closed it."""
+    if not model.get('adding_field') and model.get('editing_index') is None:
+        return
+    sel_idx = model.get('selected_suggestion_index')
+    commit_val = model.get('input_value', '').strip()
+    if sel_idx is not None:
+        suggestions = _get_autocomplete_suggestions(value, model.get('fields', []), model.get('input_value', '')) if value is not None else []
+        capped = suggestions[:10]
+        if 0 <= sel_idx < len(capped):
+            commit_val = capped[sel_idx]
+
+    if model.get('adding_field'):
+        if commit_val:
+            model['fields'].append(commit_val)
+            if full_class_name:
+                _save_slots(model)
+        model['adding_field'] = False
+        model['input_value'] = ''
+        model['selected_suggestion_index'] = None
+    elif model.get('editing_index') is not None:
+        idx = model['editing_index']
+        if commit_val and 0 <= idx < len(model['fields']):
+            model['fields'][idx] = commit_val
+            if full_class_name:
+                _save_slots(model)
+        model['editing_index'] = None
+        model['input_value'] = ''
+        model['selected_suggestion_index'] = None
+
+
 def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_scope=None) -> Tuple[dict, List[Any]]:
     """
     Update model based on event. Returns (new_model, commands) tuple.
@@ -548,35 +591,7 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                         model['selected_suggestion_index'] = (cur - 1) % count
 
             elif key in ('Enter', 'Tab'):
-                # If a suggestion is selected, commit it
-                sel_idx = model.get('selected_suggestion_index')
-                if sel_idx is not None and is_input_active:
-                    suggestions = _get_autocomplete_suggestions(value, model.get('fields', []), model.get('input_value', '')) if value is not None else []
-                    capped = suggestions[:10]
-                    if 0 <= sel_idx < len(capped):
-                        commit_val = capped[sel_idx]
-                    else:
-                        commit_val = model.get('input_value', '').strip()
-                else:
-                    commit_val = model.get('input_value', '').strip()
-
-                if model.get('adding_field'):
-                    if commit_val:
-                        model['fields'].append(commit_val)
-                        if full_class_name:
-                            _save_slots(model)
-                    model['adding_field'] = False
-                    model['input_value'] = ''
-                    model['selected_suggestion_index'] = None
-                elif model.get('editing_index') is not None:
-                    idx = model['editing_index']
-                    if commit_val and 0 <= idx < len(model['fields']):
-                        model['fields'][idx] = commit_val
-                        if full_class_name:
-                            _save_slots(model)
-                    model['editing_index'] = None
-                    model['input_value'] = ''
-                    model['selected_suggestion_index'] = None
+                _commit_field_input(model, value, full_class_name)
 
             elif key == 'Escape':
                 model['adding_field'] = False
@@ -584,6 +599,9 @@ def update(event, var_and_exp, model: dict, value, get_visualizer=None, eval_in_
                 model['input_value'] = ''
                 model['selected_suggestion_index'] = None
                 model['focused_child'] = None
+
+        case FieldInputBlur():
+            _commit_field_input(model, value, full_class_name)
 
         case DeselectChildren():
             model['focused_child'] = None
@@ -955,6 +973,7 @@ def _render_input_row(obj, model, is_editing: bool, editing_index: int = -1, eva
     input_html = (
         f'<span class="snc-dropdown-trigger">'
         f'<input type="text" snc-input="{html.escape(input_event)}" '
+        f'snc-blur="{html.escape(repr(FieldInputBlur()))}" '
         f'value="{html.escape(input_value)}" '
         f'placeholder="$.field_name" '
         f'data-tooltip="{html.escape(field_scope().legend)}" '
