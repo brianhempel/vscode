@@ -153,7 +153,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private readonly lineNumber: number;
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
 	private readonly onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void;
-	private readonly onInputEvent: (pythonEventStr: string, value: string) => void;
+	private readonly onInputEvent: (pythonEventStr: string, value: string, previous: string) => void;
 	// Invoked when the user clicks the "+" button in an expression tooltip to
 	// assign that expression to a new variable on the line below.
 	private readonly onInsertNewVar: (expression: string, imports?: readonly string[]) => void;
@@ -201,6 +201,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// Python changing its mind, and must not overwrite what's in the DOM --
 	// see keepNewerTypedValue.
 	private pendingTypedValues: { key: string; values: string[] } | null = null;
+	// The last value sent to Python from each snc-input element, for the
+	// `previous` an input event carries -- see previousInputValue.
+	private readonly lastSentInputValues = new WeakMap<Element, string>();
 	// Dropdown panels reparented to the editor container so they escape the
 	// widget's overflow. More than one can be open at once (e.g. a column's ▾
 	// menu alongside the column-name input's suggestion list).
@@ -208,16 +211,19 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private hoistedDropdownListeners: IDisposable[] = [];
 	// Segment-label anchors reparented to the widget root (out of the
 	// scrollable .string-visualizer that would otherwise clip them). Each entry
-	// remembers the scroll container and the anchor's char position (relative to
-	// the widget) captured at the scroll offset `baseScrollLeft/Top`, so the
-	// label can be re-glued to its character / hidden as the container scrolls.
+	// remembers the scroll containers and the anchor's char position (relative
+	// to the widget) captured at the scroll offsets `baseScrollLeft/Top`, so the
+	// label can be re-glued to its character / hidden as the containers scroll.
+	//
+	// Every scroller between the anchor and the widget root counts, not only
+	// the visualizer it was lifted out of: a string in a table cell moves with
+	// the table's horizontal scroll as well as its own, and an anchor parked at
+	// the widget root follows neither on its own.
 	private hoistedSegmentLabels: {
 		anchor: HTMLElement;
-		scroller: HTMLElement;
+		scrollers: { el: HTMLElement; baseScrollLeft: number; baseScrollTop: number }[];
 		baseLeft: number;
 		baseTop: number;
-		baseScrollLeft: number;
-		baseScrollTop: number;
 		// What decides whether the anchor has scrolled away, when the anchor's own
 		// position doesn't. A segment label sits on its character, so it answers
 		// for itself; a hoisted toolbar hangs BELOW the thing it belongs to, off
@@ -282,7 +288,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	private dwellTimer: any = null;
 	private dwellTarget: Element | null = null;
-	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string) => void, isFocused: () => boolean, isLiveOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
+	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string, previous: string) => void, isFocused: () => boolean, isLiveOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
 		this.position = new Position(lineNumber, 1);
@@ -1948,6 +1954,23 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 	}
 
+	/**
+	 * What a box read just before the keystroke that is being sent: the last
+	 * value sent from this element, or, for one nothing has been typed into
+	 * since it was rendered, what Python rendered into it.
+	 *
+	 * A box that names itself by its own text (the table's compute and
+	 * sub-column boxes bake the expression into their snc-input attribute)
+	 * is stale-named while a render is in flight: the keystroke before this
+	 * one has already rewritten the entry that name points at. Python takes
+	 * this as the box's name in that case.
+	 */
+	private previousInputValue(target: HTMLInputElement | HTMLTextAreaElement, value: string): string {
+		const previous = this.lastSentInputValues.get(target) ?? target.defaultValue;
+		this.lastSentInputValues.set(target, value);
+		return previous;
+	}
+
 	/** Remember a value just sent to Python from an snc-input box. */
 	private noteTypedValue(inputEl: Element, value: string): void {
 		const key = inputEl.getAttribute('snc-input') ?? '';
@@ -2015,8 +2038,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				let pythonEventStr: string = el.getAttribute(attr_name) ?? '';
 				pythonEventStr = this.wrapWithChildKeys(pythonEventStr, el.parentElement, this.domNode);
 				const value = (target as HTMLInputElement).value ?? '';
+				const previous = this.previousInputValue(target as HTMLInputElement, value);
 				this.noteTypedValue(el, value);
-				this.onInputEvent(pythonEventStr, value);
+				this.onInputEvent(pythonEventStr, value, previous);
 				return;
 			}
 			el = el.parentElement;
@@ -2673,8 +2697,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					if (el.hasAttribute('snc-input')) {
 						const pythonEventStr = wrapHoistedEvent(el.getAttribute('snc-input') ?? '', el);
 						const value = (target as HTMLInputElement).value ?? '';
+						const previous = this.previousInputValue(target as HTMLInputElement, value);
 						this.noteTypedValue(el, value);
-						this.onInputEvent(pythonEventStr, value);
+						this.onInputEvent(pythonEventStr, value, previous);
 						return;
 					}
 					el = el.parentElement;
@@ -2820,8 +2845,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const scrollers = new Set<HTMLElement>();
 
 		for (const anchor of anchors) {
-			const scroller = anchor.closest('.string-visualizer') as HTMLElement | null;
-			if (!scroller) { continue; }
+			const innermost = anchor.closest('.string-visualizer') as HTMLElement | null;
+			if (!innermost) { continue; }
+			const anchorScrollers = this.hoistedAnchorScrollers(anchor, innermost);
 
 			// Capture position + child-key chain BEFORE detaching (ancestors are
 			// lost once removed from the DOM).
@@ -2847,13 +2873,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 			this.hoistedSegmentLabels.push({
 				anchor,
-				scroller,
+				scrollers: anchorScrollers,
 				baseLeft,
 				baseTop,
-				baseScrollLeft: scroller.scrollLeft,
-				baseScrollTop: scroller.scrollTop,
 			});
-			scrollers.add(scroller);
+			for (const { el } of anchorScrollers) { scrollers.add(el); }
 		}
 
 		// Keep labels glued to their characters as the string scrolls, and hide
@@ -2982,8 +3006,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		const scrollers = new Set<HTMLElement>();
 
 		for (const anchor of anchors) {
-			const scroller = anchor.closest('.snc-base-visualizer') as HTMLElement | null;
-			if (!scroller) { continue; }
+			const innermost = anchor.closest('.snc-base-visualizer') as HTMLElement | null;
+			if (!innermost) { continue; }
+			const anchorScrollers = this.hoistedAnchorScrollers(anchor, innermost);
 
 			// Capture position + child-key chain BEFORE detaching (ancestors are
 			// lost once removed from the DOM).
@@ -3016,14 +3041,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 			this.hoistedSegmentLabels.push({
 				anchor,
-				scroller,
+				scrollers: anchorScrollers,
 				baseLeft,
 				baseTop,
-				baseScrollLeft: scroller.scrollLeft,
-				baseScrollTop: scroller.scrollTop,
 				clipTarget,
 			});
-			scrollers.add(scroller);
+			for (const { el } of anchorScrollers) { scrollers.add(el); }
 		}
 
 
@@ -3039,44 +3062,70 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Recompute hoisted segment-label positions from their scroll container and
-	 * hide any that have scrolled out of the container's visible area.
+	 * The scroll containers a hoisted anchor has to follow: the visualizer it
+	 * is lifted out of, whether or not it overflows yet, and then whatever
+	 * scrolls between there and the widget root -- the table a string sits in
+	 * a cell of. The widget root itself is left out: the anchor is its child,
+	 * so it scrolls with it already. Each comes with the scroll offset the
+	 * anchor's position was measured at.
+	 */
+	private hoistedAnchorScrollers(anchor: HTMLElement, innermost: HTMLElement):
+		{ el: HTMLElement; baseScrollLeft: number; baseScrollTop: number }[] {
+		const els = [innermost];
+		let ancestor = anchor.parentElement;
+		while (ancestor && ancestor !== this.domNode) {
+			if (ancestor !== innermost && VisualizationWidget.isScrollableElement(ancestor)) {
+				els.push(ancestor);
+			}
+			ancestor = ancestor.parentElement;
+		}
+		return els.map((el) => ({ el, baseScrollLeft: el.scrollLeft, baseScrollTop: el.scrollTop }));
+	}
+
+	/**
+	 * Recompute hoisted segment-label positions from their scroll containers
+	 * and hide any that have scrolled out of a container's visible area.
 	 */
 	private repositionHoistedSegmentLabels(): void {
 		if (this.hoistedSegmentLabels.length === 0) { return; }
 		const widgetRect = this.domNode.getBoundingClientRect();
 		for (const entry of this.hoistedSegmentLabels) {
-			const { anchor, scroller, baseLeft, baseTop, baseScrollLeft, baseScrollTop, clipTarget } = entry;
+			const { anchor, scrollers, baseLeft, baseTop, clipTarget } = entry;
 			// Re-glue to the character: shift the anchor by the scroll delta since
-			// it was hoisted (content scrolls left/up => label follows).
-			const left = baseLeft - (scroller.scrollLeft - baseScrollLeft);
-			const top = baseTop - (scroller.scrollTop - baseScrollTop);
+			// it was hoisted (content scrolls left/up => label follows). The
+			// scrollers nest, so their deltas add.
+			let left = baseLeft;
+			let top = baseTop;
+			for (const { el, baseScrollLeft, baseScrollTop } of scrollers) {
+				left -= el.scrollLeft - baseScrollLeft;
+				top -= el.scrollTop - baseScrollTop;
+			}
 			anchor.style.left = `${left}px`;
 			anchor.style.top = `${top}px`;
 
-			// Hide when the character has scrolled outside the scroller's visible
+			// Hide when the character has scrolled outside any scroller's visible
 			// box (so labels don't float over neighbouring content). Compare the
-			// anchor's viewport position against the scroller's. The small top
+			// anchor's viewport position against each scroller's. The small top
 			// slack accounts for labels rendered just above the line.
-			const scrollerRect = scroller.getBoundingClientRect();
-			let outOfView: boolean;
-			if (clipTarget) {
-				// Whatever the anchor belongs to is still in flow inside the
-				// scroller, so its rect already carries the scroll. It counts as in
-				// view while any of it is, the anchor being allowed to hang outside.
-				const targetRect = clipTarget.getBoundingClientRect();
-				outOfView = targetRect.right < scrollerRect.left - 1
-					|| targetRect.left > scrollerRect.right + 1
-					|| targetRect.bottom < scrollerRect.top - 1
-					|| targetRect.top > scrollerRect.bottom + 1;
-			} else {
-				const anchorViewportLeft = widgetRect.left + left;
-				const anchorViewportTop = widgetRect.top + top;
-				outOfView = anchorViewportLeft < scrollerRect.left - 1
+			const anchorViewportLeft = widgetRect.left + left;
+			const anchorViewportTop = widgetRect.top + top;
+			// Whatever the anchor belongs to is still in flow inside the
+			// scrollers, so its rect already carries the scroll. It counts as in
+			// view while any of it is, the anchor being allowed to hang outside.
+			const targetRect = clipTarget?.getBoundingClientRect();
+			const outOfView = scrollers.some(({ el }) => {
+				const scrollerRect = el.getBoundingClientRect();
+				if (targetRect) {
+					return targetRect.right < scrollerRect.left - 1
+						|| targetRect.left > scrollerRect.right + 1
+						|| targetRect.bottom < scrollerRect.top - 1
+						|| targetRect.top > scrollerRect.bottom + 1;
+				}
+				return anchorViewportLeft < scrollerRect.left - 1
 					|| anchorViewportLeft > scrollerRect.right + 1
 					|| anchorViewportTop < scrollerRect.top - 12
 					|| anchorViewportTop > scrollerRect.bottom + 1;
-			}
+			});
 			anchor.style.visibility = outOfView ? 'hidden' : '';
 		}
 
@@ -5390,7 +5439,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							visIndex,
 							(pythonEventStr, ev, overrideRect?) => { this.onPointerEvent(lineNumber, visIndex, pythonEventStr, ev, overrideRect); },
 							(pythonEventStr, ev) => { this.onKeyboardEvent(lineNumber, visIndex, pythonEventStr, ev); },
-							(pythonEventStr, value) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value); },
+							(pythonEventStr, value, previous) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value, previous); },
 							() => this.effectiveFocusedLine() === lineNumber,
 							() => this.isLiveOnly(),
 							() => this.requestExpand(lineNumber),
@@ -5580,8 +5629,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 	/**
 	 * Handle input event from VisualizationWidget (for text inputs with snc-input attribute)
 	 */
-	private onInputEvent(lineNumber: number, visIndex: number, pythonEventStr: string, value: string): void {
-		const eventJSON = { type: 'input', value };
+	private onInputEvent(lineNumber: number, visIndex: number, pythonEventStr: string, value: string, previous: string): void {
+		const eventJSON = { type: 'input', value, previous };
 		const event: UiEventSpec = { line: lineNumber, visIndex, pythonEventStr, eventJSON };
 		studyLog.log('widget.input', { ...this.visInfo(lineNumber, visIndex), pythonEventStr, value }, this.editor.getModel()?.uri.toString());
 		this.sendEventToPython(event);

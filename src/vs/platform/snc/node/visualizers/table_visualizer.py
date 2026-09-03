@@ -379,11 +379,15 @@ class ComputeToggle:
 @dataclass(frozen=True, slots=True)
 class ComputeHoleInput:
     """User typed in one of the boxes inside a Compute row's expression, e.g.
-    the level of a percentile."""
+    the level of a percentile.
+
+    `previous` is what the box read just before this keystroke: see _box_name.
+    """
     col: str
     expr: str
     hole: int
     value: str
+    previous: Optional[str] = None
 
 @dataclass(frozen=True, slots=True)
 class ComputeCodeClick:
@@ -400,10 +404,13 @@ class ComputeExprInput:
 
     Both boxes hold the whole expression rather than part of one, which is what
     tells this from ComputeHoleInput.
+
+    `previous` is what the box read just before this keystroke: see _box_name.
     """
     col: str
     expr: str
     value: str
+    previous: Optional[str] = None
 
 @dataclass(frozen=True, slots=True)
 class ComputeExprKeyDown:
@@ -465,10 +472,14 @@ class SubcolHideAll:
 @dataclass(frozen=True, slots=True)
 class SubcolExprInput:
     """User typed a sub-column of their own into the empty box at the foot of
-    the Subcolumns submenu, or edited one already there."""
+    the Subcolumns submenu, or edited one already there.
+
+    `previous` is what the box read just before this keystroke: see _box_name.
+    """
     col: str
     expr: str
     value: str
+    previous: Optional[str] = None
 
 @dataclass(frozen=True, slots=True)
 class SubcolExprKeyDown:
@@ -8705,7 +8716,7 @@ def _subcol_expr_event(col: str, expr: str) -> str:
     """The box that holds a whole sub-column expression, at the foot of the
     submenu."""
     return (f"lambda e: SubcolExprInput(col={col!r}, expr={expr!r}, "
-            f"value=e.get('value', ''))")
+            f"value=e.get('value', ''), previous=e.get('previous'))")
 
 
 def _render_column_convert(col, model) -> str:
@@ -9044,9 +9055,28 @@ def _render_compute_panel(col, model, lst, eval_in_scope=None) -> str:
             f'snc-dropdown-align="flyout">{"".join(rows)}</div>')
 
 
+def _box_name(names, *said) -> Optional[str]:
+    """Which of a column's entries a box is speaking of, given what it has
+    said: the expression it was drawn with, then what it read just before this
+    keystroke.
+
+    A box that names itself by its own text is stale-named while a render is
+    in flight: every keystroke carries the whole box under the name the box
+    was drawn with, and the keystroke before this one has already rewritten
+    that entry -- a burst of them reaches one run together. Taken at its word,
+    each keystroke would add an entry rather than rewrite the first. So the
+    text the box read just before the keystroke is tried next: that is the
+    entry as the keystroke before left it. A box that has said nothing that is
+    still there is a new entry, which is also what an emptied box retyped
+    before its render is back amounts to -- emptying it took its entry away.
+    """
+    return next((name for name in said if name and name in names), None)
+
+
 def _compute_hole_event(col: str, template: str, hole: int) -> str:
     return (f"lambda e: ComputeHoleInput(col={col!r}, expr={template!r}, "
-            f"hole={hole}, value=e.get('value', ''))")
+            f"hole={hole}, value=e.get('value', ''), "
+            f"previous=e.get('previous'))")
 
 
 def _agg_hole_tooltip(template: str) -> str:
@@ -9065,7 +9095,7 @@ def _compute_expr_event(col: str, template: str) -> str:
     """The box that holds a whole aggregation, wherever it is drawn: at the foot
     of the submenu, or as the label of the cell it made."""
     return (f"lambda e: ComputeExprInput(col={col!r}, expr={template!r}, "
-            f"value=e.get('value', ''))")
+            f"value=e.get('value', ''), previous=e.get('previous'))")
 
 
 def _column_dwell_attr(model, *, opens: 'str | None' = None, owns=()) -> str:
@@ -11961,17 +11991,24 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 if changed and has_rows:
                     _save_slots(model)
 
-        case ComputeHoleInput(col=named, expr=expr, hole=hole, value=text):
+        case ComputeHoleInput(col=named, expr=expr, hole=hole, value=text,
+                              previous=previous):
             col = _named_column(model, named)
             if col is not None:
-                edited = _agg_set_hole(expr, hole, text)
                 exprs = _column_computes(model, col)
-                if expr in exprs:
+                # The whole expression as the keystroke before left it, since
+                # the box only reads its one hole.
+                before = (_agg_set_hole(expr, hole, previous)
+                          if previous is not None else expr)
+                was = _box_name(exprs, expr, before)
+                edited = _agg_set_hole(was or expr, hole, text)
+                if was is not None:
                     # In place, so the cell the user is typing at stays where
                     # it was in the column's stack.
-                    exprs[exprs.index(expr)] = edited
-                elif not _regroup_agg_column(model, col, expr, edited,
-                                             eval_in_scope):
+                    exprs[exprs.index(was)] = edited
+                elif not any(_regroup_agg_column(model, col, template, edited,
+                                                 eval_in_scope)
+                             for template in dict.fromkeys([expr, before])):
                     # Typing a level into a row that isn't checked is a way of
                     # asking for that percentile -- unless the per-group box
                     # beside it is the one that is checked, in which case the
@@ -11992,15 +12029,17 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # menu -- and this box is only drawn while the submenu is open.
                 model['col_search_dropdown'] = None
 
-        case ComputeExprInput(col=named, expr=expr, value=text):
+        case ComputeExprInput(col=named, expr=expr, value=text,
+                              previous=previous):
             col = _named_column(model, named)
             if col is not None:
                 exprs = _column_computes(model, col)
-                if expr in exprs:
+                was = _box_name(exprs, expr, previous)
+                if was is not None:
                     # In place, so the cell the user is typing at stays where it
                     # was in the column's stack. Emptying the box drops it,
                     # since _set_column_computes keeps no blank aggregations.
-                    exprs[exprs.index(expr)] = text
+                    exprs[exprs.index(was)] = text
                 else:
                     exprs.append(text)
                 _set_column_computes(model, col, exprs)
@@ -12071,17 +12110,19 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _drop_subcolumn(model, col, expr, eval_in_scope)
                 _save_subcolumns(model, col)
 
-        case SubcolExprInput(col=named, expr=expr, value=text):
+        case SubcolExprInput(col=named, expr=expr, value=text,
+                             previous=previous):
             col = _named_column(model, named)
             if col is not None:
                 subs = _subs_at(model['columns'], col, create=True)
                 if subs is not None:
                     written = text.strip()
-                    if expr in subs:
+                    was = _box_name(subs, expr, previous)
+                    if was is not None:
                         # In place, so the column the user is typing at stays
                         # where it is among its siblings.
-                        index_of = list(subs).index(expr)
-                        _drop_subcolumn(model, col, expr, eval_in_scope)
+                        index_of = list(subs).index(was)
+                        _drop_subcolumn(model, col, was, eval_in_scope)
                         if written:
                             _col_add(subs, written)
                             _col_move(subs, len(subs) - 1, index_of)

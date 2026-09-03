@@ -13860,13 +13860,14 @@ def agg_x_events(html_str):
         r'<span class="col-agg-x[^>]*snc-mouse-down="([^"]*)"', html_str)]
 
 
-def make_compute_hole_event(col, expr, hole, value):
+def make_compute_hole_event(col, expr, hole, value, previous=None):
     """Create a ComputeHoleInput event for one of a row's boxes."""
     return {
         'pythonEventStr': (f"lambda e: ComputeHoleInput(col={col!r}, "
                            f"expr={expr!r}, hole={hole}, "
-                           f"value=e.get('value', ''))"),
-        'eventJSON': {'type': 'input', 'value': value},
+                           f"value=e.get('value', ''), "
+                           f"previous=e.get('previous'))"),
+        'eventJSON': {'type': 'input', 'value': value, 'previous': previous},
     }
 
 
@@ -13998,9 +13999,10 @@ class TestComputeEvents(unittest.TestCase):
 class TestComputeHoleEvents(unittest.TestCase):
     """Typing in a box edits the expression, because the box is part of it."""
 
-    def input(self, model, lst, expr, value, hole=0, col=None):
+    def input(self, model, lst, expr, value, hole=0, col=None, previous=None):
         col = col_at(model) if col is None else col
-        model, _ = update(make_compute_hole_event(col, expr, hole, value),
+        model, _ = update(make_compute_hole_event(col, expr, hole, value,
+                                                  previous),
                           None, model, lst, mock_get_visualizer,
                           eval_in_scope=eval)
         return model
@@ -14011,6 +14013,16 @@ class TestComputeHoleEvents(unittest.TestCase):
         model = self.input(model, lst, P10, '25')
         self.assertEqual(_column_computes(model, '$'),
                          ['min($)', 'np.percentile($, {{25}})', 'max($)'])
+
+    def test_a_digit_typed_before_the_render_is_back_edits_the_same_row(self):
+        # The box still names the expression it was drawn with, which the
+        # first digit has already rewritten. What it read just before this
+        # digit says which expression that is now.
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, P10, '2')
+        model = self.input(model, lst, P10, '25', previous='2')
+        self.assertEqual(_column_computes(model, '$'),
+                         ['np.percentile($, {{25}})'])
 
     def test_typing_in_an_unchecked_row_asks_for_that_percentile(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -15076,23 +15088,51 @@ class TestFreeAggregations(unittest.TestCase):
         self.assertIsNone(model['column_computes'])
 
 
-def make_compute_expr_event(col, expr, value):
+def make_compute_expr_event(col, expr, value, previous=None):
     """Create a ComputeExprInput event for a free-form aggregation's box."""
     return {
         'pythonEventStr': (f"lambda e: ComputeExprInput(col={col!r}, "
-                           f"expr={expr!r}, value=e.get('value', ''))"),
-        'eventJSON': {'type': 'input', 'value': value},
+                           f"expr={expr!r}, value=e.get('value', ''), "
+                           f"previous=e.get('previous'))"),
+        'eventJSON': {'type': 'input', 'value': value, 'previous': previous},
     }
 
 
 class TestFreeAggregationEvents(unittest.TestCase):
     """The box is the aggregation: what is typed in it is the expression."""
 
-    def input(self, model, lst, expr, value, col=None):
+    def input(self, model, lst, expr, value, col=None, previous=None):
         col = col_at(model) if col is None else col
-        model, _ = update(make_compute_expr_event(col, expr, value), None,
-                          model, lst, mock_get_visualizer, eval_in_scope=eval)
+        model, _ = update(make_compute_expr_event(col, expr, value, previous),
+                          None, model, lst, mock_get_visualizer,
+                          eval_in_scope=eval)
         return model
+
+    def test_a_keystroke_before_the_render_is_back_rewrites_the_same_box(self):
+        # Every keystroke carries the whole box, under the name the box was
+        # drawn with -- which the keystroke before it has already rewritten.
+        # What the box read just before this keystroke is its name meanwhile.
+        lst, model = tally_model(COMPUTE_LIST)
+        model = self.input(model, lst, '', 'sorted(')
+        model = self.input(model, lst, '', 'sorted($', previous='sorted(')
+        self.assertEqual(_column_computes(model, '$'), ['sorted($'])
+
+    def test_the_same_in_a_box_that_was_already_there(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]'])
+        model = self.input(model, lst, 'sorted($)[2]', 'sorted($)[1]')
+        model = self.input(model, lst, 'sorted($)[2]', 'sorted($)[0]',
+                           previous='sorted($)[1]')
+        self.assertEqual(_column_computes(model, '$'), ['sorted($)[0]'])
+
+    def test_a_box_emptied_and_retyped_adds_rather_than_taking_the_next(self):
+        # Emptying it took its aggregation away; what is typed next is new.
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, '$', ['sorted($)[2]', 'sorted($)[1]'])
+        model = self.input(model, lst, 'sorted($)[2]', '')
+        model = self.input(model, lst, 'sorted($)[2]', 'len($)', previous='')
+        self.assertEqual(_column_computes(model, '$'),
+                         ['sorted($)[1]', 'len($)'])
 
     def test_typing_in_the_empty_box_adds_the_aggregation(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -15151,6 +15191,16 @@ class TestFreeAggregationRendering(ComputePanelCase):
     def test_the_menu_ends_with_an_empty_box(self):
         lst, model = tally_model(COMPUTE_LIST)
         self.assertEqual(self.boxes(self.panel(model, lst)), [''])
+
+    def test_every_box_says_what_it_read_before_the_keystroke(self):
+        # The free box and the boxes inside the catalog's rows alike.
+        lst, model = tally_model(COMPUTE_LIST)
+        boxes = [html.unescape(m) for m in
+                 re.findall(r'snc-input="([^"]*)"', self.panel(model, lst))
+                 if 'Compute' in m]
+        self.assertGreater(len(boxes), 1)
+        for box in boxes:
+            self.assertIn("previous=e.get('previous')", box)
 
     def test_each_of_the_users_own_gets_a_box_and_an_empty_one_follows(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -16124,6 +16174,12 @@ class TestSubcolMenuRendering(SubcolPanelCase):
         self.assertIn(f'snc-focus-key="subcol-free-{self.SPLIT}-0"',
                       self.panel(self.model()))
 
+    def test_the_box_says_what_it_read_before_the_keystroke(self):
+        box = html.unescape(re.search(r'snc-input="([^"]*)"',
+                                      self.panel(self.model())).group(1))
+        self.assertIn('SubcolExprInput', box)
+        self.assertIn("previous=e.get('previous')", box)
+
     def test_the_box_keeps_its_name_when_the_first_character_lands(self):
         # That first character makes the column it was typed at stop being a
         # leaf, which moves it. A name that moved with it would lose the focus
@@ -16413,6 +16469,21 @@ class TestSubcolEvents(unittest.TestCase):
             out, _ = update(event, None, model, self.LINES, mock_get_visualizer)
         self.assertEqual(list(_subs_at(out['columns'], self.SPLIT) or {}),
                          ['len($)'])
+
+    def test_a_keystroke_before_the_render_is_back_rewrites_the_same_box(self):
+        # The box still names the sub-column it was drawn with, which the
+        # keystroke before has already rewritten. What it read just before
+        # this keystroke is its name meanwhile.
+        model = self.model()
+        for expr, value, previous in [('', 'l', None), ('', 'le', 'l')]:
+            event = {'pythonEventStr': repr(SubcolExprInput(
+                         col=self.SPLIT, expr=expr, value=value,
+                         previous=previous)),
+                     'eventJSON': {'type': 'input', 'value': value}}
+            with patch('table_visualizer.save_columns_config'):
+                model, _ = update(event, None, model, self.LINES,
+                                  mock_get_visualizer)
+        self.assertEqual(self.subs(model), ['le'])
 
     def test_editing_a_box_keeps_the_columns_place(self):
         model = self.model(
