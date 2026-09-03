@@ -2995,11 +2995,26 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 	}
 
+	/**
+	 * Lift a nested visualizer's search box and tool toolbar out to the widget
+	 * root. Both hang outside the visualizer they belong to -- the search box
+	 * below it, the toolbar to its left -- and a table cell the user has
+	 * resized clips to its width (get_col_width_style), which took the
+	 * toolbar with it. Positioned where the CSS had put them and re-glued on
+	 * scroll (repositionHoistedSegmentLabels); events find their nested model
+	 * through the child-key chain they carry (wrapWithChildKeys).
+	 */
 	private hoistNestedToolbars(): void {
-		const anchors = Array.from(this.domNode.querySelectorAll('.visualizer-container .visualizer-container > .toolbar-anchor'))
+		const anchors = Array.from(this.domNode.querySelectorAll(
+			'.visualizer-container .visualizer-container > .toolbar-anchor, '
+			+ '.visualizer-container .visualizer-container > .snc-tool-and-visualizer > .tool-toolbar'))
 			.filter(dom.isHTMLElement)
 			// Skip anything already at the widget root (defensive; shouldn't happen).
-			.filter((a) => a.parentElement !== this.domNode);
+			.filter((a) => a.parentElement !== this.domNode)
+			// A nested table with a focused child of its own hides its toolbar
+			// (.has-focused-child); it only keeps doing so where it is.
+			.filter((a) => !(a.classList.contains('tool-toolbar')
+				&& a.parentElement?.parentElement?.classList.contains('has-focused-child')));
 		if (anchors.length === 0) { return; }
 
 		const widgetRect = this.domNode.getBoundingClientRect();
@@ -3024,8 +3039,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				anchor.setAttribute('snc-child-key-chain', JSON.stringify(childKeyChain));
 			}
 
+			// The search box's 10px pairs with the margin-top its hoisted rule
+			// gives back; the toolbar goes exactly where it was.
+			const isToolToolbar = anchor.classList.contains('tool-toolbar');
 			const baseLeft = anchorRect.left - widgetRect.left;
-			const baseTop = anchorRect.top - widgetRect.top - 10;
+			const baseTop = anchorRect.top - widgetRect.top - (isToolToolbar ? 0 : 10);
 
 			// The toolbar hangs below its visualizer, and for the last row of a
 			// list that is below the scroller's bottom edge -- so the toolbar can't
@@ -3036,7 +3054,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			anchor.remove();
 			anchor.style.left = `${baseLeft}px`;
 			anchor.style.top = `${baseTop}px`;
-			anchor.classList.add('toolbar-anchor-hoisted');
+			anchor.classList.add(isToolToolbar ? 'tool-toolbar-hoisted' : 'toolbar-anchor-hoisted');
 			this.domNode.appendChild(anchor);
 
 			this.hoistedSegmentLabels.push({

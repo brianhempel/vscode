@@ -652,9 +652,26 @@
 	padding: 0px;
 }
 
+/* A nested visualizer's toolbar sits to its LEFT, where the top-level one
+   sits to the right: to the right is the rest of the row, and a column the
+   user resized clips its cells there. (Not `left: revert-rule` -- that is no
+   CSS keyword, so the base `left` won and the toolbar landed on the right
+   after all.) The compact variant's own translateX would shift it a second
+   toolbar-width left, so that is switched off here. This only decides where
+   the toolbar is measured: hoistNestedToolbars then lifts it out to the
+   widget root, past the cell's clip, at that same spot. */
 .visualizer-container .visualizer-container > .snc-tool-and-visualizer > .tool-toolbar {
 	right: calc(100% + 5px);
-	left: revert-rule;
+	left: auto;
+	transform: none;
+}
+
+/* Lifted to the widget root (hoistNestedToolbars): placed by inline left/top,
+   so neither the base rule's `left` nor the compact variant's translate may
+   move it again. Specific enough to beat .tool-toolbar.tool-toolbar-compact. */
+.snc-visualization-widget > .tool-toolbar.tool-toolbar-hoisted {
+	transform: none;
+	margin: 0;
 }
 
 .visualizer-container .snc-generic-visualizer {
