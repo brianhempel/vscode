@@ -48,8 +48,15 @@ function code() {
 		DISABLE_TEST_EXTENSION=""
 	fi
 
+	# Pylance checks for an official Microsoft product name and silently runs a
+	# stub otherwise, so in this build it gives no diagnostics but still nags
+	# whenever python.languageServer isn't "Default". Disabling it makes the
+	# Python extension resolve "Default" to its bundled Jedi server, which does
+	# report syntax errors.
+	DISABLE_PYLANCE="--disable-extension=ms-python.vscode-pylance"
+
 	# Launch Code
-	exec "$CODE" . $DISABLE_TEST_EXTENSION "$@"
+	exec "$CODE" . $DISABLE_TEST_EXTENSION $DISABLE_PYLANCE "$@"
 }
 
 function code-wsl()

@@ -36,8 +36,8 @@ for %%A in (%*) do (
 	)
 )
 
-:: Launch Code
-%CODE% . %DISABLE_TEST_EXTENSION% %*
+:: Launch Code (Pylance disabled: see the note in code.sh)
+%CODE% . %DISABLE_TEST_EXTENSION% --disable-extension=ms-python.vscode-pylance %*
 goto end
 
 :builtin

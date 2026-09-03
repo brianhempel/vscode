@@ -14,6 +14,7 @@ fnm install && fnm use   # or: nvm install && nvm use
 npm install # On Windows you have to run this in Visual Studio
 
 # Use your ordinary VS Code extensions
+# (though scripts/code.sh launches with Pylance disabled because it won't work outside the Microsoft distro, so the Python extension falls back to its bundled Jedi server for syntax errors)
 mkdir ~/.vscode-oss-dev
 ln -s ~/.vscode/extensions ~/.vscode-oss-dev/extensions
 # Windows PowerShell equivalent:

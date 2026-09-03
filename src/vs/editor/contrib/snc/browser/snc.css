@@ -76,7 +76,12 @@
 	vertical-align: middle;
 	filter: none;
 	opacity: 1;
-	z-index: 1000;
+	/* The editor's own popups share this stacking context and use small
+	   numbers: scrollbars 11, inline edits 34, find 35, parameter hints 39,
+	   suggest 40, hover 50. Sit above the first and below the rest, so
+	   autocomplete and error hovers draw over a visualizer. The loop slider
+	   and link arrows below use the same value for the same reason. */
+	z-index: 20;
 	user-select: text;
 
 	/*background: var(--snc-bg);
@@ -965,7 +970,7 @@
 /* The iteration picker on a loop (or def) header line; see LoopSliderWidget. */
 .monaco-editor .snc-loop-slider {
 	position: absolute;
-	z-index: 1000;
+	z-index: 20; /* see .snc-visualization-widget */
 	box-sizing: border-box;
 	width: 128px;
 	height: 18px;
@@ -1051,7 +1056,7 @@
 /* === Link arrow (chain icon → linked line of code) === */
 .snc-link-arrow {
 	position: fixed;
-	z-index: 1000;
+	z-index: 20; /* see .snc-visualization-widget */
 	pointer-events: none;
 	overflow: visible;
 }
