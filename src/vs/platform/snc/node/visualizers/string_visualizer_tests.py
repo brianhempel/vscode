@@ -16374,6 +16374,43 @@ class TestLiveOnly(unittest.TestCase):
         self.assertNotIn('snc-py-exps', out)
         self.assertNotIn('py-exp-grab', out)
 
+    def test_focused_render_shows_a_tab_as_its_escape(self):
+        # The escape displays are how the focused render says what the string
+        # holds; they are not code-writing, so live-only keeps them.
+        out = self.render("a\tb")
+        self.assertIn('class="chr special">\\t</span>', out)
+        self.assertNotIn('a\tb', out)
+
+    def test_focused_render_shows_a_newline_as_its_escape_and_breaks_the_line(self):
+        out = self.render("a\nb")
+        self.assertIn('class="chr special">\\n</span>\n', out)
+        self.assertIn('a<span', out)
+        self.assertIn('</span>\n b', out, 'continuation lines align under the opening quote')
+
+    def test_focused_render_shows_a_carriage_return_as_its_escape(self):
+        out = self.render("a\rb")
+        self.assertIn('class="chr special">\\r</span>', out)
+        self.assertNotIn('a\rb', out)
+
+    def test_focused_render_has_no_regex_anchors(self):
+        # ^ and $ are the regex tool's marks, and live-only offers no regex.
+        out = self.render("a\nb")
+        self.assertNotIn('regex-anchor', out)
+        self.assertNotIn('>^<', out)
+        self.assertNotIn('>$<', out)
+        self.assertNotIn('snc-idx', out)
+
+    def test_focused_render_escapes_html_around_the_escapes(self):
+        out = self.render("<a>\t&")
+        self.assertIn('&lt;a&gt;<span class="chr special">\\t</span>&amp;', out)
+
+    def test_small_render_prints_special_chars_raw(self):
+        # The non-focused preview is the string as it is, so the ordinary
+        # preview reads the same under live-only as it does otherwise.
+        out = self.render("a\tb\nc", small=True)
+        self.assertIn("a\tb\n c", out)
+        self.assertNotIn('chr special', out)
+
 
 # =============================================================================
 # Fetch Menu

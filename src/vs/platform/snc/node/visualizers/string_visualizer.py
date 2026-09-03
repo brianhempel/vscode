@@ -961,6 +961,27 @@ HTML_ESCAPE_CHARS = '<>&\'"'
 # Chars that always render as individual spans (newline expands to $ / \n / ^).
 _SPECIAL_CHAR_RE = re.compile(r'[\n\t\r]')
 
+# How each of those reads on screen in place of the character itself.
+_ESCAPE_DISPLAY = {'\n': '\\n', '\t': '\\t', '\r': '\\r'}
+
+def _text_with_escape_displays(text: str) -> str:
+    """*text* as the live-only focused preview prints it: HTML-escaped, with
+    each \\n, \\t, \\r shown as the gray escape the focused render shows in
+    its place (a newline still breaks the line after its display). No ^/$
+    anchors -- those are the regex tool's marks, and there is no regex tool
+    here -- so the spans carry no index either: nothing addresses them."""
+    out = []
+    pos = 0
+    for m in _SPECIAL_CHAR_RE.finditer(text):
+        out.append(html.escape(text[pos:m.start()]))
+        char = m.group()
+        out.append(f'<span class="chr special">{_ESCAPE_DISPLAY[char]}</span>')
+        if char == '\n':
+            out.append('\n')
+        pos = m.end()
+    out.append(html.escape(text[pos:]))
+    return ''.join(out)
+
 def text_group_span(pieces: list, start_index: int) -> str:
     """pieces: string fragments (single chars or longer slices) covering
     consecutive internal indices from start_index. html.escape escapes
@@ -4596,7 +4617,13 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # name the wrong character. Splitting per line would fix the arithmetic
         # at the cost of an element per line, which is what the grouping exists
         # to avoid. Nothing wants those indices anyway -- see PinFocus.
-        display_html = html.escape(display)
+        #
+        # The live-only focused render does print the \n / \t / \r escapes the
+        # focused render prints: they say what the string holds, which is the
+        # one thing this render is for. The ^/$ anchors stay out -- they mark
+        # where a regex could bind, and live-only offers no regex.
+        display_html = (_text_with_escape_displays(display) if not small
+                        else html.escape(display))
 
         # Expand/collapse toggle is offered even in the non-focused (small)
         # preview so a tall string can be peeked at without pinning focus to
