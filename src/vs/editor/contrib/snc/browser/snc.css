@@ -2498,8 +2498,13 @@
 	font-family: inherit;
 	font-size: inherit;
 	outline: none;
-	min-width: 120px;
-	width: -webkit-fill-available;
+	/* Sized by what is typed, so a long expression widens its header cell
+	   (and the column, and the table) instead of scrolling inside the box;
+	   never narrower than the cell it sits in. The front-end keeps the
+	   growing box on screen -- see the widget's input listener. */
+	field-sizing: content;
+	width: auto;
+	min-width: max(120px, 100%);
 }
 
 .list-visualizer .col-suggestion {

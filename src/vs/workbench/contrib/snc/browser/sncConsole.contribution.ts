@@ -55,25 +55,26 @@ class SNCConsoleAutoOpenContribution extends Disposable {
 		if (this._store.isDisposed) {
 			return;
 		}
-		const groupsBefore = this.editorGroupsService.count;
 		// Focus only when the program is actually waiting to be typed at; plain
 		// output must not pull the caret out of the source editor.
 		const pane = await this.editorService.openEditor(
 			{ resource, options: { preserveFocus: !focus, pinned: true } },
 			SIDE_GROUP
 		);
-		if (pane && this.editorGroupsService.count > groupsBefore) {
-			this.narrowNewGroup(pane.group);
+		if (pane) {
+			this.narrowGroup(pane.group);
 		}
 	}
 
 	/**
 	 * A fresh side group is split evenly, which hands half the window to a
-	 * console the user didn't ask to see. Take it down to a third — enough
-	 * for output, but the code stays the thing on screen. Only ever on the
-	 * group this open just created: a group the user already sized is theirs.
+	 * console the user didn't ask to see -- and SIDE_GROUP reuses a group
+	 * already beside the source, however wide the user left it. Either way,
+	 * take the console's group down to a third: enough for output, but the
+	 * code stays the thing on screen. Once per file (the service latches the
+	 * open), so how the user sizes it afterwards is theirs.
 	 */
-	private narrowNewGroup(group: IEditorGroup): void {
+	private narrowGroup(group: IEditorGroup): void {
 		const available = this.editorGroupsService.getPart(group).contentDimension.width;
 		const size = this.editorGroupsService.getSize(group);
 		// Width narrower than the whole part means the split went sideways; a

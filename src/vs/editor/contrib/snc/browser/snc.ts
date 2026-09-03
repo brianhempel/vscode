@@ -507,6 +507,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		this._register(dom.addDisposableListener(targetWindow, 'keydown', onModifierChangeDuringDrag, true));
 		this._register(dom.addDisposableListener(targetWindow, 'keyup', onModifierChangeDuringDrag, true));
 		this._register(dom.addDisposableListener(this.domNode, 'input', (ev: Event) => {
+			this.keepGrowingInputInView(ev.target);
 			this.dispatch_input_event('snc-input', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'focusout', (ev: FocusEvent) => {
@@ -2057,6 +2058,27 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			// Setting the value put the caret at the end; back where it was,
 			// clamped to the new value.
 			kept.setSelectionRange(selectionStart, selectionEnd ?? selectionStart);
+		}
+	}
+
+	/**
+	 * A column's code box widens as its expression is typed (CSS
+	 * field-sizing), and the rightmost one grows straight out of the table's
+	 * scroll box: the browser scrolls a box's own text into view, not a
+	 * growing box into its ancestor's. Move the table by the least amount that
+	 * shows the whole box, the way scrollToFirstMatch shows a new cell.
+	 */
+	private keepGrowingInputInView(target: EventTarget | null): void {
+		if (!dom.isHTMLElement(target) || !target.classList.contains('col-input')) { return; }
+		const scroller = target.closest<HTMLElement>('.list-table-scroll');
+		if (!scroller) { return; }
+		const box = target.getBoundingClientRect();
+		const view = scroller.getBoundingClientRect();
+		const visibleRight = view.left + scroller.clientWidth;
+		if (box.right > visibleRight) {
+			scroller.scrollLeft += box.right - visibleRight + 2;
+		} else if (box.left < view.left) {
+			scroller.scrollLeft -= view.left - box.left + 2;
 		}
 	}
 
