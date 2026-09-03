@@ -394,7 +394,7 @@ _PREVIEW_SOURCE_BINDER = '_snc_v'
 # deliberately says nothing about `$`: this is the one box where a bare `$` is
 # legal as written, being the regex end anchor, and a note saying the box has no
 # dollars would read as a note saying not to type one.
-FIND_TOOLTIP = "Text, r'regex', an index, or start:stop"
+FIND_TOOLTIP = "'Text', r'regex', an index, or start:stop"
 
 
 def replace_scope(idx_slice: bool, match_expr: str = None,
