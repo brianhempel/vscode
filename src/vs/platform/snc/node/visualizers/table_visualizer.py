@@ -79,6 +79,7 @@ from visualizer_utils import (
     error_html,
     nerd_font_icon, render_tool_toolbar,
     render_expand_toggle, EXPANDED_PANE_MAX_HEIGHT,
+    ENABLE_AUTO_EXPAND,
     ICONS,
 )
 
@@ -10983,6 +10984,10 @@ def _render_agg_rows(columns, model, lst, get_visualizer, eval_in_scope=None,
                     f'<td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
+def get_col_width(col, model):
+    config = _leaf_config(model.get('columns'), col)
+    width = _valid_width((config or {}).get('width'))
+    return width
 
 def get_col_width_style(col, model, clip=True):
     """The inline style pinning a leaf column to the width the user dragged it
@@ -10994,8 +10999,7 @@ def get_col_width_style(col, model, clip=True):
     is the handle's positioning anchor, so a clip there would cut the handle
     in half. The header's inner wrapper does its clipping instead (CSS).
     """
-    config = _leaf_config(model.get('columns'), col)
-    width = _valid_width((config or {}).get('width'))
+    width = get_col_width(col, model)
     if width is None:
         return ''
     overflow = ' overflow: hidden;' if clip else ''
@@ -11034,7 +11038,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
         except Exception:
             pass
 
-    collapsed_max_height = (max_height or 144) - 32
+    collapsed_max_height = (max_height or 244) - 32
     # The aggregation rows are part of what the table has to show, so a short
     # one doesn't get a scrollbar for the sake of the answers under it. 18px is
     # the height of a row of plain cells; one holding a nested visualizer is
@@ -11049,8 +11053,8 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # rather than guess at them here, the bar is always there. It costs a short
     # table nothing to carry one -- opening it lifts a ceiling the table isn't
     # reaching anyway, so nothing moves until something is actually clipped.
-    can_expand = True
-    expanded = bool(model.get('expanded', False) or focused_child)
+    can_expand = not ENABLE_AUTO_EXPAND
+    expanded = bool(model.get('expanded', False) or focused_child or (not small if ENABLE_AUTO_EXPAND else False))
     actual_max_height = (max(EXPANDED_PANE_MAX_HEIGHT, collapsed_max_height)
                          if expanded else collapsed_max_height)
     actual_min_height = min(wanted_height, actual_max_height)
@@ -11404,10 +11408,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                              and wants_kwarg(draw_cell, 'every_row_exps')
                              else {})
 
+                    actual_max_width = min(max(get_col_width(col, model) or 0, max_column_width), get_col_width(col, model) or 800)
+
                     if hasattr(cell_vis, 'visualize_els'):
-                        cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)
+                        cell_htmls = cell_vis.visualize_els(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=actual_max_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)
                     else:
-                        cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=max_column_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)]
+                        cell_htmls = [cell_vis.visualize(cell_value, cell_model, get_visualizer, eval_in_scope, max_width=actual_max_width, max_height=200, small=child_small, var_and_exp=child_var_and_exp, **inner)]
                 except Exception as e:
                     # The child couldn't draw the value it was handed. The
                     # error takes the cell, and the rest of the table goes on

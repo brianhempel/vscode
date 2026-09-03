@@ -157,7 +157,8 @@ from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unl
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
                               dollar_expr_parses, is_nested, label_readings,
                               nerd_font_icon, render_tool_toolbar,
-                              render_expand_toggle, wrap_drag_grab)
+                              render_expand_toggle, wrap_drag_grab, ENABLE_AUTO_EXPAND)
+
 import z_object_visualizer
 
 # === Command types (Elm-style commands for VS Code to execute) ===
@@ -4579,6 +4580,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # under live-only none of it may be offered. What is left is the text, the
     # expand bar, and the counts (which py_exp_attrs leaves bare).
     live_only = is_live_only()
+    size_styling = f'style="max-width:{max_width}px"' if max_width is not None else ''
     if small or live_only:
         # Non-focused preview: wrap the string in leading/trailing ' quotes so
         # it reads as a string literal. Each newline after the first gets a
@@ -4586,7 +4588,6 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # line's content (which the opening quote shifts one char to the right).
         raw = value or ""
         display = "'" + raw.replace("\n", "\n ") + "'"
-        size_styling = f'style="max-width:{max_width}px"' if max_width is not None else ''
 
         # Plain text, no per-character addressing. snc-idx-start would let the
         # front-end turn a caret offset into an internal index, but the preview
@@ -4601,15 +4602,16 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # preview so a tall string can be peeked at without pinning focus to
         # its line. Mirrors the focused-mode behavior below: only tall strings
         # (>4 lines) get it, since shorter ones aren't clipped by the 80px pane.
-        expanded = bool(model.get('expanded', False)) if model else False
+        expanded = bool(model.get('expanded', False) or (not small if ENABLE_AUTO_EXPAND else False)) if model else False
         expanded_class = ' expanded' if expanded else ''
         line_count = (raw.count('\n') + 1) if raw else 1
+        can_expand = False if ENABLE_AUTO_EXPAND else line_count > 4
         expand_toggle_html = ''
-        if line_count > 4:
+        if can_expand:
             expand_toggle_html = _render_expand_bar(
                 expanded, value, model, small=True)
 
-        expandable_class = ' is-expandable' if expand_toggle_html else ''
+        expandable_class = ' is-expandable' if can_expand else ''
 
 
 
@@ -4988,10 +4990,11 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # 600px max-height (see string-visualizer.css). The container carries an
     # `expanded` class when open so the CSS can bump the max-height and rotate
     # the chevron. Not shown in small mode (handled by the early return above).
-    expanded = bool(model.get('expanded', False)) if model else False
+    expanded = bool(model.get('expanded', False) or (not small if ENABLE_AUTO_EXPAND else False)) if model else False
     expanded_class = ' expanded' if expanded else ''
+    can_expand = False if ENABLE_AUTO_EXPAND else line_count > 4
     expand_toggle_html = ''
-    if line_count > 4:
+    if can_expand:
         expand_toggle_html = _render_expand_bar(expanded, value, model)
 
     is_expandable_class = ' is-expandable' if expand_toggle_html else ''
@@ -5011,7 +5014,7 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # early above (self-wrapped for drag), so this is always the full/interactive
     # path - it keeps its mouse events and is not a drag handle.
     return [
-        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}"{notify_attr} class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}{is_expandable_class}"><div class="snc-tool-and-visualizer">{tool_toolbar_html}<div class="string-visualizer snc-base-visualizer"><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
+        f'''<div tabindex="0" snc-key-down="{html.escape(repr(KeyDown()))}"{notify_attr} class="visualizer-container {active_tool}-tool-selected{compact_class}{expanded_class}{is_expandable_class}"><div class="snc-tool-and-visualizer">{tool_toolbar_html}<div class="string-visualizer snc-base-visualizer" {size_styling}><div>''', # .string-visualizer is flex to remove extra pixels. needs extra inner div to restore white-space:pre
         *char_els,
         f"""</div></div>{expand_toggle_html}</div>{search_box_html}</div>""",
     ]

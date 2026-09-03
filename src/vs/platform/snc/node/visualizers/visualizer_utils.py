@@ -175,7 +175,7 @@ def render_tool_toolbar(tools, current: str, make_event, *, disabled=(), is_comp
 # .string-visualizer, in string-visualizer.css) and repeats the number there;
 # the table works its height out here, so it reads it from Python.
 EXPANDED_PANE_MAX_HEIGHT = 600
-
+ENABLE_AUTO_EXPAND = False
 
 def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> str:
     """Render the full-width bar under a pane that is clipping its content.

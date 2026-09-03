@@ -1,6 +1,6 @@
 [
     {
-        "name": "Apartment in Downtown Detroit",
+        "name": "Apartment in Detroit, Michigan",
         "info": "1 bedroom, 1 bed, 1 bath",
         "price": "$1,235 for 7 nights",
         "rating": "4.83 (178)",
@@ -11,7 +11,17 @@
         ]
     },
     {
-        "name": "Apartment in Downtown Detroit",
+        "name": "Hotel in Detroit, Michigan",
+        "info": "1 queen bed, 1 bath",
+        "price": "$1,175 for 5 nights",
+        "rating": "4.74 (27)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
         "info": "1 bedroom, 1 bed, 1 bath",
         "price": "$1,271 for 7 nights",
         "rating": "4.9 (179)",
@@ -22,7 +32,48 @@
         ]
     },
     {
-        "name": "Apartment in Downtown Detroit",
+        "name": "Loft in Detroit, Michigan",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$728 for 7 nights",
+        "rating": "4.82 (278)",
+        "offers": [
+            "Weekly discount",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Loft in Detroit, Michigan",
+        "info": "1 bedroom, 1 king bed, 1 bath",
+        "price": "$411 for 4 nights",
+        "rating": "4.75 (353)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$1,490 for 7 nights",
+        "rating": "4.96 (737)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$1,536 for 7 nights",
+        "rating": "4.92 (260)",
+        "offers": [
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
         "info": "2 bedrooms, 1 bath",
         "price": "$1,314 for 7 nights",
         "rating": "4.89 (175)",
@@ -33,7 +84,16 @@
         ]
     },
     {
-        "name": "Apartment in Downtown Detroit",
+        "name": "Loft in Detroit, Michigan",
+        "info": "1 bedroom, 1 queen bed, 1 bath",
+        "price": "$2,061 for 7 nights",
+        "rating": "New",
+        "offers": [
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Apartment in Detroit, Michigan",
         "info": "1 bedroom, 1 king bed, 1 bath",
         "price": "$1,413 for 7 nights",
         "rating": "4.87 (469)",
@@ -43,135 +103,76 @@
         ]
     },
     {
-        "name": "Hotel in Downtown Detroit",
+        "name": "Room in Detroit, Michigan",
         "info": "1 queen bed, 1 bath",
-        "price": "$2,375 for 7 nights",
-        "rating": "4.77 (73)",
+        "price": "$724 for 7 nights",
+        "rating": "4.96 (601)",
         "offers": [
             "Pay $0 today",
             "Free cancellation"
         ]
     },
     {
-        "name": "Apartment in Downtown Detroit",
-        "info": "1 bedroom, 1 queen bed, 1 bath",
-        "price": "$1,536 for 7 nights",
-        "rating": "4.92 (260)",
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$832 for 6 nights",
+        "rating": "5.0 (8)",
         "offers": [
-            "Pay $0 today",
             "Free cancellation"
+        ]
+    },
+    {
+        "name": "Trumbull and Porter Hotel",
+        "info": "$933 for 7 nights, $139 Airbnb credit",
+        "price": "$933 for 7 nights",
+        "rating": "4.51 (584)",
+        "offers": [
+            "+$139 Airbnb credit"
         ]
     },
     {
         "name": "The Siren Hotel",
-        "info": "",
-        "price": "$1,939 for 7 nights",
+        "info": "$1,505 for 5 nights, $225 Airbnb credit",
+        "price": "$1,505 for 5 nights",
         "rating": "4.44 (18)",
         "offers": [
-            "+$290 Airbnb credit"
+            "+$225 Airbnb credit"
         ]
     },
     {
-        "name": "Loft in Downtown Detroit",
-        "info": "1 bedroom, 1 queen bed, 1 bath",
-        "price": "$2,061 for 7 nights",
-        "rating": "New",
+        "name": "Home in Detroit",
+        "info": "1 bedroom, 2 beds, 1 bath",
+        "price": "$1,559 for 7 nights",
+        "rating": "5.0 (6)",
+        "offers": [
+            "Weekly discount",
+            "Pay $0 today",
+            "Free cancellation"
+        ]
+    },
+    {
+        "name": "Loft in Corktown",
+        "info": "1 bedroom, 1 king bed, 1 bath",
+        "price": "$1,089 for 6 nights",
+        "rating": "4.98 (339)",
         "offers": [
             "Free cancellation"
         ]
     },
     {
-        "name": "Apartment in Downtown Detroit",
-        "info": "1 bedroom, 1 bath",
-        "price": "$1,045 for 7 nights",
-        "rating": "4.7 (122)",
+        "name": "Apartment in Detroit, Michigan",
+        "info": "1 bedroom, 1 bed, 1 bath",
+        "price": "$1,194 for 7 nights",
+        "rating": "4.69 (197)",
         "offers": [
             "Weekly discount"
         ]
     },
     {
-        "name": "Hotel in Downtown Detroit",
-        "info": "2 bedrooms, 3 beds, 1 bath",
-        "price": "$2,215 for 7 nights",
-        "rating": "4.47 (105)",
-        "offers": [
-            "Pay $0 today",
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Apartment in Downtown Detroit",
-        "info": "2 bedrooms, 2 king beds, 2 baths",
-        "price": "$1,923 for 7 nights",
-        "rating": "4.73 (60)",
-        "offers": [
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Apartment in Downtown Detroit",
-        "info": "1 bedroom, 1 queen bed, 1 bath",
-        "price": "$1,982 for 7 nights",
-        "rating": "4.94 (325)",
-        "offers": [
-            "Weekly discount",
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Apartment in Downtown Detroit",
-        "info": "2 beds, No bathroom",
-        "price": "$1,889 for 7 nights",
-        "rating": "4.9 (10)",
-        "offers": [
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Apartment in Downtown Detroit",
-        "info": "1 bedroom, 1 queen bed, 1 bath",
-        "price": "$2,143 for 7 nights",
-        "rating": "4.77 (90)",
-        "offers": [
-            "Weekly discount",
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Apartment in Detroit",
-        "info": "1 bedroom, 1 queen bed, 1 bath",
-        "price": "$1,723 for 7 nights",
-        "rating": "4.93 (642)",
-        "offers": [
-            "Pay $0 today",
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Hotel in Downtown Detroit",
-        "info": "1 bedroom, 2 beds, 1 bath",
-        "price": "$1,898 for 7 nights",
-        "rating": "4.5 (58)",
-        "offers": [
-            "Pay $0 today",
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Hotel room in Downtown Detroit",
-        "info": "1 bedroom, 2 double beds, 1 bath",
-        "price": "$1,347 for 7 nights",
-        "rating": "New",
-        "offers": [
-            "Pay $0 today",
-            "Free cancellation"
-        ]
-    },
-    {
-        "name": "Apartment in Detroit",
-        "info": "1 bedroom, 1 sofa bed, 1 bath",
-        "price": "$1,859 for 7 nights",
-        "rating": "4.79 (28)",
+        "name": "Apartment in Corktown",
+        "info": "1 bedroom, 3 beds, 1 bath",
+        "price": "$945 for 7 nights",
+        "rating": "4.95 (116)",
         "offers": [
             "Weekly discount",
             "Pay $0 today",

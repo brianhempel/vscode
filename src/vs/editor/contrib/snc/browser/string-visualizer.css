@@ -25,7 +25,11 @@
    Kept in step with visualizer_utils.EXPANDED_PANE_MAX_HEIGHT, which is where
    the list visualizer reads the same ceiling from. */
 .visualizer-container.expanded .string-visualizer {
-	max-height: 600px;
+	max-height: 300px;
+}
+
+.list-visualizer .visualizer-container.expanded > .snc-tool-and-visualizer > .string-visualizer {
+	max-height: 300px;
 }
 
 .string-visualizer-overlay {
