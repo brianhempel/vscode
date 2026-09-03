@@ -3417,6 +3417,69 @@ class TestGetMatchingIndices(unittest.TestCase):
         self.assertEqual(indices, [0, 2])
 
 
+class TestAValueSearchMeansEquality(unittest.TestCase):
+    """Typing a value with no operator -- '' or None or 3.5 -- asks for the
+    rows equal to it. Read as a predicate, '' is false for every row, so the
+    one way to search for empty strings would find nothing."""
+
+    def test_empty_string_finds_the_empty_strings(self):
+        lst = ['', 'a', '']
+        self.assertEqual(_get_matching_indices("''", lst, eval), [0, 2])
+        self.assertEqual(_get_matching_indices('""', lst, eval), [0, 2])
+
+    def test_a_string_finds_its_equals(self):
+        lst = ['alice', 'bob', 'alice']
+        self.assertEqual(_get_matching_indices('"alice"', lst, eval), [0, 2])
+
+    def test_none_finds_the_nones(self):
+        lst = [None, 1, None]
+        self.assertEqual(_get_matching_indices('None', lst, eval), [0, 2])
+
+    def test_a_float_finds_its_equals(self):
+        lst = [3.5, 1, 3.5]
+        self.assertEqual(_get_matching_indices('3.5', lst, eval), [0, 2])
+
+    def test_a_variable_finds_its_equals(self):
+        lst = ['a', 'b', 'a']
+        scope = program_scope(s='a')
+        self.assertEqual(_get_matching_indices('s', lst, scope), [0, 2])
+
+    def test_an_int_is_still_an_index(self):
+        lst = [1, 1, 1]
+        self.assertEqual(_get_matching_indices('1', lst, eval), [1])
+
+    def test_a_bool_is_still_a_predicate(self):
+        lst = [False, True]
+        self.assertEqual(_get_matching_indices('True', lst, eval), [0, 1])
+        self.assertEqual(_get_matching_indices('False', lst, eval), [])
+
+    def test_a_function_is_called_on_the_row(self):
+        lst = [1, 2, 3, 4]
+        scope = program_scope(is_even=lambda n: n % 2 == 0)
+        self.assertEqual(_get_matching_indices('is_even', lst, scope), [1, 3])
+
+    def test_the_generated_predicate_compares(self):
+        model = {'search': "''", 'first_match': False}
+        ctx = _get_search_context(model, var_and_exp=('data', 'data'),
+                                  eval_in_scope=eval)
+        self.assertTrue(ctx['is_predicate'])
+        self.assertEqual(ctx['predicate_expr'], "item == ''")
+        self.assertEqual(generate_action('filter', ctx)[1],
+                         "[item for item in data if item == '']")
+
+    def test_the_generated_predicate_compares_against_a_variable(self):
+        model = {'search': 's', 'first_match': False}
+        ctx = _get_search_context(model, var_and_exp=('data', 'data'),
+                                  eval_in_scope=program_scope(s='a'))
+        self.assertEqual(ctx['predicate_expr'], 'item == s')
+
+    def test_a_dict_compares_the_pair(self):
+        model = {'search': '("k", 1)', 'first_match': False, '_is_dict': True}
+        ctx = _get_search_context(model, var_and_exp=('d', 'd'),
+                                  eval_in_scope=eval)
+        self.assertEqual(ctx['predicate_expr'], '(k, v) == ("k", 1)')
+
+
 def program_scope(**names):
     """An eval_in_scope for a user program that defined `names`.
 

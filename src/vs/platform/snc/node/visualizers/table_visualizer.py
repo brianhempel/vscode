@@ -1886,6 +1886,32 @@ def needs_implicit_dollar(search: str) -> bool:
     return bool(_IMPLICIT_DOLLAR_RE.match(search))
 
 
+# What a search evaluated to when it couldn't be evaluated at all: it names $,
+# or a name the program doesn't have. Distinct from None, which is a value a
+# row can equal.
+_UNEVALUABLE = object()
+
+
+def _search_as_predicate(search: str, val) -> str:
+    """The search box's text as a predicate over $, given what the text
+    evaluates to on its own (*val*, or _UNEVALUABLE).
+
+    A test is left as written: one that names $, one that starts with an
+    operator (which gets its $), a bool. A VALUE is not a test -- '' is false
+    for every row, so read as a predicate it can never find the empty strings
+    -- so it asks for the rows equal to it. A function is a test waiting for
+    its argument, the same reading a column search gives a bare name.
+    """
+    text = search.lstrip()
+    if needs_implicit_dollar(search):
+        return '$' + text if text.startswith('.') else '$ ' + text
+    if val is _UNEVALUABLE or isinstance(val, bool):
+        return search
+    if callable(val):
+        return f'{search.strip()}($)'
+    return f'$ == {search.strip()}'
+
+
 SPLAT = '*'
 
 
@@ -6298,7 +6324,7 @@ def _search_context_for(model: dict, var_and_exp=None,
     try:
         val = _eval(expr_text)
     except Exception:
-        val = None
+        val = _UNEVALUABLE
 
     if isinstance(val, int) and not isinstance(val, bool):
         return {
@@ -6324,14 +6350,7 @@ def _search_context_for(model: dict, var_and_exp=None,
             'is_first': first,
         }
 
-    predicate_with_dollar = expr_text
-    if needs_implicit_dollar(search):
-        if search.lstrip().startswith('.'):
-            predicate_with_dollar = '$' + search.lstrip()
-        else:
-            predicate_with_dollar = '$ ' + search.lstrip()
-    else:
-        predicate_with_dollar = search
+    predicate_with_dollar = _search_as_predicate(search, val)
 
     # $ is the item and $$ the array, which is the level a column search's $$$
     # lands on once it is lifted into this scope. $i is the row's number, which
@@ -7225,7 +7244,7 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
     try:
         val = _eval(expr_text)
     except Exception:
-        val = None
+        val = _UNEVALUABLE
 
     if isinstance(val, int) and not isinstance(val, bool):
         if 0 <= val < len(lst):
@@ -7241,12 +7260,7 @@ def _get_matching_indices(search: str | None, lst: list, eval_in_scope=None) -> 
             matched.update(range(max(0, s), min(e, len(lst))))
         return sorted(matched)
 
-    predicate_with_dollar = search
-    if needs_implicit_dollar(search):
-        if search.lstrip().startswith('.'):
-            predicate_with_dollar = '$' + search.lstrip()
-        else:
-            predicate_with_dollar = '$ ' + search.lstrip()
+    predicate_with_dollar = _search_as_predicate(search, val)
 
     predicate_expr = replace_dollars_in_py_exp(
         predicate_with_dollar, ['_item', '_lst'],
