@@ -6402,6 +6402,83 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
             {col: list(cfg.get('cols') or []) for col, cfg in new_model['columns'].items()},
             {"*$['teams']": ["$['who']", "len($['who'])", "$['age']"], '$': []})
 
+    # === The new column's cell beside the visualizer is scrolled to ===
+
+    def _scroll_target_cells(self, output):
+        return re.findall(r'<td[^>]*snc-scroll-to-match="nearest"[^>]*>', output)
+
+    def test_the_new_columns_cell_in_the_rows_row_is_asked_to_be_scrolled_to(self):
+        # A column the eye should follow: the code came out of a cell, and the
+        # cell the column adds beside it is where the result shows up -- so
+        # the render asks the front-end to bring THAT cell into view, not the
+        # first row's, and not by yanking the visualizer out of view.
+        nc_vis = self._make_newcode_vis([('result', "len($['name'])")])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 40}]
+        model = init_model(lst, get_vis,
+                           slots_config=['$', "$['name']", "$['age']"])
+        model['focused_child'] = "1\x00$['name']"
+        event = make_child_mouse_event("1\x00$['name']", 'X')
+        new_model, _ = update(event, ('x', 'x'), model, lst, get_vis)
+
+        self.assertEqual(new_model.get('_scroll_to_cell'),
+                         f"1{CELL_KEY_SEP}len($['name'])")
+        output = visualize(lst, new_model, get_vis, eval)
+        cells = self._scroll_target_cells(output)
+        self.assertEqual(len(cells), 1, output)
+        self.assertIn('len($[', html.unescape(cells[0]))
+        # Row 1's, not row 0's: the marked cell comes after Bob's name cell.
+        self.assertGreater(output.index('snc-scroll-to-match="nearest"'),
+                           output.index('Bob'))
+
+    def test_a_sub_column_derived_under_a_splat_marks_its_own_cell(self):
+        nc_vis = self._make_newcode_vis([('result', "len($['who'])")])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'teams': [{'who': 'ann', 'age': 3}]}]
+        model = init_model(lst, get_vis, slots_config=[
+            {'expr': "*$['teams']", 'cols': ["$['who']", "$['age']"]}, '$'])
+        sub = f"*$['teams']{SUBCOL_SEP}$['who']"
+        model['focused_child'] = f"0.0\x00{sub}"
+        event = make_child_mouse_event(f"0.0\x00{sub}", 'X')
+        new_model, _ = update(event, ('x', 'x'), model, lst, get_vis)
+
+        self.assertEqual(new_model.get('_scroll_to_cell'),
+                         f"0.0{CELL_KEY_SEP}*$['teams']{SUBCOL_SEP}len($['who'])")
+        output = visualize(lst, new_model, get_vis, eval)
+        cells = self._scroll_target_cells(output)
+        self.assertEqual(len(cells), 1, output)
+        self.assertIn("len($['who'])", html.unescape(cells[0]))
+
+    def test_the_scroll_request_is_one_shot(self):
+        # Cleared by the next event of any kind, child events included: a
+        # hover over the visualizer a moment later must not keep scrolling
+        # the table back to the cell.
+        nc_vis = self._make_newcode_vis([('result', "len($['name'])")])
+        get_vis = self._get_vis_for(nc_vis)
+
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, get_vis)
+        model['focused_child'] = "0\x00$['name']"
+        event = make_child_mouse_event("0\x00$['name']", 'X')
+        new_model, _ = update(event, ('x', 'x'), model, lst, get_vis)
+        self.assertIsNotNone(new_model.get('_scroll_to_cell'))
+
+        quiet_vis = self._make_newcode_vis([])
+        get_quiet = self._get_vis_for(quiet_vis)
+        later_model, _ = update(event, ('x', 'x'), new_model, lst, get_quiet)
+        self.assertIsNone(later_model.get('_scroll_to_cell'))
+        self.assertEqual(self._scroll_target_cells(
+            visualize(lst, later_model, get_quiet, eval)), [])
+
+    def test_no_cell_is_marked_without_a_request(self):
+        lst = [{'name': 'Alice'}]
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=['$', "$['name']"])
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        self.assertEqual(self._scroll_target_cells(output), [])
+
     def test_child_newcode_tuple_not_inserted_to_buffer(self):
         nc_vis = self._make_newcode_vis([('filtered', '[x for x in $]')])
         get_vis = self._get_vis_for(nc_vis)

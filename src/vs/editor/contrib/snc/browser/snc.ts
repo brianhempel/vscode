@@ -2429,6 +2429,31 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			: 0;
 		const visibleTop = containerRect.top + headerHeight;
 
+		if (matchTarget.getAttribute('snc-scroll-to-match') === 'nearest') {
+			// A cell a nested visualizer's action just put beside it: brought
+			// into view by the least movement, so the visualizer the eye is on
+			// stays put. The left-edge alignment below would push a wide
+			// visualizer cell off screen to make room for a narrow new one.
+			// Rects run to the scrollbars; client sizes stop at them.
+			const visibleRight = containerRect.left + container.clientWidth;
+			const footEl = container.querySelector('tfoot') as HTMLElement | null;
+			const footHeight = footEl && dom.getWindow(footEl).getComputedStyle(footEl).position === 'sticky'
+				? footEl.getBoundingClientRect().height
+				: 0;
+			const visibleBottom = containerRect.top + container.clientHeight - footHeight;
+			if (targetRect.top < visibleTop || targetRect.height > visibleBottom - visibleTop) {
+				container.scrollTop += targetRect.top - visibleTop - 2;
+			} else if (targetRect.bottom > visibleBottom) {
+				container.scrollTop += targetRect.bottom - visibleBottom + 2;
+			}
+			if (targetRect.left < containerRect.left || targetRect.width > container.clientWidth) {
+				container.scrollLeft += targetRect.left - containerRect.left - 2;
+			} else if (targetRect.right > visibleRight) {
+				container.scrollLeft += targetRect.right - visibleRight + 2;
+			}
+			return;
+		}
+
 		// Vertical: if not fully visible, align to top of container (below any pinned header)
 		if (targetRect.top < visibleTop || targetRect.bottom > containerRect.bottom) {
 			container.scrollTop += targetRect.top - visibleTop - 2;

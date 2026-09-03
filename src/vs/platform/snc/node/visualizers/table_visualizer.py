@@ -2426,10 +2426,11 @@ def _subs_at(columns, target: str, create: bool = False) -> 'dict | None':
     return node
 
 
-def _add_derived_column(model, cell_col: str, expr: str) -> None:
+def _add_derived_column(model, cell_col: str, expr: str) -> str:
     """Code made in a cell, as a column of the table -- put in right after the
     column the cell was in, where the eye already is, rather than at the far
-    right.
+    right. Answers the key the new column's cells are drawn under (its leaf
+    expr), so the caller can point at one of them.
 
     A cell's expression is one every row answers, so code derived from it is a
     column. A cell under a splat shows one ELEMENT, though, so code derived
@@ -2444,18 +2445,19 @@ def _add_derived_column(model, cell_col: str, expr: str) -> None:
         # A column of the table, right after the one its cell was in -- the
         # top-level column, when the cell was in a plain sub-column of one.
         _col_insert(columns, expr, _index_after(columns, path[0]))
-        return
+        return expr
     # A splat drawing its own column is its new sub-column's parent; a
     # sub-column's parent is whatever it is itself a sub-column of.
     if path[-1] == leaf.splat:
         subs = _subs_at(columns, cell_col, create=True)
         _col_add(columns if subs is None else subs, expr)
-        return
+        return expr if subs is None else f'{cell_col}{SUBCOL_SEP}{expr}'
     subs = _subs_at(columns, SUBCOL_SEP.join(path[:-1]), create=True)
     if subs is None:
         _col_insert(columns, expr, _index_after(columns, path[0]))
-        return
+        return expr
     _col_insert(subs, expr, _index_after(subs, path[-1]))
+    return SUBCOL_SEP.join(path[:-1] + [expr])
 
 
 def _index_after(columns, name: str) -> int:
@@ -11036,6 +11038,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
 
     scroll_to = model.get('_scroll_to_match', False)
+    # The cell a just-derived column put beside the visualizer it came out of.
+    # `nearest`: brought into view by the least movement, so the visualizer
+    # the eye is on stays where it is (see scrollToFirstMatch in snc.ts).
+    scroll_to_cell = model.get('_scroll_to_cell')
 
     first_match_row = min(matched_indices) if matched_indices else None
     # Pick mode replaces the row-match / row-dim striping with a grid of
@@ -11170,8 +11176,11 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 continue
             composite_key = f"{row.key}{CELL_KEY_SEP}{col}"
             cell_span = leaf_span(leaf.depth)
+            scroll_cell_attr = (' snc-scroll-to-match="nearest"'
+                                if composite_key == scroll_to_cell else '')
             td_open = (f'<td data-col="{repr(html.escape(col))}" '
-                       f'{get_col_width_style(col, model)} {cell_span}>')
+                       f'{get_col_width_style(col, model)} {cell_span}'
+                       f'{scroll_cell_attr}>')
             try:
                 cell_value = _leaf_cell_value(leaf, row, lst, source_expr,
                                               eval_in_scope, read_through)
@@ -11434,6 +11443,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     if msg is None:
         return (model, [])
 
+    # A one-shot request (see the derived-column branch below), cleared before
+    # the child branch so a child event clears it too: a hover over the
+    # visualizer a moment later must not scroll the table back to the cell.
+    model.pop('_scroll_to_cell', None)
+
     if isinstance(msg, ChildEvent):
         is_agg = _parse_agg_child_key(msg.child_key) is not None
         row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
@@ -11538,7 +11552,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 # Mapped above and headed for the outermost table.
                 filtered_commands.append(cmd)
             elif is_new_code(cmd) and not is_agg:
-                _add_derived_column(new_model, cell_col, cmd[1])
+                new_col = _add_derived_column(new_model, cell_col, cmd[1])
+                # The result shows up in the cell the column adds beside the
+                # visualizer, on this row -- which a wide visualizer may well
+                # have pushed off the right of the scroll box. The render asks
+                # the front-end to bring that one cell into view.
+                new_model['_scroll_to_cell'] = f'{row_key}{CELL_KEY_SEP}{new_col}'
                 if len(cmd) > 2 and cmd[2]:
                     filtered_commands.append(AddImports(imports=tuple(cmd[2])))
                 if has_rows:
