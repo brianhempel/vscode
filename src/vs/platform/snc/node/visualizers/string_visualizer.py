@@ -150,7 +150,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Any, Optional
 
 from visualizer_utils import is_live_only, study_note
-from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unlink, Relink, truncate_repr, ICONS,
+from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unlink, Relink, LineChanged, handle_line_changed, truncate_repr, ICONS,
                               opens_block, with_pass_body,
                               Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
@@ -5608,6 +5608,32 @@ def _commit_open_dropdown_edit(model: dict) -> None:
 # Expression Builder Helpers for Action Buttons
 # =============================================================================
 
+def _walk_history_to(model: dict, before, undo: list, redo: list) -> None:
+    """Line the visualizer's undo/redo up with a pattern the editor's undo or
+    redo just put in the code (see LineChanged), given the stacks as they
+    stood before the line was adopted.
+
+    A pattern the visualizer once showed is somewhere on its own stacks: walk
+    there the way its own Cmd-Z / Cmd-Shift-Z would have, so the two undo
+    histories stay in step. One it never showed is an edit from outside, and
+    goes on top like any other change.
+    """
+    now = model.get('search')
+    if now == before:
+        model['undoHistory'], model['redoHistory'] = undo, redo
+    elif now in undo:
+        i = len(undo) - 1 - undo[::-1].index(now)
+        model['undoHistory'] = undo[:i]
+        model['redoHistory'] = redo + [before] + undo[:i:-1]
+    elif now in redo:
+        i = len(redo) - 1 - redo[::-1].index(now)
+        model['undoHistory'] = undo + [before] + redo[:i:-1]
+        model['redoHistory'] = redo[:i]
+    else:
+        model['undoHistory'] = undo + [before]
+        model['redoHistory'] = []
+
+
 def _ctx_to_model(ctx: dict, model: dict) -> None:
     """Apply parsed DSL context to model state (reverse of _get_search_context).
 
@@ -7155,6 +7181,15 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             handle_relink(_LINK_CONFIG, mode, text, var_and_exp, model, commands,
                           eval_in_scope=eval_in_scope)
 
+        case LineChanged(text=text):
+            # Adopting rebuilds the search state from the line and resets the
+            # stacks with it, so they are kept from before to walk afterwards.
+            before = model.get('search')
+            undo, redo = model.get('undoHistory', []), model.get('redoHistory', [])
+            if handle_line_changed(_LINK_CONFIG, text, var_and_exp, model,
+                                   eval_in_scope=eval_in_scope):
+                _walk_history_to(model, before, undo, redo)
+
         case SegmentToggle(segment_id=seg_id):
             # Toggle the segment in the selection list (preserving canonical
             # order via _segment_rank), then rebuild the Replace text.
@@ -7280,7 +7315,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     if is_nested(var_and_exp):
         return (model, commands)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, FetchClick, Unlink, Relink)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, FetchClick, Unlink, Relink, LineChanged)):
         # A map expression has just appeared (typed, or composed from chips):
         # the substring actions ignore it, so the line becomes the one that
         # consumes it. Its disappearing does not switch back -- the user may
@@ -7299,7 +7334,7 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (FetchClick, Unlink, Relink))):
+          and not isinstance(msg, (FetchClick, Unlink, Relink, LineChanged))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).

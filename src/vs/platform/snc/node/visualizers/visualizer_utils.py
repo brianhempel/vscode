@@ -1003,6 +1003,13 @@ class Unlink:
     pass
 
 @dataclass(frozen=True, slots=True)
+class LineChanged:
+    """Sent by the TypeScript front-end when something other than the
+    visualizer rewrote its linked line -- an editor undo or redo. `text` is
+    the line as it now stands, which is what the visualizer should show."""
+    text: str = ''
+
+@dataclass(frozen=True, slots=True)
 class Relink:
     """Sent by the TypeScript front-end when the user re-establishes a link via
     the chain icon.
@@ -1232,6 +1239,26 @@ def handle_relink(cfg: LinkConfig, mode: str, text: str, var_and_exp,
         model['unlinked_action'] = None
         model['auto_linked_once'] = True
         model['last_linked_expr'] = written
+
+
+def handle_line_changed(cfg: LinkConfig, text: str, var_and_exp, model: dict, *,
+                        eval_in_scope=None) -> bool:
+    """Handle a LineChanged event: take the linked line as it now stands.
+
+    The line was rewritten behind the visualizer's back (an editor undo or
+    redo), so it, not the model, says what the selection is. Adopted when it
+    parses as this visualizer's own code. A line it can't read changes
+    nothing -- and nothing is written either way: regenerating the line from
+    the model would undo the user's undo. Returns whether it was adopted.
+    """
+    study_note(action='link.line-changed', outcome='none')
+    owned = parse_owned_line(cfg, text, var_and_exp)
+    if not owned:
+        study_note(outcome='unreadable')
+        return False
+    adopt_linked_line(cfg, owned, var_and_exp, model, eval_in_scope=eval_in_scope)
+    study_note(outcome='adopted')
+    return True
 
 
 # What generated code reaches outside the builtins for, and the line that puts

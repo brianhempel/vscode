@@ -4541,6 +4541,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.pruneDeadLinks();
 		}
 
+		// An undo or redo that rewrote a linked line put code there the
+		// visualizer didn't write. Tell it the line as it now stands, so what
+		// it shows -- and its own undo history -- follows the code. Undo and
+		// redo only: a line being typed in is the user's until they are done
+		// with it, and the next interaction is what reconciles that.
+		if (e.isUndoing || e.isRedoing) {
+			this.adoptRewrittenLinks(e);
+		}
+
 		// Debounce to avoid running on every keystroke
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
@@ -4550,6 +4559,41 @@ export class SNCController extends Disposable implements IEditorContribution {
 			this.debounceTimer = null;
 			this.runProgram(this.getProgram(), undefined, 'edit');
 		}, this.debounceDelay);
+	}
+
+	/**
+	 * Send each link whose lines an undo/redo just rewrote the text now on
+	 * them (LineChanged). The event's ranges are in pre-edit coordinates and
+	 * the link decorations in post-edit ones, so each change is carried
+	 * forward by the lines the changes above it added or removed.
+	 */
+	private adoptRewrittenLinks(e: IModelContentChangedEvent): void {
+		const editorModel = this.editor.getModel();
+		if (!editorModel || this.linkedSelections.length === 0) {
+			return;
+		}
+		const spans: { start: number; end: number }[] = [];
+		let delta = 0;
+		for (const change of [...e.changes].sort((a, b) => a.range.startLineNumber - b.range.startLineNumber)) {
+			const start = change.range.startLineNumber + delta;
+			const newLineCount = (change.text.match(/\n/g) || []).length + 1;
+			spans.push({ start, end: start + newLineCount - 1 });
+			delta += newLineCount - (change.range.endLineNumber - change.range.startLineNumber + 1);
+		}
+		for (const link of this.linkedSelections) {
+			const range = editorModel.getDecorationRange(link.decorationId);
+			if (!range || range.isEmpty()
+				|| !spans.some(span => span.start <= range.endLineNumber && span.end >= range.startLineNumber)) {
+				continue;
+			}
+			const text = editorModel.getValueInRange(range).split('\n').map(stripConfigComment).join('\n').trim();
+			this.sendEventToPython({
+				line: link.line,
+				visIndex: link.visIndex,
+				pythonEventStr: "lambda e: LineChanged(text=e.get('text', ''))",
+				eventJSON: { type: 'line-changed', text },
+			});
+		}
 	}
 
 	/**

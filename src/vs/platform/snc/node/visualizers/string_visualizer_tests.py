@@ -183,6 +183,9 @@ def make_mouse_up_event(index: int, legacy_index: bool = True,
     }
 
 
+from visualizer_utils import LineChanged
+
+
 def _command_text(cmd) -> str:
     """Return the code/text carried by a command, for substring assertions.
 
@@ -647,6 +650,67 @@ class TestFreshSelectionKeepsUndo(unittest.TestCase):
         self.assertEqual(model['linked_action'], self.model['linked_action'])
         self.assertEqual(model['tool'], self.model['tool'])
         self.assertEqual(model['expanded'], self.model['expanded'])
+
+
+class TestLineChangedFollowsCode(unittest.TestCase):
+    """An editor undo or redo rewrites the linked line behind the visualizer's
+    back. The front-end reports the line as it now stands (LineChanged); the
+    visualizer adopts it and walks its own undo/redo to match, writing
+    nothing back."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        model = init_model(self.value)
+        model, _ = update(make_mouse_down_event(2, top_half=True),
+                         self.var_and_exp, model, self.value)
+        model, commands = update(make_mouse_up_event(6),
+                                self.var_and_exp, model, self.value)
+        new_code = next(c for c in commands if isinstance(c, tuple))
+        self.name = new_code[0]
+        self.hello_line = f'{self.name} = {new_code[1]}'
+        model, _ = update(make_mouse_down_event(8, top_half=True),
+                         self.var_and_exp, model, self.value)
+        model, commands = update(make_mouse_up_event(12),
+                                self.var_and_exp, model, self.value)
+        change = next(c for c in commands if isinstance(c, ChangeSelectedText))
+        self.world_line = f'{self.name} = {change.expression}'
+        self.model = model
+        self.assertEqual(model['search'], r"r'world'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
+
+    def _line_changed(self, model, text):
+        event = {'pythonEventStr': repr(LineChanged(text=text)),
+                 'eventJSON': {'type': 'line-changed', 'text': text}}
+        return update(event, self.var_and_exp, model, self.value)
+
+    def test_undone_line_is_adopted_and_history_walks_back(self):
+        model, commands = self._line_changed(self.model, self.hello_line)
+        self.assertEqual(model['search'], r"r'hello'")
+        self.assertEqual(model['undoHistory'], [None])
+        self.assertEqual(model['redoHistory'], [r"r'world'"])
+        self.assertEqual(commands, [])
+
+    def test_redone_line_walks_forward_again(self):
+        model, _ = self._line_changed(self.model, self.hello_line)
+        model, commands = self._line_changed(model, self.world_line)
+        self.assertEqual(model['search'], r"r'world'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
+        self.assertEqual(model['redoHistory'], [])
+        self.assertEqual(commands, [])
+
+    def test_a_pattern_never_shown_goes_on_top(self):
+        model, commands = self._line_changed(self.model, self.world_line.replace("r'world'", "r'wor'"))
+        self.assertEqual(model['search'], r"r'wor'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'", r"r'world'"])
+        self.assertEqual(model['redoHistory'], [])
+        self.assertEqual(commands, [])
+
+    def test_a_line_it_cannot_read_is_left_alone(self):
+        model, commands = self._line_changed(self.model, 'y = 1')
+        self.assertEqual(model['search'], r"r'world'")
+        self.assertEqual(model['undoHistory'], [None, r"r'hello'"])
+        self.assertEqual(commands, [])
 
 
 # =============================================================================

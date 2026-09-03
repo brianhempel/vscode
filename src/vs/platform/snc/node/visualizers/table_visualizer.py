@@ -61,10 +61,10 @@ from typing import Any, List, Tuple, Optional
 from table_visualizer_grammar import parse_generated_code_or_assignment, _STATEMENT_ACTIONS
 from visualizer_utils import is_live_only, study_note
 from visualizer_utils import (
-    ChildEvent, Unlink, Relink,
+    ChildEvent, Unlink, Relink, LineChanged,
     route_child_event, aggregate_handled_keys,
     opens_block, with_pass_body,
-    LinkConfig, handle_relink,
+    LinkConfig, handle_relink, handle_line_changed,
     wrap_child_prefix, wrap_child_suffix, defer_drag_grab, add_drag_readings,
     DOLLARS_RE, SIGILS, Dollar, DollarScope,
     eval_dollar_expr, replace_dollars_in_py_exp,
@@ -12623,6 +12623,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             handle_relink(_LINK_CONFIG, mode, text, var_and_exp, model, commands,
                           eval_in_scope=eval_in_scope)
 
+        case LineChanged(text=text):
+            handle_line_changed(_LINK_CONFIG, text, var_and_exp, model,
+                                eval_in_scope=eval_in_scope)
+
         case DeselectChildren():
             study_note(action='child.deselect', was=model.get('focused_child'))
             model['focused_child'] = None
@@ -12643,7 +12647,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     if is_nested(var_and_exp):
         return (model, commands)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink, LineChanged)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -12655,7 +12659,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (Unlink, Relink))):
+          and not isinstance(msg, (Unlink, Relink, LineChanged))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).
