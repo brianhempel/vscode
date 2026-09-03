@@ -4569,6 +4569,13 @@ def _render_auxiliary_attributes(value: str, model, *, small: bool = False):
 def visualize(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, every_row_exps=None) -> str:
     return ''.join(visualize_els(value, model, get_visualizer, eval_in_scope, max_width, max_height, small, var_and_exp, every_row_exps))
 
+def _is_nested_render(max_width, max_height) -> bool:
+    """Whether this render is inside a parent's cell rather than on a line of
+    its own. A parent always says how much room its child has; the top-level
+    runner never does."""
+    return max_width is not None or max_height is not None
+
+
 def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, max_height=None, small=False, var_and_exp=None, every_row_exps=None) -> List[str]:
     if eval_in_scope is None:
         eval_in_scope = lambda _c: eval(_c)
@@ -4629,10 +4636,20 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
         # preview so a tall string can be peeked at without pinning focus to
         # its line. Mirrors the focused-mode behavior below: only tall strings
         # (>4 lines) get it, since shorter ones aren't clipped by the 80px pane.
-        expanded = bool(model.get('expanded', False) or (not small if ENABLE_AUTO_EXPAND else False)) if model else False
+        #
+        # Only a top-level string gets the toggle. A string nested in a
+        # parent's cell auto-expands instead (when ENABLE_AUTO_EXPAND): the
+        # parent decides how much room it gets, so there is nothing to toggle.
+        # Nested is "a parent said how much room there is": every parent hands
+        # its children a max_width/max_height, and the top-level runner hands
+        # neither. (is_nested is a different question -- whether the child's
+        # code can link -- and is false for a cell, which is named by its
+        # access path rather than the binder.)
+        auto_expand = ENABLE_AUTO_EXPAND and _is_nested_render(max_width, max_height)
+        expanded = bool(model.get('expanded', False) or (not small if auto_expand else False)) if model else False
         expanded_class = ' expanded' if expanded else ''
         line_count = (raw.count('\n') + 1) if raw else 1
-        can_expand = False if ENABLE_AUTO_EXPAND else line_count > 4
+        can_expand = False if auto_expand else line_count > 4
         expand_toggle_html = ''
         if can_expand:
             expand_toggle_html = _render_expand_bar(
@@ -5017,9 +5034,12 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
     # 600px max-height (see string-visualizer.css). The container carries an
     # `expanded` class when open so the CSS can bump the max-height and rotate
     # the chevron. Not shown in small mode (handled by the early return above).
-    expanded = bool(model.get('expanded', False) or (not small if ENABLE_AUTO_EXPAND else False)) if model else False
+    # Only a top-level string gets the toggle; a nested one auto-expands
+    # instead (see the small-mode branch above).
+    auto_expand = ENABLE_AUTO_EXPAND and _is_nested_render(max_width, max_height)
+    expanded = bool(model.get('expanded', False) or (not small if auto_expand else False)) if model else False
     expanded_class = ' expanded' if expanded else ''
-    can_expand = False if ENABLE_AUTO_EXPAND else line_count > 4
+    can_expand = False if auto_expand else line_count > 4
     expand_toggle_html = ''
     if can_expand:
         expand_toggle_html = _render_expand_bar(expanded, value, model)

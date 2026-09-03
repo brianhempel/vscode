@@ -25,9 +25,13 @@
    Kept in step with visualizer_utils.EXPANDED_PANE_MAX_HEIGHT, which is where
    the list visualizer reads the same ceiling from. */
 .visualizer-container.expanded .string-visualizer {
-	max-height: 300px;
+	max-height: 600px;
 }
 
+/* A string nested in a parent's cell auto-expands (no bar, see
+   string_visualizer.visualize_els), so it gets a lower ceiling: the parent's
+   rows should not each grow to 600px. */
+.visualizer-container .visualizer-container.expanded > .snc-tool-and-visualizer > .string-visualizer,
 .list-visualizer .visualizer-container.expanded > .snc-tool-and-visualizer > .string-visualizer {
 	max-height: 300px;
 }

@@ -9502,6 +9502,38 @@ class TestExpandToggle(unittest.TestCase):
         html = visualize(self.tall_value, model, None, None)
         self.assertNotIn('literal-tool-selected expanded', html)
 
+    # A parent renders a child the way the table does: with the room it has
+    # (max_width/max_height) and the cell's access path. The top-level runner
+    # passes neither a width nor a height.
+    nested_kwargs = dict(max_width=300, max_height=200,
+                         var_and_exp=(None, "x[0]['name']"))
+
+    def test_nested_tall_string_auto_expands_without_a_toggle(self):
+        """A string nested in a parent's cell auto-expands when focused and
+        offers no toggle: the parent decides how much room it gets."""
+        model = init_model(self.tall_value)
+        html = visualize(self.tall_value, model, None, None,
+                         **self.nested_kwargs)
+        self.assertNotIn('expand-toggle', html)
+        self.assertIn('literal-tool-selected expanded', html)
+
+    def test_nested_small_tall_string_has_no_toggle(self):
+        """The nested small preview offers no toggle either."""
+        model = init_model(self.tall_value)
+        html = visualize(self.tall_value, model, None, None, small=True,
+                         **self.nested_kwargs)
+        self.assertNotIn('expand-toggle', html)
+        self.assertNotIn('is-expandable', html)
+
+    def test_top_level_string_is_named_by_its_cell_path_too(self):
+        """A top-level expression with no variable also arrives as (None, expr);
+        that alone must not make it read as nested."""
+        model = init_model(self.tall_value)
+        html = visualize(self.tall_value, model, None, None,
+                         var_and_exp=(None, "x[0]['name']"))
+        self.assertIn('expand-toggle', html)
+        self.assertNotIn('literal-tool-selected expanded', html)
+
     def test_fresh_literal_selection_preserves_expanded(self):
         """Starting a fresh literal selection must not collapse an expanded pane.
 
