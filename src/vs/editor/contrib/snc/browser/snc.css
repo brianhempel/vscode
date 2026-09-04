@@ -2963,9 +2963,13 @@
 /* The JSON of a trailing `#%click` config comment, folded to a token that
    reads like a fold placeholder (see SNCController.updateConfigCommentFolding).
    Clicking the token opens the comment (onConfigCommentMouseDown), so it gets
-   a pointer cursor and a hover highlight. */
+   a pointer cursor and a hover highlight. The payload is shrunk to nothing
+   rather than display:none: the editor places the caret by measuring the
+   character at its column, and a display:none character has no box, so the
+   caret would vanish at the two positions next to the token. */
 .monaco-editor .snc-config-payload {
-	display: none;
+	font-size: 0;
+	letter-spacing: 0;
 }
 .monaco-editor .snc-config-ellipsis {
 	color: var(--vscode-editor-foldPlaceholderForeground);

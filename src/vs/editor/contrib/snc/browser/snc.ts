@@ -4031,6 +4031,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * cursor leaves its line, until the next click.
 	 */
 	private openConfigCommentLine: number | null = null;
+	/** Where the cursor was before the current move; see snapCursorPastFoldedConfigComment. */
+	private lastCursorPosition: Position | null = null;
 	private readonly debounceDelay = 100; // ms
 
 	// Streaming state
@@ -4276,6 +4278,13 @@ export class SNCController extends Disposable implements IEditorContribution {
 				this.openConfigCommentLine = null;
 			}
 			this.updateConfigCommentFolding();
+			// Record the position before snapping: the snap's setPosition
+			// re-enters this listener synchronously, and that nested call is
+			// what should leave the snapped-to edge as the latest position.
+			// Recording afterwards would overwrite it with the inside column.
+			const previous = this.lastCursorPosition;
+			this.lastCursorPosition = e.position;
+			this.snapCursorPastFoldedConfigComment(e.position, previous);
 			this.onCursorPositionChanged();
 		}));
 		this._register(editor.onMouseDown(e => { this.onConfigCommentMouseDown(e); }));
@@ -4479,7 +4488,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 	/**
 	 * Hide: tear down every widget, slider, arrow and view zone so the code
 	 * reflows as if SNC were not there, keeping the items and loop counts.
-	 * Show: draw what those hold. Either way the button stays.
+	 * Show: draw what those hold. Either way the button stays, and the
+	 * `#%click` comments stay folded.
 	 */
 	private applyWidgetsVisible(visible: boolean): void {
 		if (visible === this.widgetsVisible) {
@@ -4491,12 +4501,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 			return;
 		}
 		if (visible) {
-			this.updateConfigCommentFolding();
 			this.updateLoopSliders();
 			this.updateVisualizationWidgets(this.visualizationItems);
 		} else {
 			this.removeWidgetDom();
-			this.updateConfigCommentFolding();
 		}
 	}
 
@@ -6602,12 +6610,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * Fold each `#%click` comment's JSON down to a `…` token, leaving the
 	 * `#%click` prefix to say what the line is. What the JSON holds is what the
 	 * visualizer shows, so the text is storage rather than something to read.
+	 * Folded whether or not the widgets are shown (see applyWidgetsVisible):
+	 * hiding them is about the code reflowing, not about reading the JSON.
 	 * The one comment the user has clicked open (`openConfigCommentLine`, see
 	 * onConfigCommentMouseDown) is shown in full so it can be edited.
 	 */
 	private updateConfigCommentFolding(): void {
 		const model = this.editor.getModel();
-		if (!model || !this.isPythonModel() || !this.widgetsVisible) {
+		if (!model || !this.isPythonModel()) {
 			this.configCommentDecorations.clear();
 			return;
 		}
@@ -6615,29 +6625,81 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const foldedLines = new Set<number>();
 		for (const match of model.findMatches(CONFIG_COMMENT_PREFIX, false, false, true, null, false)) {
 			const ln = match.range.startLineNumber;
-			if (ln === this.openConfigCommentLine || foldedLines.has(ln)) {
-				continue;
-			}
-			const content = model.getLineContent(ln);
-			const startCol = configCommentStartColumn(content);
-			if (!startCol) {
+			if (foldedLines.has(ln)) {
 				continue;
 			}
 			foldedLines.add(ln);
-			const payloadStart = startCol - 1 + CONFIG_COMMENT_PREFIX.length + 1;
-			if (payloadStart >= content.length) {
+			const folded = this.foldedConfigCommentColumns(model, ln);
+			if (!folded) {
 				continue;
 			}
 			decorations.push({
-				range: new Range(ln, payloadStart + 1, ln, model.getLineMaxColumn(ln)),
+				range: new Range(ln, folded.start, ln, folded.end),
 				options: {
 					description: 'snc-config-comment-fold',
 					inlineClassName: 'snc-config-payload',
-					after: { content: '…', inlineClassName: 'snc-config-ellipsis' },
+					// The chip goes in front of the hidden text, not after it, so
+					// the caret sits to its left at `start` and to its right at
+					// `end` -- the two sides of a single character.
+					before: { content: '…', inlineClassName: 'snc-config-ellipsis' },
 				},
 			});
 		}
 		this.configCommentDecorations.set(decorations);
+	}
+
+	/**
+	 * The columns the fold on `lineNumber` hides: `start` is the column just
+	 * before the JSON (after the space following `#%click`) and `end` the line's
+	 * max column, so the hidden text is [start, end). Null if the line has no
+	 * folded comment -- none at all, an empty one, or the one clicked open.
+	 */
+	private foldedConfigCommentColumns(model: ITextModel, lineNumber: number): { start: number; end: number } | null {
+		if (lineNumber === this.openConfigCommentLine) {
+			return null;
+		}
+		const content = model.getLineContent(lineNumber);
+		const startCol = configCommentStartColumn(content);
+		if (!startCol) {
+			return null;
+		}
+		const payloadStart = startCol - 1 + CONFIG_COMMENT_PREFIX.length + 1;
+		if (payloadStart >= content.length) {
+			return null;
+		}
+		return { start: payloadStart + 1, end: model.getLineMaxColumn(lineNumber) };
+	}
+
+	/**
+	 * The folded JSON is hidden, not gone, so the cursor could otherwise creep
+	 * through it one invisible character at a time. Treat the chip as one
+	 * character instead: a cursor that lands strictly inside the hidden text
+	 * is moved to an edge -- moving along the same line, the edge in its
+	 * direction of travel (rightward lands on the right edge, leftward on the
+	 * left); arriving from another line, the nearer one. `previous` is where
+	 * the cursor was before this move; the caller records it ahead of the
+	 * snap, since setPosition re-enters the cursor listener. Selections are
+	 * left alone so shift+arrow can still sweep the whole comment.
+	 */
+	private snapCursorPastFoldedConfigComment(position: Position, previous: Position | null): void {
+		const model = this.editor.getModel();
+		if (!model || !this.isPythonModel()) {
+			return;
+		}
+		const folded = this.foldedConfigCommentColumns(model, position.lineNumber);
+		if (!folded || position.column <= folded.start || position.column >= folded.end) {
+			return;
+		}
+		if (!this.editor.getSelection()?.isEmpty()) {
+			return;
+		}
+		let column: number;
+		if (previous && previous.lineNumber === position.lineNumber && previous.column !== position.column) {
+			column = position.column > previous.column ? folded.end : folded.start;
+		} else {
+			column = position.column - folded.start < folded.end - position.column ? folded.start : folded.end;
+		}
+		this.editor.setPosition(new Position(position.lineNumber, column));
 	}
 
 	/**
