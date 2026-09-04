@@ -6744,6 +6744,113 @@ class TestChildNewCodeBecomesColumn(unittest.TestCase):
         self.assertIn("$['name'].upper()", new_model['columns'])
 
 
+class TestManualAddScrollsToColumn(unittest.TestCase):
+    """A column added by hand is asked to be scrolled to, the way one derived
+    from a nested visualizer is. Its header is what is marked rather than a
+    cell: there is no row the eye is on, and an empty table has no cells at
+    all -- and the header row is pinned, so only the horizontal scroll moves."""
+
+    def marked_headers(self, output):
+        return re.findall(r'<th[^>]*snc-scroll-to-match="nearest"[^>]*>', output)
+
+    def marked(self, lst, model):
+        output = visualize(lst, model, mock_get_visualizer, eval)
+        ths = self.marked_headers(output)
+        self.assertEqual(len(ths), 1, output)
+        self.assertEqual(output.count('snc-scroll-to-match'), 1, output)
+        return html.unescape(ths[0])
+
+    def update(self, model, lst, event):
+        with patch('table_visualizer.save_columns_config'):
+            new_model, _ = update(event, ('x', 'x'), model, lst,
+                                  mock_get_visualizer)
+        return new_model
+
+    def test_enter_in_the_add_box_marks_the_new_columns_header(self):
+        lst = [{'name': 'Alice', 'age': 30}]
+        model = init_model(lst, mock_get_visualizer, slots_config=["$['name']"])
+        model['adding_column'] = True
+        model['column_input_value'] = "$['age']"
+        model['selected_suggestion_index'] = None
+        new_model = self.update(model, lst, make_column_key_event('Enter'))
+        self.assertEqual(new_model.get('_scroll_to_cell'), "$['age']")
+        self.assertIn("$['age']", self.marked(lst, new_model))
+
+    def test_picking_a_suggestion_marks_the_new_columns_header(self):
+        lst = [{'name': 'Alice', 'age': 30, 'city': 'NYC'}]
+        model = init_model(lst, mock_get_visualizer, slots_config=["$['name']"])
+        model['adding_column'] = True
+        model['column_input_value'] = "$['ci"
+        new_model = self.update(
+            model, lst, make_column_mouse_event(repr(ColumnSelect(name="$['city']"))))
+        self.assertEqual(new_model.get('_scroll_to_cell'), "$['city']")
+        self.assertIn("$['city']", self.marked(lst, new_model))
+
+    def test_ticking_a_column_in_the_plus_menu_marks_its_header(self):
+        lst = [{'a': 1, 'b': 2}]
+        model = init_model(lst, mock_get_visualizer, slots_config=["$['a']"])
+        new_model = self.update(
+            model, lst, make_column_mouse_event(repr(ColumnToggle(expr="$['b']"))))
+        self.assertEqual(new_model.get('_scroll_to_cell'), "$['b']")
+        self.assertIn("$['b']", self.marked(lst, new_model))
+
+    def test_unticking_a_column_asks_for_no_scroll(self):
+        lst = [{'a': 1, 'b': 2}]
+        model = init_model(lst, mock_get_visualizer,
+                           slots_config=["$['a']", "$['b']"])
+        new_model = self.update(
+            model, lst, make_column_mouse_event(repr(ColumnToggle(expr="$['b']"))))
+        self.assertIsNone(new_model.get('_scroll_to_cell'))
+        self.assertEqual(self.marked_headers(
+            visualize(lst, new_model, mock_get_visualizer, eval)), [])
+
+    def test_an_empty_table_still_marks_the_header(self):
+        lst = []
+        model = init_model(lst, mock_get_visualizer, slots_config=["$['a']"])
+        new_model = self.update(
+            model, lst, make_column_mouse_event(repr(ColumnToggle(expr="$['b']"))))
+        self.assertEqual(new_model.get('_scroll_to_cell'), "$['b']")
+        self.assertIn("$['b']", self.marked(lst, new_model))
+
+    def test_the_request_is_one_shot(self):
+        lst = [{'a': 1, 'b': 2}]
+        model = init_model(lst, mock_get_visualizer, slots_config=["$['a']"])
+        new_model = self.update(
+            model, lst, make_column_mouse_event(repr(ColumnToggle(expr="$['b']"))))
+        later = self.update(new_model, lst, make_column_input_event('x'))
+        self.assertIsNone(later.get('_scroll_to_cell'))
+        self.assertEqual(self.marked_headers(
+            visualize(lst, later, mock_get_visualizer, eval)), [])
+
+    def test_a_converted_column_written_beside_marks_its_header(self):
+        lst, model = convert_model()
+        with patch('table_visualizer.save_columns_config'):
+            new_model, _ = update(
+                make_column_mouse_event(repr(ConvertTypeColumnClick(col="$['n']", to='int'))),
+                ('data', 'data'), model, lst, mock_get_visualizer,
+                eval_in_scope=lambda code: eval(code, {}, {'data': lst}))
+        self.assertEqual(new_model.get('_scroll_to_cell'), "int($['n'])")
+        output = visualize(lst, new_model, mock_get_visualizer,
+                           lambda code: eval(code, {}, {'data': lst}))
+        ths = self.marked_headers(output)
+        self.assertEqual(len(ths), 1, output)
+        self.assertIn("int($['n'])", html.unescape(ths[0]))
+
+    def test_a_ticked_sub_column_marks_its_own_header(self):
+        lines = ['id,name', '1,Alice']
+        split = "$.split(',')"
+        model = init_model(lines, mock_get_visualizer)
+        model['columns'] = {split: {}}
+        model['openDropdown'] = {'id': menu_id(model, index=0)}
+        model['col_search_dropdown'] = menu_id(model, 'subcols', 0)
+        new_model = self.update(
+            model, lines, make_column_mouse_event(repr(SubcolToggle(col=split, expr='$[0]'))))
+        self.assertEqual(new_model.get('_scroll_to_cell'), f'{split}{SUBCOL_SEP}$[0]')
+        th = self.marked(lines, new_model)
+        self.assertIn('col-subheader', th)
+        self.assertIn('$[0]', th)
+
+
 class TestColumnHeaderTooltips(unittest.TestCase):
     """The icon-only column header controls (drag handle, remove, add) must
     use the snc-tooltip system (data-tooltip) instead of the native title

@@ -3069,6 +3069,7 @@ def _commit_column_input(model: dict, value, get_visualizer, eval_in_scope,
         study_note(action='column.add', column=commit_val)
         if commit_val:
             _add_beside(model, commit_val)
+            model['_scroll_to_cell'] = commit_val
             if has_rows:
                 _save_slots(model)
         model['adding_column'] = False
@@ -9445,8 +9446,14 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
 
     if extra_classes:
         th_classes.append(extra_classes)
+    # A column just added by hand: its header is what there is to bring into
+    # view (see _scroll_to_cell in visualize), by the least movement, so the
+    # box or menu it was added from stays where the eye left it.
+    scroll_attr = (' snc-scroll-to-match="nearest"'
+                   if model.get('_scroll_to_cell') == col else '')
     return (
         f'<th class="{" ".join(th_classes)}"{span_attrs} data-col="{repr(html.escape(col))}" {get_col_width_style(col, model, clip=False)}'
+        f'{scroll_attr}'
         f'{track_move}'
         f'snc-mouse-up="{html.escape(drag_end_event)}">'
         f'<span class="col-header-inner">'
@@ -11193,9 +11200,12 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     read_through = eval_in_scope is not None and _is_pure_ref(source_expr)
 
     scroll_to = model.get('_scroll_to_match', False)
-    # The cell a just-derived column put beside the visualizer it came out of.
-    # `nearest`: brought into view by the least movement, so the visualizer
-    # the eye is on stays where it is (see scrollToFirstMatch in snc.ts).
+    # The cell a just-derived column put beside the visualizer it came out of
+    # (`row\x00col`), or the header of a column just added by hand (the bare
+    # column, marked in _render_column_header: there is no row the eye is on,
+    # and an empty table has no cells). `nearest`: brought into view by the
+    # least movement, so what the eye is on stays where it is (see
+    # scrollToFirstMatch in snc.ts).
     scroll_to_cell = model.get('_scroll_to_cell')
 
     first_match_row = min(matched_indices) if matched_indices else None
@@ -11601,9 +11611,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     if msg is None:
         return (model, [])
 
-    # A one-shot request (see the derived-column branch below), cleared before
-    # the child branch so a child event clears it too: a hover over the
-    # visualizer a moment later must not scroll the table back to the cell.
+    # A one-shot request (see the derived-column branch below, and every
+    # branch that adds a column by hand), cleared before the child branch so a
+    # child event clears it too: a hover over the visualizer a moment later
+    # must not scroll the table back to the cell.
     model.pop('_scroll_to_cell', None)
 
     # Every branch below says what it did with `study_note(action='area.verb',
@@ -11759,6 +11770,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     _drop_column(model, expr, eval_in_scope)
                 else:
                     _col_add(model['columns'], expr)
+                    model['_scroll_to_cell'] = expr
                 _save_columns(model)
 
         # The fields only. The row columns are their own section for exactly
@@ -11805,6 +11817,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             if model.get('adding_column'):
                 study_note(action='column.add', column=name, via='suggestion')
                 _add_beside(model, name)
+                model['_scroll_to_cell'] = name
                 model['adding_column'] = False
                 model['column_input_value'] = ''
                 if has_rows:
@@ -12147,7 +12160,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             study_note(action='column.convert-column', column=named, to=to)
             col = _named_column(model, named)
             if col is not None and to in CONVERT_TYPES:
-                seg, _converted = _convert_target(col, to)
+                seg, converted = _convert_target(col, to)
                 if _convert_writable(model['columns'], col, seg):
                     _close_column_menus(model)
                     # Beside the column rather than at the far right, which is
@@ -12156,6 +12169,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     siblings = _siblings_of(model['columns'], col)
                     _col_insert(siblings, seg,
                                 list(siblings).index(col.split(SUBCOL_SEP)[-1]) + 1)
+                    model['_scroll_to_cell'] = converted
                     if has_rows:
                         _save_slots(model)
 
@@ -12312,6 +12326,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         _drop_subcolumn(model, col, expr, eval_in_scope)
                     else:
                         _col_add(subs, expr)
+                        model['_scroll_to_cell'] = f'{col}{SUBCOL_SEP}{expr}'
                     _save_subcolumns(model, col)
 
         case SubcolShowAll(col=named):

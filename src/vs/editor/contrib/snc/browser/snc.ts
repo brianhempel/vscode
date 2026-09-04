@@ -2558,10 +2558,17 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				? footEl.getBoundingClientRect().height
 				: 0;
 			const visibleBottom = containerRect.top + container.clientHeight - footHeight;
-			if (targetRect.top < visibleTop || targetRect.height > visibleBottom - visibleTop) {
-				container.scrollTop += targetRect.top - visibleTop - 2;
-			} else if (targetRect.bottom > visibleBottom) {
-				container.scrollTop += targetRect.bottom - visibleBottom + 2;
+			// A header cell (a column just added by hand) rides in the pinned
+			// <thead>: it is never above or below the view, only left or right
+			// of it, and measuring it against the space under the header would
+			// read it as hidden and scroll the rows up for nothing.
+			const pinned = headerEl?.contains(matchTarget) || footEl?.contains(matchTarget);
+			if (!pinned) {
+				if (targetRect.top < visibleTop || targetRect.height > visibleBottom - visibleTop) {
+					container.scrollTop += targetRect.top - visibleTop - 2;
+				} else if (targetRect.bottom > visibleBottom) {
+					container.scrollTop += targetRect.bottom - visibleBottom + 2;
+				}
 			}
 			if (targetRect.left < containerRect.left || targetRect.width > container.clientWidth) {
 				container.scrollLeft += targetRect.left - containerRect.left - 2;
