@@ -8613,7 +8613,6 @@ def _render_sort_panel(col, model) -> str:
             f'{"" if code else " unselectable"}"'
             f'{py_exp_attrs(code, align="right")}>'
             f'<span class="col-compute-toggle" {click_attr} data-tooltip="Insert as new code">{ICONS['plus']}</span>'
-            f'</span>'
             f'</div>'
         )
 
@@ -8960,7 +8959,6 @@ def _render_convert_panel(col, model) -> str:
             f'{" unselectable" if inert else ""}"'
             f'{py_exp_attrs(code, align="right")}>'
             f'<span class="col-compute-toggle" {click_attr} data-tooltip="Insert as a new column">{ICONS['column-right']}</span>'
-            f'</span>'
             f'</div>'
         )
 

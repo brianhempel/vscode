@@ -16928,6 +16928,19 @@ class TestScrollToFirstMatch(unittest.TestCase):
         self.assertNotIn('snc-scroll-to-match', out)
 
 
+class TestMarkupIsBalanced(unittest.TestCase):
+    """A stray closing tag is harmless through innerHTML, where the browser
+    drops it, but anything that reads the HTML as written trips over it."""
+
+    def test_the_full_render_closes_what_it_opens(self):
+        model = init_model("hello world")
+        model['search'] = "r'wor'"
+        out = visualize("hello world", model, None, None)
+        balance = {tag: len(re.findall(rf'<{tag}\b', out)) - out.count(f'</{tag}>')
+                   for tag in ('div', 'span')}
+        self.assertEqual(balance, {'div': 0, 'span': 0})
+
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -5020,7 +5020,6 @@ def visualize_els(value, model, get_visualizer, eval_in_scope, max_width=None, m
             f"</div>"
             f'{auxiliary_html}'
             f"</div>"
-            f"</div>"
         )
 
     # Compact (dropdown) toolbar is used when the string is < 4 lines tall.

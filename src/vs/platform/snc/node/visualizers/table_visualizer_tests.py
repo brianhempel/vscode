@@ -17995,6 +17995,29 @@ def convert_model(lst=None, columns=None, source='data', index=0):
     return lst, model
 
 
+def _tag_balance(markup: str) -> dict:
+    """Opens minus closes, per tag: what the browser would silently mend."""
+    return {tag: len(re.findall(rf'<{tag}\b', markup)) - markup.count(f'</{tag}>')
+            for tag in ('div', 'span')}
+
+
+class TestSubmenuMarkupIsBalanced(unittest.TestCase):
+    """A stray closing tag is harmless through innerHTML, where the browser
+    drops it, but anything that reads the HTML as written trips over it."""
+
+    def test_the_sort_submenu(self):
+        lst, model = sort_model()
+        out = visualize(lst, model, mock_get_visualizer,
+                        lambda code: eval(code, {}, {'data': lst}))
+        self.assertEqual(_tag_balance(out), {'div': 0, 'span': 0})
+
+    def test_the_convert_type_submenu(self):
+        lst, model = convert_model()
+        out = visualize(lst, model, mock_get_visualizer,
+                        lambda code: eval(code, {}, {'data': lst}))
+        self.assertEqual(_tag_balance(out), {'div': 0, 'span': 0})
+
+
 class ConvertPanelCase(unittest.TestCase):
     """The Convert Type submenu, opened over a one-column table."""
 
