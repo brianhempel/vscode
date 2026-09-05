@@ -3643,6 +3643,28 @@ function editLineCount(edit: NewCodeEdit): number {
 }
 
 /**
+ * The edit that leaves the file ending in a blank line, to go in with the
+ * code being inserted -- or nothing, when the file will end blank anyway.
+ *
+ * A visualizer takes so much of the screen that when its line is the last
+ * one, there is nowhere below it to click and press return for the next
+ * line. An empty line closing the file is always there to click on.
+ *
+ * `tailText` is what the inserts leave as the last line, when they add lines
+ * after it; otherwise the last line stays what it is. The edit sits at the
+ * end of the file, so it comes after anything inserted there as long as it is
+ * last in the batch: edits at one position apply in batch order.
+ */
+function trailingBlankLineEdit(model: ITextModel, tailText: string | undefined): { range: Range; text: string } | undefined {
+	const lastLine = model.getLineCount();
+	if (/^\s*$/.test(tailText ?? model.getLineContent(lastLine))) {
+		return undefined;
+	}
+	const col = model.getLineMaxColumn(lastLine);
+	return { range: new Range(lastLine, col, lastLine, col), text: '\n' };
+}
+
+/**
  * One expression a handle offers: the code, whatever it can't run without, and
  * what it reads as when the code alone doesn't say.
  */
@@ -5989,7 +6011,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				}
 			}
 
-			const editOperations = sortedEdits.map(edit => {
+			const editOperations: { range: Range; text: string }[] = sortedEdits.map(edit => {
 				if (edit.afterLine === 0) {
 					return {
 						range: new Range(1, 1, 1, 1),
@@ -6002,6 +6024,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 					text: '\n' + edit.text
 				};
 			});
+
+			// Last in the batch, so it lands below whatever goes in after the
+			// last line -- the bottom-most such edit is the first, sorted.
+			const tailEdit = sortedEdits.find(edit => edit.afterLine === model.getLineCount());
+			const blankLineEdit = trailingBlankLineEdit(model, tailEdit?.text.split('\n').pop());
+			if (blankLineEdit) {
+				editOperations.push(blankLineEdit);
+			}
 
 			// After inserting, capture (a) the inverse range of the main inserted
 			// line so we can link it for live updates, and (b) a rename selection
@@ -6195,7 +6225,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 		const linesInsertedAbove = imported.reduce(
 			(n, edit) => n + (edit.afterLine < lineNumber ? editLineCount(edit) : 0), 0);
 
-		const newSelections = studyLog.withEditOrigin('InsertNewVar', () => model.pushEditOperations([], [editOperation, ...importOperations], (inverseEdits) => {
+		// Last, so it follows the new statement when that closes the file.
+		const blankLineEdit = trailingBlankLineEdit(model,
+			lineNumber === model.getLineCount() ? editText.split('\n').pop() : undefined);
+		const operations = [editOperation, ...importOperations, ...(blankLineEdit ? [blankLineEdit] : [])];
+
+		const newSelections = studyLog.withEditOrigin('InsertNewVar', () => model.pushEditOperations([], operations, (inverseEdits) => {
 			const inv = inverseEdits[0];
 			if (!inv) {
 				return null;

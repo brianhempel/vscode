@@ -153,6 +153,28 @@ function importPlacements(model: ITextModel, importStatements: readonly string[]
 }
 
 /**
+ * The edit that leaves the file ending in a blank line once a drop at
+ * `position` has landed -- or nothing, when the file will end blank anyway.
+ *
+ * A visualizer takes so much of the screen that when its line is the last
+ * one, there is nowhere below it to click and press return for the next
+ * line. An empty line closing the file is always there to click on.
+ *
+ * A drop on the last line fills it; anywhere else leaves it as it is. Dropped
+ * at the very end of the file, the insert and this edit share a position,
+ * and apply in the order given: the insert, then this, as the last of the
+ * additional edits.
+ */
+function trailingBlankLineEdit(model: ITextModel, position: IPosition): { range: Range; text: string } | undefined {
+	const lastLine = model.getLineCount();
+	if (position.lineNumber < lastLine && /^\s*$/.test(model.getLineContent(lastLine))) {
+		return undefined;
+	}
+	const col = model.getLineMaxColumn(lastLine);
+	return { range: new Range(lastLine, col, lastLine, col), text: '\n' };
+}
+
+/**
  * Drops a file or a URL into Python as a line that reads it.
  *
  * A `.csv` comes in as its rows, a `.json` as its parsed value, and a
@@ -237,6 +259,10 @@ export class PythonReadDropProvider implements DocumentDropEditProvider {
 		}
 
 		const { inlineText, separateEdits } = importPlacements(model, imports, position);
+		const blankLineEdit = trailingBlankLineEdit(model, position);
+		if (blankLineEdit) {
+			separateEdits.push(blankLineEdit);
+		}
 
 		studyLog.log('editor.fileDrop', { sources, lines, imports, position: [position.lineNumber, position.column] }, model.uri.toString());
 
@@ -304,6 +330,10 @@ export class SncPyExpDropProvider implements DocumentDropEditProvider {
 
 		// Every import that isn't there yet, in declaration order.
 		const { inlineText, separateEdits } = importPlacements(model, payload.imports ?? [], position);
+		const blankLineEdit = trailingBlankLineEdit(model, position);
+		if (blankLineEdit) {
+			separateEdits.push(blankLineEdit);
+		}
 
 		return {
 			edits: [{
