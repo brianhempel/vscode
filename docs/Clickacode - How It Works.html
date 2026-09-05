@@ -1,0 +1,1063 @@
+<title>Clickacode Under the Hood</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+	--bg: #F5F6F8;
+	--bg-raised: #FFFFFF;
+	--bg-sunken: #ECEEF2;
+	--ink: #1C2028;
+	--ink-2: #4A515E;
+	--ink-3: #7A8290;
+	--rule: #D9DDE4;
+	--rule-2: #C4C9D3;
+	--accent: #0069FF;
+	--accent-soft: rgba(0,105,255,.14);
+	--accent-strong: rgba(0,105,255,.30);
+	--green: #1E9E4A;
+	--green-soft: rgba(52,199,89,.28);
+	--fuzzy: rgba(120,126,140,.28);
+	--fuzzy-strong: rgba(120,126,140,.45);
+	--red: #C93A3A;
+	--ed-bg: #FFFFFF;
+	--ed-gutter: #9AA1AE;
+	--ed-kw: #AF00DB;
+	--ed-str: #A31515;
+	--ed-fn: #795E26;
+	--ed-cm: #008000;
+	--ed-line: rgba(0,0,0,.035);
+	--code-bg: #EEF0F4;
+	--shadow: 0 1px 2px rgba(20,24,32,.06), 0 6px 20px rgba(20,24,32,.06);
+	color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #151820;
+		--bg-raised: #1C2029;
+		--bg-sunken: #10131A;
+		--ink: #E4E7EC;
+		--ink-2: #AEB5C2;
+		--ink-3: #7C8493;
+		--rule: #2A303C;
+		--rule-2: #3A4150;
+		--accent: #5A9CFF;
+		--accent-soft: rgba(90,156,255,.18);
+		--accent-strong: rgba(90,156,255,.36);
+		--green: #4CD26A;
+		--green-soft: rgba(52,199,89,.30);
+		--fuzzy: rgba(170,176,190,.22);
+		--fuzzy-strong: rgba(170,176,190,.40);
+		--red: #FF7B7B;
+		--ed-bg: #1E1E1E;
+		--ed-gutter: #6E7681;
+		--ed-kw: #C586C0;
+		--ed-str: #CE9178;
+		--ed-fn: #DCDCAA;
+		--ed-cm: #6A9955;
+		--ed-line: rgba(255,255,255,.04);
+		--code-bg: #11141B;
+		--shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+		color-scheme: dark;
+	}
+}
+:root[data-theme="dark"] {
+	--bg: #151820;
+	--bg-raised: #1C2029;
+	--bg-sunken: #10131A;
+	--ink: #E4E7EC;
+	--ink-2: #AEB5C2;
+	--ink-3: #7C8493;
+	--rule: #2A303C;
+	--rule-2: #3A4150;
+	--accent: #5A9CFF;
+	--accent-soft: rgba(90,156,255,.18);
+	--accent-strong: rgba(90,156,255,.36);
+	--green: #4CD26A;
+	--green-soft: rgba(52,199,89,.30);
+	--fuzzy: rgba(170,176,190,.22);
+	--fuzzy-strong: rgba(170,176,190,.40);
+	--red: #FF7B7B;
+	--ed-bg: #1E1E1E;
+	--ed-gutter: #6E7681;
+	--ed-kw: #C586C0;
+	--ed-str: #CE9178;
+	--ed-fn: #DCDCAA;
+	--ed-cm: #6A9955;
+	--ed-line: rgba(255,255,255,.04);
+	--code-bg: #11141B;
+	--shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+	color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+	font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+	font-size: 16px;
+	line-height: 1.6;
+	-webkit-font-smoothing: antialiased;
+}
+code, pre, kbd, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- shell ---------- */
+.shell {
+	display: grid;
+	grid-template-columns: 1fr;
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: 0 20px 96px;
+}
+@media (min-width: 1000px) {
+	.shell { grid-template-columns: 220px minmax(0, 1fr); column-gap: 56px; }
+	.toc { position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; padding-top: 96px; }
+}
+.toc { display: none; }
+@media (min-width: 1000px) { .toc { display: block; } }
+.toc h2 { font: 500 11px/1 "IBM Plex Mono", monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 14px; }
+.toc ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--rule); }
+.toc li a { display: block; padding: 5px 0 5px 14px; margin-left: -1px; border-left: 1px solid transparent; color: var(--ink-2); font-size: 13.5px; line-height: 1.35; }
+.toc li a:hover { color: var(--ink); border-left-color: var(--rule-2); text-decoration: none; }
+
+main { min-width: 0; }
+.prose { max-width: 68ch; }
+
+/* ---------- header ---------- */
+header.masthead { padding: 72px 0 40px; border-bottom: 1px solid var(--rule); margin-bottom: 48px; }
+.eyebrow { font: 500 12px/1 "IBM Plex Mono", monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin: 0 0 20px; }
+h1 {
+	font-family: "Bricolage Grotesque", "IBM Plex Sans", sans-serif;
+	font-weight: 700;
+	font-size: clamp(38px, 5.2vw, 60px);
+	line-height: 1.02;
+	letter-spacing: -.02em;
+	margin: 0 0 22px;
+	text-wrap: balance;
+	max-width: 18ch;
+}
+.lede { font-size: 19px; line-height: 1.5; color: var(--ink-2); max-width: 60ch; margin: 0 0 18px; }
+.lede + .lede { font-size: 16px; }
+
+/* ---------- headings ---------- */
+h2 {
+	font-family: "Bricolage Grotesque", "IBM Plex Sans", sans-serif;
+	font-weight: 700;
+	font-size: 30px;
+	line-height: 1.12;
+	letter-spacing: -.015em;
+	margin: 72px 0 18px;
+	text-wrap: balance;
+	scroll-margin-top: 24px;
+}
+h3 {
+	font-family: "Bricolage Grotesque", "IBM Plex Sans", sans-serif;
+	font-weight: 600;
+	font-size: 20px;
+	line-height: 1.25;
+	margin: 40px 0 10px;
+	text-wrap: balance;
+}
+p { margin: 0 0 16px; }
+p + p { margin-top: -2px; }
+strong { font-weight: 600; }
+ul, ol { padding-left: 22px; margin: 0 0 18px; }
+li { margin-bottom: 6px; }
+li::marker { color: var(--ink-3); }
+.callout {
+	border-left: 3px solid var(--accent);
+	padding: 4px 0 4px 18px;
+	margin: 22px 0 26px;
+	color: var(--ink-2);
+}
+.callout strong { color: var(--ink); }
+code:not(pre code) {
+	font-size: .86em;
+	background: var(--code-bg);
+	padding: .1em .4em;
+	border-radius: 4px;
+}
+pre {
+	background: var(--code-bg);
+	border: 1px solid var(--rule);
+	border-radius: 6px;
+	padding: 14px 18px;
+	font-size: 13px;
+	line-height: 1.55;
+	overflow-x: auto;
+	margin: 0 0 20px;
+}
+
+/* ---------- tables ---------- */
+.tbl { overflow-x: auto; margin: 8px 0 28px; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+th { text-align: left; font: 500 11.5px/1.3 "IBM Plex Mono", monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); padding: 0 14px 10px 0; border-bottom: 1px solid var(--rule-2); }
+td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+td:first-child { font-weight: 500; white-space: nowrap; }
+td code { white-space: nowrap; }
+
+/* ---------- figures ---------- */
+figure { margin: 30px 0 34px; }
+figure.wide { max-width: 860px; }
+figure svg { display: block; max-width: 100%; height: auto; color: var(--ink); font-family: "IBM Plex Mono", monospace; }
+figcaption { font-size: 13.5px; line-height: 1.5; color: var(--ink-2); margin-top: 12px; max-width: 68ch; }
+figcaption b { color: var(--ink); font-weight: 600; }
+.figlabel { font: 500 11px/1 "IBM Plex Mono", monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); margin-right: 8px; }
+.d-box { fill: var(--bg-raised); stroke: currentColor; stroke-width: 1.2; }
+.d-box-muted { fill: var(--bg-sunken); stroke: var(--rule-2); stroke-width: 1; }
+.d-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+.d-green { fill: var(--green-soft); stroke: var(--green); stroke-width: 1.2; }
+.d-t { font-size: 12.5px; fill: currentColor; }
+.d-t-s { font-size: 11px; fill: var(--ink-2); }
+.d-t-b { font-size: 13px; font-weight: 500; fill: currentColor; }
+.d-t-acc { font-size: 11px; fill: var(--accent); font-weight: 500; }
+.d-ln { stroke: currentColor; stroke-width: 1.2; fill: none; }
+.d-ln-acc { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+.d-ln-d { stroke: var(--ink-3); stroke-width: 1; fill: none; stroke-dasharray: 4 4; }
+.d-lane { stroke: var(--rule-2); stroke-width: 1; stroke-dasharray: 2 5; }
+
+/* ---------- editor recreations ---------- */
+.screen {
+	background: var(--ed-bg);
+	border: 1px solid var(--rule);
+	border-radius: 8px;
+	box-shadow: var(--shadow);
+	overflow: hidden;
+	margin: 0;
+}
+.screen .titlebar {
+	display: flex; align-items: center; gap: 8px;
+	padding: 8px 12px;
+	background: var(--bg-sunken);
+	border-bottom: 1px solid var(--rule);
+	font: 12px/1 "IBM Plex Sans", sans-serif; color: var(--ink-2);
+}
+.screen .dots { display: inline-flex; gap: 6px; margin-right: 6px; }
+.screen .dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--rule-2); display: inline-block; }
+.screen .tab { background: var(--ed-bg); border: 1px solid var(--rule); border-bottom-color: var(--ed-bg); padding: 5px 12px; border-radius: 5px 5px 0 0; margin-bottom: -9px; color: var(--ink); }
+.screen .corner { margin-left: auto; display: inline-flex; gap: 10px; align-items: center; color: var(--ink-3); }
+.ed { overflow-x: auto; }
+.ed-inner { min-width: 780px; padding: 12px 0 16px; position: relative; }
+.ln {
+	display: flex; align-items: flex-start;
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
+	font-size: 13.5px; line-height: 22px;
+	white-space: pre;
+	position: relative;
+}
+.ln .g { width: 46px; flex: none; text-align: right; padding-right: 18px; color: var(--ed-gutter); user-select: none; }
+.ln .c { flex: none; }
+.ln.cur { background: var(--ed-line); }
+.ln .zone { display: block; }
+.kw { color: var(--ed-kw); } .st { color: var(--ed-str); } .fn { color: var(--ed-fn); } .cm { color: var(--ed-cm); }
+.fold { display: inline-block; background: var(--code-bg); color: var(--ink-3); border-radius: 3px; padding: 0 5px; font-size: 12px; line-height: 16px; vertical-align: 1px; margin-left: 2px; }
+
+/* widgets */
+.w {
+	display: inline-flex; align-items: center; gap: 0;
+	margin-left: 10px;
+	border: 1px solid var(--rule-2);
+	border-radius: 4px;
+	background: var(--bg-raised);
+	font-family: "IBM Plex Mono", ui-monospace, monospace;
+	font-size: 13px; line-height: 20px;
+	padding: 0 4px;
+	vertical-align: top;
+	position: relative;
+	white-space: nowrap;
+}
+.w.focus { border-color: var(--accent); }
+.w.small { opacity: .85; }
+.w .q { color: var(--ink-3); }
+.chr { display: inline-block; padding: 0 1px; border-radius: 2px; }
+.chr.anchor { color: var(--ink-3); }
+.chr.lit { background: var(--accent-strong); }
+.chr.fz { background: var(--fuzzy-strong); }
+.chr.sel { background: var(--green-soft); }
+.chr.nl { color: var(--ink-3); }
+.toolbar {
+	display: inline-flex; gap: 3px; margin-left: 10px; padding-left: 8px; border-left: 1px solid var(--rule);
+}
+.tb { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; border-radius: 3px; color: var(--ink-2); font: 500 10.5px/1 "IBM Plex Sans", sans-serif; border: 1px solid transparent; }
+.tb.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.acts { display: inline-flex; gap: 4px; margin-left: 8px; }
+.act { font: 11px/1 "IBM Plex Sans", sans-serif; padding: 3px 7px; border: 1px solid var(--rule-2); border-radius: 3px; color: var(--ink-2); background: var(--bg); }
+.chain { display: inline-flex; align-items: center; margin-left: 8px; color: var(--accent); }
+.chain svg { width: 14px; height: 14px; }
+.slider { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font: 11.5px/1 "IBM Plex Mono", monospace; color: var(--ink-2); vertical-align: top; height: 22px; }
+.slider .rail { position: relative; width: 70px; height: 3px; background: var(--rule-2); border-radius: 2px; }
+.slider .rail i { position: absolute; top: -4px; left: 40%; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); }
+.err { color: var(--red); font-family: "IBM Plex Mono", monospace; }
+
+/* mini table widget */
+.tw { display: inline-block; margin-left: 10px; border: 1px solid var(--rule-2); border-radius: 4px; background: var(--bg-raised); vertical-align: top; font-family: "IBM Plex Mono", monospace; font-size: 12.5px; }
+.tw table { width: auto; font-size: 12.5px; border-collapse: collapse; }
+.tw th { font: 500 11px/1.2 "IBM Plex Mono", monospace; text-transform: none; letter-spacing: 0; color: var(--ink-2); padding: 4px 10px; border-bottom: 1px solid var(--rule); background: var(--bg-sunken); white-space: nowrap; }
+.tw th .dd { color: var(--ink-3); margin-left: 6px; }
+.tw td { padding: 2px 10px; border-bottom: 1px solid var(--rule); font-weight: 400; white-space: nowrap; line-height: 18px; }
+.tw td.n { color: var(--ink-3); text-align: right; }
+.tw tr:last-child td { border-bottom: 0; }
+.tw .srch { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--rule); font: 11px/1 "IBM Plex Sans", sans-serif; color: var(--ink-3); }
+.tw .srch span { flex: 1; border: 1px solid var(--rule-2); border-radius: 3px; padding: 2px 6px; color: var(--ink-3); font-family: "IBM Plex Mono", monospace; }
+
+/* link arrow */
+.arrow-svg { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+
+/* legend chips */
+.legend { display: flex; flex-wrap: wrap; gap: 14px 22px; font-size: 13px; color: var(--ink-2); margin-top: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; border: 1px solid var(--rule-2); }
+
+/* console recreation */
+.console .ln .g { color: var(--ed-gutter); }
+.out { font-family: "IBM Plex Mono", monospace; font-size: 13px; line-height: 20px; color: var(--ink-2); padding: 3px 0 3px 46px; background: var(--bg-sunken); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin: 2px 0; white-space: pre; }
+.out.err { color: var(--red); }
+.eof { color: var(--ink-3); }
+
+/* ---------- live demo ---------- */
+.demo {
+	border: 1px solid var(--rule);
+	border-radius: 8px;
+	background: var(--bg-raised);
+	box-shadow: var(--shadow);
+	padding: 18px 20px 16px;
+	max-width: 860px;
+}
+.demo-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.demo-head h4 { margin: 0; font: 600 15px/1.3 "Bricolage Grotesque", sans-serif; }
+.demo-head .hint { font-size: 13px; color: var(--ink-2); }
+.demo-tools { display: inline-flex; gap: 4px; }
+.demo-tools button {
+	font: 500 12px/1 "IBM Plex Sans", sans-serif; padding: 6px 10px; border-radius: 4px;
+	border: 1px solid var(--rule-2); background: var(--bg); color: var(--ink-2); cursor: pointer;
+}
+.demo-tools button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.demo-str {
+	font-family: "IBM Plex Mono", monospace; font-size: 20px; line-height: 34px;
+	padding: 8px 10px; border: 1px solid var(--rule-2); border-radius: 4px; background: var(--ed-bg);
+	user-select: none; cursor: text; white-space: nowrap; overflow-x: auto;
+}
+.demo-str .chr { padding: 0 2px; }
+.demo-str .chr.hover { outline: 1px solid var(--rule-2); }
+.demo-out { margin-top: 14px; display: grid; grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 720px) { .demo-out { grid-template-columns: 1.2fr 1fr; } }
+.demo-code { background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; font-family: "IBM Plex Mono", monospace; font-size: 13.5px; line-height: 1.6; overflow-x: auto; white-space: pre; min-height: 66px; }
+.demo-code .dim { color: var(--ink-3); }
+.demo-rank { font-size: 13px; color: var(--ink-2); border-left: 1px solid var(--rule); padding-left: 14px; }
+.demo-rank ol { margin: 6px 0 0; padding-left: 18px; }
+.demo-rank li { margin-bottom: 3px; }
+.demo-rank li.win { color: var(--ink); font-weight: 500; }
+.demo-rank li.win code { background: var(--accent-soft); }
+.demo-rank li.no { text-decoration: line-through; color: var(--ink-3); }
+.demo-note { font-size: 12.5px; color: var(--ink-3); margin-top: 10px; }
+
+@media (prefers-reduced-motion: no-preference) {
+	.chr { transition: background-color .12s; }
+}
+.foot { margin-top: 80px; padding-top: 20px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--ink-3); max-width: 68ch; }
+</style>
+
+<div class="shell">
+<nav class="toc" aria-label="Contents">
+	<h2>Contents</h2>
+	<ol>
+		<li><a href="#processes">Three processes</a></li>
+		<li><a href="#run">Anatomy of one run</a></li>
+		<li><a href="#logging">What gets logged</a></li>
+		<li><a href="#visualizers">Visualizers: Elm in Python</a></li>
+		<li><a href="#interaction">The interaction round trip</a></li>
+		<li><a href="#speed">A fresh process per keystroke, fast</a></li>
+		<li><a href="#state">Where state lives</a></li>
+		<li><a href="#codegen">From clicks to code</a></li>
+		<li><a href="#loops">Loops and the slider</a></li>
+		<li><a href="#console">The console</a></li>
+		<li><a href="#liveonly">Live-only mode</a></li>
+		<li><a href="#events">Everything it reacts to</a></li>
+		<li><a href="#logging-study">Study logging</a></li>
+		<li><a href="#limits">Known limits</a></li>
+	</ol>
+</nav>
+
+<main>
+<header class="masthead">
+	<p class="eyebrow">Architecture notes</p>
+	<h1>Clickacode Under the Hood</h1>
+	<p class="lede">Clickacode is a fork of VS Code. Open a Python file and it runs the file, captures the value produced by every statement, and draws an interactive picture of each value at the end of the line that produced it. Type a character and the pictures update a tenth of a second later. Drag across a string in one of those pictures and a line of Python appears below, extracting what you selected. Keep dragging and that line rewrites itself in place.</p>
+	<p class="lede">This page explains how that is put together, for someone asking "how did they implement that?" rather than someone about to edit the code. It stays at the level of processes, protocols, and the ideas that hold the design together. The widgets shown here are HTML recreations of the real ones, not screenshots.</p>
+</header>
+
+<figure class="wide">
+	<div class="screen">
+		<div class="titlebar"><span class="dots"><i></i><i></i><i></i></span><span class="tab">camel_case.py</span><span class="corner" title="wrench: visualizers may write code; eye: hide all widgets">🔧 &nbsp;👁</span></div>
+		<div class="ed"><div class="ed-inner">
+			<div class="ln"><span class="g">1</span><span class="c"><span class="kw">with</span> <span class="fn">open</span>(<span class="st">"camel-case.input.txt"</span>) <span class="kw">as</span> f:</span></div>
+			<div class="ln"><span class="g">2</span><span class="c">    identifiers = [line.strip() <span class="kw">for</span> line <span class="kw">in</span> f <span class="kw">if</span> line.strip()]</span><span class="tw"><table><tr><th></th><th>$ <span class="dd">▾</span></th></tr><tr><td class="n">0</td><td>'the-stealth-warrior'</td></tr><tr><td class="n">1</td><td>'A-B-C'</td></tr><tr><td class="n">2</td><td>'user_id'</td></tr><tr><td class="n">⋮</td><td class="q">3 more</td></tr></table></span></div>
+			<div class="ln"><span class="g">3</span></div>
+			<div class="ln"><span class="g">4</span><span class="c"><span class="kw">for</span> ident <span class="kw">in</span> identifiers:</span><span class="slider"><span class="rail"><i></i></span>3 / 6</span><span class="w small"><span class="q">'</span><span class="chr">u</span><span class="chr">s</span><span class="chr">e</span><span class="chr">r</span><span class="chr">_</span><span class="chr">i</span><span class="chr">d</span><span class="q">'</span></span></div>
+			<div class="ln cur"><span class="g">5</span><span class="c">    words = ident.replace(<span class="st">"_"</span>, <span class="st">"-"</span>)</span><span class="w focus" id="hero-w"><span class="chr anchor">^</span><span class="chr lit">u</span><span class="chr lit">s</span><span class="chr lit">e</span><span class="chr lit">r</span><span class="chr lit">-</span><span class="chr fz">i</span><span class="chr fz">d</span><span class="chr anchor">$</span><span class="toolbar"><span class="tb on">ab</span><span class="tb">.*</span><span class="tb">[i]</span><span class="tb">⌖</span></span><span class="acts"><span class="act">Count</span><span class="act">Substrs</span><span class="act">Split</span><span class="act">Replace</span><span class="act">▾</span></span><span class="chain" title="linked to line 7"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6.5 9.5 9.5 6.5"/><path d="M7 4.5 8.5 3a2.5 2.5 0 0 1 3.5 3.5L10.5 8"/><path d="M9 11.5 7.5 13A2.5 2.5 0 0 1 4 9.5L5.5 8"/></svg></span></span></div>
+			<div class="ln"><span class="g">6</span><span class="c">    <span class="cm">#%click</span><span class="fold">…</span></span></div>
+			<div class="ln" id="hero-linked"><span class="g">7</span><span class="c">    str1 = re.search(<span class="st">r'user-[a-z]+'</span>, words).group()</span><span class="w small"><span class="q">'</span><span class="chr">u</span><span class="chr">s</span><span class="chr">e</span><span class="chr">r</span><span class="chr">-</span><span class="chr">i</span><span class="chr">d</span><span class="q">'</span></span></div>
+			<div class="ln"><span class="g">8</span><span class="c">    parts = words.split(<span class="st">"-"</span>)</span><span class="tw"><table><tr><th></th><th>$ <span class="dd">▾</span></th></tr><tr><td class="n">0</td><td>'user'</td></tr><tr><td class="n">1</td><td>'id'</td></tr></table></span></div>
+			<div class="ln"><span class="g">9</span><span class="c">    <span class="fn">print</span>(parts[<span class="st">2</span>])</span><span class="w small"><span class="err">IndexError: list index out of range</span></span></div>
+			<svg class="arrow-svg" width="780" height="220" aria-hidden="true"><path d="M 712 122 C 712 150, 400 158, 118 156" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="3 3"/><circle cx="118" cy="156" r="3" fill="var(--accent)"/></svg>
+		</div></div>
+	</div>
+	<figcaption><span class="figlabel">Recreation</span>What the editor looks like with Clickacode running. Every line that produced a value has a widget at its end. The line the cursor is on (line 5) shows its widget in full, with a tool toolbar and action buttons; the others are drawn small. The loop on line 4 has a slider picking iteration 3 of 6, so the body shows the values from that iteration. Line 5's widget is linked to line 7, a line it generated and keeps rewriting as the selection changes. The <code>#%click</code> comment on line 6 holds that widget's saved configuration, folded to a chip. Line 9 shows an uncaught error in place.</figcaption>
+</figure>
+
+<section class="prose" id="processes">
+<h2>Three processes</h2>
+<p>Clickacode is spread over three running programs. Two are ordinary VS Code processes with new code added; one is Python.</p>
+</section>
+
+<figure class="wide">
+<svg viewBox="0 0 780 400" role="img" aria-label="Three stacked processes: the renderer, the Electron main process, and a Python worker, connected by an IPC channel and by stdin/stdout carrying newline-delimited JSON.">
+	<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+	<!-- renderer -->
+	<rect x="20" y="16" width="480" height="96" rx="4" class="d-box"/>
+	<text x="36" y="42" class="d-t-b">Renderer (Electron window, TypeScript)</text>
+	<text x="36" y="62" class="d-t-s">An editor contribution attached to every code editor.</text>
+	<text x="36" y="80" class="d-t-s">Owns: widgets, the queue of UI events, every visualizer's saved</text>
+	<text x="36" y="96" class="d-t-s">state, and the decision to start a run.</text>
+	<!-- main -->
+	<rect x="20" y="168" width="480" height="80" rx="4" class="d-box"/>
+	<text x="36" y="194" class="d-t-b">Main process (Electron / Node, TypeScript)</text>
+	<text x="36" y="214" class="d-t-s">A process service. Owns: pools of pre-warmed Python workers,</text>
+	<text x="36" y="230" class="d-t-s">matching runs to workers, timeouts, timing.</text>
+	<!-- python -->
+	<rect x="20" y="304" width="480" height="80" rx="4" class="d-acc"/>
+	<text x="36" y="330" class="d-t-b">Python worker (one per run, then exits)</text>
+	<text x="36" y="350" class="d-t-s">The runner parses, rewrites and executes the user's program.</text>
+	<text x="36" y="366" class="d-t-s">Visualizer modules turn a value plus UI state into HTML.</text>
+	<!-- arrows renderer<->main -->
+	<line x1="200" y1="112" x2="200" y2="168" class="d-ln" marker-end="url(#ar)"/>
+	<line x1="320" y1="168" x2="320" y2="112" class="d-ln" marker-end="url(#ar)"/>
+	<text x="520" y="130" class="d-t-s">VS Code IPC channel</text>
+	<text x="520" y="146" class="d-t-acc">↓ startProgram, sendEvents, cancel</text>
+	<text x="520" y="162" class="d-t-acc">↑ spawn, item, loop, output, resumed, end</text>
+	<!-- arrows main<->python -->
+	<line x1="200" y1="248" x2="200" y2="304" class="d-ln" marker-end="url(#ar)"/>
+	<line x1="320" y1="304" x2="320" y2="248" class="d-ln" marker-end="url(#ar)"/>
+	<text x="520" y="266" class="d-t-s">stdin / stdout, one JSON object per line</text>
+	<text x="520" y="282" class="d-t-acc">↓ run, events, init_imports, init_run</text>
+	<text x="520" y="298" class="d-t-acc">↑ checkpoint_ready, item, output, loop, end</text>
+</svg>
+<figcaption><span class="figlabel">Figure</span>The renderer never talks to Python directly. It asks the main process to run some code and listens to a stream of typed messages tagged with a run id. Process management lives in the main process; the program and the HTML live in Python.</figcaption>
+</figure>
+
+<section class="prose">
+<div class="callout"><strong>The choice that shapes everything else:</strong> every run is a fresh Python process that executes the whole program from the top and then exits. Nothing survives between keystrokes except what the renderer chooses to send back in with the next run. That makes the system easy to reason about, and most of the engineering below goes into making it fast anyway.</div>
+</section>
+
+<section class="prose" id="run">
+<h2>Anatomy of one run</h2>
+<p>When the renderer decides the program should run, about 100 ms after the last keystroke, the following happens.</p>
+</section>
+
+<figure class="wide">
+<svg viewBox="0 0 800 440" role="img" aria-label="Sequence diagram of a run across renderer, main process and Python worker: package the run, pick a worker, rewrite and execute the program, stream items back progressively, render, then end.">
+	<defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+	<!-- lane heads -->
+	<rect x="40" y="14" width="150" height="30" rx="4" class="d-box"/><text x="115" y="34" text-anchor="middle" class="d-t-b">Renderer</text>
+	<rect x="325" y="14" width="150" height="30" rx="4" class="d-box"/><text x="400" y="34" text-anchor="middle" class="d-t-b">Main process</text>
+	<rect x="610" y="14" width="150" height="30" rx="4" class="d-acc"/><text x="685" y="34" text-anchor="middle" class="d-t-b">Python worker</text>
+	<line x1="115" y1="44" x2="115" y2="425" class="d-lane"/>
+	<line x1="400" y1="44" x2="400" y2="425" class="d-lane"/>
+	<line x1="685" y1="44" x2="685" y2="425" class="d-lane"/>
+	<!-- 1 keystroke -->
+	<circle cx="115" cy="76" r="4" fill="currentColor"/>
+	<text x="128" y="72" class="d-t">keystroke</text>
+	<text x="128" y="88" class="d-t-s">100 ms debounce, then package the run</text>
+	<!-- 2 startProgram -->
+	<line x1="115" y1="112" x2="400" y2="112" class="d-ln" marker-end="url(#ar2)"/>
+	<text x="257" y="106" text-anchor="middle" class="d-t">startProgram</text>
+	<text x="257" y="128" text-anchor="middle" class="d-t-s">file text, path, cursor line, every model + queued events,</text>
+	<text x="257" y="142" text-anchor="middle" class="d-t-s">stdin document, loop pins, live-only flag</text>
+	<!-- 3 pick worker -->
+	<rect x="330" y="160" width="140" height="22" rx="3" class="d-box-muted"/>
+	<text x="400" y="175" text-anchor="middle" class="d-t-s">pick a warm worker</text>
+	<line x1="400" y1="198" x2="685" y2="198" class="d-ln" marker-end="url(#ar2)"/>
+	<text x="542" y="192" text-anchor="middle" class="d-t">run  (one JSON line on stdin)</text>
+	<!-- 4 rewrite & exec -->
+	<rect x="600" y="214" width="170" height="60" rx="3" class="d-box-muted"/>
+	<text x="685" y="232" text-anchor="middle" class="d-t-s">parse → rewrite AST</text>
+	<text x="685" y="247" text-anchor="middle" class="d-t-s">compile (line numbers kept)</text>
+	<text x="685" y="262" text-anchor="middle" class="d-t-s">exec; each log site → HTML</text>
+	<!-- 5 items stream -->
+	<line x1="685" y1="292" x2="400" y2="292" class="d-ln-acc" marker-end="url(#ar2)"/>
+	<line x1="400" y1="292" x2="115" y2="292" class="d-ln-acc" marker-end="url(#ar2)"/>
+	<text x="542" y="286" text-anchor="middle" class="d-t-acc">item, item, output, loop …</text>
+	<text x="257" y="286" text-anchor="middle" class="d-t-acc">relayed, tagged with run id</text>
+	<line x1="685" y1="318" x2="400" y2="318" class="d-ln-acc" marker-end="url(#ar2)"/>
+	<line x1="400" y1="318" x2="115" y2="318" class="d-ln-acc" marker-end="url(#ar2)"/>
+	<text x="542" y="312" text-anchor="middle" class="d-t-acc">item, item …</text>
+	<rect x="30" y="330" width="170" height="36" rx="3" class="d-box-muted"/>
+	<text x="115" y="345" text-anchor="middle" class="d-t-s">create / update widgets</text>
+	<text x="115" y="359" text-anchor="middle" class="d-t-s">batched, at most every 16 ms</text>
+	<!-- 6 end -->
+	<line x1="685" y1="392" x2="400" y2="392" class="d-ln" marker-end="url(#ar2)"/>
+	<line x1="400" y1="392" x2="115" y2="392" class="d-ln" marker-end="url(#ar2)"/>
+	<text x="542" y="386" text-anchor="middle" class="d-t">end  (exit code, awaiting input?)</text>
+	<text x="128" y="412" class="d-t-s">remove widgets that produced no item; worker exits</text>
+</svg>
+<figcaption><span class="figlabel">Figure</span>One run, start to finish. Widgets appear progressively because the runner emits each item the moment its statement executes, not when the program finishes. The whole trip is typically well under a second, and often under 100 ms for a small program on a warm worker.</figcaption>
+</figure>
+
+<section class="prose">
+<p>The rewrite step deserves a word. The runner parses the source into an abstract syntax tree, walks it, and inserts a logging call after each interesting statement. The rewritten tree is compiled directly, and because tree nodes keep their original line numbers, tracebacks and line attribution stay correct. There is no <code>sys.settrace</code>, no debugger, and no string-level code generation.</p>
+</section>
+
+<section class="prose" id="logging">
+<h2>What gets logged, and how a widget knows who it is</h2>
+<h3>Statements that produce widgets</h3>
+<p>The rewriter treats each statement kind a little differently, but the pattern is always the same: evaluate the expression once into a temporary, do what the original statement did with the temporary, then log the temporary. Evaluating once matters because expressions can have side effects.</p>
+</section>
+<div class="tbl prose"><table>
+<tr><th>Statement</th><th>What is logged</th></tr>
+<tr><td><code>x = expr</code></td><td>the value, tagged with the name <code>x</code></td></tr>
+<tr><td><code>x += expr</code></td><td>the result after the update</td></tr>
+<tr><td><code>if test:</code></td><td>the test's truth value</td></tr>
+<tr><td><code>for a, b in ...:</code></td><td>each loop variable, at the top of each iteration</td></tr>
+<tr><td><code>return expr</code></td><td>the returned value</td></tr>
+<tr><td>bare expression</td><td>its value</td></tr>
+<tr><td><code>print(a, b)</code></td><td>each argument separately, as well as the text going to the console</td></tr>
+<tr><td><code>def f(x, y):</code></td><td>each parameter, at the top of each call</td></tr>
+</table></div>
+<section class="prose">
+<p>Not logged: <code>while</code> tests, annotated assignments, <code>with</code> targets, comprehension internals, lambdas.</p>
+<p>Along with the value, each log site carries the <strong>name and source text</strong> of what produced it, and sometimes the exact <strong>source span</strong> of the expression. The span is handed out only where the value literally is an expression written on the line, because that is the only case where a visualizer may legitimately rewrite it in place. The table's Sort does exactly that.</p>
+
+<h3>Identity: line and site</h3>
+<p>A line can have more than one log site (<code>for a, b in ...</code> has two). Each site gets a static index at rewrite time, and a widget's identity is the pair of line number and site index. It is stable across runs and across loop iterations, and it is the key everything else hangs off: the visualizer's saved state, the queue of pending UI events, the on-screen DOM node.</p>
+<p>When the user edits the file, the renderer shifts these line numbers itself using the edit's line delta rather than waiting for a run to say where things went. A command that arrives from Python after the user inserted a line above is translated through a small map from "the line Python was told about" to "where that line is now."</p>
+
+<h3>Paths: which iteration, which call</h3>
+<p>A line inside a loop runs many times, so "the value of this line" really means "the value in some iteration." The rewriter wraps every loop and every function body in enter and exit hooks, and the runner keeps a stack of header-line and iteration-number frames. Every logged item carries a copy of that stack, its <strong>path</strong>. A function is treated as a loop over its calls, so a slider on a <code>def</code> line picks a call the way a slider on a <code>for</code> line picks an iteration. Recursive activations are numbered in entry order.</p>
+<p>When a loop or function finishes, the runner sends a <code>loop</code> message with the header line and the count. That is what sizes the slider on the header line.</p>
+
+<h3>The execution step</h3>
+<p>The runner also increments a counter on every log call, whether or not the value is rendered, and each item carries its value. It is the total order over "moments in the program" that the checkpoint 3 optimization below depends on.</p>
+</section>
+
+<section class="prose" id="visualizers">
+<h2>Visualizers: Elm in Python</h2>
+<p>A visualizer is a Python module whose filename ends in <code>_visualizer.py</code>. The runner loads them from three places in priority order: a <code>.snc_visualizers/</code> folder in the workspace, one in the home directory, and the built-in set that ships with the app. Within a folder they are tried alphabetically and the first whose <code>can_visualize(value)</code> returns true wins. That is why the fallback object visualizer's filename starts with <code>z_</code>, and why the error visualizer sorts first.</p>
+<p>An interactive visualizer follows the Elm architecture, implemented by hand in Python:</p>
+<ul>
+	<li><code>init_model(value, …)</code> returns a JSON-serializable dict of UI state.</li>
+	<li><code>visualize(value, model, …)</code> returns HTML.</li>
+	<li><code>update(event, model, value, …)</code> takes one UI event and returns a new model plus a list of commands for the editor to carry out.</li>
+</ul>
+<p>A static visualizer only needs <code>can_visualize</code> and <code>visualize</code>. Visualizers ask for optional extras simply by naming them in their signature; the runner inspects each function once and passes only what it asks for. That is how an older or third-party visualizer keeps working as the runner learns to offer more.</p>
+<div class="callout"><strong>The value is never stored in the model.</strong> The model holds only UI state, and the value is passed fresh every run. This is what lets a model survive an edit that changes the value.</div>
+
+<h3>The built-in set</h3>
+<ul>
+	<li><strong>Strings</strong> are drawn one character per element, with visible markers for start and end of string and for newlines. This is the visualizer that builds regular expressions by demonstration.</li>
+	<li><strong>Lists and dicts</strong> become a table with configurable columns, each column a Python expression over the row. Per-column menus filter, sort, convert types, group, and aggregate. The table paginates at 50 rows while always showing the last three, because a list is as much its end as its beginning.</li>
+	<li><strong>Tuples and named tuples</strong> are a row of child visualizers. The tuple visualizer deliberately has no search or actions: a tuple is a collection of unlike things. What it contributes is a name for each element, so every element is a drag handle.</li>
+	<li><strong>Everything else</strong> goes to an object visualizer showing accessor → value rows, with autocomplete for adding fields.</li>
+	<li><strong>NumPy and pandas</strong> values get read-only summaries. These modules recognize their types by module name rather than importing the libraries, so a run without NumPy never pays NumPy's import cost.</li>
+	<li><strong>An uncaught exception</strong> is wrapped in a marker type and rendered in red at the line that raised it, in the iteration that raised it. The wrapper exists so an exception the program caught and is merely holding still renders as an ordinary object.</li>
+</ul>
+
+<h3>Nesting</h3>
+<p>A table cell holding a string gets the string visualizer; a tuple element holding a list gets the table. A parent asks the runner for the right child visualizer, wraps the child's HTML in an element tagged with a child key, and the renderer wraps any event from inside that element as a child event so the parent can route it down. Only the child that currently has focus receives events; the first click on an unfocused child just moves focus, so sweeping the mouse across a table cannot hijack it. Nesting depth is capped as a cycle backstop.</p>
+
+<h3>Focus and the small rendering</h3>
+<p>The renderer tells Python which line the cursor is on. Every widget on any other line renders in a compact form with no toolbars or search boxes. Clicking a small widget pins focus to it and reruns immediately. This is why a file full of widgets does not turn into a wall of toolbars, and also why moving the cursor is itself a reason to rerun.</p>
+
+<h3>Visualizers can evaluate in the program's scope</h3>
+<p>At each log site the rewriter also injects a tiny lambda that calls <code>eval</code> at that point in the program, and visualizers receive it. A table column written as <code>$ * factor</code> can therefore refer to the program's own <code>factor</code> variable. There is no sandbox here; this is <code>eval</code> inside the user's own process. The mitigations are conventions: catch exceptions, and never touch the user's <code>random</code> state, since visualizer code runs between the user's statements and would otherwise shift every subsequent random draw.</p>
+
+<h3>Determinism and hot reload</h3>
+<p>Because the program runs dozens of times a minute, nondeterminism would make the pictures flicker. The runner seeds <code>random</code> and <code>numpy.random</code> after the imports, and workers start with a fixed hash seed so set iteration order is stable. A user's own <code>random.seed()</code> still wins.</p>
+<p>At the start of every run the runner compares each visualizer file's modification time against the one it loaded and re-executes changed modules. The runner itself cannot reload, so the main process checks the runner's modification time before each run and drains its worker pools if it changed.</p>
+</section>
+
+<section class="prose" id="interaction">
+<h2>The interaction round trip</h2>
+<p>This is what makes the system feel like an application rather than a debugger display.</p>
+<h3>HTML attributes carry Python</h3>
+<p>The HTML a visualizer emits has attributes like <code>snc-mouse-down="MouseDown(index=17)"</code>. The value is Python source: the repr of a small dataclass constructor defined in the visualizer's own module. The renderer never interprets these strings. When a DOM event fires it walks up from the target to the nearest element with the attribute and sends the string back with a deliberately minimal event record: type, buttons, modifier keys, and the typed value for input events. No coordinates cross the wire, so two identical mouse moves are byte-identical and can be deduplicated. Python's <code>update</code> evaluates the string in the visualizer module's namespace and gets the event object.</p>
+<p>There are shorthands. An element tagged <code>snc-idx="5"</code> expands to mouse down, move, and up events at index 5. For runs of text the renderer uses the browser's caret-from-point API to resolve the exact character under the pointer, including the gaps between spans and the space past the end of a line.</p>
+</section>
+
+<figure class="wide">
+<svg viewBox="0 0 820 400" role="img" aria-label="Flow of one UI event: stamped with an id and queued on its widget; if a run in flight has not reached that widget the event is handed to it, otherwise a new run starts and the previous one is killed; the runner applies queued events when it reaches the site and reports which ids it handled; the renderer requeues the rest for one retry.">
+	<defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+	<rect x="20" y="20" width="200" height="64" rx="4" class="d-box"/>
+	<text x="120" y="44" text-anchor="middle" class="d-t-b">DOM event on a widget</text>
+	<text x="120" y="62" text-anchor="middle" class="d-t-s">snc-mouse-move="MouseMove(17)"</text>
+	<text x="120" y="76" text-anchor="middle" class="d-t-s">+ {type, buttons, modifiers}</text>
+	<line x1="220" y1="52" x2="290" y2="52" class="d-ln" marker-end="url(#ar3)"/>
+	<rect x="290" y="20" width="200" height="64" rx="4" class="d-box"/>
+	<text x="390" y="44" text-anchor="middle" class="d-t-b">stamp id, queue it</text>
+	<text x="390" y="62" text-anchor="middle" class="d-t-s">on the widget's (line, site)</text>
+	<text x="390" y="76" text-anchor="middle" class="d-t-s">renderer memory</text>
+	<line x1="490" y1="52" x2="560" y2="52" class="d-ln" marker-end="url(#ar3)"/>
+	<rect x="600" y="20" width="200" height="64" rx="4" class="d-box"/>
+	<text x="700" y="44" text-anchor="middle" class="d-t-b">a run is in flight and</text>
+	<text x="700" y="62" text-anchor="middle" class="d-t-b">hasn't reached this widget?</text>
+	<!-- yes branch -->
+	<line x1="640" y1="84" x2="640" y2="150" class="d-ln-acc" marker-end="url(#ar3)"/>
+	<text x="650" y="120" class="d-t-acc">yes</text>
+	<rect x="540" y="150" width="260" height="58" rx="4" class="d-acc"/>
+	<text x="670" y="172" text-anchor="middle" class="d-t-b">hand it to that run</text>
+	<text x="670" y="190" text-anchor="middle" class="d-t-s">"events" message on the worker's stdin;</text>
+	<text x="670" y="203" text-anchor="middle" class="d-t-s">no new run starts</text>
+	<!-- no branch -->
+	<line x1="760" y1="84" x2="760" y2="150" class="d-ln" />
+	<line x1="760" y1="150" x2="760" y2="230" class="d-ln" marker-end="url(#ar3)"/>
+	<text x="770" y="120" class="d-t-s">no</text>
+	<rect x="540" y="230" width="260" height="58" rx="4" class="d-box"/>
+	<text x="670" y="252" text-anchor="middle" class="d-t-b">start a new run</text>
+	<text x="670" y="270" text-anchor="middle" class="d-t-s">the run in flight is killed; every</text>
+	<text x="670" y="283" text-anchor="middle" class="d-t-s">model and its queue go along</text>
+	<!-- converge to runner -->
+	<line x1="540" y1="179" x2="470" y2="179" class="d-ln-acc"/>
+	<line x1="540" y1="259" x2="470" y2="259" class="d-ln"/>
+	<line x1="470" y1="179" x2="470" y2="259" class="d-ln"/>
+	<line x1="470" y1="219" x2="380" y2="219" class="d-ln" marker-end="url(#ar3)"/>
+	<rect x="150" y="186" width="230" height="66" rx="4" class="d-acc"/>
+	<text x="265" y="208" text-anchor="middle" class="d-t-b">runner reaches the site</text>
+	<text x="265" y="226" text-anchor="middle" class="d-t-s">drains stdin; if the model is reusable,</text>
+	<text x="265" y="240" text-anchor="middle" class="d-t-s">applies each event via update()</text>
+	<line x1="265" y1="252" x2="265" y2="310" class="d-ln" marker-end="url(#ar3)"/>
+	<rect x="110" y="310" width="310" height="66" rx="4" class="d-box"/>
+	<text x="265" y="332" text-anchor="middle" class="d-t-b">item: html, model, handledEventIds, commands</text>
+	<text x="265" y="350" text-anchor="middle" class="d-t-s">renderer requeues unhandled ids for one retry,</text>
+	<text x="265" y="364" text-anchor="middle" class="d-t-s">then drops them; commands are applied</text>
+	<path d="M110 343 L60 343 L60 52 L20 52" class="d-ln-d"/>
+</svg>
+<figcaption><span class="figlabel">Figure</span>How one event reaches its visualizer. A drag at 60 Hz costs roughly one run per trip through the program, not one run per mouse move, because most events are handed to a run already under way.</figcaption>
+</figure>
+
+<section class="prose">
+<h3>Events queue on their widget and travel with the next run</h3>
+<p>There is no persistent Python process to send an event to. So the renderer stamps each event with an id, appends it to its widget's queue, and starts a run. The run carries every widget's model and queue. When the runner's logging call reaches a widget it applies the queued events through <code>update</code>, renders, and reports on the resulting item which event ids it handled. The renderer requeues anything unhandled, retries exactly once, then drops it rather than spinning runs forever. Events for a widget a completed run never reached are dropped too.</p>
+<p>Why report handled ids rather than assume everything sent was applied? Because the runner declines to replay events onto a model it had to rebuild. A model is reused only if the value's type fingerprint, the source expression, and the line's saved configuration all match; otherwise <code>init_model</code> runs fresh, and replaying old events onto it would be wrong.</p>
+
+<h3>An event does not always need its own run</h3>
+<p>A run reaches a given widget long before the program ends. If a run is in flight and has not yet emitted the item for the widget the event is for, the renderer hands the event to that run: the main process writes an <code>events</code> message onto the worker's stdin, and the runner drains its stdin just before it looks up a widget's pending events. No new run starts.</p>
+<p>One consequence on the Python side: exactly one reader owns the protocol file descriptor with its own byte buffer, and <code>sys.stdin.readline()</code> is never used alongside it. A buffered text reader would read ahead and silently swallow an <code>events</code> message arriving hard behind a <code>run</code> message.</p>
+
+<h3>Commands ride on the item</h3>
+<p>When <code>update</code> returns commands (insert this code, copy this text, rewrite this comment), they are attached to the same <code>item</code> message as the rendered HTML rather than sent separately. A run can be killed at any instant by the next keystroke. If the command were its own message, a run could die between the item that retired an event and the command that event produced, and a drag's line of code would silently never be written. One message means both or neither.</p>
+
+<h3>What the renderer does with the HTML</h3>
+<p>Each item becomes an overlay widget positioned in absolute pixels at the end of its line. Overlay widgets float, so each line also gets an empty view zone under it to reserve vertical space. A widget that grows past 150 px in either dimension switches to a block layout under the line, aligned with the code's indentation.</p>
+<p>Widget content is replaced by a full innerHTML swap, but the renderer saves and restores focus (by element name), input selection ranges, any text typed since the render was requested, and the scroll position of every scrollable descendant, so a rerun mid-drag is invisible. Byte-identical HTML is skipped entirely, and view zone heights are only replaced when they actually changed, because changing one relays out every line below it.</p>
+<p>Keeping the editor from jumping is its own subsystem. Before changing zones the controller anchors on the focused line, or the line nearest the viewport's midpoint, and restores the scroll offset afterwards. When content above the viewport shrinks and the needed scroll would be negative, it inserts a phantom spacer at the top of the document and melts it away as the user scrolls down.</p>
+<p>While the file has a syntax error, widgets are greyed out and made non-interactive rather than removed, so the last good picture stays on screen while you finish typing.</p>
+</section>
+
+<section class="prose" id="speed">
+<h2>A fresh process per keystroke, made fast</h2>
+<p>A Python process takes a noticeable fraction of a second to start, and <code>import pandas</code> alone can take a second or more. Three tiers of pre-warmed workers hide this, each five workers deep.</p>
+</section>
+
+<figure class="wide">
+<svg viewBox="0 0 820 300" role="img" aria-label="Four horizontal timelines comparing a cold start with checkpoint 1, 2 and 3 workers. Each tier has done more work ahead of time, leaving less on the critical path after a keystroke.">
+	<defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+	<text x="170" y="22" class="d-t-s">done before the keystroke</text>
+	<rect x="150" y="12" width="14" height="12" class="d-box-muted"/>
+	<text x="400" y="22" class="d-t-s">on the critical path after it</text>
+	<rect x="380" y="12" width="14" height="12" class="d-acc"/>
+	<!-- rows -->
+	<g>
+		<text x="20" y="68" class="d-t-b">Cold</text>
+		<rect x="150" y="52" width="110" height="24" class="d-acc"/><text x="205" y="69" text-anchor="middle" class="d-t-s">start Python</text>
+		<rect x="260" y="52" width="110" height="24" class="d-acc"/><text x="315" y="69" text-anchor="middle" class="d-t-s">load visualizers</text>
+		<rect x="370" y="52" width="150" height="24" class="d-acc"/><text x="445" y="69" text-anchor="middle" class="d-t-s">imports</text>
+		<rect x="520" y="52" width="180" height="24" class="d-acc"/><text x="610" y="69" text-anchor="middle" class="d-t-s">program prefix</text>
+		<rect x="700" y="52" width="100" height="24" class="d-acc"/><text x="750" y="69" text-anchor="middle" class="d-t-s">tail</text>
+	</g>
+	<g>
+		<text x="20" y="122" class="d-t-b">Checkpoint 1</text>
+		<rect x="150" y="106" width="110" height="24" class="d-box-muted"/><text x="205" y="123" text-anchor="middle" class="d-t-s">start Python</text>
+		<rect x="260" y="106" width="110" height="24" class="d-box-muted"/><text x="315" y="123" text-anchor="middle" class="d-t-s">load visualizers</text>
+		<rect x="370" y="106" width="150" height="24" class="d-acc"/><text x="445" y="123" text-anchor="middle" class="d-t-s">imports</text>
+		<rect x="520" y="106" width="180" height="24" class="d-acc"/><text x="610" y="123" text-anchor="middle" class="d-t-s">program prefix</text>
+		<rect x="700" y="106" width="100" height="24" class="d-acc"/><text x="750" y="123" text-anchor="middle" class="d-t-s">tail</text>
+	</g>
+	<g>
+		<text x="20" y="176" class="d-t-b">Checkpoint 2</text>
+		<rect x="150" y="160" width="110" height="24" class="d-box-muted"/><text x="205" y="177" text-anchor="middle" class="d-t-s">start Python</text>
+		<rect x="260" y="160" width="110" height="24" class="d-box-muted"/><text x="315" y="177" text-anchor="middle" class="d-t-s">load visualizers</text>
+		<rect x="370" y="160" width="150" height="24" class="d-box-muted"/><text x="445" y="177" text-anchor="middle" class="d-t-s">leading imports</text>
+		<rect x="520" y="160" width="180" height="24" class="d-acc"/><text x="610" y="177" text-anchor="middle" class="d-t-s">program prefix</text>
+		<rect x="700" y="160" width="100" height="24" class="d-acc"/><text x="750" y="177" text-anchor="middle" class="d-t-s">tail</text>
+		<text x="150" y="200" class="d-t-s">keyed by the file's leading import lines; serves any body with those imports</text>
+	</g>
+	<g>
+		<text x="20" y="244" class="d-t-b">Checkpoint 3</text>
+		<rect x="150" y="228" width="110" height="24" class="d-box-muted"/><text x="205" y="245" text-anchor="middle" class="d-t-s">start Python</text>
+		<rect x="260" y="228" width="110" height="24" class="d-box-muted"/><text x="315" y="245" text-anchor="middle" class="d-t-s">load visualizers</text>
+		<rect x="370" y="228" width="150" height="24" class="d-box-muted"/><text x="445" y="245" text-anchor="middle" class="d-t-s">leading imports</text>
+		<rect x="520" y="228" width="180" height="24" class="d-box-muted"/><text x="610" y="245" text-anchor="middle" class="d-t-s">prefix, paused at widget</text>
+		<rect x="700" y="228" width="100" height="24" class="d-acc"/><text x="750" y="245" text-anchor="middle" class="d-t-s">update + tail</text>
+		<text x="150" y="268" class="d-t-s">keyed by everything that could change what the prefix does: code, cursor line, pins, stdin, target widget</text>
+	</g>
+	<line x1="140" y1="40" x2="140" y2="280" class="d-lane"/>
+	<text x="140" y="292" text-anchor="middle" class="d-t-s">keystroke</text>
+</svg>
+<figcaption><span class="figlabel">Figure</span>Each tier moves more of the program off the critical path. Checkpoint 3 workers have already run the program up to the widget the user is interacting with and are paused there holding live state, so a drag on a visualizer below an expensive line costs only that visualizer's update and the rest of the program.</figcaption>
+</figure>
+
+<section class="prose">
+<p><strong>Checkpoint 1</strong> workers have started Python and loaded the runner and all visualizers. A keystroke takes one and a replacement is spawned.</p>
+<p><strong>Checkpoint 2</strong> workers have also executed the program's leading <code>import</code> statements. Editing the body of a program does not change its imports, so almost every keystroke can use one. The main process keys these workers by a cheap line-scan of the leading imports; the worker re-checks with a real parse and, if the imports turn out to differ, executes them itself. A wrong guess only costs speed, never correctness.</p>
+<p><strong>Checkpoint 3</strong> workers have gone further: run up to the log site of the widget the user most recently interacted with and paused there. When a run arrives, the worker applies the event to that visualizer and runs only the tail. This is valid only while nothing that could change what the prefix does is different: the code, the file path, the cursor line (which changes every widget's small or full rendering), loop pins, the stdin document, live-only mode, and which widget to stop at. Any change kills the pool. Cursor movement therefore invalidates it, which is why checkpoint 2 gave up half its workers to fund it rather than the pool being bigger.</p>
+<p>A paused worker has no run to attribute its output to, so it holds everything the prefix produced and releases it under the arriving run's id, except items, which it drops because the renderer already holds byte-identical ones from the run that warmed it. The renderer, told through a <code>resumed</code> message which execution step the run started from, keeps on-screen widgets whose step is earlier than that. If the prefix never reaches its target (an untaken branch, an exception above it), the worker discards itself rather than serve a run whose gesture would land on a program that already finished.</p>
+<p>Several scheduling rules came out of real lag investigations:</p>
+<ul>
+	<li><strong>A run waiting for a worker outranks warming one.</strong> A worker reaching checkpoint 1 while a keystroke has nothing to run on is handed over immediately instead of being sent off to import.</li>
+	<li><strong>Queued runs are dropped, not served.</strong> A new run supersedes the one in flight, whose worker is killed, and every run still waiting for a worker. Under a flood of mouse moves the queue itself is the latency.</li>
+	<li><strong>Pools refill as workers are taken, not when runs complete.</strong> A burst of runs never reaches <code>end</code>, since each kills the previous one, so refilling on completion would drain the pool and dump the burst onto cold workers.</li>
+	<li><strong>A warm is bounded by a ten-second timer.</strong> A prefix with a <code>sleep</code> or a non-terminating loop would otherwise leave five workers spinning silently. On expiry further checkpoint 3 warms are suppressed until the key changes.</li>
+</ul>
+<p>A run itself has a 60-second timeout, and every worker serves exactly one run and exits.</p>
+<p>Two more speedups live elsewhere. <strong>Network reads are cached:</strong> the runner patches <code>urlopen</code> so a program that downloads a URL is served from a cache folder beside the file, keyed by URL hash. Entries last for the app session, and editing the line is how you force a refetch. And <strong>the renderer suppresses events aggressively:</strong> mouse moves are throttled to 16 ms, identical moves are dropped, moves over small widgets and idle moves over plain characters never leave the renderer, and an empty event string is treated as a no-op rather than costing a run.</p>
+</section>
+
+<section class="prose" id="state">
+<h2>Where state lives</h2>
+<p>Because Python is stateless between runs, everything that must persist is owned by the renderer or the file.</p>
+</section>
+<div class="tbl prose"><table>
+<tr><th>State</th><th>Lives in</th><th>Travels how</th></tr>
+<tr><td>Visualizer UI state (model)</td><td>renderer memory, keyed by line and site</td><td>sent with every run, returned on every item</td></tr>
+<tr><td>Pending UI events</td><td>renderer memory, per widget</td><td>sent with every run; handled ids come back</td></tr>
+<tr><td>Columns and fields</td><td>a <code>#%click</code> comment in the source file</td><td>parsed by the runner; rewritten via a command</td></tr>
+<tr><td>Loop iteration pins</td><td>renderer memory, keyed by a decoration on the header line</td><td>sent with every run</td></tr>
+<tr><td>The program's stdin</td><td>a document on disk beside the source, open as a tab</td><td>sent with every run</td></tr>
+<tr><td>Last-touched widget</td><td>renderer memory</td><td>drives checkpoint 3</td></tr>
+</table></div>
+<section class="prose">
+<p>The <code>#%click</code> comment deserves a word. What a visualizer wants to remember across sessions (a table's columns, an object's shown fields) is saved as JSON in a comment directly above the line that produced the value:</p>
+<pre><code>#%click [{"expr": "$['name']"}, {"expr": "$['orders']", "children": [{"expr": "$.total"}]}]
+people = [{'name': 'Alice', 'orders': [...]}, ...]</code></pre>
+<p>The comment binds to the next non-blank, non-comment line, so inserting blank lines or ordinary comments does not re-bind it. The JSON is a list of slots, each an expression with optional children, and it has no type keys: a configuration written for one shape of value applies to whatever the line holds now, and an expression that no longer fits shows an error cell rather than being silently dropped. The editor folds each comment's JSON to a <code>…</code> chip and unfolds it only on click, since the JSON is storage, not something to read. A hash of the slots is stamped into the model, so a comment edited by hand or swapped in by a git checkout rebuilds the model, while the visualizer's own save does not.</p>
+</section>
+
+<section class="prose" id="codegen">
+<h2>From clicks to code</h2>
+<p>This is the part most specific to Clickacode. Several distinct ideas combine.</p>
+<h3>Commands</h3>
+<p><code>update</code> can return commands the editor carries out:</p>
+<ul>
+	<li><strong>NewCode:</strong> a suggested variable name, a line or block of code, the imports it needs, and optionally a <code>#%click</code> configuration the new line should open with, so a line generated from a table inherits the table's columns. The editor inserts the code after the triggering line at the right indentation (deeper if the trigger line opens a block) and picks a variable name that does not collide with anything in the file. Only the editor decides where a missing <code>import re</code> goes, because only it knows the file as it stands.</li>
+	<li><strong>ChangeSelectedText:</strong> rewrite a range that a previous NewCode created. This is what makes continued dragging update the line in place rather than stacking new lines.</li>
+	<li><strong>SetConfigComment:</strong> rewrite the line's <code>#%click</code> comment.</li>
+	<li><strong>CopyToClipboard.</strong></li>
+</ul>
+<p>An undo stop is pushed on every widget mousedown, so each gesture's edits become their own undo step. After a NewCode the caret stays on the trigger line so the visualizer keeps focus and the user can keep interacting with it. The inserted line is then <strong>linked</strong> to the widget: a chain icon appears in the widget's corner, an arrow is drawn from the widget to the line, and further gestures rewrite that line. Clicking the chain unlinks; clicking again can re-link by parsing the existing line and adopting it rather than clobbering it.</p>
+
+<h3>A grammar that runs both ways</h3>
+<p>Each generating visualizer has a grammar: a set of named rules, where a rule is a template with typed holes such as <code>"{var:Var} = {expr:Action}"</code>, a regular expression, or a validator like <code>ast.parse</code>. Every rule also carries a dictionary of context constraints: only when the search is case-insensitive, only when the action is replace.</p>
+</section>
+
+<figure class="wide">
+<svg viewBox="0 0 820 230" role="img" aria-label="A context dictionary on the left and a line of code on the right, joined through a grammar in the middle. Generate runs left to right; parse runs right to left and recovers the context, which then re-seeds the visualizer state.">
+	<defs><marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+	<rect x="20" y="40" width="220" height="120" rx="4" class="d-box"/>
+	<text x="130" y="64" text-anchor="middle" class="d-t-b">context (what the user did)</text>
+	<text x="36" y="90" class="d-t-s">action:  'get'</text>
+	<text x="36" y="106" class="d-t-s">search:  r'user-[a-z]+'</text>
+	<text x="36" y="122" class="d-t-s">is_first: True</text>
+	<text x="36" y="138" class="d-t-s">is_ci:    False</text>
+	<rect x="300" y="40" width="220" height="120" rx="4" class="d-acc"/>
+	<text x="410" y="64" text-anchor="middle" class="d-t-b">grammar</text>
+	<text x="316" y="90" class="d-t-s">Assign: "{var:Var} = {expr:Action}"</text>
+	<text x="316" y="106" class="d-t-s">Action → GetFirst  if is_first</text>
+	<text x="316" y="122" class="d-t-s">GetFirst: "re.search({pat}, {src}).group()"</text>
+	<text x="316" y="138" class="d-t-s">Flags:   "re.I"  if is_ci</text>
+	<rect x="580" y="40" width="220" height="120" rx="4" class="d-box"/>
+	<text x="690" y="64" text-anchor="middle" class="d-t-b">one line of Python</text>
+	<text x="596" y="98" class="d-t-s">str1 = re.search(</text>
+	<text x="596" y="114" class="d-t-s">   r'user-[a-z]+', words</text>
+	<text x="596" y="130" class="d-t-s">).group()</text>
+	<line x1="240" y1="80" x2="300" y2="80" class="d-ln" marker-end="url(#ar5)"/>
+	<line x1="520" y1="80" x2="580" y2="80" class="d-ln" marker-end="url(#ar5)"/>
+	<text x="410" y="26" text-anchor="middle" class="d-t">generate: fire only rules whose constraints fit</text>
+	<line x1="580" y1="130" x2="520" y2="130" class="d-ln-acc" marker-end="url(#ar5)"/>
+	<line x1="300" y1="130" x2="240" y2="130" class="d-ln-acc" marker-end="url(#ar5)"/>
+	<text x="410" y="188" text-anchor="middle" class="d-t-acc">parse: match the line, recover the context, re-seed the model</text>
+	<text x="410" y="210" text-anchor="middle" class="d-t-s">accepted only if regenerating from the reading reproduces the line exactly</text>
+</svg>
+<figcaption><span class="figlabel">Figure</span>The same rule table generates code from visualizer state and reads visualizer state back out of code. Parsing is what lets a linked line be adopted, lets the Sort menu show which sort is ticked by reading the line, and lets the table recover tally checkmarks from a column's search expression.</figcaption>
+</figure>
+
+<section class="prose">
+<p>The string grammar has roughly twenty actions (get a slice, first match or all matches, split, replace, delete, filter, count, any/all, loop over matches, find indices, and a family for when the input is itself a list of indices or index pairs), each with variants driven by context flags: case-insensitive picks <code>re.I</code>, first-only picks <code>count=1</code> or <code>next(..., None)</code>. The table grammar has the same shape over rows, with an extra axis for whether the value is a dict (a dict filter must write a dict comprehension, not silently yield keys) and whether the user's expression referred to the row index, which forces <code>enumerate</code>. The grammar also owns variable-name suggestion: <code>data_filtered</code>, <code>str1_matches</code>, <code>parts</code>, or nothing for statement-shaped actions like loops.</p>
+
+<h3>Strings by demonstration</h3>
+<p>Dragging across the top half of characters makes a literal segment; dragging across the bottom half makes a fuzzy one. For a fuzzy drag the visualizer enumerates candidate patterns and picks the most specific character class that matches exactly the dragged text without overshooting either edge, in a fixed order. The result is stored as an ordinary Python search string such as <code>r'hello.*world'</code>, with optional postfix flags for first-only, case-insensitive, and capture. Segments can be resized by handles, split, deleted, or have their class or quantifier changed from a per-segment menu.</p>
+</section>
+
+<figure class="wide">
+<div class="demo" id="demo">
+	<div class="demo-head">
+		<h4>Try the ranking rule</h4>
+		<div class="demo-tools" role="group" aria-label="Selection tool">
+			<button type="button" data-tool="fuzzy" aria-pressed="true">fuzzy</button>
+			<button type="button" data-tool="literal" aria-pressed="false">literal</button>
+		</div>
+		<span class="hint">Drag across the string. Fuzzy picks a pattern; literal quotes what you dragged.</span>
+	</div>
+	<div class="demo-str" id="demo-str" aria-label="Sample string; drag to select"></div>
+	<div class="demo-out">
+		<div class="demo-code" id="demo-code"><span class="dim"># drag to generate a line</span></div>
+		<div class="demo-rank" id="demo-rank">Candidates are tried in this order; the first that matches exactly your selection, and nothing more, wins.</div>
+	</div>
+	<p class="demo-note">A simplified reimplementation of the real rule, running in this page. The real visualizer also adjusts the quantifier when a segment abuts a literal, supports multi-segment patterns, and rewrites the linked line in place through a run of your program.</p>
+</div>
+<figcaption><span class="figlabel">Live demo</span>How a fuzzy selection becomes a pattern. Candidate order: a content-describing class with an open quantifier, then that class with an exact count, then a negated class built from the next character, then <code>.</code> with an exact count as the last resort.</figcaption>
+</figure>
+
+<section class="prose">
+<p>A <strong>pick tool</strong> decomposes the first match into chips: start, prefix, each group, suffix, end. Selecting chips assembles an expression with algebraic simplification, so prefix plus match plus suffix collapses to the whole string, and match plus suffix becomes a slice from the match start. In multi-match mode each chip becomes a comprehension over <code>re.finditer</code>.</p>
+<p>When the string looks like a URL or names an existing file, a Fetch menu offers to generate the line that reads it as text, JSON, CSV, or Excel. Dragging a URL, or a tab from the integrated browser, into a Python file generates the same read.</p>
+
+<h3>Tables: the expression is the single source of truth</h3>
+<p>Table columns are Python expressions in a small dollar notation: <code>$</code> is the cell, <code>$$</code> the row, <code>$$$</code> the whole list, and <code>*$.members</code> splats a sub-list into sub-columns. Per-column searches are written in the column's scope and then lifted and folded into one search string in the main search box, so the composition is visible and editable as text. An aggregation is its expression: the same string is stored, evaluated for the preview, and handed to the file on drag, so the number on screen and the code in the file cannot drift.</p>
+</section>
+
+<figure class="wide">
+	<div class="screen">
+		<div class="titlebar"><span class="dots"><i></i><i></i><i></i></span><span class="tab">orders.py</span></div>
+		<div class="ed"><div class="ed-inner" style="min-width:720px">
+			<div class="ln"><span class="g">3</span><span class="c"><span class="kw">with</span> <span class="fn">open</span>(<span class="st">"orders.json"</span>) <span class="kw">as</span> f:</span></div>
+			<div class="ln cur" style="align-items:flex-start"><span class="g">4</span><span class="c">    data = <span class="fn">sorted</span>(json.load(f), key=<span class="kw">lambda</span> item: item[<span class="st">'total'</span>])</span><span class="tw" style="margin-top:0"><div class="srch">search <span>$['city'] == 'Boston'</span><span style="flex:none;border:0;color:var(--accent)">✎ 2 cols</span></div><table><tr><th></th><th>$['name'] <span class="dd">▾</span></th><th>$['total'] <span class="dd" style="color:var(--accent)">▾ sorted</span></th><th style="color:var(--accent)">+</th></tr><tr><td class="n">0</td><td>'Ada'</td><td>12.50</td><td></td></tr><tr><td class="n">1</td><td>'Grace'</td><td>48.00</td><td></td></tr><tr><td class="n">2</td><td>'Linus'</td><td>103.20</td><td></td></tr></table></span></div>
+			<div class="ln"><span class="g">5</span><span class="c">    <span class="cm">#%click</span><span class="fold">…</span></span></div>
+			<div class="ln"><span class="g">6</span><span class="c">    data_filtered = [item <span class="kw">for</span> item <span class="kw">in</span> data <span class="kw">if</span> item[<span class="st">'city'</span>] == <span class="st">'Boston'</span>]</span><span class="w small"><span class="q">list[dict] · 2 rows</span></span></div>
+		</div></div>
+	</div>
+	<figcaption><span class="figlabel">Recreation</span>A table widget. Choosing Sort from the total column's menu did not add a line; it rewrote line 4 itself, wrapping the expression in <code>sorted(...)</code>, so everything downstream sees sorted data. Which sort is ticked is read back out of that line. The search typed into the search box generated line 6 and keeps it linked. The column list lives in the folded <code>#%click</code> comment on line 5.</figcaption>
+</figure>
+
+<section class="prose">
+<p>Some table actions do not generate a new line at all. <strong>Sort rewrites the very line the table is showing</strong>, using the source span from earlier: <code>data = json.load(f)</code> becomes <code>data = sorted(json.load(f), key=lambda item: item['b'])</code>. The visualizer declares which part of the expression it considers incidental, so its own rewrite does not throw away the user's search configuration. Group By writes a walrus-based expression that yields a dict of lists, which the existing visualizers already know how to draw, so grouping needed no new drawing code.</p>
+
+<h3>Children generate code without knowing where they are</h3>
+<p>A nested visualizer never sees the parent's dollar expression. The parent binds the cell value to a fixed placeholder name, the child generates ordinary Python against that name, and the parent substitutes its own expression back in. Nested visualizers never link to a line; only the top-level one does.</p>
+
+<h3>Dragging expressions out</h3>
+<p>Many elements can be dragged into the code as text. An element can carry several expressions (a tally row is both "how many times this value occurs" and "which rows it occurs in"), each with the imports it needs. Drags carry a custom MIME type alongside plain text, and a drop provider on the Python editor inserts the text and the imports.</p>
+</section>
+
+<section class="prose" id="loops">
+<h2>Loops and the slider</h2>
+<p>Every item carries its path, and a slider appears on the header line of any loop or function that ran at least twice. Moving the slider sends the pin, header line to iteration, with the next run. Selection happens in Python: the logging call drops any value whose path disagrees with a pin before choosing a visualizer, so only the pinned iteration is rendered or transmitted. Rendering at the moment of logging is also what makes this correct for values mutated across iterations; recording every iteration and scrubbing locally would need deep copies. A loop with no pin renders every iteration, each replacing the last on screen, so the last iteration is what stays.</p>
+<p>Pins are keyed by a decoration on the header line rather than a line number, so edits above the loop do not re-key them. When a loop's reported count shrinks below a pin, the editor moves the pin and reruns. A site logged repeatedly in one run applies its pending events on the first logging and carries the resulting model through the rest, so a command emitted in response goes out once.</p>
+</section>
+
+<section class="prose" id="console">
+<h2>The console</h2>
+<p>A program that reads stdin cannot be handed a live pipe: the worker's real stdin is the command channel, and every rerun is a new process. So the console follows the same rule as visualizer state. <strong>The renderer owns the input and Python replays it.</strong></p>
+<p>The user's typed input is a document beside the source file, created only once a program actually asks for input. It is sent with every run, and a stand-in <code>sys.stdin</code> replays it so <code>input()</code>, <code>sys.stdin.read()</code>, and iteration behave identically every time. A read past the end of the document raises a special exception derived from <code>BaseException</code>, so a user's <code>except Exception:</code> cannot swallow it; that unwinds the run cleanly and reports "awaiting input." Statements after the read simply do not run, as in a terminal session that has not got there yet. End of stream is a literal <code>&lt;EOF&gt;</code> line, inserted with Ctrl-D.</p>
+</section>
+
+<figure class="wide">
+	<div class="screen console">
+		<div class="titlebar"><span class="dots"><i></i><i></i><i></i></span><span class="tab">.snc_stdin/quiz.txt</span></div>
+		<div class="ed"><div class="ed-inner" style="min-width:520px">
+			<div class="out">What is your name? </div>
+			<div class="ln"><span class="g">1</span><span class="c">Ada</span></div>
+			<div class="out">Hello, Ada. Pick a number: </div>
+			<div class="ln"><span class="g">2</span><span class="c">17</span></div>
+			<div class="out">17 is prime. Another? </div>
+			<div class="ln cur"><span class="g">3</span><span class="c"><span class="eof">&lt;EOF&gt;</span></span></div>
+			<div class="out">Bye.</div>
+		</div></div>
+	</div>
+	<figcaption><span class="figlabel">Recreation</span>The console is an ordinary editor tab on the stdin document. The program's output is interleaved as view zones between the typed lines; each output chunk records how much stdin had been consumed when it was written, which maps directly onto a document position. Editing a line reruns the program.</figcaption>
+</figure>
+
+<section class="prose">
+<p>The document opens as an ordinary editor tab, first in a group beside the source, narrowed to a third of the width. Being a real editor means find, undo, multi-cursor, and split all come for free. Output is committed atomically when a run ends unless the run exceeds 150 ms, after which it streams live.</p>
+</section>
+
+<section class="prose" id="liveonly">
+<h2>Live-only mode</h2>
+<p>A setting, live-only visualizers, turns off code generation. Under it a visualizer is only a view: no drag handles, no action buttons, no chain icon, no drag-to-select, no column search, sort, or compute menus. Expanding, scrolling, picking an iteration, and adjusting table columns still work, since those change only the picture. It is enforced on both sides: visualizers omit the affordances, the runner filters outgoing commands down to copy and config-comment writes, and the renderer refuses code-writing commands and strips any expression attributes from HTML that still carries them.</p>
+<p>A wrench badge in the editor's top corner is shown while visualizers can write code, next to an eye button that hides all widgets globally. The wrench is informational, not a control. The setting exists for the user study: the same tool, with and without code generation.</p>
+</section>
+
+<section class="prose" id="events">
+<h2>Everything the system reacts to</h2>
+</section>
+<div class="tbl prose"><table>
+<tr><th>Event</th><th>Response</th></tr>
+<tr><td>Text edit</td><td>shift widget line numbers immediately; rerun after 100 ms</td></tr>
+<tr><td>Cursor moves to another line</td><td>re-render small/full after 50 ms; rerun after 150 ms; invalidates checkpoint 3</td></tr>
+<tr><td>Click on a small widget</td><td>pin focus there, rerun at once</td></tr>
+<tr><td>UI event on a widget</td><td>queue it; hand to the in-flight run if it can still answer, else rerun</td></tr>
+<tr><td>Loop slider moves</td><td>rerun with the new pin</td></tr>
+<tr><td>Tab switch or file change</td><td>cancel the run, clear widgets, re-resolve the Python interpreter, rerun</td></tr>
+<tr><td>Editor becomes visible again</td><td>rerun after 100 ms</td></tr>
+<tr><td>Window regains focus</td><td>re-render only</td></tr>
+<tr><td>Stdin document edited</td><td>rerun</td></tr>
+<tr><td>Visualizer file changes on disk</td><td>picked up at the start of the next run</td></tr>
+<tr><td>Runner file changes</td><td>pools drained; the next run uses the new runner</td></tr>
+<tr><td>Interpreter setting changes</td><td>pools drained and refilled with the new interpreter</td></tr>
+<tr><td>Live-only toggled</td><td>chains hidden, rerun</td></tr>
+<tr><td>Leading imports change</td><td>checkpoint 2 and 3 pools invalidated</td></tr>
+<tr><td>Run exceeds 60 s</td><td>killed, error shown</td></tr>
+<tr><td>Python fails to launch</td><td>one sticky notification, dismissed when a later run succeeds</td></tr>
+<tr><td>Syntax error in the file</td><td>widgets greyed and frozen, not removed</td></tr>
+<tr><td>Program raises</td><td>red error widget at the raising line, in the raising iteration</td></tr>
+</table></div>
+<section class="prose">
+<p>The Python interpreter is whatever the official Python extension has selected for the file's workspace folder, falling back to <code>python3</code> on the path. Status-bar interpreter picks are not surfaced as a configuration event, so they take effect on the next tab switch.</p>
+</section>
+
+<section class="prose" id="logging-study">
+<h2>Study logging</h2>
+<p>Because the tool exists to be studied, it records how it is used. Every window appends JSON lines to one file per app launch in the user data directory; nothing is uploaded. Records cover session start (including a description of the git checkout, with a hash of the uncommitted diff so two sessions on identical work can be matched), editor and file lifecycle, periodic full-text snapshots of changed files, every run with its trigger and timing, every item, every widget event with a compact description of the DOM element hit, every command, and which edits were machine-written versus typed. Mouse moves are coalesced at 250 ms per distinct event string. The renderer buffers and flushes to the main process every second or every 500 events, and on shutdown, so a hard crash can lose about a second.</p>
+</section>
+
+<section class="prose" id="limits">
+<h2>Known limits</h2>
+<ul>
+	<li>There is no sandbox. Visualizer expressions are evaluated inside the user's process, and the user's program runs every 100 ms with whatever side effects it has. Network reads are cached, but file writes are not intercepted.</li>
+	<li>A paused checkpoint 3 worker holds the visualizer modules it loaded, so editing a visualizer file does not reach it until the Python file changes. Typing and deleting a space is the usual workaround.</li>
+	<li>The stdin document cannot contain the literal line <code>&lt;EOF&gt;</code>.</li>
+	<li>The cheap import scan in the main process can disagree with Python's parser on exotic input; this only costs a warm worker.</li>
+	<li>Widgets are laid out only for visible lines, which the editor already restricts, but there is no further virtualization of very large numbers of items.</li>
+	<li>Generator and async functions get no call frames, since a frame pushed on entry cannot follow a function that suspends.</li>
+</ul>
+<p class="foot">Clickacode is a research prototype built on VS Code 1.130. Pool sizes, debounce timings, and other numbers here describe the code as of September 2026 and will drift. Widget images on this page are HTML recreations, not screenshots.</p>
+</section>
+</main>
+</div>
+
+<script>
+(function () {
+	var SAMPLE = "get-http_response-code";
+	var strEl = document.getElementById('demo-str');
+	var codeEl = document.getElementById('demo-code');
+	var rankEl = document.getElementById('demo-rank');
+	var tool = 'fuzzy';
+	var anchor = null, head = null, dragging = false;
+
+	// Build characters with ^ and $ anchors like the real widget.
+	var chars = [];
+	function build() {
+		strEl.textContent = '';
+		var a = document.createElement('span'); a.className = 'chr anchor'; a.textContent = '^'; strEl.appendChild(a);
+		chars = [];
+		for (var i = 0; i < SAMPLE.length; i++) {
+			var s = document.createElement('span');
+			s.className = 'chr'; s.textContent = SAMPLE[i]; s.dataset.i = i;
+			strEl.appendChild(s); chars.push(s);
+		}
+		var z = document.createElement('span'); z.className = 'chr anchor'; z.textContent = '$'; strEl.appendChild(z);
+	}
+	build();
+
+	var CLASSES = [
+		{ name: '\\d', re: /^[0-9]$/ },
+		{ name: '[a-z]', re: /^[a-z]$/ },
+		{ name: '[A-Z]', re: /^[A-Z]$/ },
+		{ name: '[a-zA-Z]', re: /^[a-zA-Z]$/ },
+		{ name: '\\w', re: /^[A-Za-z0-9_]$/ },
+		{ name: '\\s', re: /^\s$/ }
+	];
+	function esc(s) { return s.replace(/[.*+?^${}()|[\]\\\-]/g, '\\$&'); }
+	function allMatch(cls, text) { for (var i = 0; i < text.length; i++) { if (!cls.re.test(text[i])) return false; } return true; }
+
+	function rank(start, end) {
+		var text = SAMPLE.slice(start, end);
+		var prev = start > 0 ? SAMPLE[start - 1] : null;
+		var next = end < SAMPLE.length ? SAMPLE[end] : null;
+		var out = [], winner = null;
+		// 1. content class, open quantifier: must not extend into prev or next char
+		CLASSES.forEach(function (c) {
+			if (!allMatch(c, text)) return;
+			var over = (prev !== null && c.re.test(prev)) || (next !== null && c.re.test(next));
+			var pat = c.name + '+';
+			var ok = !over && !winner;
+			out.push({ pat: pat, ok: ok, why: over ? 'would also swallow ' + (next !== null && c.re.test(next) ? 'the next char "' + next + '"' : 'the previous char "' + prev + '"') : 'matches exactly' });
+			if (ok) winner = pat;
+		});
+		// 2. content class with exact count
+		CLASSES.forEach(function (c) {
+			if (!allMatch(c, text)) return;
+			var pat = c.name + '{' + text.length + '}';
+			var ok = !winner;
+			out.push({ pat: pat, ok: ok, why: 'exact count pins the length' });
+			if (ok) winner = pat;
+		});
+		// 3. negated next char
+		if (next !== null && text.indexOf(next) === -1) {
+			var pat3 = '[^' + esc(next) + ']+';
+			var ok3 = !winner;
+			out.push({ pat: pat3, ok: ok3, why: 'anything up to the next "' + next + '"' });
+			if (ok3) winner = pat3;
+		}
+		// 4. universal fallback
+		var pat4 = '.{' + text.length + '}';
+		out.push({ pat: pat4, ok: !winner, why: 'last resort' });
+		if (!winner) winner = pat4;
+		return { list: out, winner: winner };
+	}
+
+	function render() {
+		chars.forEach(function (c) { c.className = 'chr'; });
+		if (anchor === null || head === null) return;
+		var s = Math.min(anchor, head), e = Math.max(anchor, head) + 1;
+		for (var i = s; i < e; i++) chars[i].classList.add(tool === 'fuzzy' ? 'fz' : 'lit');
+		var text = SAMPLE.slice(s, e);
+		if (tool === 'literal') {
+			codeEl.innerHTML = 'str1 = re.search(r\'' + esc(text).replace(/</g, '&lt;') + '\', s).group()\n<span class="dim"># literal: exactly the dragged text, escaped</span>';
+			rankEl.innerHTML = 'A literal drag quotes the characters as they are. Switch to <b>fuzzy</b> to see the ranking.';
+			return;
+		}
+		var r = rank(s, e);
+		codeEl.innerHTML = 'str1 = re.search(r\'' + r.winner.replace(/</g, '&lt;') + '\', s).group()\n<span class="dim"># selected "' + text.replace(/</g, '&lt;') + '" → ' + r.winner.replace(/</g, '&lt;') + '</span>';
+		var html = 'Candidates for "<code>' + text.replace(/</g, '&lt;') + '</code>", in order:<ol>';
+		var seenWin = false;
+		r.list.forEach(function (c) {
+			var cls = c.ok && !seenWin ? 'win' : (c.ok ? '' : 'no');
+			if (c.ok && !seenWin) seenWin = true;
+			html += '<li class="' + cls + '"><code>' + c.pat.replace(/</g, '&lt;') + '</code> <span>' + c.why.replace(/</g, '&lt;') + '</span></li>';
+		});
+		html += '</ol>';
+		rankEl.innerHTML = html;
+	}
+
+	function idxFromEvent(ev) {
+		var t = ev.target.closest ? ev.target.closest('.chr') : null;
+		if (t && t.dataset && t.dataset.i !== undefined) return +t.dataset.i;
+		// fall back to nearest by x
+		var x = ev.clientX, best = null, bd = 1e9;
+		chars.forEach(function (c, i) { var r = c.getBoundingClientRect(); var d = Math.abs((r.left + r.right) / 2 - x); if (d < bd) { bd = d; best = i; } });
+		return best;
+	}
+	strEl.addEventListener('pointerdown', function (ev) {
+		var i = idxFromEvent(ev); if (i === null) return;
+		dragging = true; anchor = head = i; strEl.setPointerCapture(ev.pointerId); render(); ev.preventDefault();
+	});
+	strEl.addEventListener('pointermove', function (ev) {
+		if (!dragging) return; var i = idxFromEvent(ev); if (i === null || i === head) return; head = i; render();
+	});
+	function stop() { dragging = false; }
+	strEl.addEventListener('pointerup', stop);
+	strEl.addEventListener('pointercancel', stop);
+
+	Array.prototype.forEach.call(document.querySelectorAll('.demo-tools button'), function (b) {
+		b.addEventListener('click', function () {
+			tool = b.dataset.tool;
+			Array.prototype.forEach.call(document.querySelectorAll('.demo-tools button'), function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+			render();
+		});
+	});
+
+	// Open at rest with a selection already made, so the demo shows what it does.
+	anchor = 4; head = 7; render();
+})();
+</script>
