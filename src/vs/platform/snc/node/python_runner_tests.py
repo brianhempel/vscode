@@ -85,6 +85,81 @@ def capture_stream_messages():
         python_runner._stream_out = old
 
 
+def as_javascript_would(value):
+    """`value` as it comes back after a trip through a JavaScript object:
+    integer-like keys first, in numeric order, ahead of every other key."""
+    if isinstance(value, list):
+        return [as_javascript_would(v) for v in value]
+    if isinstance(value, dict):
+        hoisted = sorted((k for k in value if python_runner._is_array_index(k)), key=int)
+        rest = [k for k in value if not python_runner._is_array_index(k)]
+        return {k: as_javascript_would(value[k]) for k in hoisted + rest}
+    return value
+
+
+class TestModelKeyOrderSurvivesTheEditor(unittest.TestCase):
+    """The editor holds a model as a JavaScript object between events, and a
+    JavaScript object puts integer-like keys first no matter how they were
+    written. A table column named `1` would come back first. The wire form
+    spells such a dict out as an ordered list of pairs, and the read side puts
+    it back."""
+
+    COLUMNS = {'$': {}, "$*10": {'width': 40}, '1': {}, '-1': {}, '01': {}, '1.5': {}}
+
+    def test_a_dict_with_an_integer_like_key_is_spelled_out_in_order(self):
+        wire = python_runner._js_safe({'columns': self.COLUMNS})
+        self.assertEqual(wire, {'columns': {
+            '__snc_ordered__': [['$', {}], ["$*10", {'width': 40}], ['1', {}],
+                                ['-1', {}], ['01', {}], ['1.5', {}]]}})
+
+    def test_a_dict_without_one_is_left_as_it_is(self):
+        model = {'columns': {'$': {}, '-1': {}, '01': {}}, 'n': [1, {'0.5': 2}]}
+        self.assertEqual(python_runner._js_safe(model), model)
+
+    def test_an_integer_key_counts_too(self):
+        # json.dumps writes an int key as its digits, which JavaScript hoists.
+        self.assertEqual(python_runner._js_safe({1: 'a', 'b': 'c'}),
+                         {'__snc_ordered__': [['1', 'a'], ['b', 'c']]})
+
+    def test_the_order_comes_back_after_the_editor_reorders_the_keys(self):
+        model = {'columns': self.COLUMNS,
+                 'children': {'0\x00$': {'columns': {'2': {}, '$': {}}}}}
+        wire = json.loads(json.dumps(python_runner._js_safe(model)))
+        back = python_runner._js_restore(as_javascript_would(wire))
+        self.assertEqual(back, model)
+        self.assertEqual(list(back['columns']), list(model['columns']))
+        self.assertEqual(list(back['children']['0\x00$']['columns']), ['2', '$'])
+
+    def test_the_editor_reordering_would_otherwise_lose_it(self):
+        # The test above is only a test if this is what it guards against.
+        self.assertEqual(list(as_javascript_would(self.COLUMNS)),
+                         ['1', '$', "$*10", '-1', '01', '1.5'])
+
+    def test_parsing_the_editors_snapshot_restores_the_order(self):
+        wire = as_javascript_would(json.loads(json.dumps(python_runner._js_safe(
+            [{'line': 2, 'visIndex': 0, 'model': {'columns': self.COLUMNS},
+              'events': []}]))))
+        parsed = python_runner._parse_models_and_events(json.dumps(wire))
+        self.assertEqual(list(parsed[0]['model']['columns']), list(self.COLUMNS))
+
+    def test_the_item_on_the_wire_carries_the_safe_form(self):
+        class Vis:
+            def can_visualize(value): return isinstance(value, int)
+            def init_model(value, get_visualizer): return {'columns': {'$': {}, '1': {}}}
+            def visualize(value, model, get_visualizer, eval_in_scope): return '<b>x</b>'
+        import_code, body_code = split_leading_imports('y = 1\n')
+        saved = python_runner._visualizers
+        python_runner._visualizers = lambda: [Vis]
+        try:
+            with capture_stream_messages() as msgs:
+                python_runner._execute_run(body_code, '', 'run-1', import_code=import_code)
+        finally:
+            python_runner._visualizers = saved
+        models = [m['item']['model'] for m in msgs.all() if m.get('type') == 'item']
+        self.assertEqual(models[0]['columns'],
+                         {'__snc_ordered__': [['$', {}], ['1', {}]]})
+
+
 class TestSplitLeadingImports(unittest.TestCase):
     def test_bare_string_after_imports_stays_in_body(self):
         source_code = 'import re\n\n"hello world"\n'

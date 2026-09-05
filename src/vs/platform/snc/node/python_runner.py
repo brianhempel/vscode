@@ -144,6 +144,47 @@ def _emit(msg: Dict[str, Any]) -> None:
     _write_message(msg)
 
 
+# A JavaScript object enumerates integer-like keys first, in numeric order,
+# ahead of every other key, however they were written -- and the editor holds
+# every model as one between events. A table with a column named `1` would
+# get it back first. Dicts whose order the editor would lose are spelled out
+# on the wire as a list of pairs under this one key, and read back into dicts.
+_ORDERED_KEY = '__snc_ordered__'
+# 2**32 - 1 is the array length bound; `-1`, `01` and `1.5` are ordinary keys.
+_ARRAY_INDEX_RE = re.compile(r'^(?:0|[1-9][0-9]*)$')
+
+
+def _is_array_index(key: Any) -> bool:
+    """Whether JavaScript would hoist this key (as json.dumps writes it)."""
+    text = str(key) if isinstance(key, int) and not isinstance(key, bool) else key
+    return (isinstance(text, str) and _ARRAY_INDEX_RE.match(text) is not None
+            and int(text) < 2 ** 32 - 1)
+
+
+def _js_safe(value: Any) -> Any:
+    """`value` for the editor to hold: a dict with any key JavaScript would
+    hoist becomes {_ORDERED_KEY: [[key, value], ...]}, recursively."""
+    if isinstance(value, list):
+        return [_js_safe(v) for v in value]
+    if isinstance(value, dict):
+        if any(_is_array_index(k) for k in value):
+            return {_ORDERED_KEY: [[str(k), _js_safe(v)] for k, v in value.items()]}
+        return {k: _js_safe(v) for k, v in value.items()}
+    return value
+
+
+def _js_restore(value: Any) -> Any:
+    """The inverse of _js_safe, on what came back from the editor."""
+    if isinstance(value, list):
+        return [_js_restore(v) for v in value]
+    if isinstance(value, dict):
+        pairs = value.get(_ORDERED_KEY)
+        if len(value) == 1 and isinstance(pairs, list):
+            return {k: _js_restore(v) for k, v in pairs}
+        return {k: _js_restore(v) for k, v in value.items()}
+    return value
+
+
 # list of:
 # {
 # 	"lineNumber": int,
@@ -153,7 +194,7 @@ def _emit(msg: Dict[str, Any]) -> None:
 # }
 models_and_events: List[Dict[str, Any]] = []
 models_and_events_json = os.environ.get('SNC_MODELS_AND_EVENTS', '')
-models_and_events = json.loads(models_and_events_json) if (models_and_events_json and models_and_events_json.strip()) else []
+models_and_events = _js_restore(json.loads(models_and_events_json)) if (models_and_events_json and models_and_events_json.strip()) else []
 # models_and_events = []
 if not isinstance(models_and_events, list):
     _stream_out.write(json.dumps({"type": "vis_error", "error": f"Expected SNC_MODELS_AND_EVENTS to be a JSON of a list of dicts, but it parsed as {str(type(SNC_MODELS_AND_EVENTS))}"}, ensure_ascii=False) + "\n")
@@ -685,7 +726,7 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         "handledEventIds": handled_event_ids
     }
     if model is not None:
-        item["model"] = model
+        item["model"] = _js_safe(model)
     # For the study log: every `update` this item ran, with the model before
     # and after each. The editor logs them; nothing here reads them back.
     if updates:
@@ -967,7 +1008,7 @@ def _parse_models_and_events(models_and_events_json: str) -> List[Dict[str, Any]
     if not models_and_events_json or not models_and_events_json.strip():
         return []
     try:
-        return json.loads(models_and_events_json)
+        return _js_restore(json.loads(models_and_events_json))
     except Exception:
         return []
 
