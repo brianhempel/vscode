@@ -11061,7 +11061,14 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     # reaching anyway, so nothing moves until something is actually clipped.
     can_expand = not ENABLE_AUTO_EXPAND
     expanded = bool(model.get('expanded', False) or focused_child or (not small if ENABLE_AUTO_EXPAND else False))
-    actual_max_height = (max(EXPANDED_PANE_MAX_HEIGHT, collapsed_max_height)
+    # A table nested in a parent's cell opens to half the ceiling, as a nested
+    # string does (see string-visualizer.css): the parent's rows should not
+    # each grow to the full pane height. Nested is "a parent said how much
+    # room there is" -- every parent hands its children a max_width or
+    # max_height, and the top-level runner hands neither.
+    nested = max_width is not None or max_height is not None
+    expanded_max_height = EXPANDED_PANE_MAX_HEIGHT // 2 if nested else EXPANDED_PANE_MAX_HEIGHT
+    actual_max_height = (max(expanded_max_height, collapsed_max_height)
                          if expanded else collapsed_max_height)
     actual_min_height = min(wanted_height, actual_max_height)
     if not small: # room for toolbar

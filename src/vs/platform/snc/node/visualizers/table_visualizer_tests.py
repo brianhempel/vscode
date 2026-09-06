@@ -21,7 +21,7 @@ from visualizer_utils import (ChildEvent, wrap_drag_grab, MAX_NEST_DEPTH, is_new
                               set_line_config, take_line_config,
                               replace_dollars_in_py_exp, py_exp_attrs, PyExp,
                               with_pass_body, AddImports, CHILD_SOURCE_BINDER,
-                              truncate_repr)
+                              truncate_repr, EXPANDED_PANE_MAX_HEIGHT)
 import table_visualizer
 
 
@@ -18876,6 +18876,39 @@ class TestExpandToggle(unittest.TestCase):
         lst = [{'xs': [1, 2, 3]}]
         model = init_model(lst, mock_get_visualizer)
         self.assertIn('expand-toggle', self.table(lst, model))
+
+
+class TestNestedPaneCeiling(unittest.TestCase):
+    """A focused table nested in a parent's cell opens to half the ceiling a
+    top-level one gets, the way a nested string does: the parent's rows should
+    not each grow to the full pane height."""
+
+    # 60 rows at 18px each reach past either ceiling, so the ceiling is what
+    # decides the pane's height.
+    TALL = list(range(60))
+
+    def table(self, model=None, **kwargs):
+        if model is None:
+            model = init_model(self.TALL, mock_get_visualizer)
+        return visualize(self.TALL, model, mock_get_visualizer, None, **kwargs)
+
+    def test_a_focused_top_level_table_opens_to_the_full_ceiling(self):
+        self.assertEqual(_pane_max_height(self.table()), EXPANDED_PANE_MAX_HEIGHT)
+
+    def test_a_focused_nested_table_opens_to_half_the_ceiling(self):
+        # A parent always hands its child a max_height (see the cell render in
+        # _visualize_table); the top-level runner never does.
+        nested = self.table(max_height=200)
+        self.assertEqual(_pane_max_height(nested), EXPANDED_PANE_MAX_HEIGHT // 2)
+
+    def test_a_parent_handing_only_a_width_still_counts_as_nesting(self):
+        self.assertEqual(_pane_max_height(self.table(max_width=300)),
+                         EXPANDED_PANE_MAX_HEIGHT // 2)
+
+    def test_an_unfocused_nested_table_keeps_the_collapsed_ceiling(self):
+        # Half is the price of being open; a preview isn't open.
+        self.assertLess(_pane_max_height(self.table(max_height=200, small=True)),
+                        EXPANDED_PANE_MAX_HEIGHT // 2)
 
 
 def _tiny_len(output: str) -> str:
