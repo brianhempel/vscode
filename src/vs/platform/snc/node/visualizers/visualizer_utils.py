@@ -233,6 +233,13 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 # by its parent and never reads the line's comment itself -- which is what
 # keeps a value nested inside a value of its own type from recursing.
 #
+# The visualizer that owns a level may keep more on a slot than its expr --
+# the table's `width`, `cols` and `computes` (see table_visualizer's "COLUMN
+# CONFIGURATION") -- and every save of that level states all of them, so a
+# key it stops stating is gone. `children` is the one key that outlives a
+# save that doesn't mention it: it is the nested visualizer's, not the
+# caller's, and the caller knows nothing about it.
+#
 # Visualizers never see the source. The runner parses the comment for a line,
 # hands the slots to the root visualizer's init_model, and installs them here
 # with `set_line_config`; a save (`save_slots_at_path`) rewrites this store,
@@ -502,8 +509,10 @@ def save_slots_at_path(path, exprs: list) -> None:
 
     `path` is the list of slot exprs leading down from the root. Only this
     level's expr list is rewritten; each surviving slot keeps its existing
-    `children` (matched by expr), and other branches already saved are left
-    untouched. So an ancestor never clobbers a descendant's nested config.
+    `children` (matched by expr) and nothing else, and other branches already
+    saved are left untouched. So an ancestor never clobbers a descendant's
+    nested config, and a level never keeps a key its owner stopped stating --
+    a bare entry means a slot with nothing configured.
     """
     global _line_slots, _line_slots_dirty
     if _line_slots is None:
@@ -526,17 +535,21 @@ def save_slots_at_path(path, exprs: list) -> None:
     old = list(target)
     rebuilt = []
     for entry in exprs:
-        # An entry is either a bare expr or a slot carrying this table's own
-        # keys (`cols`). Either way the slot already on disk is reused when
-        # there is one, so its `children` -- a nested visualizer's config,
-        # which the caller knows nothing about -- survives untouched.
+        # An entry is either a bare expr or a slot carrying the level's own
+        # keys (`width`, `cols`, `computes`). The slot is built afresh from
+        # what the entry states; only `children` -- a nested visualizer's
+        # config, which the caller knows nothing about -- is carried over from
+        # the slot already on disk, so a key the caller no longer states (a
+        # column's last aggregation unticked) is gone rather than lingering.
         expr = entry['expr'] if isinstance(entry, dict) else entry
         existing = _find_slot(old, expr)
-        slot = existing if existing is not None else {'expr': expr}
+        slot = {'expr': expr}
         if isinstance(entry, dict):
             for key, value in entry.items():
-                if key != 'expr':
+                if key not in ('expr', 'children'):
                     slot[key] = value
+        if existing is not None and isinstance(existing.get('children'), list):
+            slot['children'] = existing['children']
         rebuilt.append(slot)
     target[:] = rebuilt
     _line_slots_dirty = True

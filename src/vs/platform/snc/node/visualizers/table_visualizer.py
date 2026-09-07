@@ -28,9 +28,11 @@ Columns shown in the table are configurable and persisted:
 
 1. THE LINE'S #%click COMMENT (see visualizer_utils, "Per-line config"):
    - A slot list; the runner hands it to init_model as `slots_config`
-   - A slot is a bare expr, or {"expr": ..., "width": px, "cols": [...]}:
-     `width` is a column the user dragged to a size, `cols` a splat's
-     sub-columns (see _slots_from_columns)
+   - A slot is a bare expr, or {"expr": ..., "width": px, "cols": [...],
+     "computes": [...]}: `width` is a column the user dragged to a size,
+     `cols` a splat's sub-columns, `computes` the aggregations ticked in the
+     column's Compute submenu, as the expressions they are (see
+     _slots_from_columns)
    - Highest priority: user-customized columns, for this line only
    - A save goes into the line's config store; the runner turns it into a
      rewrite of the comment
@@ -774,6 +776,48 @@ def _valid_width(width) -> 'int | None':
     return int(round(width))
 
 
+def _ordered_computes(exprs) -> list:
+    """A column's aggregations as they are kept: each once, none blank, in the
+    order the menu lists them so the cells under the column read the same way
+    it does.
+
+    fromkeys rather than a set: asking for the same aggregation twice is one
+    cell, and the ones the ordering can't tell apart -- two percentiles --
+    keep the order they were asked in. An empty box is not an aggregation, so
+    it is dropped here rather than kept as a cell with nothing in it.
+    """
+    return sorted((expr for expr in dict.fromkeys(exprs)
+                   if isinstance(expr, str) and expr.strip()),
+                  key=_agg_order)
+
+
+def _valid_computes(computes) -> list:
+    """A column's aggregations as saved, or [] when what is there is not a
+    list of them.
+
+    A hand-edited comment is a real input, the way it is for a width: only
+    the strings of a list count, and they come back the way a click would
+    have left them.
+    """
+    if not isinstance(computes, list):
+        return []
+    return _ordered_computes(computes)
+
+
+def _config_from_slot(entry: dict) -> dict:
+    """The config a saved slot gives a column: its width and its
+    aggregations, each only where the slot carries a usable one. `cols` is
+    the caller's, since it recurses."""
+    config = {}
+    width = _valid_width(entry.get('width'))
+    if width is not None:
+        config['width'] = width
+    computes = _valid_computes(entry.get('computes'))
+    if computes:
+        config['computes'] = computes
+    return config
+
+
 def _col_add(columns, col: str, config=None) -> bool:
     """Append a column. False when it is already there -- a duplicate would be
     a second cell with the first one's identity."""
@@ -845,39 +889,43 @@ def _slots_from_columns(columns) -> list:
     """The columns map as the slot list the saved config stores.
 
     A plain column stays a bare string, so a table with nothing configured
-    saves exactly what it always did; a splat carrying sub-columns, or a
-    column the user resized, needs the object form -- `cols` for the one,
-    `width` (in pixels) for the other.
+    saves exactly what it always did; a splat carrying sub-columns, a column
+    the user resized, or one asked for an aggregation, needs the object form
+    -- `cols` for the first, `width` (in pixels) for the second, `computes`
+    (the expressions) for the third.
     """
     slots = []
     for col, config in (columns or {}).items():
         subs = (config or {}).get('cols') or {}
         width = _valid_width((config or {}).get('width'))
-        if not subs and width is None:
+        computes = _valid_computes((config or {}).get('computes'))
+        if not subs and width is None and not computes:
             slots.append(col)
             continue
         slot = {'expr': col}
         if width is not None:
             slot['width'] = width
+        if computes:
+            slot['computes'] = computes
         if subs:
             slot['cols'] = _slots_from_columns(subs)
         slots.append(slot)
     return slots
 
 
-def _slot_widths(slots_config) -> dict:
-    """Each root slot's saved column width, keyed by slot expr -- only the
-    slots that carry a usable one."""
+def _slot_configs(slots_config) -> dict:
+    """Each root slot's saved config (see _config_from_slot), keyed by slot
+    expr -- only the slots that carry any."""
     out = {}
     for entry in (slots_config or []):
         if isinstance(entry, dict) and 'expr' in entry:
-            width = _valid_width(entry.get('width'))
-            if width is not None:
-                out[entry['expr']] = width
+            config = _config_from_slot(entry)
+            if config:
+                out[entry['expr']] = config
     return out
 
 
-def _columns_from_slots(exprs, slot_cols, depth: int = 0, slot_widths=None) -> dict:
+def _columns_from_slots(exprs, slot_cols, depth: int = 0, slot_configs=None) -> dict:
     """Build the columns map from what the saved config gave up.
 
     Recursive, because a splat's sub-column may splat in turn and `cols` has
@@ -889,10 +937,7 @@ def _columns_from_slots(exprs, slot_cols, depth: int = 0, slot_widths=None) -> d
     columns = {}
     for expr in exprs:
         subs = slot_cols.get(expr) or []
-        config = {}
-        width = (slot_widths or {}).get(expr)
-        if width is not None:
-            config['width'] = width
+        config = dict((slot_configs or {}).get(expr) or {})
         if subs and depth < MAX_SPLAT_DEPTH:
             config['cols'] = _sub_columns_from_entries(subs, depth + 1)
         _col_add(columns, expr, config)
@@ -910,10 +955,7 @@ def _sub_columns_from_entries(entries, depth: int) -> dict:
         if not isinstance(entry, dict) or 'expr' not in entry:
             continue
         expr = entry['expr']
-        config = {}
-        width = _valid_width(entry.get('width'))
-        if width is not None:
-            config['width'] = width
+        config = _config_from_slot(entry)
         nested = entry.get('cols')
         if nested and depth < MAX_SPLAT_DEPTH:
             config['cols'] = _sub_columns_from_entries(nested, depth + 1)
@@ -2810,7 +2852,6 @@ def _rename_column(model: dict, old: str, new: str, eval_in_scope=None) -> bool:
         return False
     _rename_column_children(model, old, new)
     _remove_column_search(model, old)
-    _rename_column_compute(model, old, new)
     _recompose_search(model, eval_in_scope)
     return True
 
@@ -3179,46 +3220,42 @@ def _column_computes(model: dict, col: str) -> List[str]:
     """The aggregations a column shows under the table, as the expressions they
     are.
 
+    They live in the column's own config (and so in the line's #%click
+    comment), the way its width does: an aggregation is part of the column
+    that asked for it, and comes back when the line does. Nothing records
+    which of the menu's rows are checked: that is read back out of these.
+
     Every aggregation a column keeps, per-group answers being columns of their
     own rather than anything stored here (see _group_agg_column).
     """
-    return list((model.get('column_computes') or {}).get(col) or [])
+    config = _leaf_config(_as_columns(model.get('columns')), col)
+    return list((config or {}).get('computes') or [])
 
 
 def _set_column_computes(model: dict, col: str, exprs) -> None:
     """Replace a column's aggregations, keeping them in the order the menu lists
     them so the cells under the column read the same way it does.
 
-    A column showing none of them is dropped rather than stored empty, the way
-    a search back at its default is.
+    A column showing none of them carries no key rather than an empty list,
+    the way a search back at its default is dropped -- and the way a column
+    never resized carries no width. A column that isn't there takes nothing.
     """
-    computes = dict(model.get('column_computes') or {})
-    # fromkeys rather than a set: asking for the same aggregation twice is one
-    # cell, and the ones the ordering can't tell apart -- two percentiles --
-    # keep the order they were asked in. An empty box is not an aggregation, so
-    # it is dropped here rather than kept as a cell with nothing in it.
-    ordered = sorted((expr for expr in dict.fromkeys(exprs) if expr.strip()),
-                     key=_agg_order)
+    model['columns'] = _as_columns(model.get('columns'))
+    config = _leaf_config(model['columns'], col)
+    if config is None:
+        return
+    ordered = _ordered_computes(exprs)
     if ordered:
-        computes[col] = ordered
+        config['computes'] = ordered
     else:
-        computes.pop(col, None)
-    model['column_computes'] = computes or None
+        config.pop('computes', None)
     _drop_agg_children(model, col, set(ordered))
 
 
 def _remove_column_compute(model: dict, col: str) -> None:
-    computes = dict(model.get('column_computes') or {})
-    computes.pop(col, None)
-    model['column_computes'] = computes or None
+    """Forget the answers of a column that is going: its aggregations went with
+    its config, but the models that drew them are keyed by it."""
     _drop_agg_children(model, col, ())
-
-
-def _rename_column_compute(model: dict, old_name: str, new_name: str) -> None:
-    computes = dict(model.get('column_computes') or {})
-    if old_name in computes:
-        computes[new_name] = computes.pop(old_name)
-        model['column_computes'] = computes or None
 
 
 def _reset_tally_view(model: dict) -> None:
@@ -5350,7 +5387,6 @@ def _convert_column(model, col: str, to: 'str | None', eval_in_scope=None) -> bo
     # search and aggregations are all keyed by the identity it is DRAWN under.
     _rename_column_children(model, col, converted)
     _remove_column_search(model, col)
-    _rename_column_compute(model, col, converted)
     _recompose_search(model, eval_in_scope)
     return True
 
@@ -8094,10 +8130,8 @@ _COLUMN_MGMT_DEFAULTS = {
     # column edit recomposes them instead of dropping them. Stored as None when
     # there are none, like the searches above.
     'search_leftovers': None,
-    # Per-column aggregations, keyed by column expression like the searches
-    # above, and each stored as the expression it is. Nothing records which of
-    # the menu's rows are checked: that is read back out of these.
-    'column_computes': None,
+    # A column's aggregations are not here: they are the `computes` of its
+    # config in `columns`, saved with the line -- see _column_computes.
     # Which chip menu is open on the visible column search row ('op-3' /
     # 'compose-3'). Deliberately not `openDropdown`: those panels are nested
     # inside the column menu, which that single slot is already holding open.
@@ -8142,7 +8176,7 @@ def _resolve_columns(lst, get_visualizer, slots_config):
     if slots_config is not None:
         exprs, slot_children = parse_slots(slots_config)
         return (_columns_from_slots(exprs, parse_slot_cols(slots_config),
-                                    slot_widths=_slot_widths(slots_config)),
+                                    slot_configs=_slot_configs(slots_config)),
                 slot_children)
 
     # The defaults never propose a splat, so they never propose sub-columns.
@@ -12297,6 +12331,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 else:
                     exprs.append(expr)
                 _set_column_computes(model, col, exprs)
+                if has_rows:
+                    _save_slots(model)
             else:
                 # A per-group answer is a column, so ticking the box adds one
                 # and unticking takes it away -- and taking a column away is
@@ -12382,6 +12418,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 else:
                     exprs.append(text)
                 _set_column_computes(model, col, exprs)
+                if has_rows:
+                    _save_slots(model)
 
         # One line written, unlike checking a box, which invites the next -- so
         # this closes the menu the way an action button's dropdown closes.

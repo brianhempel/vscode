@@ -9702,6 +9702,18 @@ def tally_model(lst=None):
     return lst, model
 
 
+def stored_computes(model) -> dict:
+    """Every column's aggregations, keyed by leaf -- {} when no column carries
+    any. They live in the columns' own configs, so this is the one place to
+    ask whether the model records any at all."""
+    columns = model['columns']
+    if not isinstance(columns, dict):
+        columns = {c: {} for c in columns}
+    return {leaf.expr: _column_computes(model, leaf.expr)
+            for leaf in _leaf_columns(columns)
+            if _column_computes(model, leaf.expr)}
+
+
 class TestColumnValues(unittest.TestCase):
     """A column's values for every row, which is what there is to tally. The
     table itself only ever evaluates one cell at a time."""
@@ -12313,7 +12325,7 @@ class TestNestedRendering(unittest.TestCase):
 
     def html(self):
         m = init_model(self.ORGS, mock_get_visualizer, var_and_exp=('o', 'o'))
-        m['columns'] = self.COLS
+        m['columns'] = copy.deepcopy(self.COLS)
         return visualize(self.ORGS, m, mock_get_visualizer, None)
 
     def test_the_header_has_a_row_per_level(self):
@@ -12361,7 +12373,7 @@ class TestPlainSubColumns(unittest.TestCase):
     def html(self):
         model = init_model(self.LINES, mock_get_visualizer,
                            var_and_exp=('data', 'data'))
-        model['columns'] = self.COLS
+        model['columns'] = copy.deepcopy(self.COLS)
         model['_source_expr'] = 'data'
         return visualize(self.LINES, model, mock_get_visualizer,
                          lambda code: eval(code, {}, {'data': self.LINES}))
@@ -12397,7 +12409,7 @@ class TestPlainSubColumns(unittest.TestCase):
 
     def test_the_column_has_the_values_the_composition_reads(self):
         model = init_model(self.LINES, mock_get_visualizer)
-        model['columns'] = self.COLS
+        model['columns'] = copy.deepcopy(self.COLS)
         self.assertEqual(
             _column_values(f'{self.SPLIT}{SUBCOL_SEP}$[0]', self.LINES, model),
             ['id', '1', '2'])
@@ -12726,7 +12738,7 @@ class TestGroupAggregationMenu(unittest.TestCase):
         m = self.toggle(self.model(), per_group=True)
         self.assertIn("sum([item2['n'] for item2 in $v])", m['columns'])
         # And keeps nothing of its own: the column IS the record.
-        self.assertIsNone(m.get('column_computes'))
+        self.assertEqual(stored_computes(m), {})
 
     def test_the_new_column_sits_beside_the_splat_it_summarises(self):
         m = self.toggle(self.model(), per_group=True)
@@ -13531,7 +13543,7 @@ class TestAggAnswerIsAKeptChild(unittest.TestCase):
     def table(self, computes=None):
         model = init_model(COMPUTE_LIST, mock_get_visualizer,
                            var_and_exp=('nums', 'nums'))
-        model['column_computes'] = {'$': list(computes or [self.LIST_AGG])}
+        _set_column_computes(model, '$', list(computes or [self.LIST_AGG]))
         return model
 
     def key(self, agg=None):
@@ -13635,7 +13647,7 @@ class TestAggAnswerSavesNothing(unittest.TestCase):
     def test_a_column_inside_an_answer_saves_nothing(self):
         model = init_model(COMPUTE_LIST, mock_get_visualizer,
                            var_and_exp=('nums', 'nums'))
-        model['column_computes'] = {'$': ['sorted($)']}
+        _set_column_computes(model, '$', ['sorted($)'])
         visualize(COMPUTE_LIST, model, mock_get_visualizer, None)
         child = model['children'][_agg_child_key('$', 'sorted($)', '$')]
         _col_add(child['columns'], 'len(str($))')
@@ -13816,7 +13828,7 @@ class TestNestedAggAnswerCodeStaysRowGeneric(unittest.TestCase):
     def inner_model(self, nested: bool):
         model = init_model(self.ROWS[0], mock_get_visualizer,
                            var_and_exp=('x', 'x'))
-        model['column_computes'] = {'$': [self.AGG]}
+        _set_column_computes(model, '$', [self.AGG])
         if nested:
             # What rendering hands a cell: the concrete path to this row.
             model['_source_expr'] = 'x[0]'
@@ -14627,7 +14639,7 @@ class TestComputeEvents(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         model = self.toggle(model, lst, 'min($)')
         model = self.toggle(model, lst, 'min($)')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_they_are_kept_in_the_order_the_menu_lists_them(self):
         # However the user clicked their way to them.
@@ -14657,7 +14669,7 @@ class TestComputeEvents(unittest.TestCase):
     def test_a_click_on_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
         model = self.toggle(model, lst, 'min($)', col='$.gone')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_the_menu_stays_open_across_a_click(self):
         # The whole point is checking several in a row.
@@ -14677,7 +14689,7 @@ class TestComputeEvents(unittest.TestCase):
                               agg_x_events(visualize(lst, model,
                                                      mock_get_visualizer,
                                                      None))[0])
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_the_x_takes_away_only_the_cell_it_is_on(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -14719,7 +14731,129 @@ class TestComputeEvents(unittest.TestCase):
         model, _ = update(
             make_column_mouse_event(repr(RemoveColumnClick(col=col_at(model)))),
             None, model, lst, mock_get_visualizer, eval_in_scope=eval)
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
+
+
+class TestComputesAreSavedWithTheColumn(unittest.TestCase):
+    """An aggregation is part of the column that asked for it, the way its
+    width is: it lives in the column's config, and so in the line's #%click
+    comment, and comes back when the line does.
+
+    It used to be a model key of its own that nothing saved, so a model rebuilt
+    from the comment -- the file reopened, the comment edited by hand, the
+    value's type or expression changed -- came back with the cells gone while
+    the per-group answers, being columns, stayed.
+    """
+
+    def setUp(self):
+        set_line_config(None)
+        # This class genuinely saves; the module-level patches neuter that for
+        # everyone else.
+        for p in _module_patches:
+            p.stop()
+
+    def tearDown(self):
+        for p in _module_patches:
+            p.start()
+        set_line_config(None)
+
+    def saved(self):
+        from visualizer_utils import peek_line_config
+        return peek_line_config()
+
+    def toggle(self, model, lst, expr, col='$'):
+        model, _ = update(
+            make_column_mouse_event(repr(ComputeToggle(col=col, expr=expr))),
+            None, model, lst, mock_get_visualizer, eval_in_scope=eval)
+        return model
+
+    def test_ticking_a_row_saves_it_with_the_column(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.toggle(model, lst, 'min($)')
+        self.assertEqual(take_line_config(),
+                         ([{'expr': '$', 'computes': ['min($)']}], True))
+
+    def test_unticking_the_last_one_takes_the_key_away(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.toggle(model, lst, 'min($)')
+        self.toggle(model, lst, 'min($)')
+        self.assertEqual(self.saved(), [{'expr': '$'}])
+
+    def test_a_free_form_aggregation_saves_too(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        update(make_compute_expr_event('$', '', 'sorted($)'), None, model, lst,
+               mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(self.saved(),
+                         [{'expr': '$', 'computes': ['sorted($)']}])
+
+    def test_an_empty_list_saves_nothing(self):
+        lst, model = tally_model([])
+        self.toggle(model, lst, 'min($)')
+        self.assertEqual(take_line_config(), (None, False))
+
+    def test_nothing_else_records_them(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        self.toggle(model, lst, 'min($)')
+        self.assertNotIn('column_computes', model)
+        self.assertEqual(model['columns'], {'$': {'computes': ['min($)']}})
+
+    def test_a_saved_aggregation_loads_and_renders(self):
+        model = init_model(COMPUTE_LIST, mock_get_visualizer,
+                           slots_config=[{'expr': '$',
+                                          'computes': ['min($)', 'max($)']}])
+        self.assertEqual(model['columns'],
+                         {'$': {'computes': ['min($)', 'max($)']}})
+        self.assertEqual(_column_computes(model, '$'), ['min($)', 'max($)'])
+        out = visualize(COMPUTE_LIST, model, mock_get_visualizer, None)
+        self.assertIn('<tfoot', out)
+        self.assertEqual(agg_answers(out), ['1', '5'])
+        # Reading is not a change.
+        self.assertFalse(take_line_config()[1])
+
+    def test_under_a_splat_it_lives_in_the_splats_cols(self):
+        D = TestGroupAggregationRendering.D
+        leaf = f"*$v{SUBCOL_SEP}$['n']"
+        model = init_model(
+            D, mock_get_visualizer_dict_tables, var_and_exp=('d', 'd'),
+            slots_config=['$k', {'expr': '*$v', 'cols': [
+                {'expr': "$['n']", 'computes': ['sum($)']}]}])
+        self.assertEqual(_column_computes(model, leaf), ['sum($)'])
+        out = visualize(D, model, mock_get_visualizer_dict_tables, None)
+        self.assertIn('36', out)  # 1+2+3+10+20, the flattened column
+        # And goes back the way it came, in menu order.
+        _set_column_computes(model, leaf, ['min($)', 'sum($)'])
+        _save_slots(model)
+        self.assertEqual(self.saved(), [
+            {'expr': '$k'},
+            {'expr': '*$v', 'cols': [
+                {'expr': "$['n']", 'computes': ['sum($)', 'min($)']}]}])
+
+    def test_hand_edited_junk_is_ignored(self):
+        # A hand-edited comment is a real input, the way a width is.
+        for junk in ('min($)', 3, None, [3, '', '  '], {'a': 1}):
+            model = init_model(COMPUTE_LIST, mock_get_visualizer,
+                               slots_config=[{'expr': '$', 'computes': junk}])
+            self.assertEqual(model['columns'], {'$': {}}, repr(junk))
+
+    def test_a_hand_edited_list_is_put_in_menu_order_and_deduped(self):
+        model = init_model(
+            COMPUTE_LIST, mock_get_visualizer,
+            slots_config=[{'expr': '$', 'computes':
+                           ['max($)', 'min($)', 'max($)', 3, '']}])
+        self.assertEqual(_column_computes(model, '$'), ['min($)', 'max($)'])
+
+    def test_a_list_form_columns_model_can_be_written_to(self):
+        # A test literal, or a model from before columns became a map.
+        lst, model = tally_model(COMPUTE_LIST)
+        self.assertIsInstance(model['columns'], list)
+        _set_column_computes(model, '$', ['min($)'])
+        self.assertEqual(model['columns'], {'$': {'computes': ['min($)']}})
+        self.assertEqual(_column_computes(model, '$'), ['min($)'])
+
+    def test_a_column_that_is_not_there_takes_nothing(self):
+        lst, model = tally_model(COMPUTE_LIST)
+        _set_column_computes(model, 'len($)', ['min($)'])
+        self.assertEqual(model['columns'], {'$': {}})
 
 
 class TestComputeHoleEvents(unittest.TestCase):
@@ -14774,7 +14908,7 @@ class TestComputeHoleEvents(unittest.TestCase):
     def test_typing_at_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
         model = self.input(model, lst, P10, '25', col='$.gone')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
 
 class TestComputeRows(unittest.TestCase):
@@ -15811,7 +15945,7 @@ class TestFreeAggregations(unittest.TestCase):
     def test_an_empty_one_is_not_an_aggregation(self):
         _, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['   '])
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
 
 def make_compute_expr_event(col, expr, value, previous=None):
@@ -15875,12 +16009,12 @@ class TestFreeAggregationEvents(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)[2]'])
         model = self.input(model, lst, 'sorted($)[2]', '')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_an_empty_box_left_empty_adds_nothing(self):
         lst, model = tally_model(COMPUTE_LIST)
         model = self.input(model, lst, '', '  ')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_a_half_typed_expression_is_kept_so_the_box_keeps_its_place(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -15897,7 +16031,7 @@ class TestFreeAggregationEvents(unittest.TestCase):
     def test_typing_at_a_column_that_is_gone_is_a_noop(self):
         lst, model = tally_model(COMPUTE_LIST)
         model = self.input(model, lst, '', 'sorted($)[2]', col='$.gone')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_writing_the_catalogs_own_expression_checks_its_row(self):
         # It is Min, whoever typed it.
@@ -16226,7 +16360,7 @@ class TestFreeAggregationRemoval(unittest.TestCase):
         lst, model = tally_model(COMPUTE_LIST)
         _set_column_computes(model, '$', ['sorted($)[2]'])
         model = self.toggle(model, lst, 'sorted($)[2]')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
     def test_the_others_stay_where_they_were(self):
         lst, model = tally_model(COMPUTE_LIST)
@@ -16238,7 +16372,7 @@ class TestFreeAggregationRemoval(unittest.TestCase):
     def test_the_empty_row_has_nothing_to_toggle(self):
         lst, model = tally_model(COMPUTE_LIST)
         model = self.toggle(model, lst, '')
-        self.assertIsNone(model['column_computes'])
+        self.assertEqual(stored_computes(model), {})
 
 
 from table_visualizer import (
@@ -18512,7 +18646,7 @@ class TestConvertTypeToggle(ConvertEventCase):
     def test_what_the_column_computes_follows_it_over(self):
         # The aggregations describe the column rather than filtering it.
         lst, model = convert_model()
-        model['column_computes'] = {"$['n']": ['len($)']}
+        _set_column_computes(model, "$['n']", ['len($)'])
         model, _ = update(
             make_column_mouse_event(repr(ConvertTypeToggle(col="$['n']",
                                                            to='int'))),
@@ -19797,7 +19931,7 @@ class TestSplatSubColumnCellExpressions(unittest.TestCase):
     def model(self, columns=None, data=None):
         data = self.DATA if data is None else data
         model = init_model(data, mock_get_visualizer, var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS if columns is None else columns)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS) if columns is None else columns)
         return model
 
     def row(self, key, columns=None, data=None):
@@ -19881,7 +20015,7 @@ class TestSplatSubColumnChildEvents(unittest.TestCase):
     def model(self):
         model = init_model(self.DATA, mock_get_visualizer,
                            var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS))
         return model
 
     def leaf_key(self, row_key):
@@ -20096,7 +20230,7 @@ class TestTallyOnLeafColumns(unittest.TestCase):
     def model(self, columns=None, data=None):
         data = self.DATA if data is None else data
         model = init_model(data, mock_get_visualizer, var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS if columns is None else columns)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS) if columns is None else columns)
         model['_source_expr'] = 'data'
         return model
 
@@ -20166,7 +20300,7 @@ class TestColumnSearchInLeafSpace(unittest.TestCase):
     def model(self):
         model = init_model(self.DATA, mock_get_visualizer,
                            var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS))
         model['_source_expr'] = 'data'
         return model
 
@@ -20298,7 +20432,7 @@ class TestSplatAggregationExpressions(unittest.TestCase):
     def model(self, computes=None):
         model = init_model(self.DATA, mock_get_visualizer,
                            var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS))
         model['_source_expr'] = 'data'
         for col, exprs in (computes or {}).items():
             _set_column_computes(model, col, exprs)
@@ -20345,7 +20479,7 @@ class TestLeafSpaceLayout(unittest.TestCase):
     def model(self, computes=None):
         model = init_model(self.DATA, mock_get_visualizer,
                            var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS))
         model['_source_expr'] = 'data'
         for col, exprs in (computes or {}).items():
             _set_column_computes(model, col, exprs)
@@ -20431,7 +20565,7 @@ class TestPickRegionsInLeafSpace(unittest.TestCase):
         data = [{'name': 'ann', 'pets': [{'n': 1}]},
                 {'name': 'bo', 'pets': [{'n': 2}]}]
         model = init_model(data, mock_get_visualizer, var_and_exp=('data', 'data'))
-        model['columns'] = _as_columns(self.COLS)
+        model['columns'] = _as_columns(copy.deepcopy(self.COLS))
         model['_source_expr'] = 'data'
         model['search'] = "$['name'] == 'bo'"
         model['tool'] = 'pick'
@@ -20927,7 +21061,7 @@ class TestEditingAColumnLegend(unittest.TestCase):
         name = 'd' if isinstance(value, dict) else 'data'
         ev = lambda c: eval(c, {name: value})
         model = init_model(value, mock_get_visualizer, var_and_exp=(name, name))
-        model['columns'] = self.COLS if columns is None else columns
+        model['columns'] = copy.deepcopy(self.COLS) if columns is None else columns
         model['_source_expr'] = name
         model['editing_column'] = target
         model['column_input_value'] = (
@@ -21403,7 +21537,7 @@ class AddColumnBesideCase(unittest.TestCase):
     def model(self, lst=None, columns=None, index=0):
         model = init_model(self.LST if lst is None else lst,
                            mock_get_visualizer)
-        model['columns'] = _as_columns(self.COLUMNS if columns is None
+        model['columns'] = _as_columns(copy.deepcopy(self.COLUMNS) if columns is None
                                        else columns)
         model['openDropdown'] = {'id': menu_id(model, index=index)}
         return model
@@ -21723,15 +21857,15 @@ class TestAddColumnBesideKeepsTheTableRectangular(AddColumnBesideCase):
     def test_a_splat_and_its_per_group_answers(self):
         def model_for():
             model = self.model(lst=self.GROUPS, columns=copy.deepcopy(self.SPLAT))
-            model['column_computes'] = {f'*$v{SUBCOL_SEP}$[0]': ['len($)']}
+            _set_column_computes(model, f'*$v{SUBCOL_SEP}$[0]', ['len($)'])
             return model
         self.check(model_for, self.GROUPS)
 
     def test_a_table_with_answers_under_it(self):
         def model_for():
             model = self.model()
-            model['column_computes'] = {
-                "$['b']": ['min($)', 'min($$, key=lambda item: $)']}
+            _set_column_computes(
+                model, "$['b']", ['min($)', 'min($$, key=lambda item: $)'])
             return model
         self.check(model_for, self.LST)
 
@@ -22591,6 +22725,14 @@ class TestGeneratedLinesInheritTheColumns(InheritedConfigCase):
         # as much the view as the top-level exprs; the comment travels whole.
         saved = [{'expr': "*$['pets']", 'cols': ['$[0]']},
                  {'expr': "$['b']", 'children': ['$.start()']}]
+        set_line_config(saved)
+        _, commands = self.sort_click()
+        self.assertEqual(self.config_of(commands), saved)
+
+    def test_the_aggregations_come_along_with_their_columns(self):
+        # The same rows, so the same answers: an aggregation is part of the
+        # column that asked for it, and travels in the comment with it.
+        saved = [{'expr': "$['b']", 'computes': ['min($)', 'max($)']}, "$['c']"]
         set_line_config(saved)
         _, commands = self.sort_click()
         self.assertEqual(self.config_of(commands), saved)

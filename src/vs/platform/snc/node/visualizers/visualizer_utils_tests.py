@@ -739,14 +739,26 @@ class TestParseSlotCols(unittest.TestCase):
     def test_bare_strings_are_tolerated(self):
         self.assertEqual(parse_slot_cols(['$.a', '$.b']), {})
 
-    def test_cols_survive_a_save_that_does_not_mention_them(self):
-        # save_slots_at_path rewrites the expr list and keeps each surviving
-        # slot's other keys, so an ancestor never clobbers a descendant's
-        # sub-columns.
-        set_line_config([{'expr': '$.name'}, {'expr': '*$.m', 'cols': ['$.who']}])
+    def test_a_save_that_does_not_mention_cols_drops_them(self):
+        # save_slots_at_path states what each slot holds at this level: a bare
+        # entry means nothing configured, so a key the caller no longer states
+        # -- a splat's last sub-column taken away, a column's last aggregation
+        # unticked -- is gone rather than lingering in the comment. Only
+        # `children`, a nested visualizer's own config the caller knows
+        # nothing about, rides over.
+        set_line_config([{'expr': '$.name'},
+                         {'expr': '*$.m', 'cols': ['$.who'], 'children': ['$.b']}])
         save_slots_at_path([], ['$.name', '*$.m'])
         stored, _ = take_line_config()
-        self.assertEqual(stored[1], {'expr': '*$.m', 'cols': ['$.who']})
+        self.assertEqual(stored[1], {'expr': '*$.m', 'children': ['$.b']})
+
+    def test_a_dict_entry_replaces_a_slots_keys(self):
+        set_line_config([{'expr': '*$.m', 'cols': ['$.who'], 'width': 80,
+                          'children': ['$.b']}])
+        save_slots_at_path([], [{'expr': '*$.m', 'cols': ['$.x']}])
+        stored, _ = take_line_config()
+        self.assertEqual(stored[0],
+                         {'expr': '*$.m', 'cols': ['$.x'], 'children': ['$.b']})
 
 
 class TestNewCodeCommand(unittest.TestCase):
