@@ -16723,7 +16723,7 @@ class TestMenuRowReadings(unittest.TestCase):
         # module needs it there whichever reading is taken.
         out, _path = self.fetch_render()
         csv_row = self.readings(out, 'as CSV')
-        self.assertEqual([r['label'] for r in csv_row], ['One', 'List'])
+        self.assertEqual([r['label'] for r in csv_row], ['Cell Only', 'All'])
         self.assertEqual(csv_row[1]['imports'], ['import csv'])
 
     def test_with_no_table_above_a_fetch_row_has_the_one_reading(self):
@@ -16738,7 +16738,7 @@ class TestMenuRowReadings(unittest.TestCase):
 
     def test_a_predicate_row_offers_the_column_it_would_write(self):
         rows = self.readings(self.predicate_render(), 'Any')
-        self.assertEqual([r['label'] for r in rows], ['One', 'List'])
+        self.assertEqual([r['label'] for r in rows], ['Cell Only', 'All'])
         self.assertTrue(rows[1]['expr'].endswith('for item in x]'),
                         rows[1]['expr'])
 

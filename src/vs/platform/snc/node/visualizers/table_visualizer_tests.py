@@ -7243,9 +7243,9 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         self.assertTrue(offered, 'no handle offers the read the menu would write')
         by_label = {entry.get('label'): entry['expr'] for entry in offered}
         self.assertEqual(
-            by_label.get('One'),
+            by_label.get('Cell Only'),
             'urllib.request.urlopen(rows[0]).read().decode()')
-        self.assertIn('for ', by_label.get('List', ''),
+        self.assertIn('for ', by_label.get('All', ''),
                       f'no column reading among {sorted(by_label)}')
 
     def test_an_action_that_needs_nothing_asks_for_nothing(self):
@@ -14063,6 +14063,84 @@ class TestColumnBindingTheRowsNameStaysCorrect(unittest.TestCase):
         model['picked'] = ['pre_col_1', 'match_col_1', 'post_col_1']
         expr = _build_pick_expr(model, 'data')
         self.assertEqual(eval(expr, {'data': self.DATA}), ['ab', 'c'])
+
+
+class TestNestedTableActionReadings(unittest.TestCase):
+    """An action button of a table that is itself a CELL offers two readings,
+    the way the string visualizer's do: this cell's answer, and the same
+    question asked of every row of the table above -- which is the column a
+    click writes. The parent lifts the action generated against `$` exactly
+    as it lifts a cell's access path."""
+
+    TAGS = [1, 2, 3]
+    PEOPLE = [{'name': 'A', 'tags': TAGS}, {'name': 'B', 'tags': [4]}]
+
+    def readings(self, out, action):
+        m = re.search(r'data-action-expr="([^"]*)"[^>]*>[^<]*</span>', out)
+        for m in re.finditer(r'snc-mouse-down="ActionButtonClick\(action=&#x27;'
+                             + re.escape(action) + r'&#x27;, copy=False\)"'
+                             r' data-action-expr="([^"]*)"', out):
+            return json.loads(html.unescape(m.group(1)))
+        return None
+
+    def every_row(self, sub_expr):
+        """Stands in for the table above: a column expression, read down it."""
+        return [f'[{replace_dollars_in_py_exp(sub_expr, ["item"])} for item in x]']
+
+    def test_a_button_offers_this_cell_and_every_row(self):
+        model = init_model(self.TAGS, mock_get_visualizer,
+                           var_and_exp=(None, 'x[0]'))
+        model['search'] = '$ > 1'
+        out = visualize(self.TAGS, model, mock_get_visualizer,
+                        lambda c: eval(c, {'x': [self.TAGS]}),
+                        var_and_exp=(None, 'x[0]'), every_row_exps=self.every_row)
+        self.assertEqual(
+            [(r.get('label'), r['expr']) for r in self.readings(out, 'filter')],
+            [('Cell Only', '[item for item in x[0] if item > 1]'),
+             ('All', '[[item2 for item2 in item if item2 > 1] for item in x]')])
+
+    def test_with_no_table_above_a_button_has_the_one_reading(self):
+        model = init_model(self.TAGS, mock_get_visualizer,
+                           var_and_exp=('data', 'data'))
+        model['search'] = '$ > 1'
+        out = visualize(self.TAGS, model, mock_get_visualizer,
+                        lambda c: eval(c, {'data': self.TAGS}),
+                        var_and_exp=('data', 'data'))
+        self.assertEqual([r.get('label') for r in self.readings(out, 'filter')],
+                         [None])
+
+    def test_a_statement_has_no_column_reading(self):
+        model = init_model(self.TAGS, mock_get_visualizer,
+                           var_and_exp=(None, 'x[0]'))
+        model['search'] = '$ > 1'
+        out = visualize(self.TAGS, model, mock_get_visualizer,
+                        lambda c: eval(c, {'x': [self.TAGS]}),
+                        var_and_exp=(None, 'x[0]'), every_row_exps=self.every_row)
+        rows = self.readings(out, 'loop_no_idx')
+        self.assertEqual([r.get('label') for r in rows], [None])
+        self.assertTrue(rows[0]['expr'].startswith('for item in'))
+
+    def test_through_the_table_above(self):
+        """The real parent: the column reading is the nested table's action
+        composed onto the cell's column and read down the outer list, and it
+        answers for every row."""
+        key = f"0{CELL_KEY_SEP}$['tags']"
+        # The module itself for the nested table, since the test adapter's
+        # visualize takes neither the access path nor the every-row callback
+        # the parent hands down.
+        get_vis = (lambda v: table_visualizer if isinstance(v, (list, dict))
+                   else mock_get_visualizer(v))
+        eval_in_scope = lambda c: eval(c, {'people': self.PEOPLE})
+        parent = init_model(self.PEOPLE, get_vis, var_and_exp=('people', 'people'),
+                            eval_in_scope=eval_in_scope)
+        parent['focused_child'] = key
+        parent['children'][key]['search'] = '$ > 1'
+        out = visualize(self.PEOPLE, parent, get_vis, eval_in_scope,
+                        var_and_exp=('people', 'people'))
+        rows = self.readings(out, 'filter')
+        self.assertEqual([r.get('label') for r in rows], ['Cell Only', 'All'])
+        self.assertEqual(eval_in_scope(rows[0]['expr']), [2, 3])
+        self.assertEqual(eval_in_scope(rows[1]['expr']), [[2, 3], [4]])
 
 
 class TestAggHoles(unittest.TestCase):

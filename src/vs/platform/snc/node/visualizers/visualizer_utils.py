@@ -1676,16 +1676,16 @@ def whole_grab_body(child_html: str, expr: str) -> 'str | None':
 # value being pointed at, and the same question asked of the whole column.
 # Named only in company -- a lone expression has nothing to be told apart from,
 # which is why _column_header_exps leaves a list's single reading unlabelled.
-READING_ONE = 'One'
-READING_LIST = 'List'
+READING_ONE = 'Cell Only'
+READING_LIST = 'All'
 
 
 def label_readings(primary, extras) -> list:
     """The readings of one value, named so the tooltip's rows can be told apart.
 
-    The value itself leads and is `One`; anything that already said what it is
-    -- a dict column's `List` and `Dict` -- keeps its own word, and the rest are
-    the list reading. Returns PyExps with everything else about them (declared
+    The value itself leads and is `Cell Only`; anything that already said what
+    it is -- a dict column's `List` and `Dict` -- keeps its own word, and the
+    rest are `All`, the same question asked of every row. Returns PyExps with everything else about them (declared
     imports) carried through.
     """
     def as_exp(e):

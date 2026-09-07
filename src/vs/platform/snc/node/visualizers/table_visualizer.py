@@ -70,6 +70,7 @@ from visualizer_utils import (
     eval_dollar_expr, replace_dollars_in_py_exp,
     py_exp_attrs, PyExp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
+    label_readings,
     new_code_command, is_new_code, imports_for_code, AddImports,
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
     parse_slot_cols,
@@ -9958,14 +9959,18 @@ def _is_plain_slice_search(model: dict, eval_in_scope) -> bool:
     return not (_is_list_of_ints(start_val) or _is_list_of_ints(stop_val))
 
 
-def _preview_expr(model, action, eval_in_scope):
+def _preview_expr(model, action, eval_in_scope, source_expr=None):
     """Pre-compute the Python expression an action would generate.
 
     Used to populate `data-action-expr` (action buttons) and `snc-py-exps`
     (dropdown rows) so the existing snc-action-tooltip / py-exp-tooltip systems
     can show + copy + drag the expression on hover.
+
+    *source_expr* overrides what the list is called. Passing `$` yields the
+    action as a column expression over the list -- what a table above lifts
+    into its own scope (see _every_row_action_exps).
     """
-    source_expr = model.get('_source_expr')
+    source_expr = source_expr or model.get('_source_expr')
     if not source_expr:
         return ''
     ctx = _get_search_context(model, source_expr=source_expr, eval_in_scope=eval_in_scope)
@@ -9986,14 +9991,45 @@ def _preview_expr(model, action, eval_in_scope):
     return with_pass_body(result[1]) if result else ''
 
 
-def _preview_py_exp_attrs(model, action, eval_in_scope, **kwargs) -> str:
+def _every_row_action_exps(model, action, eval_in_scope, every_row_exps) -> list:
+    """What this action says of EVERY row, when this table is a cell of one.
+
+    Clicking already generalizes -- the code goes up as a column, one
+    expression each row of the table above answers. Only the preview named
+    one row, so the button offered `[item for item in x[0] if item > 1]`
+    while the column it was about to write said the same of every row. The
+    action generated against `$` IS that column, so the table above lifts it
+    the same way it lifts a cell's access path.
+
+    Nothing for an action that writes a STATEMENT: a loop header is a line
+    and only ever a line, and a column holds an expression.
+    """
+    if every_row_exps is None:
+        return []
+    column = _preview_expr(model, action, eval_in_scope, source_expr='$')
+    if not column or not dollar_expr_parses(column):
+        return []
+    return list(every_row_exps(column))
+
+
+def _preview_py_exp_attrs(model, action, eval_in_scope, every_row_exps=None,
+                          **kwargs) -> str:
     """The same preview, as the attributes that hand it to the editor.
 
     What the code needs imported is declared here, beside the code, exactly as
-    it is when the same action is clicked rather than dragged.
+    it is when the same action is clicked rather than dragged. Nested, the
+    handle carries the column reading too (see _every_row_action_exps), named
+    so the tooltip can say which is which.
     """
     expr = _preview_expr(model, action, eval_in_scope)
-    return py_exp_attrs(PyExp(expr, code_imports(expr)), **kwargs)
+    primary = PyExp(expr, code_imports(expr))
+    also = _every_row_action_exps(model, action, eval_in_scope, every_row_exps)
+    if not also:
+        return py_exp_attrs(primary, **kwargs)
+    return py_exp_attrs(label_readings(primary, [
+        (e if isinstance(e, PyExp) else PyExp(e))._replace(
+            imports=code_imports(e.expr if isinstance(e, PyExp) else e))
+        for e in also]), **kwargs)
 
 
 def _compute_predicate_previews(model: dict, eval_in_scope) -> tuple:
@@ -10103,7 +10139,7 @@ def _render_search_box_input(model, eval_in_scope=None):
 JOIN_SEP_TOOLTIP = 'The separator, as a Python expression (no $ here)'
 
 
-def _render_action_buttons(model, lst, eval_in_scope=None):
+def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
     """Render the .action-buttons bar (no outer wrapper).
 
     Uses .action-button + .snc-dropdown-trigger / .snc-dropdown-panel /
@@ -10155,7 +10191,7 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
             cls += ' ' + extra_classes
         event = repr(ActionButtonClick(action=action, copy=False))
         expr_attr = (_preview_py_exp_attrs(model, action, eval_in_scope,
-                                           draggable=False,
+                                           every_row_exps, draggable=False,
                                            attr='data-action-expr')
                      if enabled else '')
         title_attr = f' title="{html.escape(title)}"' if title else ''
@@ -10171,7 +10207,8 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
             cls += ' dimmed'
         act_event = repr(ActionButtonClick(action=action, copy=False))
         py_exp_attr = (_preview_py_exp_attrs(model, action, eval_in_scope,
-                                             draggable=False, align='right')
+                                             every_row_exps, draggable=False,
+                                             align='right')
                        if enabled else '')
         return (
             f'<div class="{cls}"{py_exp_attr}>'
@@ -10301,7 +10338,8 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
         act_action = f'join:{sep_expr}'
         act_event = repr(ActionButtonClick(action=act_action, copy=False))
         py_exp_attr = (_preview_py_exp_attrs(model, act_action, eval_in_scope,
-                                             draggable=False, align='right')
+                                             every_row_exps, draggable=False,
+                                             align='right')
                        if join_enabled else '')
         rows.append(
             f'<div class="snc-dropdown-option"{py_exp_attr}>'
@@ -10316,8 +10354,8 @@ def _render_action_buttons(model, lst, eval_in_scope=None):
     custom_input_event = "lambda e: JoinSeparatorInput(value=e.get('value', ''))"
     custom_act_action = f'join:{custom_sep}'
     custom_py_exp_attr = (_preview_py_exp_attrs(model, custom_act_action,
-                                                eval_in_scope, draggable=False,
-                                                align='right')
+                                                eval_in_scope, every_row_exps,
+                                                draggable=False, align='right')
                           if join_enabled else '')
     rows.append(
         f'<div class="snc-dropdown-option"{custom_py_exp_attr}>'
@@ -10525,7 +10563,7 @@ def _render_pick_preview(model: dict, eval_in_scope) -> str:
         result = str(e)
     return (
         f'<div class="pick-preview">'
-        f'<span class="pick-preview-arrow">⇒</span>'
+        f'<span class="pick-preview-arrow">⇒</span> '
         f'<span class="pick-preview-value">{html.escape(result)}</span>'
         f'</div>'
     )
@@ -10545,7 +10583,8 @@ def _render_auxiliary_attributes(model, lst):
         f'</div>'
     )
 
-def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_child=None):
+def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_child=None,
+                       every_row_exps=None):
     """Render the full .search-div (search input row + action buttons row)."""
     input_html = _render_search_box_input(model, eval_in_scope)
     has_focused_child_class = ' has-focused-child-search-box' if focused_child else ''
@@ -10553,7 +10592,8 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
     if small:
         action_buttons_html = ''
     else:
-        action_buttons_html = _render_action_buttons(model, lst, eval_in_scope)
+        action_buttons_html = _render_action_buttons(model, lst, eval_in_scope,
+                                                     every_row_exps)
     preview_html = '' if small else _render_pick_preview(model, eval_in_scope)
     preview_row = (f'<div class="search-div-row">{preview_html}</div>'
                    if preview_html else '')
@@ -11541,7 +11581,9 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
     strs.append('</div>')
 
     if not small and not live_only:
-        strs.append(_render_search_box(model, lst, eval_in_scope, small=False, focused_child=focused_child))
+        strs.append(_render_search_box(model, lst, eval_in_scope, small=False,
+                                       focused_child=focused_child,
+                                       every_row_exps=every_row_exps))
 
     strs.append('</div>')
     return ''.join(strs)
