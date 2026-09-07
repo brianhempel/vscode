@@ -39,7 +39,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -439,6 +439,11 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
     cmd_dicts: List[Dict[str, Any]] = []
     for cmd in commands:
         try:
+            if isinstance(cmd, Phantom):
+                # A preview for a table to draw, not code for the editor. Only
+                # a nested visualizer emits one and its table consumes it; one
+                # that got past every parent is nothing the editor can act on.
+                continue
             if isinstance(cmd, AddImports):
                 # Nothing to ask for is nothing to send: a command the editor
                 # would answer with no edit at all never reaches it.

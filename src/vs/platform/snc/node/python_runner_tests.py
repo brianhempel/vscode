@@ -2484,3 +2484,16 @@ class TestLiveOnly(unittest.TestCase):
                     for c in m['item'].get('commands', [])]
         self.assertEqual(commands(self._run(False, [SavingVis])), ['SetConfigComment'])
         self.assertEqual(commands(self._run(True, [SavingVis])), ['SetConfigComment'])
+
+
+class TestPhantomNeverReachesTheEditor(unittest.TestCase):
+    """A Phantom previews code inside a table; only a nested visualizer emits
+    one, and the table that takes it consumes it. One that gets past every
+    parent anyway is nothing the editor can act on, so it is dropped here."""
+
+    def test_a_phantom_is_dropped(self):
+        from visualizer_utils import Phantom
+        self.assertEqual(
+            _commands_to_dicts([Phantom(('n', 'len(s)'))], line=1, idx_in_line=0,
+                               model=None, source_code="s = 'a'\n"),
+            [])

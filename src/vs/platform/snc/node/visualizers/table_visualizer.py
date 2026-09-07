@@ -73,7 +73,7 @@ from visualizer_utils import (
     py_exp_attrs, PyExp,
     CHILD_SOURCE_BINDER, nest_generated_expr, nest_child_command,
     label_readings,
-    new_code_command, is_new_code, imports_for_code, AddImports,
+    new_code_command, is_new_code, imports_for_code, AddImports, Phantom,
     dollar_expr_parses, dollar_expr_names_index, dollar_expr_sigils, is_nested,
     parse_slot_cols,
     get_full_class_name, truncate_str, truncate_repr, wrap_drag_grab,
@@ -514,6 +514,22 @@ class ActionButtonClick:
     """User clicked an action button."""
     action: str
     copy: bool
+
+@dataclass(frozen=True, slots=True)
+class ActionButtonDwell:
+    """The pointer resting on an action button, in a cell of a table.
+
+    Only a cell asks for one (see _render_action_buttons): there it swaps the
+    phantom column the table above draws for this table to that action's
+    reading, and adopts the action. At the top level a hover writes nothing,
+    so nothing is asked for and one arriving anyway changes nothing.
+    """
+    action: str
+
+@dataclass(frozen=True, slots=True)
+class PhantomColumnCommit:
+    """A click on the phantom column, header or cell: keep it (see _set_phantom)."""
+    pass
 
 @dataclass(frozen=True, slots=True)
 class DropdownToggle:
@@ -986,6 +1002,7 @@ class LeafColumn:
     header: tuple      # the header path, one entry per header row
     chain: tuple = ()  # every splat above it, outermost first
     depth: int = 0     # which grouping level it draws at; len(chain)
+    phantom: bool = False  # a preview drawn beside its source; see _drawn_columns
 
 
 @dataclass(frozen=True)
@@ -1059,6 +1076,7 @@ def _leaf_columns(columns, path: tuple = (), chain: tuple = ()) -> list:
         identity = f'{SUBCOL_SEP}'.join(here_path)
         if not subs:
             here = chain + (col,) if is_splat else chain
+            config = columns.get(col) if isinstance(columns, dict) else None
             leaves.append(LeafColumn(
                 expr=identity,
                 splat=here[-1] if here else None,
@@ -1066,7 +1084,8 @@ def _leaf_columns(columns, path: tuple = (), chain: tuple = ()) -> list:
                 sub='$' if is_splat else _sub_expr(col, path, chain),
                 header=here_path,
                 chain=here,
-                depth=len(here)))
+                depth=len(here),
+                phantom=bool(config and config.get('phantom') is True)))
             continue
         leaves.extend(_leaf_columns(subs, here_path,
                                     chain + (col,) if is_splat else chain))
@@ -1493,6 +1512,7 @@ def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
         if depth != len(path) - 1:
             return None
         here = chain + (col,) if _split_splat(col)[0] else chain
+        config = cols.get(col) if isinstance(cols, dict) else None
         return LeafColumn(
             expr=expr,
             splat=here[-1] if here else None,
@@ -1500,7 +1520,8 @@ def _leaf_for(columns, expr: str) -> 'LeafColumn | None':
                  else _sub_expr(col, path[:depth], chain)),
             header=path,
             chain=here,
-            depth=len(here))
+            depth=len(here),
+            phantom=bool(config and config.get('phantom') is True))
     return None
 
 
@@ -2524,26 +2545,149 @@ def _add_derived_column(model, cell_col: str, expr: str) -> str:
     than a column of the table, which is the scope it was written in and the
     only one it reads correctly in.
     """
-    columns = model['columns']
+    return _place_derived_column(model['columns'], cell_col, expr)[0]
+
+
+def _place_derived_column(columns, cell_col: str, expr: str) -> tuple:
+    """_add_derived_column on a columns map: `(leaf key, whether anything was
+    added)`. Nothing is added when the table already has the column, and
+    then the key names that column."""
     leaf = _leaf_for(columns, cell_col)
     path = cell_col.split(SUBCOL_SEP)
     if leaf is None or leaf.splat is None:
         # A column of the table, right after the one its cell was in -- the
         # top-level column, when the cell was in a plain sub-column of one.
-        _col_insert(columns, expr, _index_after(columns, path[0]))
-        return expr
+        return expr, _col_insert(columns, expr, _index_after(columns, path[0]))
     # A splat drawing its own column is its new sub-column's parent; a
     # sub-column's parent is whatever it is itself a sub-column of.
     if path[-1] == leaf.splat:
         subs = _subs_at(columns, cell_col, create=True)
-        _col_add(columns if subs is None else subs, expr)
-        return expr if subs is None else f'{cell_col}{SUBCOL_SEP}{expr}'
+        added = _col_add(columns if subs is None else subs, expr)
+        return (expr if subs is None else f'{cell_col}{SUBCOL_SEP}{expr}'), added
     subs = _subs_at(columns, SUBCOL_SEP.join(path[:-1]), create=True)
     if subs is None:
-        _col_insert(columns, expr, _index_after(columns, path[0]))
-        return expr
-    _col_insert(subs, expr, _index_after(subs, path[-1]))
-    return SUBCOL_SEP.join(path[:-1] + [expr])
+        return expr, _col_insert(columns, expr, _index_after(columns, path[0]))
+    added = _col_insert(subs, expr, _index_after(subs, path[-1]))
+    return SUBCOL_SEP.join(path[:-1] + [expr]), added
+
+
+# === The phantom column ======================================================
+#
+# A visualizer in a cell has no line to link, so what a linked line would show
+# as the user works -- the current reading of the action -- this table shows
+# as a PHANTOM column beside the cell's column: faded, and dropped when the
+# cell loses focus. The child sends the code as a Phantom (see
+# visualizer_utils.Phantom) wherever it would have rewritten its line.
+#
+# It is a property of its SOURCE column, `columns[src]['phantom'] = expr`, and
+# not an entry of the map: a column is its expression, so the phantom follows
+# its source through reorders and splats with no bookkeeping, there can only
+# be one per column, and nothing that iterates `columns` -- persistence, the
+# aggregation rows, the (+) menu, every column event -- has to know to skip
+# it. _set_phantom keeps it to one per table. Only the drawing materialises
+# it (_drawn_columns), and only for as long as the drawing takes.
+
+def _phantom(columns) -> 'tuple | None':
+    """The source column carrying the phantom, as `(leaf identity, expr)`, or
+    None. A phantom under a splat sits on the sub-column its cell was in."""
+    if not isinstance(columns, dict):
+        return None
+    for col, config in columns.items():
+        if not isinstance(config, dict):
+            continue
+        expr = config.get('phantom')
+        if isinstance(expr, str):
+            return (col, expr)
+        below = _phantom(config.get('cols'))
+        if below is not None:
+            return (f'{col}{SUBCOL_SEP}{below[0]}', below[1])
+    return None
+
+
+def _drop_phantom(columns) -> None:
+    """Take the phantom off whichever column carries it."""
+    if not isinstance(columns, dict):
+        return
+    for config in columns.values():
+        if isinstance(config, dict):
+            config.pop('phantom', None)
+            _drop_phantom(config.get('cols'))
+
+
+def _set_phantom(model, cell_col: str, expr: str) -> 'str | None':
+    """Preview *expr* -- code made in a cell of *cell_col* -- as a phantom
+    column beside it, in place of whatever phantom the table had. Answers the
+    key the phantom's cells are drawn under, or None when nothing is drawn: a
+    column the table already has needs no preview."""
+    columns = model['columns']
+    _drop_phantom(columns)
+    config = _leaf_config(columns, cell_col)
+    if config is None:
+        return None
+    config['phantom'] = expr
+    drawn = next((leaf.expr for leaf in _leaf_columns(_drawn_columns(columns))
+                  if leaf.phantom), None)
+    if drawn is None:
+        del config['phantom']
+    return drawn
+
+
+def _commit_phantom(model) -> 'str | None':
+    """Keep the phantom: it becomes a column of the table exactly where it was
+    drawn. Answers its expression, or None when there was none."""
+    found = _phantom(model['columns'])
+    if found is None:
+        return None
+    src, expr = found
+    _drop_phantom(model['columns'])
+    _add_derived_column(model, src, expr)
+    return expr
+
+
+def _drawn_columns(columns) -> dict:
+    """The columns as drawn: the phantom, when there is one, materialised as a
+    column right where committing it would put it (the placement is
+    _add_derived_column's own), flagged `phantom: True` and carrying nothing
+    else. A copy, so the model's map keeps the phantom as the property of its
+    source that it is; the copy lives for one render (see visualize)."""
+    found = _phantom(columns)
+    if found is None:
+        return columns
+    drawn = copy.deepcopy(columns)
+    _drop_phantom(drawn)
+    key, added = _place_derived_column(drawn, *found)
+    if not added:
+        return columns
+    _leaf_config(drawn, key)['phantom'] = True
+    return drawn
+
+
+# How a phantom's cells get the modules their code reaches for. The phantom is
+# drawn before the file has the imports -- committing is what adds them -- so
+# each is bound as a default of a lambda wrapped around the code, which reaches
+# a caller's eval without touching the user's namespace. A file that has them
+# already binds the same module twice.
+_IMPORT_BINDINGS = {
+    'import re': "re=__import__('re')",
+    'import numpy as np': "np=__import__('numpy')",
+    'import math': "math=__import__('math')",
+    'from collections import Counter': "Counter=__import__('collections').Counter",
+    'import json': "json=__import__('json')",
+    'import csv': "csv=__import__('csv')",
+    'import urllib.request': "urllib=__import__('urllib.request')",
+    'import pandas as pd': "pd=__import__('pandas')",
+}
+
+
+def _phantom_scope(eval_in_scope, expr: str):
+    """*eval_in_scope*, with the modules *expr* needs bound around whatever it
+    is asked to evaluate (see _IMPORT_BINDINGS)."""
+    binds = [_IMPORT_BINDINGS[line] for line in imports_for_code(expr)
+             if line in _IMPORT_BINDINGS]
+    if not binds or eval_in_scope is None:
+        return eval_in_scope
+    prefix = f'(lambda {", ".join(binds)}: ('
+    return lambda code: eval_in_scope(f'{prefix}{code}))()')
 
 
 def _index_after(columns, name: str) -> int:
@@ -7230,11 +7374,17 @@ def generate_action(action: str, ctx: dict) -> tuple[str | None, str] | None:
 
 def _emit_linked_update(expr: str, model: dict, commands: list,
                         suggest_name: 'str | None' = None,
-                        rename: bool = False) -> None:
+                        rename: bool = False, nested: bool = False) -> None:
     """Send expression intent while leaving the concrete target to the editor.
 
     No-op when *expr* matches the last expression written for this link, so
     events that do not change the search context do not rewrite the linked LOC.
+
+    *nested*, there is no line: the table above draws the reading as a phantom
+    column instead (see visualizer_utils.Phantom). That is sent every time
+    rather than only on change, since the table drops the phantom when the
+    cell loses focus and a no-op event has to be able to bring it back. A
+    statement has no column form and previews nothing.
 
     Whether the code being written can be assigned to a name is read off the
     code itself rather than remembered from the action that linked the line: an
@@ -7243,6 +7393,16 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
     being true -- probing `name = for item in ...:` raises, and the update
     disappears in the except below.
     """
+    if nested:
+        if opens_block(expr):
+            return
+        try:
+            ast.parse(expr, mode='eval')
+        except SyntaxError:
+            return
+        study_note(phantom=model.get('linked_action'))
+        commands.append(Phantom(new_code_command((suggest_name, expr), code_imports)))
+        return
     if expr == model.get('last_linked_expr'):
         return
     text = expr if opens_block(expr) else '_linked_result = ' + expr
@@ -9471,6 +9631,23 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         f'data-tooltip="Resize" '
         f'class="col-handle col-resize-handle col-resize-left"></span>')
 
+    config = _leaf_config(model.get('columns'), col)
+    if config is not None and config.get('phantom') is True:
+        # A phantom (see _drawn_columns): what a cell's action would write,
+        # drawn faded until the user keeps it. Nothing to drag, resize, sort or
+        # open -- it is attached to its source column and goes where that goes
+        # -- and a click anywhere on it commits it.
+        classes = ['col-header', 'phantom'] + ([extra_classes] if extra_classes else [])
+        return (
+            f'<th class="{" ".join(classes)}"{span_attrs} data-col="{repr(html.escape(col))}"'
+            f'{get_col_width_style(col, model, clip=False)} '
+            f'snc-mouse-down="{html.escape(repr(PhantomColumnCommit()))}" '
+            f'data-tooltip="Click to keep this column">'
+            f'<span class="col-header-inner"><span class="col-name">'
+            f'{html.escape(col if label is None else label)}</span></span>'
+            f'</th>'
+        )
+
     drag_from = model.get('column_drag_from')
     drag_over = model.get('column_drag_over')
     is_drag_source = (drag_from == col)
@@ -10173,6 +10350,11 @@ def _render_search_box_input(model, eval_in_scope=None):
 JOIN_SEP_TOOLTIP = 'The separator, as a Python expression (no $ here)'
 
 
+def _dwell_attr(action: str) -> str:
+    """What a button asks to hear when the pointer rests on it, in a cell."""
+    return f' snc-dwell="{html.escape(repr(ActionButtonDwell(action=action)))}"'
+
+
 def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
     """Render the .action-buttons bar (no outer wrapper).
 
@@ -10201,6 +10383,10 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
         match_count = len(lst)
 
     linked_action = model.get('linked_action')
+    # In a cell (which is what having every_row_exps means) a rest on a button
+    # swaps the phantom column the table above draws; at the top level it
+    # would change nothing, so it is not asked for and costs no run.
+    dwell = every_row_exps is not None
 
     # Nothing generate_action declines to write should offer a button that
     # looks like it will. For a list that is every action; for a dict the
@@ -10229,9 +10415,10 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
                                            attr='data-action-expr')
                      if enabled else '')
         title_attr = f' title="{html.escape(title)}"' if title else ''
+        dwell_attr = _dwell_attr(action) if enabled and dwell else ''
         return (
             f'<span class="{cls}" snc-mouse-down="{html.escape(event)}"'
-            f'{expr_attr}{title_attr}>{label}</span>'
+            f'{expr_attr}{title_attr}{dwell_attr}>{label}</span>'
         )
 
     def dropdown_row(label, action, enabled):
@@ -10244,8 +10431,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
                                              every_row_exps, draggable=False,
                                              align='right')
                        if enabled else '')
+        dwell_attr = _dwell_attr(action) if enabled and dwell else ''
         return (
-            f'<div class="{cls}"{py_exp_attr}>'
+            f'<div class="{cls}"{py_exp_attr}{dwell_attr}>'
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
             f'</div>'
         )
@@ -10375,8 +10563,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
                                              every_row_exps, draggable=False,
                                              align='right')
                        if join_enabled else '')
+        dwell_attr = _dwell_attr(act_action) if join_enabled and dwell else ''
         rows.append(
-            f'<div class="snc-dropdown-option"{py_exp_attr}>'
+            f'<div class="snc-dropdown-option"{py_exp_attr}{dwell_attr}>'
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">'
             f'{html.escape(sep_expr)}</span>'
             f'</div>'
@@ -10576,32 +10765,6 @@ def _render_load_more_row(n_hidden: int, colspan: int, small: bool) -> str:
     )
 
 
-def _render_pick_preview(model: dict, eval_in_scope) -> str:
-    """Live preview line: what the picked expression produces.
-
-    Its own in-flow row rather than the string visualizer's .transform-preview,
-    which is absolutely positioned to overlay the right end of the replace input
-    and would escape to the container edge here. Nothing renders until something
-    is picked.
-    """
-    if model.get('tool') != 'pick' or not model.get('pick_expr'):
-        return ''
-    if eval_in_scope is None:
-        return ''
-    expr = _preview_expr(model, 'filter', eval_in_scope)
-    if not expr:
-        return ''
-    try:
-        result = truncate_str(repr(eval_in_scope(expr)), 200)
-    except Exception as e:
-        result = str(e)
-    return (
-        f'<div class="pick-preview">'
-        f'<span class="pick-preview-arrow">⇒</span> '
-        f'<span class="pick-preview-value">{html.escape(result)}</span>'
-        f'</div>'
-    )
-
 def _render_auxiliary_attributes(model, lst):
     source_expr = model.get('_source_expr') if model else None
     len_exp = f'len({source_expr})' if source_expr else None
@@ -10628,10 +10791,6 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
     else:
         action_buttons_html = _render_action_buttons(model, lst, eval_in_scope,
                                                      every_row_exps)
-    preview_html = '' if small else _render_pick_preview(model, eval_in_scope)
-    preview_row = (f'<div class="search-div-row">{preview_html}</div>'
-                   if preview_html else '')
-
     auxiliary_html = _render_auxiliary_attributes(model, lst)
 
     return (
@@ -10639,7 +10798,6 @@ def _render_search_box(model, lst, eval_in_scope=None, small=False, focused_chil
         f'<div class="search-div-row">'
         f'<div class="search-replace-container">{input_html}</div>'
         f'</div>'
-        f'{preview_row}'
         f'<div class="search-div-row">'
         f'{action_buttons_html}'
         f'</div>'
@@ -11479,12 +11637,21 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
             cell_span = leaf_span(leaf.depth)
             scroll_cell_attr = (' snc-scroll-to-match="nearest"'
                                 if composite_key == scroll_to_cell else '')
+            # A phantom's cells (see _drawn_columns) are faded, and a click on
+            # one keeps the column. They are read with the modules the code
+            # needs bound around them, since the file has no import yet.
+            phantom_attrs = ('' if not leaf.phantom else
+                             f' class="phantom" '
+                             f'snc-mouse-down="{html.escape(repr(PhantomColumnCommit()))}"')
             td_open = (f'<td data-col="{repr(html.escape(col))}" '
                        f'{get_col_width_style(col, model)} {cell_span}'
-                       f'{scroll_cell_attr}>')
+                       f'{scroll_cell_attr}{phantom_attrs}>')
             try:
-                cell_value = _leaf_cell_value(leaf, row, lst, source_expr,
-                                              eval_in_scope, read_through)
+                cell_value = _leaf_cell_value(
+                    leaf, row, lst, source_expr,
+                    (_phantom_scope(eval_in_scope, leaf.sub or leaf.expr)
+                     if leaf.phantom else eval_in_scope),
+                    read_through)
                 cell_error = None
             except Exception as e:
                 # The column raised on this row -- `int($[2])` over a row
@@ -11520,7 +11687,7 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
 
             if cell_error is None:
                 cell_model = children.get(composite_key)
-                child_small = small or (composite_key != focused_child)
+                child_small = small or leaf.phantom or (composite_key != focused_child)
 
                 # And the other readings of whatever it draws inside: the same
                 # reach down every row (see _cell_inner_exps). None under a
@@ -11583,6 +11750,10 @@ def _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=None, 
                 # expression, since what raised is the thing to look at.
                 strs.append(wrap_drag_grab(error_html(cell_error),
                                            child_var_and_exp))
+            elif leaf.phantom:
+                # Not a child: a click on a phantom's cell commits the column
+                # rather than focusing what is drawn in it.
+                strs.extend(cell_htmls)
             else:
                 strs.append(wrap_child_prefix(composite_key))
                 strs.extend(cell_htmls)
@@ -11686,13 +11857,27 @@ def visualize(lst: list, model: dict, get_visualizer, eval_in_scope, max_width=N
     # would have to except the focused one anyway. A non-empty config path is
     # what nesting is (see init_model), and `small` alone is not: a table on an
     # unfocused LINE is still the biggest thing on that line.
+    if small:
+        # The line lost focus, and with it whatever cell was previewing. Done
+        # here rather than on an event because there is none: the editor says
+        # which line has focus by rerunning, and this model is what it keeps.
+        _drop_phantom(model['columns'])
     if small and model.get('_config_path'):
         return _visualize_collapsed(lst, var_and_exp)
 
     # No whole-area drag handle in either size: the cells and column headers
     # carry their own snc-py-exps, and a handle wrapping all of them would claim
     # every hover in between. Only the generic visualizers self-wrap.
-    return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, every_row_exps=every_row_exps)
+    #
+    # Drawn from the columns WITH the phantom materialised (see _drawn_columns),
+    # swapped in for exactly the render: everything that draws reads the map
+    # off the model, and only the map on the model is state.
+    columns = model['columns']
+    model['columns'] = _drawn_columns(columns)
+    try:
+        return _visualize_table(lst, model, get_visualizer, eval_in_scope, max_width=max_width, max_height=max_height, small=small, every_row_exps=every_row_exps)
+    finally:
+        model['columns'] = columns
 
 
 def _table_child_value_getter(key, lst, model, eval_in_scope=None):
@@ -11763,6 +11948,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         is_agg = _parse_agg_child_key(msg.child_key) is not None
         row_key, cell_col = msg.child_key.split(CELL_KEY_SEP, 1)
         study_note(cell={'row': row_key, 'column': cell_col, 'agg': is_agg})
+        focus_before = model.get('focused_child')
         new_model, commands = route_child_event(
             event, model, value,
             child_value_getter=lambda key: _table_child_value_getter(key, value, model, eval_in_scope),
@@ -11772,6 +11958,10 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             var_and_exp=(None, CHILD_SOURCE_BINDER),
             eval_in_scope=eval_in_scope,
         )
+        if new_model.get('focused_child') != focus_before:
+            # Focus moved to another cell: whatever the last one was previewing
+            # went with it.
+            _drop_phantom(new_model['columns'])
         src = model.get('_source_expr')
         if is_agg:
             # An answer is one value the aggregation worked out, not a value
@@ -11834,12 +12024,15 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # the binder, and the OUTERMOST table is the one that takes it.
             # Its clipboard text is unaffected: that names this row and always
             # did, so it is resolved here as before.
+            def mapped(cmd):
+                if is_new_code(cmd):
+                    return (cmd[0], _map_over_rows_code(cmd[1], generic_cell), *cmd[2:])
+                if isinstance(cmd, Phantom):
+                    # A preview travels as the code it previews would.
+                    return Phantom(mapped(cmd.new_code))
+                return nest_child_command(cmd, generic_cell, concrete_cell)
             if is_nested(var_and_exp):
-                commands = [
-                    (cmd[0], _map_over_rows_code(cmd[1], generic_cell), *cmd[2:])
-                    if is_new_code(cmd) and not is_agg
-                    else nest_child_command(cmd, generic_cell, concrete_cell)
-                    for cmd in commands]
+                commands = [mapped(cmd) for cmd in commands]
             else:
                 commands = [nest_child_command(cmd, generic_cell, concrete_cell)
                             for cmd in commands]
@@ -11860,11 +12053,26 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # The declaration is still asked for now, though: the column is
             # evaluated in the user's scope on every run, so until the file has
             # the import there is nothing for the column to show.
-            if is_new_code(cmd) and not is_agg and is_nested(var_and_exp):
+            if isinstance(cmd, Phantom):
+                # What the cell would write, previewed as a phantom column --
+                # by the same table that would take the column (see
+                # _set_phantom). An answer's code becomes a line, never a
+                # column, so there is nothing for a preview of it to be.
+                if is_agg:
+                    continue
+                if is_nested(var_and_exp):
+                    filtered_commands.append(cmd)
+                    continue
+                key = _set_phantom(new_model, cell_col, cmd.new_code[1])
+                if key is not None:
+                    new_model['_scroll_to_cell'] = f'{row_key}{CELL_KEY_SEP}{key}'
+            elif is_new_code(cmd) and not is_agg and is_nested(var_and_exp):
                 # Mapped above and headed for the outermost table.
                 filtered_commands.append(cmd)
             elif is_new_code(cmd) and not is_agg:
                 study_note(derivedColumn=cmd[1])
+                # The column takes the place of whatever was being previewed.
+                _drop_phantom(new_model['columns'])
                 new_col = _add_derived_column(new_model, cell_col, cmd[1])
                 # The result shows up in the cell the column adds beside the
                 # visualizer, on this row -- which a wide visualizer may well
@@ -12735,7 +12943,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             study_note(action=('copy.action' if copy else 'link.set-action'
                                if model.get('linked_action') else 'code.action'),
                        codeAction=action, joinSep=join_sep, wrote=False)
-            if model.get('linked_action') and not copy:
+            if (model.get('linked_action') and not copy
+                    and not is_nested(var_and_exp)):
                 model['linked_action'] = action
                 ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
@@ -12774,12 +12983,40 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
-                            # Nested, there is no line to own - see is_nested.
-                            if not is_nested(var_and_exp):
-                                model['linked_action'] = action
-                                model['linked_source_expr'] = ctx.get('source_expr')
-                                model['last_linked_expr'] = result[1]
-                                model['auto_linked_once'] = True
+                            # Nested there is no line to own (see is_nested),
+                            # but the action is adopted all the same: it is
+                            # what the phantom column the table above draws
+                            # previews from here on.
+                            model['linked_action'] = action
+                            model['linked_source_expr'] = ctx.get('source_expr')
+                            model['last_linked_expr'] = result[1]
+                            model['auto_linked_once'] = True
+
+        case ActionButtonDwell(action=action):
+            # Only in a cell (see the class): the phantom column the table
+            # above draws for this table swaps to this action's reading, and
+            # the action is adopted so the next keystroke keeps previewing it.
+            # A statement is a line and only a line -- a column holds an
+            # expression -- so it, and an action with nothing to say, change
+            # nothing.
+            if is_nested(var_and_exp):
+                join_sep = None
+                if action.startswith('join:'):
+                    join_sep, action = action[5:], 'join'
+                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+                if ctx is None:
+                    ctx = _get_whole_list_context(model, var_and_exp)
+                if ctx and join_sep is not None:
+                    ctx['join_separator'] = join_sep
+                result = generate_action(action, ctx) if ctx else None
+                study_note(action='phantom.dwell', codeAction=action,
+                           wrote=bool(result) and not opens_block(result[1]))
+                if result and not opens_block(result[1]):
+                    model['linked_action'] = action
+                    model['linked_source_expr'] = ctx.get('source_expr')
+                    model['auto_linked_once'] = True
+                    _emit_linked_update(result[1], model, commands,
+                                        suggest_name=result[0], nested=True)
 
         case Unlink():
             # Stash the action so the chain icon can resume it on relink.
@@ -12800,6 +13037,20 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case DeselectChildren():
             study_note(action='child.deselect', was=model.get('focused_child'))
             model['focused_child'] = None
+            _drop_phantom(model['columns'])
+
+        case PhantomColumnCommit():
+            expr = _commit_phantom(model)
+            study_note(action='phantom.commit', column=expr)
+            if expr is not None:
+                # The column is evaluated in the user's scope from here on, so
+                # what its code reaches for has to be in the file -- the same
+                # ask a click on the action makes (see the ChildEvent branch).
+                needs = imports_for_code(expr)
+                if needs:
+                    commands.append(AddImports(imports=tuple(needs)))
+                if has_rows:
+                    _save_slots(model)
 
         case SelectGroupedComputeTab(grouped=grouped):
             study_note(action='compute.tab', grouped=grouped)
@@ -12814,10 +13065,12 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 _save_slots(model)
 
 
-    if is_nested(var_and_exp):
-        return (model, commands)
+    # Nested there is no line, and the same two blocks preview instead: the
+    # table above draws what the line would have said as a phantom column
+    # (see visualizer_utils.Phantom).
+    nested = is_nested(var_and_exp)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink, LineChanged)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, ActionButtonDwell, Unlink, Relink, LineChanged)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -12825,11 +13078,11 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             result = generate_action(model['linked_action'], ctx)
             if result:
                 _emit_linked_update(result[1], model, commands,
-                                    suggest_name=result[0])
+                                    suggest_name=result[0], nested=nested)
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (Unlink, Relink, LineChanged))):
+          and not isinstance(msg, (ActionButtonDwell, Unlink, Relink, LineChanged))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).
@@ -12903,6 +13156,11 @@ def _maybe_auto_link(var_and_exp, model: dict, commands: list, *, value=None,
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
+    if is_nested(var_and_exp):
+        # No line to insert in a cell: the table above previews it instead.
+        if not opens_block(expr):
+            commands.append(Phantom(new_code_command(result, code_imports)))
+        return
     commands.append(new_code_command(
         result, code_imports,
         config=_inherited_config(action, ctx, model, value, get_visualizer)))

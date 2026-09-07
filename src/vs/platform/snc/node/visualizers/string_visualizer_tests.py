@@ -17084,3 +17084,186 @@ class TestSubstrsIsTheDefaultOutput(unittest.TestCase):
         model, commands = update(make_search_box_input_event(r"r'hello'"), self.var_and_exp, model, self.value)
         self.assertEqual(model['linked_action'], 'find_or_map')
         self.assertIn('finditer', commands[0][1])
+
+
+# =============================================================================
+# Nested: the linked line's stand-in is a phantom column
+# =============================================================================
+
+def make_action_button_dwell_event(action: str) -> dict:
+    from string_visualizer import ActionButtonDwell
+    return {
+        'pythonEventStr': repr(ActionButtonDwell(action=action)),
+        'eventJSON': {'type': 'mouseover'},
+    }
+
+
+class TestNestedInteractionsPreviewAsPhantom(unittest.TestCase):
+    """A string in a table cell has no line to link. What a linked line would
+    have shown, the table above shows as a phantom column instead: the child
+    emits a Phantom wrapping the code the line would have held, and goes on
+    emitting one as the state changes, so the table always has the current
+    reading to draw."""
+
+    def setUp(self):
+        from visualizer_utils import CHILD_SOURCE_BINDER
+        self.value = "hello world"
+        self.var_and_exp = (None, CHILD_SOURCE_BINDER)
+        self.model = init_model(self.value)
+
+    def phantoms(self, commands):
+        from visualizer_utils import Phantom
+        return [c.new_code for c in commands if isinstance(c, Phantom)]
+
+    def test_typing_a_search_previews_the_default_action(self):
+        from visualizer_utils import CHILD_SOURCE_BINDER
+        model, commands = update(make_search_box_input_event(r"r'hello'"),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertEqual(len(self.phantoms(commands)), 1)
+        name, code = self.phantoms(commands)[0][:2]
+        self.assertIn("re.findall(r'hello'", code)
+        self.assertIn(CHILD_SOURCE_BINDER, code)
+        self.assertEqual(model['linked_action'], 'match_strings')
+        # Nothing is written: no line inserted, no line rewritten.
+        self.assertEqual([c for c in commands if isinstance(c, tuple)], [])
+        self.assertEqual([c for c in commands if isinstance(c, ChangeSelectedText)], [])
+
+    def test_a_no_op_event_previews_again(self):
+        # The table may have dropped the phantom on a defocus, so the child
+        # cannot assume the parent still has what it sent last time.
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          self.var_and_exp, self.model, self.value)
+        _, commands = update(make_search_box_input_event(r"r'hello'"),
+                             self.var_and_exp, model, self.value)
+        self.assertEqual(len(self.phantoms(commands)), 1)
+
+    def test_dwelling_on_an_action_button_previews_that_action(self):
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          self.var_and_exp, self.model, self.value)
+        model, commands = update(make_action_button_dwell_event('count'),
+                                 self.var_and_exp, model, self.value)
+        self.assertEqual(model['linked_action'], 'count')
+        codes = [nc[1] for nc in self.phantoms(commands)]
+        self.assertEqual(len(codes), 1)
+        self.assertTrue(codes[0].startswith('sum(1 for'), codes[0])
+
+    def test_dwelling_on_a_statement_action_previews_nothing(self):
+        # A loop header is a line and only a line; a column holds an expression.
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          self.var_and_exp, self.model, self.value)
+        model, commands = update(make_action_button_dwell_event('loop'),
+                                 self.var_and_exp, model, self.value)
+        self.assertEqual(model['linked_action'], 'match_strings')
+        self.assertEqual(commands, [])
+
+    def test_clicking_still_writes_the_column_and_adopts_the_action(self):
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          self.var_and_exp, self.model, self.value)
+        model, commands = update(make_action_button_event('count'),
+                                 self.var_and_exp, model, self.value)
+        tuples = [c for c in commands if isinstance(c, tuple)]
+        self.assertEqual(len(tuples), 1)
+        self.assertTrue(tuples[0][1].startswith('sum(1 for'), tuples[0][1])
+        self.assertEqual(self.phantoms(commands), [])
+        self.assertEqual(model['linked_action'], 'count')
+
+    def test_at_the_top_level_a_dwell_does_nothing(self):
+        var_and_exp = ('x', 'x')
+        model = init_model(self.value)
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          var_and_exp, model, self.value)
+        model, commands = update(make_action_button_dwell_event('count'),
+                                 var_and_exp, model, self.value)
+        self.assertEqual(model['linked_action'], 'match_strings')
+        self.assertEqual(commands, [])
+
+
+class TestActionButtonsAskForDwellOnlyInACell(unittest.TestCase):
+    """The front end sends a dwell only where the render asks for one, and
+    the render asks only where dwelling changes something: in a cell, where
+    it swaps the phantom column. At the top level a hover costs nothing."""
+
+    def render(self, every_row_exps=None):
+        model = init_model("hello world", var_and_exp=('x', 'x'))
+        model['search'] = r"r'hello'"
+        return visualize("hello world", model, None, lambda c: eval(c),
+                         max_width=400, var_and_exp=('x', 'x'),
+                         every_row_exps=every_row_exps)
+
+    def test_a_cells_buttons_and_menu_rows_carry_the_dwell(self):
+        from string_visualizer import ActionButtonDwell
+        out = self.render(every_row_exps=lambda col: [])
+        self.assertIn(
+            f'snc-dwell="{_html.escape(repr(ActionButtonDwell(action="count")))}"',
+            out)
+        self.assertIn(
+            f'snc-dwell="{_html.escape(repr(ActionButtonDwell(action="any")))}"',
+            out)
+
+    def test_top_level_buttons_do_not(self):
+        self.assertNotIn('snc-dwell', self.render())
+
+
+class TestIndexSearchSwitchesToASliceAction(unittest.TestCase):
+    """Only Slice, Replace and Delete have a form for a positional search
+    (the grammar's is_index / is_slice templates). Any other linked action
+    generates nothing for one, and the line went stale. Now the index tool
+    moves the link onto the Slice action instead."""
+
+    def setUp(self):
+        self.value = "hello world"
+        self.var_and_exp = ('x', 'x')
+        self.model, _ = update(make_search_box_input_event(r"r'hello'"),
+                               self.var_and_exp, init_model(self.value), self.value)
+        self.assertEqual(self.model['linked_action'], 'match_strings')
+
+    def rewrites(self, commands):
+        return [c.expression for c in commands if isinstance(c, ChangeSelectedText)]
+
+    def test_substrs_becomes_slice(self):
+        model, commands = update(make_search_box_input_event('2:5'),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['linked_action'], 'find_or_map')
+        self.assertEqual(self.rewrites(commands), ['x[2:5]'])
+
+    def test_delete_keeps_its_own_positional_form(self):
+        self.model['linked_action'] = 'delete'
+        model, commands = update(make_search_box_input_event('2:5'),
+                                 self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['linked_action'], 'delete')
+        self.assertEqual(self.rewrites(commands), ['x[:2] + x[5:]'])
+
+    def test_nested_the_phantom_follows(self):
+        from visualizer_utils import CHILD_SOURCE_BINDER, Phantom
+        var_and_exp = (None, CHILD_SOURCE_BINDER)
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          var_and_exp, init_model(self.value), self.value)
+        model, commands = update(make_search_box_input_event('2:5'),
+                                 var_and_exp, model, self.value)
+        self.assertEqual(model['linked_action'], 'find_or_map')
+        codes = [c.new_code[1] for c in commands if isinstance(c, Phantom)]
+        self.assertEqual(codes, [f'{CHILD_SOURCE_BINDER}[2:5]'])
+
+
+class TestLinkedActionButtonIsMarked(unittest.TestCase):
+    """The button of the linked action carries `linked`, Count included."""
+
+    def render(self, linked_action):
+        model = init_model("hello world", var_and_exp=('x', 'x'))
+        model['search'] = r"r'hello'"
+        model['linked_action'] = linked_action
+        return visualize("hello world", model, None, lambda c: eval(c),
+                         max_width=400, var_and_exp=('x', 'x'))
+
+    def button_classes(self, out, label):
+        m = re.search(r'<span snc-mouse-down="[^"]*" class="([^"]*)"[^>]*><span class="text">'
+                      + re.escape(label), out)
+        self.assertIsNotNone(m, label)
+        return m.group(1).split()
+
+    def test_count(self):
+        self.assertIn('linked', self.button_classes(self.render('count'), 'Count:'))
+        self.assertNotIn('linked', self.button_classes(self.render('match_strings'), 'Count:'))
+
+    def test_substrs(self):
+        self.assertIn('linked', self.button_classes(self.render('match_strings'), 'Substrs'))

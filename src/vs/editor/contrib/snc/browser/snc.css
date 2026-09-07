@@ -942,6 +942,13 @@
   outline: 1px solid var(--snc-border-color);
 }
 
+/* A phantom column: what a nested visualizer's action would write, drawn
+   faded beside its column until the user commits it (see
+   table_visualizer._set_phantom). */
+.phantom {
+	opacity: 0.5;
+}
+
 /* === Link chain icon (lower-left chrome of a linkable visualizer) === */
 .snc-link-chain {
 	position: absolute;
@@ -2834,34 +2841,6 @@
 
 .pick-region.selected.hovered {
 	background: var(--snc-hl-selected-alt-hover);
-}
-
-/* Preview line under the search box: what the picked expression produces. In
-   flow (unlike .transform-preview, which overlays the string visualizer's
-   replace input), so it reads as a line rather than floating to the edge. */
-.list-visualizer .pick-preview {
-	display: flex;
-	align-items: baseline;
-	gap: 4px;
-	min-width: 0;
-	padding: 1px 4px 2px;
-	font-family: var(--snc-code-font-family);
-	font-size: 11px;
-	color: var(--snc-text-color);
-}
-
-.list-visualizer .pick-preview-arrow {
-	color: var(--snc-text-dimmed);
-	flex: none;
-}
-
-.list-visualizer .pick-preview-value {
-	background: var(--snc-hover-bg);
-	border-radius: 4px;
-	padding: 0 4px;
-	white-space: pre;
-	overflow: hidden;
-	text-overflow: ellipsis;
 }
 
 /* snc-py-exp drag-to-extract patterns */

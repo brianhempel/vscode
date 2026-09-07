@@ -1709,3 +1709,18 @@ class TestErrorHtml(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestPhantomTravelsLikeTheCodeItPreviews(unittest.TestCase):
+    """A Phantom is a NewCode tuple that previews rather than writes. On the
+    way up through a parent it is rebound exactly as the tuple would be, and
+    stays a Phantom, so the table that takes it knows not to keep it."""
+
+    def test_a_phantom_is_rebound_and_stays_a_phantom(self):
+        from visualizer_utils import Phantom
+        cmd = Phantom(('found', f"re.findall(r'a', {CHILD_SOURCE_BINDER})",
+                       ('import re',)))
+        nested = nest_child_command(cmd, 'item', 'xs[0]')
+        self.assertIsInstance(nested, Phantom)
+        self.assertEqual(nested.new_code,
+                         ('found', "re.findall(r'a', (item))", ('import re',)))

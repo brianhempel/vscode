@@ -1377,6 +1377,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			return wrapped;
 		};
 
+		// A row in a nested visualizer's action menu asks to hear of the
+		// pointer resting on it (snc-dwell): that is what swaps the phantom
+		// column the table above draws for it.
+		this.hoverMenuListeners.push(...this.dwellListeners(clone, clone, wrapEvent));
 		this.hoverMenuListeners.push(
 			dom.addDisposableListener(clone, 'mousedown', (ev: MouseEvent) => {
 				const node = ev.target as Node;
@@ -2266,7 +2270,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			return false;
 		}
 
-		// Dismiss any active tooltips/menus since the DOM is being replaced
+		// Dismiss any active tooltips/menus since the DOM is being replaced.
+		// A hover menu the pointer is still on comes back on the trigger that
+		// takes its place: resting on one of its rows is what previews a
+		// nested action as a phantom column (snc-dwell), and that render must
+		// not close the menu the user is reading.
+		const reopenHoverMenuAt = this.hoverMenuTrigger
+			&& (this.hoverMenu?.matches(':hover') || this.hoverMenuTrigger.matches(':hover'))
+			? Array.from(this.domNode.querySelectorAll('.snc-dropdown-trigger')).indexOf(this.hoverMenuTrigger)
+			: -1;
 		this.hidePyExpTooltip();
 		this.hideActionTooltip();
 		this.hideSimpleTooltip();
@@ -2379,6 +2391,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// aren't clipped by its overflow.
 		this.hoistSegmentLabels();
 		this.hoistNestedToolbars();
+		if (reopenHoverMenuAt >= 0) {
+			const trigger = this.domNode.querySelectorAll('.snc-dropdown-trigger')[reopenHoverMenuAt];
+			if (trigger && !trigger.classList.contains('dimmed')) {
+				this.hoverMenuTrigger = trigger;
+				this.showHoverMenu(trigger);
+			}
+		}
 		this.setupResizableColumns();
 		this.reserveRoomForOverlaidControls();
 		this.updateLayoutMode();

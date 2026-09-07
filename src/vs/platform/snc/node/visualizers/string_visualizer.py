@@ -155,7 +155,7 @@ from visualizer_utils import (modifier_key_label, replace_dollars_in_py_exp, Unl
                               Dollar, DollarScope,
                               LinkConfig, handle_relink, new_code_command, py_exp_attrs, PyExp,
                               CHILD_SOURCE_BINDER, CHILD_SOURCE_DISPLAY,
-                              dollar_expr_parses, is_nested, label_readings,
+                              dollar_expr_parses, is_nested, Phantom, label_readings,
                               nerd_font_icon, render_tool_toolbar,
                               render_expand_toggle, wrap_drag_grab, ENABLE_AUTO_EXPAND)
 
@@ -264,6 +264,17 @@ class CaptureGroupsToggle:
 class ActionButtonClick:
     action: str  # 'match_strings', 'find_or_map', 'replace', 'delete', 'loop', 'loop_match_strings', 'any', 'all', 'if_any', 'if_all', 'count', 'filter', 'find_indices', 'split'
     copy: bool   # True → CopyToClipboard, False → NewCode
+
+@dataclass(frozen=True, slots=True)
+class ActionButtonDwell:
+    """The pointer resting on an action button, in a cell of a table.
+
+    Only a cell asks for one (see _render_action_buttons): there it swaps the
+    phantom column the table above draws for this string to that action's
+    reading, and adopts the action. At the top level a hover writes nothing,
+    so nothing is asked for and one arriving anyway changes nothing.
+    """
+    action: str
 
 @dataclass(frozen=True, slots=True)
 class FetchClick:
@@ -3943,15 +3954,28 @@ def _readings(expr: str, also=()):
         for e in also])
 
 
+def _dwell_event(action: str) -> str:
+    """What a button asks to hear when the pointer rests on it, in a cell."""
+    return repr(ActionButtonDwell(action=action))
+
+
 def _action_btn(label: str, action: str, enabled: bool = True,
-                expr: str = '', linked: bool = False, also=()) -> str:
+                expr: str = '', linked: bool = False, also=(),
+                dwell: bool = False) -> str:
     return _event_btn(label, repr(ActionButtonClick(action=action, copy=False)),
-                      enabled, expr, linked, also)
+                      enabled, expr, linked, also,
+                      dwell=_dwell_event(action) if dwell else '')
 
 
 def _event_btn(label: str, event: str, enabled: bool = True,
-               expr: str = '', linked: bool = False, also=()) -> str:
-    """A button in the action bar: what it says, what it sends, what it writes."""
+               expr: str = '', linked: bool = False, also=(),
+               dwell: str = '') -> str:
+    """A button in the action bar: what it says, what it sends, what it writes.
+
+    *dwell* is the event it sends when the pointer rests on it, or nothing:
+    only a button in a cell has anything to say to a rest (see
+    ActionButtonDwell), and a dimmed one has nothing to say at all.
+    """
     cls = 'action-button'
     if not enabled:
         cls += ' dimmed'
@@ -3959,8 +3983,9 @@ def _event_btn(label: str, event: str, enabled: bool = True,
         cls += ' linked'
     expr_attr = py_exp_attrs(_readings(expr, also), draggable=False,
                              attr='data-action-expr')
+    dwell_attr = f' snc-dwell="{html.escape(dwell)}"' if dwell and enabled else ''
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
-            f'{expr_attr}>{label}</span>')
+            f'{expr_attr}{dwell_attr}>{label}</span>')
 
 def _preview_expr(model: dict, action: str, eval_in_scope, source_expr=None) -> str:
     """Pre-compute the expression that an action button would generate.
@@ -3987,7 +4012,7 @@ def _preview_expr(model: dict, action: str, eval_in_scope, source_expr=None) -> 
 
 
 def _menu_row(label: str, event: str, enabled: bool, expr: str = '',
-              also=()) -> str:
+              also=(), dwell: str = '') -> str:
     """One row of a menu: what it says, what it sends, and what it writes.
 
     The row is the handle for its own code, offered rightwards so a tooltip
@@ -3998,17 +4023,19 @@ def _menu_row(label: str, event: str, enabled: bool, expr: str = '',
     disabled = '' if enabled else ' dimmed'
     exp_attrs = py_exp_attrs(_readings(expr, also), draggable=False,
                              align='right')
+    dwell_attr = f' snc-dwell="{html.escape(dwell)}"' if dwell and enabled else ''
     return (
-        f'<div class="snc-dropdown-option{disabled}"{exp_attrs}>'
+        f'<div class="snc-dropdown-option{disabled}"{exp_attrs}{dwell_attr}>'
         f'<span snc-mouse-down="{html.escape(event)}" class="snc-dropdown-option-label">{label}</span>'
         f'</div>'
     )
 
 
 def _dropdown_row(label: str, action: str, enabled: bool, expr: str = '',
-                  also=()) -> str:
+                  also=(), dwell: bool = False) -> str:
     return _menu_row(label, repr(ActionButtonClick(action=action, copy=False)),
-                     enabled, expr, also)
+                     enabled, expr, also,
+                     dwell=_dwell_event(action) if dwell else '')
 
 
 def _menu_button(label: str, panel: str, default=None,
@@ -4026,8 +4053,9 @@ def _menu_button(label: str, panel: str, default=None,
         button = f'<span class="action-button">{label}</span>'
         cls = 'snc-dropdown-trigger dimmed'
     else:
-        event, expr, also = default
-        button = _event_btn(label, event, True, expr, linked=linked, also=also)
+        event, expr, also, *rest = default
+        button = _event_btn(label, event, True, expr, linked=linked, also=also,
+                            dwell=rest[0] if rest else '')
         cls = 'snc-dropdown-trigger'
     return f'<span class="{cls}">{button}{panel}</span>'
 
@@ -4261,12 +4289,18 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     def also(action):
         return _every_row_action_exps(model, action, eval_in_scope, every_row_exps)
 
+    # In a cell (which is what having every_row_exps means) a rest on a button
+    # swaps the phantom column the table above draws; at the top level it
+    # would change nothing, so it is not asked for and costs no run.
+    dwell = every_row_exps is not None
+
     def btn(label, action, enabled=True):
         enabled = enabled and can_generate(action)
         return _action_btn(label, action, enabled,
                            expr(action) if enabled else '',
                            linked=linked_action == action,
-                           also=also(action) if enabled else ())
+                           also=also(action) if enabled else (),
+                           dwell=dwell)
 
     # these are nerd font glyphs, embedded in the bundled Pragmasevka font
     #   ┆ ┊   
@@ -4276,7 +4310,9 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     count_enabled = has_search and can_generate('count')
     parts.append(_action_btn(f'<span class="text">Count: {match_count}</span>', 'count', count_enabled,
                              expr('count') if count_enabled else '',
-                             also=also('count') if count_enabled else ()))
+                             linked=linked_action == 'count',
+                             also=also('count') if count_enabled else (),
+                             dwell=dwell))
     # parts.append('<div class="action-button-divider"></div>')
 
     if _ctx_is_index_or_slice(probe_ctx):
@@ -4300,14 +4336,16 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     def loop_row(label, action, enabled):
         return _dropdown_row(label, action, enabled,
                              expr(action) if enabled else '',
-                             also=also(action) if enabled else ())
+                             also=also(action) if enabled else (),
+                             dwell=dwell)
 
     def first_live(rows):
         """What a click on the menu's button does: its first live row."""
         for action, enabled in rows:
             if enabled:
                 return (repr(ActionButtonClick(action=action, copy=False)),
-                        expr(action), also(action))
+                        expr(action), also(action),
+                        _dwell_event(action) if dwell else '')
         return None
 
     # The 'loop' action loops over `val` (transformed) when has_replace, else over
@@ -4345,7 +4383,8 @@ def _render_action_buttons(model: dict, value: str, eval_in_scope, max_width=Non
     def predicate_row(label, action, enabled):
         return _dropdown_row(label, action, enabled,
                              expr(action) if enabled else '',
-                             also=also(action) if enabled else ())
+                             also=also(action) if enabled else (),
+                             dwell=dwell)
 
     predicate_panel = (
         '<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
@@ -7302,6 +7341,25 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             model['redoHistory'] = []
                             model['search'] = new_regex
 
+        case ActionButtonDwell(action=action):
+            # Only in a cell (see the class): the phantom column the table
+            # above draws for this string swaps to this action's reading, and
+            # the action is adopted so the next keystroke keeps previewing it.
+            # A statement is a line and only a line -- a column holds an
+            # expression -- so it, and an action with nothing to say, change
+            # nothing.
+            if is_nested(var_and_exp):
+                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
+                result = generate_action(action, ctx) if ctx else None
+                study_note(action='phantom.dwell', codeAction=action,
+                           wrote=bool(result) and not opens_block(result[1]))
+                if result and not opens_block(result[1]):
+                    model['linked_action'] = action
+                    model['linked_source_expr'] = ctx.get('source_expr')
+                    model['auto_linked_once'] = True
+                    _emit_linked_update(result[1], model, commands,
+                                        suggest_name=result[0], nested=True)
+
         case FetchClick(source=source, fmt=fmt):
             # Reading what the string names is about the string rather than
             # about the search, so it writes a line of its own and links
@@ -7321,7 +7379,8 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
             study_note(action=('copy.action' if copy else 'link.set-action'
                                if model.get('linked_action') else 'code.action'),
                        codeAction=action, wrote=False)
-            if model.get('linked_action') and not copy:
+            if (model.get('linked_action') and not copy
+                    and not is_nested(var_and_exp)):
                 ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
                                           eval_in_scope=eval_in_scope)
@@ -7354,17 +7413,21 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
                             # Link the freshly inserted LOC to this action so
                             # subsequent interactions edit it in place (via
                             # ChangeSelectedText) instead of stacking new lines.
-                            # Nested, there is no line to own - see is_nested.
-                            if not is_nested(var_and_exp):
-                                model['linked_action'] = action
-                                model['linked_source_expr'] = ctx.get('source_expr')
-                                model['last_linked_expr'] = result[1]
-                                model['auto_linked_once'] = True
+                            # Nested there is no line to own (see is_nested),
+                            # but the action is adopted all the same: it is
+                            # what the phantom column the table above draws
+                            # previews from here on.
+                            model['linked_action'] = action
+                            model['linked_source_expr'] = ctx.get('source_expr')
+                            model['last_linked_expr'] = result[1]
+                            model['auto_linked_once'] = True
 
-    if is_nested(var_and_exp):
-        return (model, commands)
+    # Nested there is no line, and the same two blocks preview instead: the
+    # table above draws what the line would have said as a phantom column
+    # (see visualizer_utils.Phantom).
+    nested = is_nested(var_and_exp)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, FetchClick, Unlink, Relink, LineChanged)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, ActionButtonDwell, FetchClick, Unlink, Relink, LineChanged)):
         # A map expression has just appeared (typed, or composed from chips):
         # the substring actions ignore it, so the line becomes the one that
         # consumes it. Its disappearing does not switch back -- the user may
@@ -7375,15 +7438,24 @@ def update(event, var_and_exp, model: dict, value: str, get_visualizer=None, eva
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
+        # The index tool reaches into the string by position, and only Slice,
+        # Replace and Delete have a form for that (the grammar's is_index /
+        # is_slice templates): any other action generates nothing and the line
+        # went stale. So the link moves onto Slice. One way, like the map rule
+        # above: a search that stops being positional leaves it there.
+        if (_ctx_is_index_or_slice(ctx)
+                and model['linked_action'] not in _INDEX_ACTIONS):
+            study_note(action='link.set-action', to='find_or_map', why='index')
+            model['linked_action'] = 'find_or_map'
         if ctx:
             result = generate_action(model['linked_action'], ctx)
             if result:
                 _emit_linked_update(result[1], model, commands,
-                                    suggest_name=result[0])
+                                    suggest_name=result[0], nested=nested)
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (FetchClick, Unlink, Relink, LineChanged))):
+          and not isinstance(msg, (ActionButtonDwell, FetchClick, Unlink, Relink, LineChanged))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).
@@ -7397,6 +7469,9 @@ _MAP_CONSUMING_ACTION = {
     'match_strings': 'find_or_map',
     'loop_match_strings': 'loop',
 }
+
+# The actions with a form for a positional (index or slice) search.
+_INDEX_ACTIONS = frozenset({'find_or_map', 'replace', 'delete'})
 
 
 def _has_map(model: dict) -> bool:
@@ -7469,17 +7544,28 @@ def _maybe_auto_link(msg, var_and_exp, model: dict, commands: list, *, eval_in_s
     model['linked_source_expr'] = ctx.get('source_expr')
     model['last_linked_expr'] = expr
     model['auto_linked_once'] = True
+    if is_nested(var_and_exp):
+        # No line to insert in a cell: the table above previews it instead.
+        if not opens_block(expr):
+            commands.append(Phantom(new_code_command(result, code_imports)))
+        return
     commands.append(new_code_command(result, code_imports))
 
 
 def _emit_linked_update(expr: str, model: dict, commands: list,
                         suggest_name: 'str | None' = None,
-                        rename: bool = False) -> None:
+                        rename: bool = False, nested: bool = False) -> None:
     """Send expression intent while leaving the concrete target to the editor.
 
     No-op when *expr* matches the last expression written for this link, so
     events that do not change the search context (e.g. hover) do not rewrite
     the linked line of code.
+
+    *nested*, there is no line: the table above draws the reading as a phantom
+    column instead (see visualizer_utils.Phantom). That is sent every time
+    rather than only on change, since the table drops the phantom when the
+    cell loses focus and a no-op event has to be able to bring it back. A
+    statement has no column form and previews nothing.
 
     Whether the code being written can be assigned to a name is read off the
     code itself rather than remembered from the action that linked the line: an
@@ -7488,6 +7574,16 @@ def _emit_linked_update(expr: str, model: dict, commands: list,
     being true -- probing `name = for i, mtch in ...:` raises, and the update
     disappears in the except below.
     """
+    if nested:
+        if opens_block(expr):
+            return
+        try:
+            ast.parse(expr, mode='eval')
+        except SyntaxError:
+            return
+        study_note(phantom=model.get('linked_action'))
+        commands.append(Phantom(new_code_command((suggest_name, expr), code_imports)))
+        return
     if expr == model.get('last_linked_expr'):
         return
     text = expr if opens_block(expr) else '_linked_result = ' + expr

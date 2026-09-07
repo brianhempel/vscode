@@ -7118,7 +7118,10 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
 
         There is no chain icon on a cell to break a link with, and a linked cell
         would rewrite an editor line on every mouse event -- so a nested
-        visualizer neither auto-links nor emits ChangeSelectedText."""
+        visualizer never emits ChangeSelectedText. It does adopt the action:
+        that is what the phantom column the table draws for it previews (see
+        TestPhantomColumn), a property of the cell's column and never a column
+        of its own."""
         import string_visualizer
         rows = ['foo bar', 'baz foo']
         model, commands, _eval = self._drive(rows, '$', [
@@ -7130,7 +7133,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         self.assertEqual([c for c in commands if isinstance(c, ChangeSelectedText)], [],
                          'a cell must not rewrite editor text')
         cell = model['children'][f'0{CELL_KEY_SEP}$']
-        self.assertIsNone(cell.get('linked_action'))
+        self.assertEqual(cell.get('linked_action'), 'find_or_map')
         # The one explicit action click is the only thing that adds a column.
         self.assertEqual(len([c for c in model['columns'] if c != '$']), 1)
 
@@ -7774,36 +7777,6 @@ class TestPickGeneratedCode(unittest.TestCase):
                                  generate_action('filter', ctx)[1])
 
 
-class TestPickPreview(unittest.TestCase):
-    """The preview line under the search box."""
-
-    def _preview(self, model):
-        output = visualize(PICK_STRS, model, mock_get_visualizer, pick_eval)
-        m = re.search(r'pick-preview-value">([^<]*)<', output)
-        return m.group(1) if m else None
-
-    def test_shows_the_picked_value(self):
-        self.assertEqual(self._preview(make_pick_model(picked=['match_col_1'])),
-                         '8')
-
-    def test_shows_a_list_for_a_band_pick(self):
-        self.assertEqual(
-            self._preview(make_pick_model(picked=['pre_col_1'])), '[3, 3]')
-
-    def test_absent_when_nothing_picked(self):
-        self.assertIsNone(self._preview(make_pick_model()))
-
-    def test_absent_outside_pick_mode(self):
-        model = make_pick_model(picked=['match_col_1'])
-        model['tool'] = 'normal'
-        self.assertIsNone(self._preview(model))
-
-    def test_reports_the_error_for_a_broken_column(self):
-        model = make_pick_model(picked=['match_col_1'],
-                                columns=['$', '$.nope'])
-        self.assertIn('attribute', (self._preview(model) or '').lower())
-
-
 class TestPickUpdateFlow(unittest.TestCase):
     """PickToggle through update(), and the code it links."""
 
@@ -8120,11 +8093,6 @@ class TestPickWithoutASearch(unittest.TestCase):
         exprs = [expr for handle in exps_in(self._render()) for expr in handle]
         self.assertIn('[len(x) for x in strs]', exprs)
         self.assertEqual(pick_eval('[len(x) for x in strs]'), [3, 3, 8, 4, 0])
-
-    def test_the_preview_shows_the_picked_column(self):
-        output = self._render(['all_col_1'])
-        m = re.search(r'pick-preview-value">([^<]*)<', output)
-        self.assertEqual(m.group(1), '[3, 3, 8, 4, 0]')
 
     def test_a_search_that_matches_nothing_still_draws_no_regions(self):
         model = make_pick_model(search='len($) > 99')
@@ -13945,19 +13913,6 @@ class TestNestedTableActionsStayRowGeneric(unittest.TestCase):
         _, cmds = self.fire(ActionButtonClick(action='extract', copy=False), model)
         self.assertEqual(self.code(cmds),
                          f"[x['k'] for x in ({CHILD_SOURCE_BINDER})]")
-
-    def test_the_pick_preview_still_reads_the_cell_on_screen(self):
-        """The line under the search box evaluates in the user's scope, where
-        the binder is no name -- so it is built against the concrete path
-        rendering handed the cell, the way the drag handles are."""
-        from table_visualizer import ToolSelect, PickToggle
-        model, _ = self.fire(ToolSelect(tool='pick'))
-        for band in ('pre', 'match', 'post'):
-            model, _ = self.fire(PickToggle(region_id=f'{band}_col_1'), model)
-        out = visualize(self.TAGS, model, mock_get_visualizer_dict_tables,
-                        self.eval_in_scope, var_and_exp=(None, self.CONCRETE))
-        m = re.search(r'pick-preview-value">([^<]*)<', out)
-        self.assertEqual(m and html.unescape(m.group(1)), repr(['x', 'y']))
 
     def test_the_parent_takes_it_as_a_column_of_every_row(self):
         """Through the table above: the binder resolves to the cell's own
@@ -23294,3 +23249,359 @@ class TestCellErrors(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# =============================================================================
+# Phantom columns: a nested visualizer's linked-line stand-in
+# =============================================================================
+
+class _PhantomVis:
+    """A cell whose every event answers with the given commands, rendering the
+    value it is handed so a phantom's cells can be read back."""
+    def __init__(self, commands):
+        self.commands = commands
+    def can_visualize(self, v): return isinstance(v, str)
+    def get_fields(self, v): return None
+    def init_model(self, v, get_visualizer=None, eval_in_scope=None, var_and_exp=None):
+        return {'handledKeys': []}
+    def visualize(self, v, m, gv, eval_in_scope=None, max_width=None, max_height=None, small=False, var_and_exp=None, every_row_exps=None):
+        return f'<span snc-mouse-down="X">{html.escape(repr(v))}</span>'
+    def update(self, event, var_and_exp, model, value, gv=None, eval_in_scope=None):
+        return (model, list(self.commands))
+
+
+def make_phantom_commit_event() -> dict:
+    from table_visualizer import PhantomColumnCommit
+    return {'pythonEventStr': repr(PhantomColumnCommit()),
+            'eventJSON': {'type': 'mousedown', 'button': 0, 'buttons': 1}}
+
+
+class TestPhantomColumn(unittest.TestCase):
+    """What a nested visualizer would have shown on a linked line, the table
+    shows as a phantom column beside the cell's column. It is a property of
+    that column -- `columns[src]['phantom']` -- so it follows the column
+    around and there can only be one per column; the setter keeps it to one
+    per table. Only the drawing materialises it as a column.
+    """
+
+    LST = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 40}]
+    NAME = "0\x00$['name']"
+
+    def setUp(self):
+        # Saving is neutralised module-wide (see setUpModule); what a test
+        # asks about saving it asks of the mock.
+        table_visualizer.save_columns_config.reset_mock()
+
+    def get_vis(self, commands):
+        # Every cell but the row itself is the previewing child, so a test can
+        # work in the name cell or the age cell alike.
+        vis = _PhantomVis(commands)
+        return lambda v: _mock_dict_vis if isinstance(v, dict) else vis
+
+    def fire(self, commands, key=NAME, model=None, var_and_exp=('x', 'x')):
+        gv = self.get_vis(commands)
+        if model is None:
+            model = init_model(self.LST, gv,
+                               slots_config=['$', "$['name']", "$['age']"])
+        model['focused_child'] = key
+        model, cmds = update(make_child_mouse_event(key, 'X'), var_and_exp,
+                             model, self.LST, gv)
+        return model, cmds, gv
+
+    def preview(self, code, **kw):
+        from visualizer_utils import Phantom
+        return self.fire([Phantom(('n', code))], **kw)
+
+    # --- state ---
+
+    def test_a_phantom_is_a_property_of_the_cells_column(self):
+        model, cmds, _ = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        self.assertEqual(cmds, [])
+        self.assertEqual(list(model['columns']), ['$', "$['name']", "$['age']"])
+        self.assertEqual(model['columns']["$['name']"].get('phantom'),
+                         "len(($['name']))")
+        # A phantom is never saved with the line.
+        self.assertEqual(table_visualizer._slots_from_columns(model['columns']),
+                         ['$', "$['name']", "$['age']"])
+        table_visualizer.save_columns_config.assert_not_called()
+
+    def test_only_one_phantom_at_a_time(self):
+        model, _, _ = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        model['focused_child'] = "0\x00$['age']"
+        model, _, _ = self.preview(f'{CHILD_SOURCE_BINDER} + 1',
+                                   key="0\x00$['age']", model=model)
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+        self.assertEqual(model['columns']["$['age']"].get('phantom'),
+                         "($['age']) + 1")
+
+    def test_a_phantom_of_a_column_already_there_is_nothing(self):
+        from table_visualizer import _set_phantom
+        model = init_model(self.LST, self.get_vis([]),
+                           slots_config=['$', "$['name']", "$['age']"])
+        self.assertIsNone(_set_phantom(model, "$['name']", "$['age']"))
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+
+    # --- drawing ---
+
+    def test_it_is_drawn_right_after_its_source_and_follows_it(self):
+        from table_visualizer import _drawn_columns, _leaf_columns, _column_groups
+        model, _, _ = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        leaves = _leaf_columns(_drawn_columns(model['columns']))
+        self.assertEqual([l.expr for l in leaves],
+                         ['$', "$['name']", "len(($['name']))", "$['age']"])
+        self.assertEqual([l.phantom for l in leaves], [False, False, True, False])
+        # Drawn as a column of its own beside the source, so a header of its own.
+        self.assertEqual([g.width for g in _column_groups(_drawn_columns(model['columns']))],
+                         [1, 1, 1, 1])
+        # The source moved; the phantom went with it.
+        model['columns'] = {'$': {}, "$['age']": {},
+                            "$['name']": model['columns']["$['name']"]}
+        leaves = _leaf_columns(_drawn_columns(model['columns']))
+        self.assertEqual([l.expr for l in leaves],
+                         ['$', "$['age']", "$['name']", "len(($['name']))"])
+
+    def test_under_a_splat_it_is_drawn_beside_its_sub_column(self):
+        from table_visualizer import _drawn_columns, _leaf_columns, _set_phantom
+        cols = {"*$['teams']": {'cols': {"$['who']": {}, "$['age']": {}}}, '$': {}}
+        model = {'columns': cols}
+        who = f"*$['teams']{SUBCOL_SEP}$['who']"
+        _set_phantom(model, who, "len(($['who']))")
+        leaves = _leaf_columns(_drawn_columns(cols))
+        self.assertEqual([l.expr for l in leaves],
+                         [who, f"*$['teams']{SUBCOL_SEP}len(($['who']))",
+                          f"*$['teams']{SUBCOL_SEP}$['age']", '$'])
+        self.assertEqual(leaves[1].sub, "len(($['who']))")
+        self.assertTrue(leaves[1].phantom)
+
+    def test_the_render_marks_it_and_offers_nothing_but_the_commit(self):
+        model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        out = visualize(self.LST, model, gv, eval)
+        ths = re.findall(r'<th[^>]*class="[^"]*\bphantom\b[^"]*"[^>]*>.*?</th>', out, re.S)
+        self.assertEqual(len(ths), 1)
+        self.assertIn('snc-mouse-down="PhantomColumnCommit()"', ths[0])
+        for handle in ('col-drag-handle', 'col-resize', 'col-menu', 'snc-mouse-up',
+                       'snc-mouse-move'):
+            self.assertNotIn(handle, ths[0])
+        tds = re.findall(r'<td[^>]*class="[^"]*\bphantom\b[^"]*"[^>]*>(.*?)</td>', out, re.S)
+        self.assertEqual(len(tds), 2)
+        for td in tds:
+            self.assertIn('snc-mouse-down="PhantomColumnCommit()"',
+                          re.search(r'<td[^>]*class="[^"]*\bphantom\b[^"]*"[^>]*>', out).group(0))
+            # Not a child: a click on it commits rather than focusing something.
+            self.assertNotIn('snc-child-key', td)
+        self.assertIn('5', tds[0])   # len('Alice')
+        self.assertIn('3', tds[1])   # len('Bob')
+        # The row the event came from is where the eye is; that cell is brought
+        # into view.
+        self.assertEqual(model.get('_scroll_to_cell'),
+                         f"0{CELL_KEY_SEP}len(($['name']))")
+
+    def test_an_aggregation_row_leaves_it_blank(self):
+        model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        model['columns']["$['age']"]['computes'] = ['sum($)']
+        out = visualize(self.LST, model, gv, eval)
+        foot = re.search(r'<tfoot.*?</tfoot>', out, re.S).group(0)
+        # $ , name, phantom blank; the answer under age.
+        self.assertEqual(foot.count('<td class="col-agg-blank"></td>'), 3)
+
+    # --- commit ---
+
+    def test_clicking_the_phantom_keeps_it(self):
+        model, _, gv = self.preview(f"re.findall('l', {CHILD_SOURCE_BINDER})")
+        model, cmds = update(make_phantom_commit_event(), ('x', 'x'), model,
+                             self.LST, gv)
+        self.assertEqual(list(model['columns']),
+                         ['$', "$['name']", "re.findall('l', ($['name']))", "$['age']"])
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+        self.assertEqual(cmds, [AddImports(imports=('import re',))])
+        table_visualizer.save_columns_config.assert_called_once_with(
+            [], ['$', "$['name']", "re.findall('l', ($['name']))", "$['age']"])
+
+    def test_clicking_the_action_replaces_it_with_the_real_column(self):
+        model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        model, cmds, _ = self.fire([('n', f'len({CHILD_SOURCE_BINDER})')], model=model)
+        self.assertEqual(list(model['columns']),
+                         ['$', "$['name']", "len(($['name']))", "$['age']"])
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+        self.assertEqual(cmds, [])
+
+    def test_a_commit_with_no_phantom_does_nothing(self):
+        model = init_model(self.LST, self.get_vis([]),
+                           slots_config=['$', "$['name']", "$['age']"])
+        model, cmds = update(make_phantom_commit_event(), ('x', 'x'), model,
+                             self.LST, self.get_vis([]))
+        self.assertEqual(list(model['columns']), ['$', "$['name']", "$['age']"])
+        self.assertEqual(cmds, [])
+        table_visualizer.save_columns_config.assert_not_called()
+
+    # --- defocus ---
+
+    def test_focusing_another_cell_drops_it(self):
+        model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        model, _ = update(make_child_mouse_event("0\x00$['age']", 'X'), ('x', 'x'),
+                          model, self.LST, gv)
+        self.assertEqual(model['focused_child'], "0\x00$['age']")
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+
+    def test_deselecting_the_children_drops_it(self):
+        from table_visualizer import DeselectChildren
+        model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        event = {'pythonEventStr': repr(DeselectChildren()), 'eventJSON': {}}
+        model, _ = update(event, ('x', 'x'), model, self.LST, gv)
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+
+    def test_the_table_going_small_drops_it(self):
+        model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        visualize(self.LST, model, gv, eval, small=False)
+        self.assertIn('phantom', model['columns']["$['name']"])
+        visualize(self.LST, model, gv, eval, small=True)
+        self.assertNotIn('phantom', model['columns']["$['name']"])
+
+    # --- evaluation ---
+
+    def test_a_phantom_cell_is_read_with_the_imports_it_needs(self):
+        # The file has no `import re` yet -- committing is what adds it -- so
+        # the phantom's cells are read with the module bound for them.
+        model, _, gv = self.preview(f"re.sub('l', 'L', {CHILD_SOURCE_BINDER})")
+        out = visualize(self.LST, model, gv, lambda code: eval(code, {}))
+        self.assertNotIn('NameError', out)
+        self.assertIn('ALice', out)
+
+
+class TestPhantomTravelsToTheOutermostTable(unittest.TestCase):
+    """A table that is itself a cell takes no phantom, as it takes no column:
+    the preview is mapped over its rows and handed up. An answer's has
+    nowhere to go and is dropped."""
+
+    LIST = ['a', 'b']
+
+    def make_vis(self):
+        from visualizer_utils import Phantom
+        class Vis(MockCodeVisualizer):
+            def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                return (model, [Phantom(('x', CHILD_SOURCE_BINDER))])
+        vis = Vis()
+        return lambda v: _mock_list_vis if isinstance(v, list) else vis
+
+    def fire(self, var_and_exp):
+        get_vis = self.make_vis()
+        model = init_model(self.LIST, get_vis, var_and_exp=var_and_exp)
+        model['_source_expr'] = 'x[0]'
+        key = f'0{CELL_KEY_SEP}$'
+        model['focused_child'] = key
+        return update(make_child_mouse_event(key, 'None'), var_and_exp, model,
+                      self.LIST, get_vis)
+
+    def test_a_nested_table_hands_the_phantom_up(self):
+        from visualizer_utils import Phantom
+        model, cmds = self.fire((None, CHILD_SOURCE_BINDER))
+        self.assertNotIn('phantom', model['columns']['$'])
+        self.assertEqual([c.new_code[1] for c in cmds if isinstance(c, Phantom)],
+                         [f'[item2 for item2 in {CHILD_SOURCE_BINDER}]'])
+
+    def test_a_root_table_takes_it(self):
+        model, cmds = self.fire(('x', 'x'))
+        self.assertEqual(model['columns']['$'].get('phantom'), '($)')
+        self.assertEqual(cmds, [])
+
+    def test_an_answers_phantom_is_dropped(self):
+        from visualizer_utils import Phantom
+        class AggPhantomVis(_AggCodeVis):
+            def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                return (model, [Phantom(('n', f'len({CHILD_SOURCE_BINDER})'))])
+        rows = [['ab', 'cd'], ['ab', 'ef']]
+        get_vis = lambda v: AggPhantomVis() if isinstance(v, str) else _mock_list_vis
+        model = init_model(rows[0], get_vis, var_and_exp=('x', 'x'))
+        model['_source_expr'] = 'x'
+        model['columns'] = {'$': {'computes': ["''.join($)"]}}
+        key = table_visualizer._agg_child_key('$', "''.join($)", '$')
+        model['focused_child'] = key
+        model, cmds = update(make_child_mouse_event(key, 'None'), ('x', 'x'), model,
+                             rows[0], get_vis)
+        self.assertEqual(cmds, [])
+        self.assertNotIn('phantom', model['columns']['$'])
+
+
+class TestNestedTableActionsPreviewAsPhantom(unittest.TestCase):
+    """A table in a cell previews like a string in one does."""
+
+    def test_a_dwell_previews_and_adopts_the_action(self):
+        from visualizer_utils import Phantom
+        from table_visualizer import ActionButtonDwell
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        event = {'pythonEventStr': repr(ActionButtonDwell(action='count')),
+                 'eventJSON': {'type': 'mouseover'}}
+        model, commands = update(event, (None, CHILD_SOURCE_BINDER), model, lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['linked_action'], 'count')
+        codes = [c.new_code[1] for c in commands if isinstance(c, Phantom)]
+        self.assertEqual(len(codes), 1)
+        self.assertIn(CHILD_SOURCE_BINDER, codes[0])
+        self.assertEqual([c for c in commands if isinstance(c, tuple)], [])
+
+    def test_typing_a_search_previews_the_default_action(self):
+        from visualizer_utils import Phantom
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model, commands = update(make_search_input_event('$ > 15'),
+                                 (None, CHILD_SOURCE_BINDER), model, lst,
+                                 mock_get_visualizer, eval_in_scope=eval)
+        self.assertEqual(model['linked_action'], 'filter')
+        self.assertEqual(len([c for c in commands if isinstance(c, Phantom)]), 1)
+        self.assertEqual([c for c in commands if isinstance(c, tuple)], [])
+
+    def test_a_cells_buttons_carry_the_dwell(self):
+        from table_visualizer import ActionButtonDwell
+        lst = [10, 20, 30]
+        model = init_model(lst, mock_get_visualizer)
+        model['search'] = '$ > 15'
+        model['_source_expr'] = 'x[0]'
+        out = table_visualizer._render_action_buttons(model, lst, eval,
+                                                      every_row_exps=lambda c: [])
+        self.assertIn(html.escape(repr(ActionButtonDwell(action='count'))), out)
+        out = table_visualizer._render_action_buttons(model, lst, eval)
+        self.assertNotIn('snc-dwell', out)
+
+
+class TestPhantomColumnWithARealStringCell(unittest.TestCase):
+    """The whole trip: a search typed into a string cell previews as a phantom
+    column of the table, read for every row, before any `import re` exists."""
+
+    def test_typing_in_a_cell_previews_a_column_that_reads_every_row(self):
+        import string_visualizer
+        rows = ['foo bar', 'baz foo']
+        scope = {'rows': rows}   # no `re`
+        eval_in_scope = lambda code: eval(code, scope)
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
+        model = init_model(rows, get_vis, eval_in_scope=eval_in_scope,
+                           var_and_exp=('rows', 'rows'), slots_config=['$'])
+        key = f'0{CELL_KEY_SEP}$'
+        model['focused_child'] = key
+        event = {'pythonEventStr': repr(ChildEvent(
+                     child_key=key, py_ev_str=repr(string_visualizer.SearchBoxInput(value="r'foo'")))),
+                 'eventJSON': {'type': 'input'}}
+        model, cmds = update(event, ('rows', 'rows'), model, rows, get_vis,
+                             eval_in_scope=eval_in_scope)
+        self.assertEqual(cmds, [])
+        phantom = model['columns']['$'].get('phantom')
+        self.assertTrue(phantom and phantom.startswith('re.findall('), phantom)
+        self.assertEqual(list(model['columns']), ['$'])
+        out = visualize(rows, model, get_vis, eval_in_scope)
+        tds = re.findall(r'<td[^>]*class="phantom"[^>]*>(.*?)</td>', out, re.S)
+        self.assertEqual(len(tds), 2)
+        self.assertNotIn('NameError', out)
+        self.assertIn(html.escape(repr(['foo'])), tds[0])
+        # A dwell on Count swaps it.
+        event = {'pythonEventStr': repr(ChildEvent(
+                     child_key=key, py_ev_str=repr(string_visualizer.ActionButtonDwell(action='count')))),
+                 'eventJSON': {'type': 'mouseover'}}
+        model, cmds = update(event, ('rows', 'rows'), model, rows, get_vis,
+                             eval_in_scope=eval_in_scope)
+        self.assertTrue(model['columns']['$']['phantom'].startswith('sum(1 for'))
+        # Clicking the phantom keeps it and asks for the import.
+        model, cmds = update(make_phantom_commit_event(), ('rows', 'rows'), model,
+                             rows, get_vis, eval_in_scope=eval_in_scope)
+        self.assertEqual(len(model['columns']), 2)
+        self.assertEqual(cmds, [AddImports(imports=('import re',))])

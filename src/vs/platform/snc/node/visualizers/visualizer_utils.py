@@ -1067,6 +1067,9 @@ def nest_child_command(cmd, code_expr: str, clipboard_expr: str):
         # Rebinding the scope doesn't change what the code needs imported, so
         # any declaration travels up with it untouched.
         return (cmd[0], nest_generated_expr(cmd[1], code_expr), *cmd[2:])
+    if isinstance(cmd, Phantom):
+        # A preview is rebound like the code it previews, and stays a preview.
+        return Phantom(nest_child_command(cmd.new_code, code_expr, clipboard_expr))
     # Duck-typed: each visualizer declares its own CopyToClipboard.
     text = getattr(cmd, 'text', None)
     if isinstance(text, str) and CHILD_SOURCE_BINDER in text:
@@ -1185,6 +1188,21 @@ class AddImports:
     editor's to answer, exactly as for a NewCode command.
     """
     imports: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Phantom:
+    """A NewCode tuple that previews rather than writes.
+
+    A visualizer in a table cell has no line to link, so what a linked line
+    would have shown as the user works -- the current reading of the action --
+    the table above shows as a PHANTOM column beside the cell's column, faded,
+    and dropped when the cell loses focus. The child emits one of these
+    wherever it would have rewritten a linked line; it travels up exactly as
+    the tuple inside it would (see nest_child_command), and the outermost table
+    takes it. Nothing hands it to the editor.
+    """
+    new_code: tuple
 
 
 @dataclass(frozen=True, slots=True)
