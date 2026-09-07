@@ -2,7 +2,7 @@
     {
         "name": "Apartment in Windsor, Canada",
         "info": "1 bedroom, 2 beds, 1 bath",
-        "price": "$436 for 7 nights",
+        "price": "$436 for 6 nights",
         "rating": "4.82 (181)",
         "offers": [
             "Pay $0 today",
@@ -33,7 +33,7 @@
     {
         "name": "Apartment in Windsor, Canada",
         "info": "1 bedroom, 1 queen bed, 1 bath",
-        "price": "$501 for 7 nights",
+        "price": "$501 for 6 nights",
         "rating": "4.83 (6)",
         "offers": [
             "Weekly discount",
@@ -76,7 +76,7 @@
     {
         "name": "Room in Windsor, Canada",
         "info": "1 queen bed, 1 bath",
-        "price": "$432 for 7 nights",
+        "price": "$432 for 5 nights",
         "rating": "4.85 (54)",
         "offers": [
             "Weekly discount",
@@ -159,7 +159,7 @@
     {
         "name": "Home in Windsor, Canada",
         "info": "2 bedrooms, 2 beds, 1 bath",
-        "price": "$969 for 7 nights",
+        "price": "$969 for 6 nights",
         "rating": "4.94 (225)",
         "offers": [
             "Weekly discount",
