@@ -13851,6 +13851,165 @@ class TestNestedAggAnswerCodeStaysRowGeneric(unittest.TestCase):
                          [len('abcd'), len('abef')])
 
 
+class TestNestedTableActionsStayRowGeneric(unittest.TestCase):
+    """Lines the menus of a table that is itself a CELL write.
+
+    Rendering hands a nested table the concrete path to the cell it is drawn
+    in -- `people[0]['tags']` -- so its cells and handles can name what is on
+    screen. Code made in it is another matter: it becomes a column of the
+    table above, drawn once per row, so it has to be written against the
+    binder and left for the parent to resolve. Written against the concrete
+    path instead, every row of the parent's new column read the first row's
+    tags.
+    """
+
+    TAGS = [{'k': 'x', 'n': 1}, {'k': 'y', 'n': 2}]
+    CONCRETE = "people[0]['tags']"
+    PEOPLE = [{'name': 'A', 'tags': TAGS}, {'name': 'B', 'tags': [{'k': 'z', 'n': 3}]}]
+
+    def eval_in_scope(self, code):
+        return eval(code, {}, {'people': self.PEOPLE})
+
+    def nested(self):
+        model = init_model(self.TAGS, mock_get_visualizer_dict_tables,
+                           eval_in_scope=self.eval_in_scope)
+        # What rendering hands a cell: the concrete path to this row.
+        model['_source_expr'] = self.CONCRETE
+        return model
+
+    def fire(self, event, model=None):
+        model = self.nested() if model is None else model
+        return update(make_column_mouse_event(repr(event)),
+                      (None, CHILD_SOURCE_BINDER), model, self.TAGS,
+                      mock_get_visualizer_dict_tables,
+                      eval_in_scope=self.eval_in_scope)
+
+    def code(self, cmds):
+        code = [c[1] for c in cmds if is_new_code(c)]
+        self.assertEqual(len(code), 1, f'expected one generated line, got {cmds}')
+        self.assertNotIn(self.CONCRETE, code[0])
+        return code[0]
+
+    def test_compute_code_asks_the_binder(self):
+        from table_visualizer import ComputeCodeClick
+        _, cmds = self.fire(ComputeCodeClick(col="$['n']", expr='set($)'))
+        self.assertEqual(self.code(cmds),
+                         f"set([item['n'] for item in {CHILD_SOURCE_BINDER}])")
+
+    def test_the_line_is_not_named_after_the_binder(self):
+        from table_visualizer import ComputeCodeClick
+        _, cmds = self.fire(ComputeCodeClick(col="$['n']", expr='set($)'))
+        self.assertEqual(cmds[0][0], 'result_unique')
+
+    def test_sort_code_sorts_the_binder(self):
+        from table_visualizer import SortCodeClick
+        _, cmds = self.fire(SortCodeClick(col="$['n']", direction='asc'))
+        self.assertEqual(self.code(cmds),
+                         f"sorted({CHILD_SOURCE_BINDER}, key=lambda item: item['n'])")
+
+    def test_group_by_groups_the_binder(self):
+        from table_visualizer import GroupByClick
+        _, cmds = self.fire(GroupByClick(col="$['k']"))
+        self.assertIn(f'for item in {CHILD_SOURCE_BINDER}', self.code(cmds))
+
+    def test_row_actions_index_the_binder(self):
+        from table_visualizer import RowActionClick
+        _, cmds = self.fire(RowActionClick(row=0, action='item'))
+        self.assertEqual(self.code(cmds), f'{CHILD_SOURCE_BINDER}[0]')
+        _, cmds = self.fire(RowActionClick(row=0, action='delete'))
+        self.assertEqual(self.code(cmds), f'{CHILD_SOURCE_BINDER}[1:]')
+        _, cmds = self.fire(RowActionClick(row=1, action='last_item'))
+        self.assertEqual(self.code(cmds), f'{CHILD_SOURCE_BINDER}[-1]')
+        _, cmds = self.fire(RowActionClick(row=0, action='cells'))
+        self.assertEqual(self.code(cmds),
+                         f"({CHILD_SOURCE_BINDER}[0], {CHILD_SOURCE_BINDER}[0]['k'], "
+                         f"{CHILD_SOURCE_BINDER}[0]['n'])")
+
+    def test_a_pick_reads_down_the_binder(self):
+        from table_visualizer import ToolSelect, PickToggle, ActionButtonClick
+        model, _ = self.fire(ToolSelect(tool='pick'))
+        for band in ('pre', 'match', 'post'):
+            model, _ = self.fire(PickToggle(region_id=f'{band}_col_1'), model)
+        _, cmds = self.fire(ActionButtonClick(action='extract', copy=False), model)
+        self.assertEqual(self.code(cmds),
+                         f"[x['k'] for x in ({CHILD_SOURCE_BINDER})]")
+
+    def test_the_pick_preview_still_reads_the_cell_on_screen(self):
+        """The line under the search box evaluates in the user's scope, where
+        the binder is no name -- so it is built against the concrete path
+        rendering handed the cell, the way the drag handles are."""
+        from table_visualizer import ToolSelect, PickToggle
+        model, _ = self.fire(ToolSelect(tool='pick'))
+        for band in ('pre', 'match', 'post'):
+            model, _ = self.fire(PickToggle(region_id=f'{band}_col_1'), model)
+        out = visualize(self.TAGS, model, mock_get_visualizer_dict_tables,
+                        self.eval_in_scope, var_and_exp=(None, self.CONCRETE))
+        m = re.search(r'pick-preview-value">([^<]*)<', out)
+        self.assertEqual(m and html.unescape(m.group(1)), repr(['x', 'y']))
+
+    def test_the_parent_takes_it_as_a_column_of_every_row(self):
+        """Through the table above: the binder resolves to the cell's own
+        column, and the column answers for each row's own tags."""
+        from table_visualizer import ComputeCodeClick
+        from visualizer_utils import eval_dollar_expr
+        key = f"0{CELL_KEY_SEP}$['tags']"
+        parent = init_model(self.PEOPLE, mock_get_visualizer_dict_tables,
+                            var_and_exp=('people', 'people'),
+                            eval_in_scope=self.eval_in_scope)
+        parent['focused_child'] = key
+        parent['children'][key] = self.nested()
+        inner = ComputeCodeClick(col="$['n']", expr='set($)')
+        parent, cmds = update(
+            make_column_mouse_event(repr(ChildEvent(child_key=key, py_ev_str=repr(inner)))),
+            ('people', 'people'), parent, self.PEOPLE,
+            mock_get_visualizer_dict_tables, eval_in_scope=self.eval_in_scope)
+        new = [c for c in parent['columns'] if c not in ('$', "$['name']", "$['tags']")]
+        self.assertEqual(new, ["set([item['n'] for item in ($['tags'])])"])
+        self.assertEqual([eval_dollar_expr(new[0], row) for row in self.PEOPLE],
+                         [{1, 2}, {3}])
+
+
+class TestNestedCellCodeKeepsItsColumn(unittest.TestCase):
+    """Code made in one CELL of a nested table, mapped over that table's rows
+    on the way up: the cell's own column goes into the map. Without it,
+    `len(_snc_cell_)` written in the `n` cell of a list of dicts came back as
+    the length of each DICT rather than of each dict's `n`."""
+
+    ROWS = [{'k': 'x', 'n': 'ab'}, {'k': 'y', 'n': 'cde'}]
+
+    def test_the_map_composes_the_cell_onto_the_element(self):
+        from table_visualizer import _map_over_rows_code
+        self.assertEqual(
+            _map_over_rows_code(f'len({CHILD_SOURCE_BINDER})', "$['n']"),
+            f"[len((item2['n'])) for item2 in {CHILD_SOURCE_BINDER}]")
+
+    def test_the_row_itself_needs_no_composing(self):
+        from table_visualizer import _map_over_rows_code
+        self.assertEqual(
+            _map_over_rows_code(f'len({CHILD_SOURCE_BINDER})', '$'),
+            f'[len(item2) for item2 in {CHILD_SOURCE_BINDER}]')
+
+    def test_through_the_table(self):
+        from visualizer_utils import eval_dollar_expr, nest_generated_expr
+
+        class _LenVis(MockCodeVisualizer):
+            def update(self, event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                return (model, [('n', f'len({CHILD_SOURCE_BINDER})')])
+
+        get_vis = lambda v: _LenVis() if isinstance(v, str) else mock_get_visualizer_dict_tables(v)
+        model = init_model(self.ROWS, get_vis)
+        model['_source_expr'] = 'x[0]'
+        key = f"0{CELL_KEY_SEP}$['n']"
+        model['focused_child'] = key
+        _, cmds = update(make_child_mouse_event(key, 'None'),
+                         (None, CHILD_SOURCE_BINDER), model, self.ROWS, get_vis)
+        code = [c[1] for c in cmds if is_new_code(c)]
+        self.assertEqual(code,
+                         [f"[len((item2['n'])) for item2 in {CHILD_SOURCE_BINDER}]"])
+        self.assertEqual(eval_dollar_expr(nest_generated_expr(code[0], '$'), self.ROWS),
+                         [2, 3])
+
+
 class TestAggHoles(unittest.TestCase):
     """A {{...}} in an aggregation is a text box, and what's typed in it is
     part of the expression rather than a setting stored beside it."""

@@ -1343,17 +1343,25 @@ def _cell_every_row(columns, col_row_expr, source_expr, binds,
     return readings
 
 
-def _map_over_rows_code(code: str) -> str:
+def _map_over_rows_code(code: str, cell_expr: str = '$') -> str:
     """A child's generated code, asked of every row of the table it came from.
+
+    *cell_expr* is the column the code was made in, as one row reads it: the
+    code is about the CELL, so what each element is asked is the code with
+    that column composed onto it -- `len(_snc_cell_)` written in the `n` cell
+    of a list of dicts is `len(item['n'])` per row, not `len(item)`. A table
+    whose rows are the cells themselves has nothing to compose.
 
     The reading half of this is _mapped_over_rows; this is the code half, and
     the difference is only what stands for the value -- a binder on the way up
     rather than a dollar. Kept beside it so the tooltip and the column the
     button writes cannot drift apart.
     """
-    elem = _fresh_elem_name(0, code)
-    return (f'[{code.replace(CHILD_SOURCE_BINDER, elem)} '
-            f'for {elem} in {CHILD_SOURCE_BINDER}]')
+    elem = _fresh_elem_name(0, code, cell_expr)
+    cell = replace_dollars_in_py_exp(cell_expr, [elem])
+    body = (code.replace(CHILD_SOURCE_BINDER, elem) if cell == elem
+            else nest_generated_expr(code, cell))
+    return f'[{body} for {elem} in {CHILD_SOURCE_BINDER}]'
 
 
 def _mapped_over_rows(sub_expr: str) -> str:
@@ -6230,8 +6238,12 @@ def _name_context_for_source(source_expr: str) -> tuple[bool, str]:
     """Return (has_var, suggestion base) for a source expression.
 
     has_var is True only when the source is a legal identifier, so it can serve
-    as an assignment-name base; otherwise callers fall back to "result".
+    as an assignment-name base; otherwise callers fall back to "result". The
+    binder a nested table writes against is an identifier too, but it is
+    nobody's name: the parent swaps it out before the line lands anywhere.
     """
+    if source_expr == CHILD_SOURCE_BINDER:
+        return False, "result"
     if source_expr.isidentifier() and not keyword.iskeyword(source_expr):
         return True, source_expr
     return False, "result"
@@ -6412,7 +6424,7 @@ def _search_context_for(model: dict, var_and_exp=None,
 
     # A pick composes an expression over the FIRST match only, so it forces
     # first-match mode and rides along for generate_action to wrap.
-    pick_expr = model.get('pick_expr')
+    pick_expr = _pick_expr_against(model, source_expr)
     if pick_expr:
         binds = _model_binds(model)
         ctx['pick_expr'] = replace_dollars_in_py_exp(
@@ -6436,7 +6448,7 @@ def _pick_only_context(model: dict, source_expr: str, has_var: bool,
     there is nothing for a next(...) to wrap, and no other action to write.
     """
     binds = _model_binds(model)
-    pick_expr = model.get('pick_expr')
+    pick_expr = _pick_expr_against(model, source_expr)
     return {
         'source_expr': source_expr, 'has_var': has_var,
         'suggest_base': suggest_base,
@@ -7741,8 +7753,32 @@ def _build_pick_expr(model: dict, source_expr: str) -> str | None:
     return '(' + ', '.join(parts) + ')'
 
 
+def _code_source_expr(model: dict, var_and_exp=None) -> 'str | None':
+    """How a line this table writes names the list.
+
+    Rendering hands a table that is itself a CELL the concrete path to the
+    cell it is drawn in -- `people[0]['tags']` -- and that is what its
+    `_source_expr` holds, so its cells and drag handles name what is on
+    screen. A line it writes is another matter: it becomes a column of the
+    table above, drawn once per row, so it is written against the binder and
+    left for the parent to resolve (see nest_child_command). Written against
+    the path instead, every row of the parent's new column read the first
+    row's tags. At the root the two are the same expression.
+    """
+    if is_nested(var_and_exp):
+        return CHILD_SOURCE_BINDER
+    return model.get('_source_expr')
+
+
 def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
-    """How this table names its own list, for building region expressions."""
+    """How this table names its own list, for building region expressions.
+
+    The list as rendered -- for a nested table, the concrete path to the cell
+    -- rather than what a line names, since the stored pick is what the
+    preview under the search box evaluates. A line is written from the
+    regions instead, against whatever source it is for: see
+    _pick_expr_against.
+    """
     src = model.get('_source_expr') or model.get('linked_source_expr')
     if src:
         return src
@@ -7750,6 +7786,23 @@ def _pick_source_expr(model: dict, var_and_exp=None) -> str | None:
         var_name, expr = var_and_exp
         return var_name if var_name else f"({expr})"
     return None
+
+
+def _pick_expr_against(model: dict, source_expr: str) -> 'str | None':
+    """The pick, written against *source_expr*.
+
+    The stored pick names the list the way the table was rendered, and the
+    name is baked in -- a band is a slice of it -- so a context for another
+    source cannot re-point the string and rebuilds it from the regions
+    instead. That is what lets a nested table preview its pick against the
+    concrete path to its cell and write it against the binder (see
+    _code_source_expr). Only a pick restored off a line (see _ctx_to_model)
+    has no regions, and that line was written at the root, where the two
+    sources are one.
+    """
+    if model.get('picked'):
+        return _build_pick_expr(model, source_expr)
+    return model.get('pick_expr')
 
 
 def _table_records_expr(col_ids, columns, source_expr, binds,
@@ -11703,7 +11756,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # did, so it is resolved here as before.
             if is_nested(var_and_exp):
                 commands = [
-                    (cmd[0], _map_over_rows_code(cmd[1]), *cmd[2:])
+                    (cmd[0], _map_over_rows_code(cmd[1], generic_cell), *cmd[2:])
                     if is_new_code(cmd) and not is_agg
                     else nest_child_command(cmd, generic_cell, concrete_cell)
                     for cmd in commands]
@@ -12081,7 +12134,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case SortCodeClick(col=named, direction=direction):
             study_note(action='code.sort', column=named, direction=direction)
             col = _named_row_column(model, named)
-            source_expr = model.get('_source_expr')
+            source_expr = _code_source_expr(model, var_and_exp)
             if col is not None and dollar_expr_names_index(col):
                 col = None
             if (col is not None and source_expr is not None
@@ -12108,7 +12161,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             # answers None here and the click writes nothing -- the same answer
             # _render_column_group_by draws, reached the same way.
             col = _named_row_column(model, named)
-            source_expr = model.get('_source_expr')
+            source_expr = _code_source_expr(model, var_and_exp)
             if col is not None and source_expr is not None:
                 _close_column_menus(model)
                 _has_var, base = _name_context_for_source(source_expr)
@@ -12128,16 +12181,21 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         # and the line that lands cannot describe different rows.
         case RowActionClick(row=i, action=action):
             study_note(action='code.row-action', row=i, rowAction=action)
-            source_expr = model.get('_source_expr')
+            source_expr = _code_source_expr(model, var_and_exp)
+            # The row helpers read the source off the model, since the menu
+            # they also draw names the rows as rendered. The line is written
+            # against what a line names (see _code_source_expr), so they are
+            # handed a view of the model that says so.
+            writing = {**model, '_source_expr': source_expr}
             in_range = isinstance(i, int) and 0 <= i < len(value)
-            code = (_row_action_code(action, model, value, i)
+            code = (_row_action_code(action, writing, value, i)
                     if in_range and action in ROW_ACTIONS else None)
             if code is not None and source_expr is not None:
                 _close_column_menus(model)
                 commands.append(new_code_command(
-                    (_row_action_name(action, model, source_expr, i), code),
+                    (_row_action_name(action, writing, source_expr, i), code),
                     code_imports,
-                    config=_row_action_config(action, model, value, i,
+                    config=_row_action_config(action, writing, value, i,
                                               get_visualizer)))
 
         # Convert Type leaves the menu open for the same reason Sort does: it is
@@ -12284,7 +12342,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
         case ComputeCodeClick(col=named, expr=expr):
             study_note(action='code.compute', column=named, expr=expr)
             col = _named_column(model, named)
-            source_expr = model.get('_source_expr')
+            source_expr = _code_source_expr(model, var_and_exp)
             if col is not None and source_expr is not None:
                 _close_column_menus(model)
                 code = _agg_code(expr, _column_whole_expr(
