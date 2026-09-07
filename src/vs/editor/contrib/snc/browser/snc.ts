@@ -1,7 +1,7 @@
 import { registerEditorContribution, EditorContributionInstantiation, EditorAction, registerEditorAction, ServicesAccessor } from '../../../browser/editorExtensions.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js';
-import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference, IEditorMouseEvent, MouseTargetType } from '../../../browser/editorBrowser.js';
+import { ICodeEditor, IViewZone, IViewZoneChangeAccessor, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference, IEditorMouseEvent, MouseTargetType } from '../../../browser/editorBrowser.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
@@ -150,7 +150,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	/** Room left at the end of the line for a loop slider ahead of this widget. */
 	leftInset = 0;
 	private readonly visIndex: number;
-	private readonly lineNumber: number;
+	/**
+	 * The line whose value this widget shows. Moves with the code: an edit
+	 * that adds or removes lines above re-keys the widget (setLineNumber)
+	 * rather than rebuilding it, so widget state survives typing elsewhere.
+	 */
+	private lineNumber: number;
+	private static nextInstanceId = 0;
+	/** Overlay-widget id. Independent of the line so a re-key doesn't orphan the registration. */
+	private readonly instanceId = `editor.contrib.visualizationOverlayWidget-${VisualizationWidget.nextInstanceId++}`;
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
 	private readonly onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void;
 	private readonly onInputEvent: (pythonEventStr: string, value: string, previous: string) => void;
@@ -319,9 +327,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		// Create the widget DOM node. The line number rides along as a class so a
 		// visualizer can be picked out by the line it belongs to (`.snc-line-7`),
 		// which is the only handle a UI test has on which visualizer is which -
-		// nothing in the HTML the visualizer renders says where it came from. A
-		// widget is only ever reused for the line it was made for (a line whose
-		// item count changes is rebuilt), so this stays true without maintenance.
+		// nothing in the HTML the visualizer renders says where it came from.
+		// setLineNumber keeps the class current when the code moves.
 		this.domNode = document.createElement('div');
 		this.domNode.className = `snc-visualization-widget snc-line-${lineNumber}`;
 
@@ -2210,11 +2217,29 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	getId(): string {
-		return `editor.contrib.visualizationOverlayWidget-${this.lineNumber}-${this.visIndex}`;
+		return this.instanceId;
 	}
 
 	getVisIndex(): number {
 		return this.visIndex;
+	}
+
+	getLineNumber(): number {
+		return this.lineNumber;
+	}
+
+	/**
+	 * The code this widget belongs to moved to `lineNumber` (lines were added
+	 * or removed above it). Nothing is redrawn here; the caller repositions.
+	 */
+	setLineNumber(lineNumber: number): void {
+		if (lineNumber === this.lineNumber) {
+			return;
+		}
+		this.domNode.classList.remove(`snc-line-${this.lineNumber}`);
+		this.domNode.classList.add(`snc-line-${lineNumber}`);
+		this.lineNumber = lineNumber;
+		this.position = new Position(lineNumber, 1);
 	}
 
 	getDomNode(): HTMLElement {
@@ -2279,6 +2304,16 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		} catch (error) {
 			return null;
 		}
+	}
+
+	/**
+	 * Monaco leaves a widget it has no position for wherever it is -- for a
+	 * fresh one, the top-left corner of the editor. Hidden rather than
+	 * display:none so the view zone can still measure it.
+	 */
+	updatePosition(): void {
+		this.domNode.classList.toggle('snc-unpositioned', this.getPosition() === null);
+		this.editor.layoutOverlayWidget(this);
 	}
 
 	/**
@@ -3434,13 +3469,6 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Update the widget's position (called when scrolling or content changes)
-	 */
-	updatePosition(): void {
-		this.editor.layoutOverlayWidget(this);
-	}
-
-	/**
 	 * Take every code-handing attribute off a live-only render, so that even
 	 * HTML that still carries one (a visualizer that doesn't know about the
 	 * setting, say) has no handle to drag, no action to hover, and no shortcut
@@ -3647,6 +3675,8 @@ class LoopSliderWidget extends Disposable implements IOverlayWidget {
 	}
 
 	updatePosition(): void {
+		// See VisualizationWidget.updatePosition.
+		this.domNode.classList.toggle('snc-unpositioned', this.getPosition() === null);
 		this.editor.layoutOverlayWidget(this);
 	}
 
@@ -4140,7 +4170,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private toggleWidgetsButton: ToggleWidgetsButton | null = null;
 
 	private visualizationWidgets: Map<number, VisualizationWidget[]> = new Map();
-	private viewZones: Map<number, string> = new Map(); // line number -> view zone id
+	/**
+	 * The view zone under each line's visualizers, by line number. `heightInPx`
+	 * is kept because a zone can only be resized by removing and re-adding it,
+	 * which relays out everything below; knowing the current height lets us
+	 * skip that when the new height is the same (the common case on a hover
+	 * re-render). `zone` is the object Monaco was handed: its afterLineNumber
+	 * is what Monaco re-reads when folding or the line height changes, so it
+	 * has to be moved along with the key when lines shift (see
+	 * shiftWidgetsForContentChange).
+	 */
+	private viewZones: Map<number, { id: string; heightInPx: number; zone: IViewZone }> = new Map();
 	// Synthetic empty space above line 1. Used to keep a focused/clicked
 	// visualizer pixel-stable when content above it shrinks while the file is
 	// scrolled near the top: scrollTop can't go below 0, so the deficit is
@@ -4148,13 +4188,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private topSpacerZoneId: string | null = null;
 	private topSpacerHeight = 0;
 	private isAdjustingTopSpacer = false;
-	/**
-	 * Height in px of each line's view zone, kept in step with `viewZones`.
-	 * A zone can only be resized by removing and re-adding it, which relays out
-	 * everything below; knowing the current height lets us skip that when the
-	 * new height is the same (the common case on a hover re-render).
-	 */
-	private viewZoneHeights: Map<number, number> = new Map();
 	private debounceTimer: any = null;
 	/** The folded-away JSON of each `#%click` comment; see updateConfigCommentFolding. */
 	private readonly configCommentDecorations = this.editor.createDecorationsCollection();
@@ -4183,6 +4216,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * where a widget went.
 	 */
 	private readonly reportedLineNow = new Map<number, number>();
+	/**
+	 * The line shifts the file has undergone since the run in flight took its
+	 * source, oldest first. Its items name lines as they were then; an item
+	 * that lands after the user deleted a line above it would otherwise be
+	 * put back on the old line -- as a second widget, one line too low, or
+	 * past the end of the file with nowhere to draw -- until the next run
+	 * replaced it. Composed over an arriving item's line in the stream
+	 * handler; a null means the item's line is gone and the item with it.
+	 */
+	private runLineShifts: ((line: number) => number | null)[] = [];
 	/**
 	 * File whose console the run in flight belongs to. Held separately from the
 	 * editor's model because the user can switch tabs mid-run, and the output
@@ -4681,7 +4724,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Immediately adjust visualization items for line changes (deletions/insertions)
 		// so stale visualizers don't linger on deleted or shifted lines.
+		if (SNCController.LOG_LAYOUT) { console.log(`[snc-layout] content-change ${e.changes.map(c => `${c.range.startLineNumber}:${c.range.startColumn}-${c.range.endLineNumber}:${c.range.endColumn} ${JSON.stringify(c.text)}`).join(' ')}`); }
 		this.adjustVisualizationItemsForContentChange(e);
+		this.logLayoutSnapshot('after-content-change');
+		if (SNCController.LOG_LAYOUT) {
+			dom.getActiveWindow().requestAnimationFrame(() => this.logLayoutSnapshot('frame-after-content-change'));
+		}
 
 		// Drop links whose tracked range collapsed or vanished (e.g. the user
 		// deleted the linked line). Skip while we ourselves are rewriting a
@@ -4785,31 +4833,39 @@ export class SNCController extends Disposable implements IEditorContribution {
 				&& change.range.startColumn === 1
 				&& lineDelta > 0;
 
-			const newItems: IVisualizationItem[] = [];
-
-			for (const item of this.visualizationItems) {
-				if (isStartOfLineInsertion && item.line >= startLine) {
+			/** Where `line` is after this change, or null if the change deleted it. */
+			const shiftedLine = (line: number): number | null => {
+				if (isStartOfLineInsertion && line >= startLine) {
 					// Content at/below the insertion point moved down.
-					newItems.push({ ...item, line: item.line + lineDelta });
-					itemsChanged = true;
-				} else if (item.line < startLine) {
+					return line + lineDelta;
+				} else if (line < startLine) {
 					// Before the change: unaffected
-					newItems.push(item);
-				} else if (item.line > endLine) {
+					return line;
+				} else if (line > endLine) {
 					// After the change: shift line number
-					newItems.push({ ...item, line: item.line + lineDelta });
-					itemsChanged = true;
-				} else if (lineDelta < 0 && item.line > startLine + newLineCount - 1) {
+					return line + lineDelta;
+				} else if (lineDelta < 0 && line > startLine + newLineCount - 1) {
 					// Within the changed range, on a line that was deleted
-					itemsChanged = true;
-					// Don't push - remove this item
+					return null;
 				} else {
 					// Within the changed range but on a line that still exists
 					// (content may have changed; will be corrected by the re-run)
+					return line;
+				}
+			};
+
+			const newItems: IVisualizationItem[] = [];
+			for (const item of this.visualizationItems) {
+				const line = shiftedLine(item.line);
+				if (line === null) {
+					itemsChanged = true;
+				} else if (line === item.line) {
 					newItems.push(item);
+				} else {
+					newItems.push({ ...item, line });
+					itemsChanged = true;
 				}
 			}
-
 			this.visualizationItems = newItems;
 
 			// Keep linked-selection keys aligned with the shifted visualizer
@@ -4820,18 +4876,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const survivingLinks: typeof this.linkedSelections = [];
 				const deadLinks: typeof this.linkedSelections = [];
 				for (const link of this.linkedSelections) {
-					if (isStartOfLineInsertion && link.line >= startLine) {
-						link.line += lineDelta;
-						survivingLinks.push(link);
-					} else if (link.line < startLine) {
-						survivingLinks.push(link);
-					} else if (link.line > endLine) {
-						link.line += lineDelta;
-						survivingLinks.push(link);
-					} else if (lineDelta < 0 && link.line > startLine + newLineCount - 1) {
+					const line = shiftedLine(link.line);
+					if (line === null) {
 						// The visualizer's trigger line was deleted; tear down.
 						deadLinks.push(link);
 					} else {
+						link.line = line;
 						survivingLinks.push(link);
 					}
 				}
@@ -4840,6 +4890,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 					this.teardownLink(link);
 				}
 			}
+
+			this.shiftWidgetsForContentChange(shiftedLine);
+			this.runLineShifts.push(shiftedLine);
 
 			// And the lines the run in flight was told about, by the same rule:
 			// a command still names the number it was given, so this is what
@@ -4857,6 +4910,95 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (itemsChanged) {
 			this.updateVisualizationWidgets(this.visualizationItems);
 		}
+	}
+
+	/**
+	 * Move the widgets and view zones along with the code they belong to,
+	 * after an edit that added or removed lines. `shiftedLine` says where
+	 * each line went (null: deleted).
+	 *
+	 * Both maps are keyed by line number. Monaco has already moved the zones
+	 * themselves (LinesLayout shifts every whitespace below an insertion or
+	 * deletion), so a key left where it was would name a zone that is no
+	 * longer under that line: updateVisualizationWidgets would then leave
+	 * the misplaced zone alone, add a second one where the widget now sits,
+	 * and the file would show a doubled gap above and a missing one below.
+	 * The widgets are moved rather than rebuilt so that they keep their
+	 * state and don't flash unpositioned at the top-left of the editor.
+	 */
+	private shiftWidgetsForContentChange(shiftedLine: (line: number) => number | null): void {
+		if (this.visualizationWidgets.size === 0 && this.viewZones.size === 0) {
+			return;
+		}
+		const movedWidgets: Map<number, VisualizationWidget[]> = new Map();
+		const deletedWidgets: VisualizationWidget[] = [];
+		for (const [line, widgets] of this.visualizationWidgets) {
+			const newLine = shiftedLine(line);
+			if (newLine === null) {
+				deletedWidgets.push(...widgets);
+			} else {
+				for (const widget of widgets) {
+					widget.setLineNumber(newLine);
+				}
+				movedWidgets.set(newLine, widgets);
+			}
+		}
+		this.visualizationWidgets = movedWidgets;
+
+		const movedZones: typeof this.viewZones = new Map();
+		const deletedZoneIds: string[] = [];
+		for (const [line, entry] of this.viewZones) {
+			const newLine = shiftedLine(line);
+			if (newLine === null) {
+				deletedZoneIds.push(entry.id);
+			} else {
+				// Monaco re-reads this (folding, line-height changes) and would
+				// otherwise snap the zone back to the line it was made on.
+				entry.zone.afterLineNumber = newLine;
+				movedZones.set(newLine, entry);
+			}
+		}
+		this.viewZones = movedZones;
+
+		for (const widget of deletedWidgets) {
+			widget.dispose();
+		}
+		if (deletedZoneIds.length > 0) {
+			this.editor.changeViewZones((accessor) => {
+				for (const id of deletedZoneIds) {
+					accessor.removeZone(id);
+				}
+			});
+		}
+		// Every widget below the edit is at a stale `top`; Monaco keeps the
+		// position it was last handed rather than asking for a fresh one.
+		this.updateOverlayWidgetPositions();
+	}
+
+	/**
+	 * Diagnostic: where each widget and zone is versus where it should be.
+	 * `want` is the pixel top a widget on its line should have; `dom` is the
+	 * top its node actually has; `zone` is the line/height our map holds
+	 * and `monaco` the line/height Monaco actually has that zone at.
+	 */
+	private static readonly LOG_LAYOUT = false;
+	private logLayoutSnapshot(tag: string): void {
+		if (!SNCController.LOG_LAYOUT) {
+			return;
+		}
+		const scrollTop = this.editor.getScrollTop();
+		const whitespaces = new Map(this.editor.getWhitespaces().map(w => [w.id, w]));
+		const rows: string[] = [];
+		for (const [line, widgets] of Array.from(this.visualizationWidgets.entries()).sort((a, b) => a[0] - b[0])) {
+			const want = Math.round(this.editor.getTopForLineNumber(line) - scrollTop);
+			const dom = widgets.map(w => w.getDomNode().style.top || '-').join(',');
+			const cls = widgets.map(w => w.getDomNode().classList.contains('snc-unpositioned') ? 'hidden' : '').join(',');
+			const zone = this.viewZones.get(line);
+			const monaco = zone ? whitespaces.get(zone.id) : undefined;
+			rows.push(`L${line} want=${want} dom=${dom}${cls ? ' ' + cls : ''} zone=${zone ? `${zone.zone.afterLineNumber}/${zone.heightInPx}` : '-'} monaco=${monaco ? `${monaco.afterLineNumber}/${monaco.height}` : '-'}`);
+		}
+		const strayZones = Array.from(this.viewZones.entries()).filter(([line]) => !this.visualizationWidgets.has(line)).map(([line, z]) => `L${line}:${z.id}`);
+		console.log(`[snc-layout] ${tag} scrollTop=${Math.round(scrollTop)} lines=${this.editor.getModel()?.getLineCount()} run=${this.currentRunId ? 'inflight' : 'none'} shifts=${this.runLineShifts.length}\n  ${rows.join('\n  ')}${strayZones.length ? '\n  strayZones=' + strayZones.join(' ') : ''}`);
 	}
 
 	private onWindowBecameVisible(): void {
@@ -4877,9 +5019,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (this.cursorUpdateTimer) {
 			clearTimeout(this.cursorUpdateTimer);
 		}
+		// Drawn from the items as they stand when the timer fires, not as they
+		// were when the cursor moved: an edit delivers its cursor event from
+		// inside the content-change handler (the config-comment refold flushes
+		// Monaco's queue), before the items have been shifted for the edit, and
+		// the array captured then would put every widget back on its old line.
 		this.cursorUpdateTimer = setTimeout(() => {
 			this.cursorUpdateTimer = null;
-			this.updateVisualizationWidgets(data);
+			this.updateVisualizationWidgets(this.visualizationItems);
+			this.logLayoutSnapshot('cursor-timer');
 		}, 50);
 
 		// When the cursor moves to a different line, the effective focused line
@@ -5512,8 +5660,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Remove all view zones (including the top spacer)
 		this.editor.changeViewZones((accessor) => {
-			for (const viewZoneId of this.viewZones.values()) {
-				accessor.removeZone(viewZoneId);
+			for (const { id } of this.viewZones.values()) {
+				accessor.removeZone(id);
 			}
 			if (this.topSpacerZoneId !== null) {
 				accessor.removeZone(this.topSpacerZoneId);
@@ -5521,7 +5669,6 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		});
 		this.viewZones.clear();
-		this.viewZoneHeights.clear();
 		this.topSpacerHeight = 0;
 	}
 
@@ -5656,6 +5803,16 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// console.log("presentLines", presentLines)
 
 
+		const addViewZone = (accessor: IViewZoneChangeAccessor, lineNumber: number, heightInPx: number): void => {
+			const zone: IViewZone = {
+				afterLineNumber: lineNumber,
+				heightInPx,
+				domNode: document.createElement('div'),
+				suppressMouseDown: false
+			};
+			this.viewZones.set(lineNumber, { id: accessor.addZone(zone), heightInPx, zone });
+		};
+
 		// Collect widgets that need repositioning; calling updatePosition()
 		// inside changeViewZones would force a synchronous render while the
 		// zone data structures are mid-mutation, causing crashes in ViewZones.render.
@@ -5698,139 +5855,115 @@ export class SNCController extends Disposable implements IEditorContribution {
 			}
 		}
 
+		// Widgets first, zones after. Making or disposing a widget must not
+		// happen inside changeViewZones: adding an overlay widget makes Monaco
+		// ask it for a position, which forces a synchronous render while the
+		// zone list is mid-mutation, and ViewZones.render throws on it. So the
+		// pass over the widgets only records what each line's zone should be
+		// (0: none), and the zones are settled afterwards in one accessor.
+		const wantedZoneHeights = new Map<number, number>();
+
+		// Remove widgets for lines no longer present
+		for (const [line, widgets] of Array.from(this.visualizationWidgets.entries())) {
+			if (!presentLines.has(line)) {
+				// console.log("disposing", line, widgets)
+				for (const w of widgets) { w.dispose(); }
+				this.visualizationWidgets.delete(line);
+				wantedZoneHeights.set(line, 0);
+			}
+		}
+
+		// Update or create for each present line
+		for (const [lineNumber, items] of groupedByLine.entries()) {
+			// One item per log site on the line (Python picks the iteration;
+			// see loopSelections), in source order.
+			const stepItems = items.slice().sort((a, b) => a.visIndex - b.visIndex);
+
+			const existing = this.visualizationWidgets.get(lineNumber);
+			// console.log("existing", lineNumber, existing)
+
+			if (existing && existing.length === stepItems.length) {
+				// Incremental update: reuse widgets, just update content
+				let anyChanged = false;
+				for (let i = 0; i < stepItems.length; i++) {
+					if (existing[i].updateContent(stepItems[i].html)) {
+						anyChanged = true;
+					}
+				}
+
+				if (anyChanged) {
+					widgetsToReposition.push(...existing);
+					wantedZoneHeights.set(lineNumber, getViewZoneHeightInPx(existing));
+				}
+			} else {
+				// Rebuild for this line
+				if (existing) {
+					for (const w of existing) { w.dispose(); }
+					this.visualizationWidgets.delete(lineNumber);
+				}
+
+				const widgets: VisualizationWidget[] = [];
+				for (let i = 0; i < stepItems.length; i++) {
+					const item = stepItems[i];
+					const visIndex = item.visIndex;
+					// The callbacks ask the widget for its line each time rather
+					// than closing over `lineNumber`: the widget outlives edits
+					// above it (shiftWidgetsForContentChange), so the line it
+					// was made on is not necessarily the line it is on.
+					const widget: VisualizationWidget = new VisualizationWidget(
+						this.editor,
+						lineNumber,
+						visIndex,
+						(pythonEventStr, ev, overrideRect?) => { this.onPointerEvent(widget.getLineNumber(), visIndex, pythonEventStr, ev, overrideRect); },
+						(pythonEventStr, ev) => { this.onKeyboardEvent(widget.getLineNumber(), visIndex, pythonEventStr, ev); },
+						(pythonEventStr, value, previous) => { this.onInputEvent(widget.getLineNumber(), visIndex, pythonEventStr, value, previous); },
+						(pythonEventStr) => { this.onBlurEvent(widget.getLineNumber(), visIndex, pythonEventStr); },
+						() => this.effectiveFocusedLine() === widget.getLineNumber(),
+						() => this.isLiveOnly(),
+						() => this.requestExpand(widget.getLineNumber()),
+						(expression, imports) => { this.insertNewVarFromExpression(widget.getLineNumber(), expression, imports); },
+						() => { this.onLinkChainClick(widget.getLineNumber(), visIndex); },
+						this.clipboardService
+					);
+					widget.leftInset = this.loopSliders.has(lineNumber) ? LoopSliderWidget.WIDTH : 0;
+					widget.updateContent(item.html);
+					widgets.push(widget);
+				}
+				if (widgets.length > 0) {
+					this.visualizationWidgets.set(lineNumber, widgets);
+					widgetsToReposition.push(...widgets);
+				}
+				wantedZoneHeights.set(lineNumber, getViewZoneHeightInPx(widgets));
+			}
+		}
+
 		// Set when a view zone is added, removed, or resized. Such a change moves
 		// every widget below it, including widgets whose own content did not
 		// change, so they all have to be repositioned rather than just the ones
 		// in `widgetsToReposition`.
 		let zonesChanged = false;
 
-		this.editor.changeViewZones((accessor) => {
-			// Remove widgets/view zones for lines no longer present
-			for (const [line, widgets] of Array.from(this.visualizationWidgets.entries())) {
-				if (!presentLines.has(line)) {
-					// console.log("disposing", line, widgets)
-					for (const w of widgets) { w.dispose(); }
-					this.visualizationWidgets.delete(line);
-					const vz = this.viewZones.get(line);
-					if (vz) {
-						accessor.removeZone(vz);
+		// A zone's height can only be changed by replacing it, and that relays
+		// out every line below. Content re-renders that leave the widget the
+		// same height (a hover repaint, say) must not pay for that, so an
+		// unchanged height is left strictly alone.
+		const zoneEdits = Array.from(wantedZoneHeights.entries())
+			.filter(([line, heightInPx]) => (this.viewZones.get(line)?.heightInPx ?? 0) !== heightInPx);
+		if (zoneEdits.length > 0) {
+			zonesChanged = true;
+			this.editor.changeViewZones((accessor) => {
+				for (const [line, heightInPx] of zoneEdits) {
+					const existingZone = this.viewZones.get(line);
+					if (existingZone) {
+						accessor.removeZone(existingZone.id);
 						this.viewZones.delete(line);
-						this.viewZoneHeights.delete(line);
-						zonesChanged = true;
+					}
+					if (heightInPx > 0) {
+						addViewZone(accessor, line, heightInPx);
 					}
 				}
-			}
-
-			// Update or create for each present line
-			for (const [lineNumber, items] of groupedByLine.entries()) {
-				// One item per log site on the line (Python picks the iteration;
-				// see loopSelections), in source order.
-				const stepItems = items.slice().sort((a, b) => a.visIndex - b.visIndex);
-
-				const existing = this.visualizationWidgets.get(lineNumber);
-				// console.log("existing", lineNumber, existing)
-
-
-				if (existing && existing.length === stepItems.length) {
-					// Incremental update: reuse widgets, just update content
-					let anyChanged = false;
-					for (let i = 0; i < stepItems.length; i++) {
-						if (existing[i].updateContent(stepItems[i].html)) {
-							anyChanged = true;
-						}
-					}
-
-					if (anyChanged) {
-						widgetsToReposition.push(...existing);
-
-						// Adjust view zone height if needed
-						const viewZoneHeightInPx = getViewZoneHeightInPx(existing);
-						const existingZoneId = this.viewZones.get(lineNumber);
-						if (viewZoneHeightInPx > 0) {
-							// A zone's height can only be changed by replacing it, and that
-							// relays out every line below. Content re-renders that leave the
-							// widget the same height (a hover repaint, say) must not pay for
-							// that, so an unchanged height is left strictly alone.
-							if (!existingZoneId || this.viewZoneHeights.get(lineNumber) !== viewZoneHeightInPx) {
-								if (existingZoneId) {
-									accessor.removeZone(existingZoneId);
-								}
-								const viewZone: IViewZone = {
-									afterLineNumber: lineNumber,
-									heightInPx: viewZoneHeightInPx,
-									domNode: document.createElement('div'),
-									suppressMouseDown: false
-								};
-								const viewZoneId = accessor.addZone(viewZone);
-								this.viewZones.set(lineNumber, viewZoneId);
-								this.viewZoneHeights.set(lineNumber, viewZoneHeightInPx);
-								zonesChanged = true;
-							}
-						} else if (existingZoneId) {
-							accessor.removeZone(existingZoneId);
-							this.viewZones.delete(lineNumber);
-							this.viewZoneHeights.delete(lineNumber);
-							zonesChanged = true;
-						}
-					}
-				} else {
-					// Rebuild for this line
-					if (existing) {
-						for (const w of existing) { w.dispose(); }
-						this.visualizationWidgets.delete(lineNumber);
-						const oldZone = this.viewZones.get(lineNumber);
-						if (oldZone) {
-							accessor.removeZone(oldZone);
-							this.viewZones.delete(lineNumber);
-							this.viewZoneHeights.delete(lineNumber);
-							zonesChanged = true;
-						}
-					}
-
-					const widgets: VisualizationWidget[] = [];
-					for (let i = 0; i < stepItems.length; i++) {
-						const item = stepItems[i];
-						const visIndex = item.visIndex;
-						const widget = new VisualizationWidget(
-							this.editor,
-							lineNumber,
-							visIndex,
-							(pythonEventStr, ev, overrideRect?) => { this.onPointerEvent(lineNumber, visIndex, pythonEventStr, ev, overrideRect); },
-							(pythonEventStr, ev) => { this.onKeyboardEvent(lineNumber, visIndex, pythonEventStr, ev); },
-							(pythonEventStr, value, previous) => { this.onInputEvent(lineNumber, visIndex, pythonEventStr, value, previous); },
-							(pythonEventStr) => { this.onBlurEvent(lineNumber, visIndex, pythonEventStr); },
-							() => this.effectiveFocusedLine() === lineNumber,
-							() => this.isLiveOnly(),
-							() => this.requestExpand(lineNumber),
-							(expression, imports) => { this.insertNewVarFromExpression(lineNumber, expression, imports); },
-							() => { this.onLinkChainClick(lineNumber, visIndex); },
-							this.clipboardService
-						);
-						widget.leftInset = this.loopSliders.has(lineNumber) ? LoopSliderWidget.WIDTH : 0;
-						widget.updateContent(item.html);
-						widgets.push(widget);
-					}
-					if (widgets.length > 0) {
-						this.visualizationWidgets.set(lineNumber, widgets);
-						widgetsToReposition.push(...widgets);
-					}
-
-					const viewZoneHeightInPx = getViewZoneHeightInPx(widgets);
-					if (viewZoneHeightInPx > 0) {
-						const viewZone: IViewZone = {
-							afterLineNumber: lineNumber,
-							heightInPx: viewZoneHeightInPx,
-							domNode: document.createElement('div'),
-							suppressMouseDown: false
-						};
-						const viewZoneId = accessor.addZone(viewZone);
-						this.viewZones.set(lineNumber, viewZoneId);
-						this.viewZoneHeights.set(lineNumber, viewZoneHeightInPx);
-						zonesChanged = true;
-					}
-				}
-			}
-		});
+			});
+		}
 
 		if (shouldStabilizeScroll && anchorLineNumber > 0) {
 			// Clear any prior spacer so the anchor's top reflects real content,
@@ -7332,6 +7465,20 @@ export class SNCController extends Disposable implements IEditorContribution {
 						this.scheduleQueuedEventRun();
 					}
 				} else if (msg.type === 'item') {
+					// Put the item where its line is now (see runLineShifts).
+					const reportedLine = msg.item.line;
+					let currentLine: number | null = msg.item.line;
+					for (const shift of this.runLineShifts) {
+						currentLine = shift(currentLine);
+						if (currentLine === null) {
+							break;
+						}
+					}
+					if (currentLine === null) {
+						// Its line was deleted out from under it; nothing to show.
+						return;
+					}
+					msg.item.line = currentLine;
 					// console.log(msg.item.model)
 					// Timing: first item arrival for this run
 					const isFirstItem = !this.runFirstItemReceivedMsById.has(msg.runId);
@@ -7424,6 +7571,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 					// Throttle UI updates
 					if (!this.streamUpdateTimer) {
 						this.updateVisualizationWidgets(this.visualizationItems);
+						this.logLayoutSnapshot(`stream-item L${msg.item.line}${reportedLine !== msg.item.line ? ` (reported as L${reportedLine})` : ''}`);
 
 						// Track first render timing:
 						// 1. Sync: DOM mutations from changeViewZones are complete
@@ -7520,6 +7668,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 						this.updateLoopSliders();
 						this.clampLoopSelections();
 						this.updateVisualizationWidgets(this.visualizationItems);
+						this.logLayoutSnapshot('run-end');
 					}
 
 					// `awaitingInput` is a normal end, not a failure: the program
@@ -7635,6 +7784,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		for (const visItem of this.visualizationItems) {
 			this.reportedLineNow.set(visItem.line, visItem.line);
 		}
+		this.runLineShifts = [];
 		// No widget has been reached yet, so the run can be handed events
 		// for any of them (see the gate above). A warm worker taking this run
 		// says otherwise, and seeds the set -- see the 'resumed' handler.

@@ -66,6 +66,12 @@
 	background-color: unset;
 }
 
+/* An overlay widget Monaco has no position for (its line is gone, or not
+   laid out yet) would otherwise show at the editor's top-left corner. */
+.monaco-editor .snc-unpositioned {
+	visibility: hidden;
+}
+
 .monaco-editor .snc-visualization-widget {
 	position: absolute;
 	display: inline-block;
