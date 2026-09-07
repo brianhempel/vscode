@@ -295,6 +295,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	private dwellTimer: any = null;
 	private dwellTarget: Element | null = null;
+	// The dwell event last sent, until the pointer leaves every dwell element:
+	// the re-render it causes hands the pointer a fresh element asking for the
+	// same thing, which is not a second rest.
+	private dwellSent: string | null = null;
 	constructor(editor: ICodeEditor, lineNumber: number, visIndex: number, onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void, onKeyboardEvent: (pythonEventStr: string, ev: KeyboardEvent) => void, onInputEvent: (pythonEventStr: string, value: string, previous: string) => void, onBlurEvent: (pythonEventStr: string) => void, isFocused: () => boolean, isLiveOnly: () => boolean, onExpandRequest: () => void, onInsertNewVar: (expression: string, imports?: readonly string[]) => void, onLinkChainClick: () => void, clipboardService: IClipboardService) {
 		super();
 		this.editor = editor;
@@ -854,9 +858,20 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				}
 				cancel();
 				if (!target) {
+					// Off every dwell element: the next one entered is a fresh
+					// rest, even the one just left.
+					this.dwellSent = null;
 					return;
 				}
 				const attr = target === slow ? 'snc-dwell-slow' : 'snc-dwell';
+				const event = wrapEvent(target.getAttribute(attr) ?? '', target);
+				// The render a dwell causes replaces the element under the
+				// pointer, and the browser answers with a mouseover on its
+				// successor -- the same button, asking for the same thing. Sent
+				// again it would cost a second run to arrive at the same model.
+				if (event === this.dwellSent) {
+					return;
+				}
 				const delay = VisualizationWidget.DWELL_MS * (attr === 'snc-dwell-slow' ? 2 : 1);
 				this.dwellTarget = target;
 				this.dwellTimer = setTimeout(() => {
@@ -867,11 +882,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 						return;
 					}
 					cancel();
-					this.onPointerEvent(
-						wrapEvent(target.getAttribute(attr) ?? '', target), ev);
+					this.dwellSent = event;
+					this.onPointerEvent(event, ev);
 				}, delay);
 			}),
-			dom.addDisposableListener(root, 'mouseleave', cancel),
+			dom.addDisposableListener(root, 'mouseleave', () => {
+				cancel();
+				this.dwellSent = null;
+			}),
 		];
 	}
 
@@ -1193,6 +1211,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 	private showActionTooltip(target: Element): void {
 		this.hideActionTooltip();
+		// Hiding forgot the target; the tooltip now showing is this one's. The
+		// hover handler compares against it, so a mouseover that stays on the
+		// same button (its inner spans, or its successor after a re-render)
+		// leaves the tooltip alone instead of hiding it to show it again.
+		this.actionTooltipTarget = target;
 
 		const exps = pyExpsOf(target, 'data-action-expr');
 		if (!exps.length) { return; }
@@ -2282,14 +2305,16 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 
 		// Dismiss any active tooltips/menus since the DOM is being replaced.
-		// A hover menu the pointer is still on comes back on the trigger that
-		// takes its place: resting on one of its rows is what previews a
-		// nested action as a phantom column (snc-dwell), and that render must
-		// not close the menu the user is reading.
+		// A hover menu or tooltip the pointer is still on comes back on the
+		// element that takes its target's place: resting on an action button
+		// is what previews a nested action as a phantom column (snc-dwell), and
+		// that render must not close the menu or blink the tooltip the user is
+		// reading.
 		const reopenHoverMenuAt = this.hoverMenuTrigger
 			&& (this.hoverMenu?.matches(':hover') || this.hoverMenuTrigger.matches(':hover'))
 			? Array.from(this.domNode.querySelectorAll('.snc-dropdown-trigger')).indexOf(this.hoverMenuTrigger)
 			: -1;
+		const carried = this.tooltipsToCarry();
 		this.hidePyExpTooltip();
 		this.hideActionTooltip();
 		this.hideSimpleTooltip();
@@ -2409,6 +2434,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				this.showHoverMenu(trigger);
 			}
 		}
+		this.carryTooltips(carried);
 		this.setupResizableColumns();
 		this.reserveRoomForOverlaidControls();
 		this.updateLayoutMode();
@@ -2647,6 +2673,62 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/** First match for `selector` across the hoisted panels, or null. */
+	/**
+	 * Which tooltips a re-render should bring straight back, as where their
+	 * targets stand among the elements of their kind -- an index, because the
+	 * element itself is about to be replaced. Only a tooltip whose target (or
+	 * which itself) is under the pointer: one the pointer has left is on its
+	 * way out anyway. A py-exp handle may live in the widget, in a hoisted
+	 * click menu, or in the hover-menu clone, each rebuilt separately, so the
+	 * scope travels with the index.
+	 */
+	private tooltipsToCarry(): { action: number; pyExp: { scope: 'widget' | 'hoisted' | 'menu'; index: number } | null } {
+		const hovered = (el: Element | null) => !!el && el.matches(':hover');
+		const action = this.actionTooltip && this.actionTooltipTarget
+			&& (hovered(this.actionTooltipTarget) || hovered(this.actionTooltip))
+			? Array.from(this.domNode.querySelectorAll('[data-action-expr]')).indexOf(this.actionTooltipTarget)
+			: -1;
+		let pyExp: { scope: 'widget' | 'hoisted' | 'menu'; index: number } | null = null;
+		const target = this.pyExpCurrentTarget;
+		if (this.pyExpTooltip && target && (hovered(target) || hovered(this.pyExpTooltip))) {
+			const scope = this.hoverMenu?.contains(target) ? 'menu'
+				: this.hoistedDropdownsContain(target) ? 'hoisted' : 'widget';
+			const index = this.pyExpHandles(scope).indexOf(target);
+			pyExp = index >= 0 ? { scope, index } : null;
+		}
+		return { action, pyExp };
+	}
+
+	/** Every py-exp handle in a scope, in document order. */
+	private pyExpHandles(scope: 'widget' | 'hoisted' | 'menu'): Element[] {
+		if (scope === 'menu') {
+			return this.hoverMenu ? Array.from(this.hoverMenu.querySelectorAll('[snc-py-exps]')) : [];
+		}
+		if (scope === 'hoisted') {
+			return this.hoistedDropdowns.flatMap((entry) => Array.from(entry.panel.querySelectorAll('[snc-py-exps]')));
+		}
+		return Array.from(this.domNode.querySelectorAll('[snc-py-exps]'));
+	}
+
+	/** Show again, at once, the tooltips tooltipsToCarry found -- on the new DOM. */
+	private carryTooltips(carried: ReturnType<VisualizationWidget['tooltipsToCarry']>): void {
+		if (carried.action >= 0) {
+			const el = this.domNode.querySelectorAll('[data-action-expr]')[carried.action];
+			if (el && el.getAttribute('data-action-expr')) {
+				this.actionTooltipTarget = el;
+				this.showActionTooltip(el);
+			}
+		}
+		if (carried.pyExp) {
+			const el = this.pyExpHandles(carried.pyExp.scope)[carried.pyExp.index];
+			if (el) {
+				this.pyExpCurrentTarget = el;
+				el.classList.add('snc-py-exp-drag-hover');
+				this.showPyExpTooltip(el);
+			}
+		}
+	}
+
 	private queryHoistedDropdowns(selector: string): Element | null {
 		for (const entry of this.hoistedDropdowns) {
 			const found = entry.panel.querySelector(selector);
