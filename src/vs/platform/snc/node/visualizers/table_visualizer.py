@@ -5819,8 +5819,10 @@ def _agg_eval(body: str, column_expr: str, values, lst, eval_in_scope=None):
     try:
         levels = _compute_scope(column_expr=column_expr,
                                 source_expr='_lst').replace_exps
+        # capture=True for the reason _agg_code gives: a row aggregation's
+        # `lambda item:` is there for the column spliced in to read.
         code = (f'lambda np, math, _v, _lst: '
-                f'{replace_dollars_in_py_exp(body, levels)}')
+                f'{replace_dollars_in_py_exp(body, levels, capture=True)}')
         agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
@@ -5863,7 +5865,9 @@ def _agg_code(template: str, column_expr: str, source_expr: str = None) -> str:
     # is what "$$ is not bound here" has to look like on both sides.
     levels = _compute_scope(column_expr=column_expr,
                             source_expr=source_expr).replace_exps
-    return replace_dollars_in_py_exp(_agg_fill(template), levels)
+    # A row aggregation's `lambda item:` is there to be read by the column
+    # spliced in for `$`, so the template's own binder is kept as written.
+    return replace_dollars_in_py_exp(_agg_fill(template), levels, capture=True)
 
 
 def _agg_column_expr(template: str, col: str, source_expr: str,

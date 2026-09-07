@@ -459,6 +459,68 @@ class TestReplaceDollarsInPyExp(unittest.TestCase):
             'rows[0].name.upper()')
 
 
+class TestReplaceDollarsAvoidsCapture(unittest.TestCase):
+    """A binder the expression already has must not capture the name the
+    substitution brings in. `''.join(str(item) for item in $)` read down a list
+    as `for item in data` put a `$` inside a generator that rebinds `item`, so
+    the row was the codon. The expression's own binder is the one renamed: the
+    outer name is what every generator writes and what a relink reads back."""
+
+    def test_a_comprehension_binder_steps_aside(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp("''.join(str(item) for item in $)", ['item']),
+            "''.join(str(item2) for item2 in item)")
+
+    def test_a_lambda_parameter_steps_aside(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('sorted($, key=lambda item: item[1])', ['item']),
+            'sorted(item, key=lambda item2: item2[1])')
+
+    def test_the_index_binding_is_guarded_too(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('[i for i in range($i)]', ['item'], index_exp='i'),
+            '[i2 for i2 in range(i)]')
+
+    def test_every_scope_binding_the_name_is_renamed(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp(
+                "''.join(str(item) for item in next((($)[:i + 1] for i, item in enumerate($) if item == 'TAG'), None))",
+                ['item']),
+            "''.join(str(item2) for item2 in next(((item)[:i + 1] for i, item2 in enumerate(item) if item2 == 'TAG'), None))")
+
+    def test_the_new_name_steps_past_one_already_there(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('[item2 for item in $ for item2 in item]', ['item']),
+            '[item2 for item3 in item for item2 in item3]')
+
+    def test_a_name_the_program_owns_is_left_alone(self):
+        # Free in the expression, so it is the user's own variable: nothing to
+        # rename, and the collision with the row's name is theirs to see.
+        self.assertEqual(replace_dollars_in_py_exp('$ + item', ['item']),
+                         'item + item')
+
+    def test_string_content_and_attributes_are_not_names(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp("[x.item for item in $ if 'item' in item]", ['item']),
+            "[x.item for item2 in item if 'item' in item2]")
+
+    def test_a_binder_no_replacement_names_is_left_as_written(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('[item for item in $]', ['x']),
+            '[item for item in x]')
+
+    def test_a_childs_code_steps_aside_for_the_parents_names(self):
+        from visualizer_utils import nest_generated_expr
+        self.assertEqual(
+            nest_generated_expr('[rows for rows in _snc_cell_]', 'rows[0].name'),
+            '[rows2 for rows2 in (rows[0].name)]')
+
+    def test_a_multi_token_binder_is_guarded_by_its_names(self):
+        self.assertEqual(
+            replace_dollars_in_py_exp('[rows for rows in $]', ['rows[0].name']),
+            '[rows2 for rows2 in rows[0].name]')
+
+
 class TestDollarIIsOneTokenOfItsOwn(unittest.TestCase):
     """`$i` names the index of the value, not a scope. A run of dollars says how
     far out to look; `$i` says which one of them we are at, so it is bound on its

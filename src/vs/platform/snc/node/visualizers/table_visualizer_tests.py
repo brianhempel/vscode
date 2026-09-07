@@ -14010,6 +14010,61 @@ class TestNestedCellCodeKeepsItsColumn(unittest.TestCase):
                          [2, 3])
 
 
+class TestColumnBindingTheRowsNameStaysCorrect(unittest.TestCase):
+    """A column whose expression binds `item` of its own -- what a join written
+    in a nested table's cell comes back as -- read down the table by the header,
+    a filter, Extract, Sort and a pick. Every one of those binds the row to
+    `item` and puts the column inside, so the column's own binder is renamed
+    out of the way; see TestReplaceDollarsAvoidsCapture in visualizer_utils."""
+
+    DATA = [['a', 'b'], ['c']]
+    JOIN = "''.join(str(item) for item in $)"
+
+    def model(self, search=None):
+        model = init_model(self.DATA, mock_get_visualizer,
+                           var_and_exp=('data', 'data'))
+        model['columns'] = ['$', self.JOIN]
+        if search is not None:
+            model['search'] = search
+        return model
+
+    def test_the_header_reads_the_column_down_the_list(self):
+        from table_visualizer import _column_header_exps, _as_columns
+        exps = _column_header_exps(_as_columns(['$', self.JOIN]), self.JOIN, 'data')
+        self.assertEqual([e.expr for e in exps],
+                         ["[''.join(str(item2) for item2 in item) for item in data]"])
+        self.assertEqual(eval(exps[0].expr, {'data': self.DATA}), ['ab', 'c'])
+
+    def test_extract_keeps_the_column_a_column(self):
+        from table_visualizer import _get_whole_list_context, generate_action
+        ctx = _get_whole_list_context(self.model(), ('data', 'data'))
+        code = generate_action('extract', ctx)[1]
+        self.assertEqual(eval(code, {'data': self.DATA}),
+                         [(['a', 'b'], 'ab'), (['c'], 'c')])
+
+    def test_a_filter_whose_search_binds_the_name(self):
+        from table_visualizer import _get_search_context, generate_action
+        model = self.model(search="any(item == 'c' for item in $)")
+        ctx = _get_search_context(model, ('data', 'data'))
+        code = generate_action('filter', ctx)[1]
+        self.assertEqual(code,
+                         "[item for item in data if any(item2 == 'c' for item2 in item)]")
+
+    def test_sort_code_keys_on_the_column(self):
+        from table_visualizer import _sort_expr, _LIST_BINDS
+        self.assertEqual(
+            _sort_expr('data', self.JOIN, 'asc', _LIST_BINDS),
+            "sorted(data, key=lambda item: ''.join(str(item2) for item2 in item))")
+
+    def test_a_pick_on_the_column(self):
+        from table_visualizer import _build_pick_expr
+        model = self.model()
+        model['tool'] = 'pick'
+        model['picked'] = ['pre_col_1', 'match_col_1', 'post_col_1']
+        expr = _build_pick_expr(model, 'data')
+        self.assertEqual(eval(expr, {'data': self.DATA}), ['ab', 'c'])
+
+
 class TestAggHoles(unittest.TestCase):
     """A {{...}} in an aggregation is a text box, and what's typed in it is
     part of the expression rather than a setting stored beside it."""

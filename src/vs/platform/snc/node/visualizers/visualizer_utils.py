@@ -1,6 +1,7 @@
 """Shared utilities for visualizer composition in Sculpt-n-Code."""
 
 import ast
+import keyword
 import dataclasses
 import functools
 import html
@@ -575,38 +576,211 @@ DOLLARS_RE = re.compile(r'(?<!\$)(\$+)(?!\$)(?:([ijkv])(?![A-Za-z0-9_]))?')
 # run with no binding for them.
 # index_exp is the older spelling of bindings={'i': ...}, kept because
 # string_visualizer and z_object_visualizer call it that way.
+# capture=True is for a caller whose text is a TEMPLATE around the value rather
+# than an expression about it: `min($$, key=lambda item: $)` binds `item` so
+# that the column spliced in for `$` reads it. Everywhere else a binder the
+# text already has is renamed out of the way of the names spliced in -- see
+# _rename_binders_capturing.
 def replace_dollars_in_py_exp(py_exp: str, replace_exps, index_exp=None,
-                              bindings=None) -> str:
+                              bindings=None, capture=False) -> str:
     binds = dict(bindings or {})
     if index_exp is not None:
         binds.setdefault('i', index_exp)
+    out, tokens = _scan_dollars(py_exp)
+
+    # What each token is replaced by, or None for one left as written.
+    def replacement(token):
+        run, sigil = DOLLARS_RE.fullmatch(token).groups()
+        n_dollars = len(run)
+        if sigil is not None:
+            # Sigils bind at depth 1 only, and an unbound one is left as
+            # written -- which isn't Python, so the caller reads it as
+            # "no value" rather than as something it can evaluate.
+            return binds.get(sigil) if n_dollars == 1 else None
+        if n_dollars <= len(replace_exps):
+            return replace_exps[n_dollars-1]
+        return None
+
+    spliced = {name: replacement(token) for name, token in tokens}
+    if not capture:
+        out = _rename_binders_capturing(
+            out, {n for r in spliced.values() if r is not None
+                  for n in _identifiers_in(r)})
+    for (name, token), rep in zip(tokens, spliced.values()):
+        out = out.replace(name, token if rep is None else rep)
+    return out
+
+
+@functools.lru_cache(maxsize=1024)
+def _scan_dollars(py_exp: str) -> tuple:
+    """*py_exp* with each dollar token that is a scope reference swapped for
+    a placeholder name, and those (placeholder, token) pairs in order.
+
+    Which dollars are references and which are string content is settled by
+    parsing: a $ is never legal Python outside a literal, so a token that
+    parses where it stands is content and is put back. That is one parse per
+    token and depends on the text alone, and the text is one column asked
+    after once per cell -- so it is cached, and a cell pays the replaces.
+    """
     temp_names = {} # temp name to the dollar token it stands for
     def temp_replacer(m):
         temp_name = f'_{len(m[0])}dollars_{len(temp_names)}_'
         temp_names[temp_name] = m[0]
         return temp_name
     out = DOLLARS_RE.sub(temp_replacer, py_exp)
-
+    tokens = []
     for name, token in temp_names.items():
         try:
             temp_str = out.replace(name, token)
             ast.parse(temp_str)
             out = temp_str # parse succeeded, meaning the dollars were likely in a string and should not be replaced
         except SyntaxError:
-            run, sigil = DOLLARS_RE.fullmatch(token).groups()
-            n_dollars = len(run)
-            if sigil is not None:
-                # Sigils bind at depth 1 only, and an unbound one is left as
-                # written -- which isn't Python, so the caller reads it as
-                # "no value" rather than as something it can evaluate.
-                bound = binds.get(sigil) if n_dollars == 1 else None
-                out = out.replace(name, token if bound is None else bound)
-            elif n_dollars <= len(replace_exps):
-                out = out.replace(name, replace_exps[n_dollars-1])
-            else:
-                out = out.replace(name, token)
+            tokens.append((name, token))
+    return out, tuple(tokens)
 
-    return out
+
+_IDENTIFIER_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+
+def _identifiers_in(code: str) -> set:
+    """Every name-shaped token in *code*: what splicing it in could bring
+    into scope. Over-counts (attributes, string content), and the cost of a
+    name counted for nothing is one parse below."""
+    return {t for t in _IDENTIFIER_RE.findall(code) if not keyword.iskeyword(t)}
+
+
+def _rename_binders_capturing(code: str, names: set) -> str:
+    """*code* with any binder of its own that would capture one of *names*
+    renamed out of the way.
+
+    The substitution above splices `item` (the row), `i` (its number) and the
+    like into the user's expression wherever it says `$` -- and an expression
+    can bind those names itself: `''.join(str(item) for item in $)` is what a
+    join written in a cell comes back as. Spliced in as written, the `$`
+    inside that generator reads the generator's own `item`, and the join
+    reads one element of the row rather than the row.
+
+    So the expression's binder is the one renamed -- `item2`, stepped past
+    any name already in use -- rather than the row's. The row's name is what
+    every generator writes and what a relink reads back off a line, so it
+    stays put. A name the expression reads FREE anywhere is the program's own
+    variable and is left alone: the collision with the row's name is then
+    the user's to see, and renaming would only hide it.
+
+    Called once per cell on a render, so the parse is done once per
+    expression (see _capturing_binders) and a cell pays a regex and a set
+    intersection.
+    """
+    hits = {n for n in names if re.search(rf'\b{re.escape(n)}\b', code)}
+    if not hits:
+        return code
+    hits &= _capturing_binders(code)
+    for name in sorted(hits):
+        n = 2
+        while (re.search(rf'\b{re.escape(name)}{n}\b', code)
+               or f'{name}{n}' in names):
+            n += 1
+        code = _rename_name(code, name, f'{name}{n}')
+    return code
+
+
+def _parse_either(code: str):
+    """*code* as a tree, as an expression first and a statement second, or
+    None when it is neither."""
+    for mode in ('eval', 'exec'):
+        try:
+            return ast.parse(code, mode=mode)
+        except SyntaxError:
+            continue
+    return None
+
+
+@functools.lru_cache(maxsize=1024)
+def _capturing_binders(code: str) -> frozenset:
+    """The names *code* binds and never reads free: the ones a substitution
+    into it has to rename before splicing that name in.
+
+    Bound or free is read off the tree rather than off the text, so a
+    comprehension target, a lambda parameter and a walrus all count as
+    binders and an attribute or a string that happens to spell the name does
+    not. Scopes are walked the way Python reads them: a comprehension's
+    targets reach its element, its conditions and every clause after the
+    first (the first iterable is read outside), a lambda's parameters reach
+    its body, and a walrus binds for the rest of the scope it sits in.
+    Coarser than the compiler -- a walrus is taken to bind from wherever it
+    is visited -- and enough to tell a binder that would capture from a
+    variable the program owns. Text that doesn't parse binds nothing.
+
+    Cached on the text: a column is one string asked after once per cell.
+    """
+    tree = _parse_either(code)
+    if tree is None:
+        return frozenset()
+    bound = set()
+    free = set()
+
+    def visit(node, scope):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                if node.id not in scope:
+                    free.add(node.id)
+            else:
+                bound.add(node.id)
+                scope.add(node.id)
+            return
+        if isinstance(node, ast.Lambda):
+            args = {a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg)}
+            bound.update(args)
+            for default in node.args.defaults + [d for d in node.args.kw_defaults if d]:
+                visit(default, scope)
+            visit(node.body, scope | args)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp,
+                             ast.DictComp)):
+            inner = set(scope)
+            for i, gen in enumerate(node.generators):
+                visit(gen.iter, scope if i == 0 else inner)
+                visit(gen.target, inner)
+                for cond in gen.ifs:
+                    visit(cond, inner)
+            if isinstance(node, ast.DictComp):
+                visit(node.key, inner)
+                visit(node.value, inner)
+            else:
+                visit(node.elt, inner)
+            return
+        if isinstance(node, ast.NamedExpr):
+            visit(node.value, scope)
+            visit(node.target, scope)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, set())
+    return frozenset(bound - free)
+
+
+@functools.lru_cache(maxsize=1024)
+def _rename_name(code: str, old: str, new: str) -> str:
+    """Every Name and parameter spelled *old* in *code*, respelled *new*.
+    Offsets are byte offsets, so each line is edited as bytes, and from the
+    end, so earlier spans stay where they were. Cached for the reason
+    _capturing_binders is: the same column, once per cell."""
+    tree = _parse_either(code)
+    spans = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == old:
+            spans.setdefault(node.lineno, []).append((node.col_offset, node.end_col_offset))
+        elif isinstance(node, ast.arg) and node.arg == old:
+            spans.setdefault(node.lineno, []).append(
+                (node.col_offset, node.col_offset + len(old.encode())))
+    lines = code.split('\n')
+    for lineno, line_spans in spans.items():
+        raw = lines[lineno - 1].encode()
+        for start, end in sorted(line_spans, reverse=True):
+            raw = raw[:start] + new.encode() + raw[end:]
+        lines[lineno - 1] = raw.decode()
+    return '\n'.join(lines)
 
 
 # A name no program has, standing in for the scopes while the question below is
@@ -831,6 +1005,9 @@ def nest_generated_expr(expr: str, parent_expr: str) -> str:
     *parent_expr* is how the parent refers to the child's value in the parent's
     own scope (a list column, an object field accessor) and may contain dollars.
     """
+    # A binder of the child's own that would capture a name the parent's
+    # expression reads is renamed first, as replace_dollars_in_py_exp does.
+    expr = _rename_binders_capturing(expr, _identifiers_in(parent_expr))
     return expr.replace(CHILD_SOURCE_BINDER, f'({parent_expr})')
 
 
