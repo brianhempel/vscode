@@ -10352,7 +10352,7 @@ JOIN_SEP_TOOLTIP = 'The separator, as a Python expression (no $ here)'
 
 def _dwell_attr(action: str) -> str:
     """What a button asks to hear when the pointer rests on it, in a cell."""
-    return f' snc-dwell="{html.escape(repr(ActionButtonDwell(action=action)))}"'
+    return f' snc-dwell-slow="{html.escape(repr(ActionButtonDwell(action=action)))}"'
 
 
 def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):

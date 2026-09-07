@@ -17194,10 +17194,10 @@ class TestActionButtonsAskForDwellOnlyInACell(unittest.TestCase):
         from string_visualizer import ActionButtonDwell
         out = self.render(every_row_exps=lambda col: [])
         self.assertIn(
-            f'snc-dwell="{_html.escape(repr(ActionButtonDwell(action="count")))}"',
+            f'snc-dwell-slow="{_html.escape(repr(ActionButtonDwell(action="count")))}"',
             out)
         self.assertIn(
-            f'snc-dwell="{_html.escape(repr(ActionButtonDwell(action="any")))}"',
+            f'snc-dwell-slow="{_html.escape(repr(ActionButtonDwell(action="any")))}"',
             out)
 
     def test_top_level_buttons_do_not(self):

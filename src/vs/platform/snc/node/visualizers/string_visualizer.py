@@ -3983,7 +3983,7 @@ def _event_btn(label: str, event: str, enabled: bool = True,
         cls += ' linked'
     expr_attr = py_exp_attrs(_readings(expr, also), draggable=False,
                              attr='data-action-expr')
-    dwell_attr = f' snc-dwell="{html.escape(dwell)}"' if dwell and enabled else ''
+    dwell_attr = f' snc-dwell-slow="{html.escape(dwell)}"' if dwell and enabled else ''
     return (f'<span snc-mouse-down="{html.escape(event)}" class="{cls}"'
             f'{expr_attr}{dwell_attr}>{label}</span>')
 
@@ -4023,7 +4023,7 @@ def _menu_row(label: str, event: str, enabled: bool, expr: str = '',
     disabled = '' if enabled else ' dimmed'
     exp_attrs = py_exp_attrs(_readings(expr, also), draggable=False,
                              align='right')
-    dwell_attr = f' snc-dwell="{html.escape(dwell)}"' if dwell and enabled else ''
+    dwell_attr = f' snc-dwell-slow="{html.escape(dwell)}"' if dwell and enabled else ''
     return (
         f'<div class="snc-dropdown-option{disabled}"{exp_attrs}{dwell_attr}>'
         f'<span snc-mouse-down="{html.escape(event)}" class="snc-dropdown-option-label">{label}</span>'

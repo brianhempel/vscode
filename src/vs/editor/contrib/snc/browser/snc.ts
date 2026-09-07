@@ -273,6 +273,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// How long the pointer must rest on an [snc-dwell] element before its event
 	// is sent. Long enough that crossing a menu on the way somewhere else opens
 	// nothing, short enough to feel like the menu is following the pointer.
+	// An [snc-dwell-slow] element -- a nested visualizer's action button, whose
+	// rest swaps the phantom column and so re-renders the table -- waits twice
+	// as long, so a pointer crossing the bar to reach one button does not
+	// preview every button on the way.
 	private static readonly DWELL_MS = 150;
 
 	// How long the mouse must rest on a snc-py-exps handle before its expression
@@ -819,11 +823,13 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Send an element's `snc-dwell` event once the pointer has rested on it.
+	 * Send an element's `snc-dwell` (or `snc-dwell-slow`) event once the
+	 * pointer has rested on it.
 	 *
 	 * What dwelling means is the renderer's to say — the column ▾ menu uses it
 	 * to open the submenu a row names, and to put away the open one over a row
-	 * that names none — so this only decides when a rest has happened. Python
+	 * that names none; a nested action button uses the slow form to swap the
+	 * phantom column — so this only decides when a rest has happened. Python
 	 * renders the attribute solely where dwelling would change something, so
 	 * every event sent here is one worth the re-run it costs.
 	 *
@@ -839,7 +845,10 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		};
 		return [
 			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
-				const target = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell', stopAt);
+				// The nearer of the two kinds, should one ever sit inside the other.
+				const quick = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell', stopAt);
+				const slow = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell-slow', stopAt);
+				const target = quick && slow ? (quick.contains(slow) ? slow : quick) : (quick ?? slow);
 				if (target === this.dwellTarget) {
 					return;
 				}
@@ -847,6 +856,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				if (!target) {
 					return;
 				}
+				const attr = target === slow ? 'snc-dwell-slow' : 'snc-dwell';
+				const delay = VisualizationWidget.DWELL_MS * (attr === 'snc-dwell-slow' ? 2 : 1);
 				this.dwellTarget = target;
 				this.dwellTimer = setTimeout(() => {
 					// The render this armed against is gone if the pointer has
@@ -857,8 +868,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					}
 					cancel();
 					this.onPointerEvent(
-						wrapEvent(target.getAttribute('snc-dwell') ?? '', target), ev);
-				}, VisualizationWidget.DWELL_MS);
+						wrapEvent(target.getAttribute(attr) ?? '', target), ev);
+				}, delay);
 			}),
 			dom.addDisposableListener(root, 'mouseleave', cancel),
 		];

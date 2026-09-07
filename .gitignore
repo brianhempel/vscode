@@ -56,4 +56,5 @@ __pycache__
 .snc_stdin/
 .vs
 .snc_table_columns.json
-working_examples/
+/working_examples/
+/study_tasks_P*
