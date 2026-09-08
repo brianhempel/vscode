@@ -2286,6 +2286,25 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 */
 	private static readonly FOCUSABLE_SELECTOR = '[tabindex], input, textarea, select';
 	private static readonly SCROLLABLE_OVERFLOW = /^(auto|scroll|overlay|hidden)$/;
+	/**
+	 * What identifies a scroller across a re-render: the nested visualizer it
+	 * belongs to (its chain of child keys), the column its cell is in, and
+	 * what kind of box it is. Two scrollers with the same key are told apart
+	 * by order, which is all the old position-only match ever was.
+	 */
+	private scrollKeyOf(el: HTMLElement): string {
+		const parts: string[] = [el.tagName, el.className];
+		let ancestor: Element | null = el;
+		while (ancestor && ancestor !== this.domNode) {
+			const childKey = ancestor.getAttribute('snc-child-key');
+			if (childKey) { parts.push(childKey); }
+			const col = ancestor.getAttribute('data-col');
+			if (col) { parts.push(col); }
+			ancestor = ancestor.parentElement;
+		}
+		return parts.join(' ');
+	}
+
 	private static isScrollableElement(el: HTMLElement): boolean {
 		if (el.scrollTop === 0 && el.scrollLeft === 0
 			&& el.scrollHeight <= el.clientHeight
@@ -2342,6 +2361,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			.filter(dom.isHTMLElement)
 			.filter(VisualizationWidget.isScrollableElement);
 		const savedScrollOffsets = oldScrollableElements.map((el) => ({
+			key: this.scrollKeyOf(el),
 			top: el.scrollTop,
 			left: el.scrollLeft
 		}));
@@ -2459,13 +2479,25 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		if (shouldRestoreScroll) {
 			this.domNode.scrollTop = savedWidgetScrollTop;
 			this.domNode.scrollLeft = savedWidgetScrollLeft;
+			// Matched by key rather than by position in the list: a render
+			// that adds a scroller ahead of the one the user is in -- a phantom
+			// column's cells, drawn on every row above theirs -- would
+			// otherwise hand their offset to the newcomer and reset theirs.
+			const unclaimed = new Map<string, { top: number; left: number }[]>();
+			for (const offset of savedScrollOffsets) {
+				const list = unclaimed.get(offset.key) ?? [];
+				list.push(offset);
+				unclaimed.set(offset.key, list);
+			}
 			const newScrollableElements = Array.from(this.domNode.querySelectorAll('*'))
 				.filter(dom.isHTMLElement)
 				.filter(VisualizationWidget.isScrollableElement);
-			const restoreCount = Math.min(savedScrollOffsets.length, newScrollableElements.length);
-			for (let i = 0; i < restoreCount; i++) {
-				newScrollableElements[i].scrollTop = savedScrollOffsets[i].top;
-				newScrollableElements[i].scrollLeft = savedScrollOffsets[i].left;
+			for (const el of newScrollableElements) {
+				const offset = unclaimed.get(this.scrollKeyOf(el))?.shift();
+				if (offset) {
+					el.scrollTop = offset.top;
+					el.scrollLeft = offset.left;
+				}
 			}
 		}
 		// [autofocus] elements may live inside a hoisted dropdown panel
@@ -2602,6 +2634,21 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			: 0;
 		const visibleTop = containerRect.top + headerHeight;
 
+		if (matchTarget.getAttribute('snc-scroll-to-match') === 'left-edge') {
+			// A phantom column's header: enough of it to read where it starts,
+			// and no more. Scrolling the whole of a wide preview into view
+			// would push the cell it was made in -- where the pointer is --
+			// off the other side. Horizontal only: the header is pinned.
+			const visibleRight = containerRect.left + container.clientWidth;
+			const show = Math.min(targetRect.width, 60);
+			if (targetRect.left < containerRect.left) {
+				container.scrollLeft += targetRect.left - containerRect.left - 2;
+			} else if (targetRect.left + show > visibleRight) {
+				container.scrollLeft += targetRect.left + show - visibleRight + 2;
+			}
+			return;
+		}
+
 		if (matchTarget.getAttribute('snc-scroll-to-match') === 'nearest') {
 			// A cell a nested visualizer's action just put beside it: brought
 			// into view by the least movement, so the visualizer the eye is on
@@ -2639,7 +2686,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			container.scrollTop += targetRect.top - visibleTop - 2;
 		}
 
-		// Horizontal: if not fully visible
+		// Horizontal: if not fully visible. Not for a table row: it is as wide
+		// as the table, so it is "not fully visible" whenever the table is
+		// scrolled right at all, and aligning it snapped the columns back to
+		// the left under the user -- out from under the column menu they were
+		// typing a filter into. A row's match is a vertical fact.
+		if (matchTarget.tagName === 'TR') {
+			return;
+		}
 		if (targetRect.left < containerRect.left || targetRect.right > containerRect.right) {
 			// First try scrolling all the way left
 			container.scrollLeft = 0;

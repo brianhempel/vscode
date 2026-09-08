@@ -23391,10 +23391,22 @@ class TestPhantomColumn(unittest.TestCase):
             self.assertNotIn('snc-child-key', td)
         self.assertIn('5', tds[0])   # len('Alice')
         self.assertIn('3', tds[1])   # len('Bob')
-        # The row the event came from is where the eye is; that cell is brought
-        # into view.
-        self.assertEqual(model.get('_scroll_to_cell'),
-                         f"0{CELL_KEY_SEP}len(($['name']))")
+        # A phantom appearing is brought into view by its header's left edge.
+        self.assertEqual(model.get('_scroll_to_cell'), "len(($['name']))")
+        self.assertIn('snc-scroll-to-match="left-edge"', ths[0])
+
+    def test_a_phantom_changing_its_reading_is_not_scrolled_to_again(self):
+        # The eye already has it; a dwell on the next button must not move
+        # the table under the pointer.
+        model, _, _ = self.preview(f'len({CHILD_SOURCE_BINDER})')
+        model, _, _ = self.preview(f'{CHILD_SOURCE_BINDER}.upper()', model=model)
+        self.assertEqual(model['columns']["$['name']"]['phantom'], "($['name']).upper()")
+        self.assertIsNone(model.get('_scroll_to_cell'))
+        # But one moving to another column is.
+        model['focused_child'] = "0\x00$['age']"
+        model, _, _ = self.preview(f'{CHILD_SOURCE_BINDER} + 1',
+                                   key="0\x00$['age']", model=model)
+        self.assertEqual(model.get('_scroll_to_cell'), "($['age']) + 1")
 
     def test_an_aggregation_row_leaves_it_blank(self):
         model, _, gv = self.preview(f'len({CHILD_SOURCE_BINDER})')

@@ -9638,9 +9638,14 @@ def _render_column_header(col, model, lst, eval_in_scope=None,
         # open -- it is attached to its source column and goes where that goes
         # -- and a click anywhere on it commits it.
         classes = ['col-header', 'phantom'] + ([extra_classes] if extra_classes else [])
+        # Brought into view by the left edge of its name, not the whole
+        # column: a wide preview scrolled fully into view would push the cell
+        # it was made in off the other side.
+        scroll_attr = (' snc-scroll-to-match="left-edge"'
+                       if model.get('_scroll_to_cell') == col else '')
         return (
             f'<th class="{" ".join(classes)}"{span_attrs} data-col="{repr(html.escape(col))}"'
-            f'{get_col_width_style(col, model, clip=False)} '
+            f'{get_col_width_style(col, model, clip=False)}{scroll_attr} '
             f'snc-mouse-down="{html.escape(repr(PhantomColumnCommit()))}" '
             f'data-tooltip="Click to keep this column">'
             f'<span class="col-header-inner"><span class="col-name">'
@@ -12063,9 +12068,14 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                 if is_nested(var_and_exp):
                     filtered_commands.append(cmd)
                     continue
+                had = _phantom(new_model['columns'])
                 key = _set_phantom(new_model, cell_col, cmd.new_code[1])
-                if key is not None:
-                    new_model['_scroll_to_cell'] = f'{row_key}{CELL_KEY_SEP}{key}'
+                # A phantom appearing is brought into view by its header's
+                # left edge (see _render_column_header); one merely changing
+                # its reading -- a dwell on the next button -- stays where the
+                # eye already has it.
+                if key is not None and (had is None or had[0] != cell_col):
+                    new_model['_scroll_to_cell'] = key
             elif is_new_code(cmd) and not is_agg and is_nested(var_and_exp):
                 # Mapped above and headed for the outermost table.
                 filtered_commands.append(cmd)
