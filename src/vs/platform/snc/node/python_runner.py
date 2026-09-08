@@ -2238,6 +2238,149 @@ def split_leading_imports(source_code: str):
     return import_code, body_code
 
 
+# How many times a recovery attempt gets to blank the line Python complains
+# about next and try again. Each try is a full transform and compile.
+_SYNTAX_RECOVERY_STEPS = 6
+# A line that only closes what an earlier line opened: `)`, `]),`, `}:`.
+_CLOSER_LINE_RE = re.compile(r'^[\)\]\},]+:?$')
+# A clause that continues the block a header opened.
+_CLAUSE_LINE_RE = re.compile(r'^(?:else|elif|except|finally)\b')
+_EXPECTED_BLOCK_RE = re.compile(r"^expected an indented block after .* on line (\d+)$")
+_HANDLER_CLAUSE_RE = re.compile(r'^(except|finally)\b')
+
+
+def _indent_of(line: str) -> str:
+    return line[:len(line) - len(line.lstrip())]
+
+
+def compile_program(source_code: str) -> Tuple[Any, Any, str]:
+    """`split_leading_imports`, recovering from a syntax error when it can.
+
+    A file being typed into spends much of its time not parsing, and nothing
+    the user has already written should stop showing values for that. So when
+    the program doesn't compile, the line Python points at is replaced by one
+    that raises a SyntaxError carrying Python's message, and the result is
+    compiled instead: everything above still runs, the broken line comes out
+    as a red item, and everything below never runs -- as it wouldn't have.
+
+    Returns the two code objects and the source they were compiled from,
+    which is the program as written when it parsed. Raises the original
+    SyntaxError when no single-line swap makes the program compile -- two
+    separately broken statements, for instance -- for the caller to report.
+    """
+    try:
+        import_code, body_code = split_leading_imports(source_code)
+        return import_code, body_code, source_code
+    except SyntaxError as e:
+        error = e
+
+    lines = source_code.split('\n')
+    message = error.msg or 'invalid syntax'
+    recovered = _recover_syntax_error(lines, error.lineno, message)
+    if recovered is None:
+        raise error
+    patched_source, import_code, body_code = recovered
+    return import_code, body_code, patched_source
+
+
+def _recover_syntax_error(lines: List[str], lineno: Optional[int], message: str) -> Optional[Tuple[str, Any, Any]]:
+    """Compile `lines` with line `lineno` swapped for `raise SyntaxError(message)`.
+
+    Lines are replaced, never removed, so line numbers still mean what they do
+    in the editor. The raise is tried at the line's own indent, at the
+    surrounding indent (an unexpected indent) and one level deeper (a header
+    with no body yet). When Python names the header that has no body, the raise
+    goes one level under *it*, and on a blank line between the two if there is
+    one, so the code Python tripped over is left to run.
+
+    When the swap leaves lines dangling -- the body or clauses under a broken
+    block header, the rest of a call whose opening line is gone -- those are
+    blanked too, a few rounds of asking Python what it complains about next.
+    A line that would have run on its own is never blanked; that is a second
+    broken statement, and the attempt gives up. A broken line inside a bracket
+    opened on an earlier line can't be swapped for a statement at all, so the
+    raise goes on the line that opened the bracket, naming the line it came
+    from, and the rest of that statement is swept up as dangling.
+
+    Returns (source, import_code, body_code), or None when nothing works.
+    """
+    if lineno is None or not 1 <= lineno <= len(lines):
+        return None
+    opener = _unclosed_opener_above(lines, lineno)
+    if opener is not None:
+        return _recover_syntax_error(lines, opener, f'{message} (line {lineno})')
+    own_indent = _indent_of(lines[lineno - 1])
+    surrounding_indent = next((_indent_of(l) for l in reversed(lines[:lineno - 1]) if l.strip()), '')
+
+    raise_stmt = f'raise SyntaxError({message!r})'
+    # (1-based line to put the raise on, its indent, the statement to put there)
+    attempts: List[Tuple[int, str, str]] = []
+    expected_block = _EXPECTED_BLOCK_RE.match(message)
+    if expected_block:
+        header = int(expected_block.group(1))
+        body_indent = _indent_of(lines[header - 1]) + '    '
+        blank = next((n for n in range(header + 1, lineno) if not lines[n - 1].strip()), None)
+        if blank is not None:
+            attempts.append((blank, body_indent, raise_stmt))
+        attempts.append((lineno, body_indent, raise_stmt))
+    clause = _HANDLER_CLAUSE_RE.match(lines[lineno - 1].strip())
+    if clause:
+        # A `try` needs a handler right after its body, so a bare raise can't
+        # stand in for a broken one: keep the clause, make it raise.
+        handler = 'except BaseException' if clause.group(1) == 'except' else 'finally'
+        attempts.append((lineno, own_indent, f'{handler}: {raise_stmt}'))
+    attempts += [(lineno, indent, raise_stmt) for indent in dict.fromkeys([own_indent, surrounding_indent, own_indent + '    '])]
+
+    for raise_line, indent, stmt in attempts:
+        patched = list(lines)
+        patched[raise_line - 1] = indent + stmt
+        blanked_through = raise_line
+        for _ in range(_SYNTAX_RECOVERY_STEPS):
+            try:
+                import_code, body_code = split_leading_imports('\n'.join(patched))
+                return '\n'.join(patched), import_code, body_code
+            except SyntaxError as again:
+                complained = again.lineno
+                if complained is None or complained > len(lines):
+                    break
+                if complained <= blanked_through or not _dangles(patched[complained - 1], indent):
+                    break
+                # Blank through the line complained about, and on past it while
+                # the lines sit deeper than the replaced statement: its body,
+                # or the continuation of what it opened.
+                end = complained
+                while end < len(lines) and (not patched[end].strip() or len(_indent_of(patched[end])) > len(indent)):
+                    end += 1
+                for i in range(blanked_through, end):
+                    patched[i] = ''
+                blanked_through = end
+    return None
+
+
+def _unclosed_opener_above(lines: List[str], lineno: int) -> Optional[int]:
+    """The line of a bracket opened above line `lineno` and still open there,
+    which is to say line `lineno` is inside it. None when the lines above
+    stand on their own."""
+    try:
+        ast.parse('\n'.join(lines[:lineno - 1]))
+    except SyntaxError as e:
+        if e.msg and e.msg.endswith('was never closed') and e.lineno is not None and e.lineno < lineno:
+            return e.lineno
+    return None
+
+
+def _dangles(line: str, statement_indent: str) -> bool:
+    """Whether `line` could only be part of the statement at `statement_indent`
+    that was replaced: deeper than it, a closer for a bracket it opened, or a
+    clause of the block it headed."""
+    stripped = line.strip()
+    if len(_indent_of(line)) > len(statement_indent):
+        return True
+    if _CLOSER_LINE_RE.match(stripped):
+        return True
+    return _indent_of(line) == statement_indent and bool(_CLAUSE_LINE_RE.match(stripped))
+
+
 def transform_code_to_ast(source_code: str) -> ast.Module:
     """
     Transform the source code by injecting logging statements, returning an AST.
@@ -2372,7 +2515,7 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
     # Transform and compile. Split like the pool worker paths do, so this path
     # seeds at the same point they do and produces the same values.
     try:
-        import_code, code_object = split_leading_imports(code)
+        import_code, code_object, compiled_source = compile_program(code)
     except SyntaxError as e:
         return {
             "stdout": "",
@@ -2385,7 +2528,7 @@ def run_with_visualization(code: str) -> Dict[str, Any]:
     if False or os.environ.get('SNC_WRITE_TRANSFORMED'):
         with open('transformed.py', 'w') as f:
             try:
-                transformed_code = ast.unparse(transform_code_to_ast(code))
+                transformed_code = ast.unparse(transform_code_to_ast(compiled_source))
                 print(transformed_code, file=f)
             except Exception as unparse_error:
                 print(f"Warning: Could not unparse transformed AST: {unparse_error}", file=f)
@@ -2790,7 +2933,9 @@ def run_pool_worker_mode(working_directory: str) -> None:
         import_output: List[Tuple[str, str, int]] = []
 
         try:
-            import_code, body_code = split_leading_imports(code)
+            # `compiled_code` is `code` unless recovering from a syntax error
+            # rewrote a line; it is what the run's imports are compared with.
+            import_code, body_code, compiled_code = compile_program(code)
 
             import_globals: Dict[str, Any] = runtime_globals()
             # No console document exists at import time, so an import that reads
@@ -2854,13 +2999,13 @@ def run_pool_worker_mode(working_directory: str) -> None:
             body_to_run = body_code
         else:
             try:
-                edited_import_code, body_to_run = split_leading_imports(run_code)
+                edited_import_code, body_to_run, compiled_run_code = compile_program(run_code)
             except SyntaxError as e:
                 result = {"stdout": "", "stderr": str(e), "exitCode": 1, "syntaxError": True}
                 _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")
                 _stream_out.flush()
                 sys.exit(0)
-            if not imports_match(run_code, code):
+            if not imports_match(compiled_run_code, compiled_code):
                 # The edit reached the imports, so the warmed globals are the
                 # wrong ones. Run as checkpoint 1 would: fresh globals, and let
                 # `execute_code` run these imports so their output is this run's.
@@ -2910,7 +3055,7 @@ def run_pool_worker_mode(working_directory: str) -> None:
             # Split the same way checkpoint 2 does, so the two paths compile the
             # user's code identically and `reseed` gets its seam between the
             # imports and the body. The imports are executed by `execute_code`.
-            import_code, code_object = split_leading_imports(code)
+            import_code, code_object, _ = compile_program(code)
         except SyntaxError as e:
             result = {"stdout": "", "stderr": str(e), "exitCode": 1, "syntaxError": True}
             _stream_out.write(json.dumps({"type": "end", "result": result, "run_id": run_id}) + "\n")

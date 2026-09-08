@@ -31,6 +31,7 @@ from python_runner import (
     VisualizerOfStaticVisualizer,
     _build_new_code_edits,
     _commands_to_dicts,
+    compile_program,
     drain_stdin_lines,
     execute_code,
     imports_match,
@@ -340,6 +341,148 @@ class TestUncaughtErrorItems(unittest.TestCase):
         self.assertIsInstance(value, ZeroDivisionError)
         self.assertNotIsInstance(value, UncaughtError)
         self.assertNotIn("snc-error-visualizer", self._visualize(value))
+
+
+class TestSyntaxErrorRecovery(unittest.TestCase):
+    """A program that doesn't parse still runs: the line Python points at is
+    replaced by one that raises the same message, so everything above it
+    produces values and the error is a red item on its own line, instead of
+    nothing running at all."""
+
+    def _run(self, source_code):
+        logged = []
+        _, body_code, compiled_source = compile_program(source_code)
+        globals_dict = {
+            "__name__": "__main__",
+            "_log_value": lambda line, value, *args, **kwargs: logged.append((line, value)),
+            "_log_and_return": lambda line, value, *args, **kwargs: value,
+        }
+        real_log_value = python_runner.log_value
+        python_runner.log_value = lambda line, value, *args, **kwargs: logged.append((line, value))
+        try:
+            result = execute_code(body_code, globals_dict)
+        finally:
+            python_runner.log_value = real_log_value
+        return logged, result, compiled_source
+
+    def _error(self, logged):
+        line, value = logged[-1]
+        self.assertIsInstance(value, UncaughtError)
+        self.assertIsInstance(value.exception, SyntaxError)
+        return line, str(value.exception)
+
+    def test_the_lines_above_the_error_still_run(self):
+        logged, result, _ = self._run("x = 1\ny = (\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(result["exitCode"], 1)
+
+    def test_the_error_is_a_red_item_on_the_broken_line_with_pythons_message(self):
+        logged, _, _ = self._run("x = 1\ny = (\n")
+        self.assertEqual(self._error(logged), (2, "'(' was never closed"))
+
+    def test_the_lines_below_the_error_do_not_run(self):
+        logged, _, _ = self._run("x = 1 +\ny = 2\n")
+        self.assertEqual(self._error(logged), (1, "invalid syntax"))
+        self.assertNotIn((2, 2), logged)
+
+    def test_a_broken_block_header_takes_its_body_with_it(self):
+        logged, _, compiled_source = self._run("x = 1\nif x\n    y = 2\nelse:\n    y = 3\nz = 4\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged), (2, "expected ':'"))
+        # Lines are replaced, never removed, so nothing below shifts.
+        self.assertEqual(compiled_source.count('\n'), 6)
+
+    def test_a_statement_spanning_lines_is_replaced_whole(self):
+        logged, _, _ = self._run("x = 1\nprint(\n    x,\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged), (2, "'(' was never closed"))
+
+    def test_an_error_inside_a_bracket_raises_from_the_line_that_opened_it(self):
+        # Python blames line 3, but with line 3 gone the `(` is never closed.
+        # The whole statement goes, `)` and all, and the item says where the
+        # error really was.
+        logged, _, _ = self._run("x = 1\ny = foo(\n    x\n    x\n)\nz = 2\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged), (2, "invalid syntax. Perhaps you forgot a comma? (line 3)"))
+        self.assertNotIn((6, 2), logged)
+
+    def test_a_header_with_no_body_yet_raises_on_the_blank_line_under_it(self):
+        # `def f():` then Enter: the code below is fine and keeps running, and
+        # the function has a body until the user writes one.
+        logged, result, compiled_source = self._run("def f():\n\nx = 1\n")
+        self.assertIn((3, 1), logged)
+        self.assertEqual(result["exitCode"], 0)
+        self.assertTrue(compiled_source.split('\n')[1].startswith('    raise SyntaxError('))
+
+    def test_an_unexpected_indent_raises_at_the_indent_around_it(self):
+        logged, _, _ = self._run("x = 1\n  y = 2\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged), (2, "unexpected indent"))
+
+    def test_a_missing_block_body_raises_inside_the_block(self):
+        logged, _, compiled_source = self._run("x = 1\nif x:\nprint(x)\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged)[0], 3)
+        self.assertTrue(compiled_source.split('\n')[2].startswith('    raise SyntaxError('))
+
+    def test_a_broken_except_clause_stays_a_handler(self):
+        # A bare raise where the `except` was leaves the `try` with no handler.
+        # The error shows when the handler would have run; the rest still runs.
+        source_code = ("x = 1\n"
+                       "try:\n"
+                       "    y = 1 / 0\n"
+                       "except ZeroDivisionError\n"
+                       "    y = 3\n"
+                       "z = 4\n")
+        logged, _, _ = self._run(source_code)
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged), (4, "expected ':'"))
+
+    def test_a_broken_finally_clause_still_runs_after_the_try(self):
+        logged, _, _ = self._run("x = 1\ntry:\n    y = 2\nfinally\n    y = 3\n")
+        self.assertIn((3, 2), logged)
+        self.assertEqual(self._error(logged), (4, "expected ':'"))
+
+    def test_a_missing_block_body_raises_under_the_header_python_names(self):
+        # The broken line's own indent says nothing about where the body goes.
+        logged, _, compiled_source = self._run("x = 1\nif x:\n    if x:\ny = 2\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged)[0], 4)
+        self.assertTrue(compiled_source.split('\n')[3].startswith('        raise SyntaxError('))
+
+    def test_an_error_only_compile_catches_is_recovered_too(self):
+        logged, _, _ = self._run("x = 1\nreturn x\n")
+        self.assertIn((1, 1), logged)
+        self.assertEqual(self._error(logged), (2, "'return' outside function"))
+
+    def test_an_error_inside_a_function_raises_when_the_function_is_called(self):
+        source_code = ("def f():\n"
+                       "    y = (\n"
+                       "    return y\n"
+                       "x = 1\n"
+                       "f()\n")
+        logged, result, _ = self._run(source_code)
+        self.assertIn((4, 1), logged)
+        self.assertEqual(result["exitCode"], 1)
+        self.assertTrue(any(isinstance(v, UncaughtError) for _, v in logged))
+
+    def test_a_second_independent_error_is_reported_as_a_syntax_error(self):
+        # One line is speculation enough. Two broken statements go back to the
+        # plain report, with Python's message for the first one.
+        with self.assertRaises(SyntaxError) as caught:
+            compile_program("x = 1 +\ny = 2\nz = 3 +\n")
+        self.assertEqual(caught.exception.lineno, 1)
+
+    def test_code_that_parses_is_compiled_as_written(self):
+        source_code = "x = 1\n"
+        _, _, compiled_source = compile_program(source_code)
+        self.assertEqual(compiled_source, source_code)
+
+    def test_the_recovered_run_reports_no_syntax_error(self):
+        # It ran and left a red item; the editor treats it as any failed run.
+        result = python_runner.run_with_visualization("x = 1\ny = (\n")
+        self.assertEqual(result["exitCode"], 1)
+        self.assertFalse(result["syntaxError"])
 
 
 class TestUserFacingTraceback(unittest.TestCase):
@@ -1628,8 +1771,30 @@ class TestPoolWorkerCheckpoint2(unittest.TestCase):
             "import os\nprint('b')\n")
         self.assertEqual(text, 'b\n')
 
-    def test_an_edit_that_breaks_the_syntax_reports_it(self):
-        _, result = self._warm_then_run("import re\nx = 1\n", "import re\nx = (\n")
+    def test_an_edit_that_breaks_the_syntax_still_runs_the_lines_above_it(self):
+        text, result = self._warm_then_run("import re\nx = 1\n", "import re\nprint('above')\nx = (\n")
+        self.assertIn('above', text)
+        self.assertIn("SyntaxError: '(' was never closed", text)
+        self.assertEqual(result['exitCode'], 1)
+        self.assertFalse(result['syntaxError'])
+
+    def test_a_body_edit_that_breaks_the_syntax_reuses_the_warmed_imports(self):
+        # The broken line is in the body, so the imports still match and the
+        # warmed import output still heads the transcript.
+        text, _ = self._warm_then_run(
+            "import snc_chatty_import\nprint('old')\n",
+            "import snc_chatty_import\nprint('new')\nx = (\n")
+        self.assertTrue(text.startswith('from imports\nnew\n'), text)
+
+    def test_a_worker_warmed_on_broken_code_still_serves_the_run(self):
+        code = "import re\nprint('above')\nx = (\n"
+        text, result = self._warm_then_run(code, code)
+        self.assertIn('above', text)
+        self.assertIn("SyntaxError: '(' was never closed", text)
+        self.assertEqual(result['exitCode'], 1)
+
+    def test_an_edit_that_breaks_the_syntax_twice_reports_it(self):
+        _, result = self._warm_then_run("import re\nx = 1\n", "import re\nx = 1 +\ny = 2\nz = 3 +\n")
         self.assertTrue(result['syntaxError'])
         self.assertEqual(result['exitCode'], 1)
 

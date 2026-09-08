@@ -56,6 +56,8 @@ User events trigger a re-run to get back to the appropriate visualizer to run th
 
 Checkpoint 3 goes further: the worker runs the program up to the visualizer the user last interacted with and *stops there*, holding all its live state. An event then costs only that visualizer's update/visualize plus the tail of the program -- everything above it (reading the CSV, fitting the model) is already done. It is only usable while nothing that changes what the prefix does has changed: the code, the focused line, the loop pins, the console document. So dragging on a visualizer is fast, and the first edit after it falls back to checkpoint 2. Note that a warm worker holds the visualizer modules it loaded, so editing a `*_visualizer.py` needs a touch to the Python file (type and delete a space) to take effect.
 
+A program that doesn't parse still runs. The runner replaces the line Python complains about with a `raise SyntaxError(...)` carrying Python's message (blanking any lines left dangling under it, such as the body of a broken block header), so everything above still shows values and the broken line shows a red error item. Only when no single-line replacement compiles -- two separately broken statements, say -- does the run report a syntax error with nothing shown. See `compile_program` in `python_runner.py`.
+
 An event doesn't always need a re-run of its own. A run that hasn't yet reached the widget the event is for is still able to answer it, so the event is handed to that run instead and it renders with everything the user has done up to the moment it gets there. This is what keeps a gesture (a drag, a hover) to roughly one run per trip through the program rather than one run per event.
 
 ### Python interpreter selection
