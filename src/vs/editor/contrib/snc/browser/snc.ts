@@ -4194,6 +4194,14 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private topSpacerHeight = 0;
 	private isAdjustingTopSpacer = false;
 	/**
+	 * The scroll top as of the last scroll event. When an edit's content-change
+	 * event arrives this is still the scroll top from before the edit: the
+	 * editor reveals the cursor while it handles the edit, but the scroll
+	 * event for that reveal is queued behind the content-change event. See
+	 * adjustVisualizationItemsForContentChange for what that is good for.
+	 */
+	private scrollTopBeforeEdit = 0;
+	/**
 	 * Height in px of each line's view zone, kept in step with `viewZones`.
 	 * A zone can only be resized by removing and re-adding it, which relays out
 	 * everything below; knowing the current height lets us skip that when the
@@ -4474,6 +4482,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// Register scroll event handler to update overlay widget positions
 		this._register(editor.onDidScrollChange(() => {
+			this.scrollTopBeforeEdit = this.editor.getScrollTop();
 			this.updateOverlayWidgetPositions();
 			this.absorbTopSpacerOnScroll();
 		}));
@@ -4810,6 +4819,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// earlier changes don't affect the line numbers of later changes)
 		const changes = [...e.changes].sort((a, b) => b.range.startLineNumber - a.range.startLineNumber);
 		let itemsChanged = false;
+		// Set when a visualizer's zone is about to be re-keyed to a line Monaco
+		// did not move it to; see the end of this method.
+		let zoneLeftBehind = false;
 
 		for (const change of changes) {
 			const startLine = change.range.startLineNumber;
@@ -4833,32 +4845,58 @@ export class SNCController extends Disposable implements IEditorContribution {
 				&& change.range.startColumn === change.range.endColumn
 				&& change.range.startColumn === 1
 				&& lineDelta > 0;
+			if (isStartOfLineInsertion && this.viewZones.has(startLine)) {
+				zoneLeftBehind = true;
+			}
 
-			const newItems: IVisualizationItem[] = [];
+			// The mirror image: a change whose range ends at column 1 leaves
+			// that line's text whole, joined onto the change's last line --
+			// backspace at the start of a line of code, or deleting the blank
+			// lines above it. The item follows its code, unless the line it
+			// lands on has an item of its own (two lines of code joined): then
+			// the one already there stands, as before, and the run sorts it out.
+			const joinedLine = startLine + newLineCount - 1;
+			const endLineMovesTo =
+				endLine > startLine
+					&& change.range.endColumn === 1
+					&& !this.visualizationItems.some(item => item.line === joinedLine)
+					? joinedLine : null;
 
-			for (const item of this.visualizationItems) {
-				if (isStartOfLineInsertion && item.line >= startLine) {
+			/** Where `line` is after this change, or null if the change deleted it. */
+			const shiftedLine = (line: number): number | null => {
+				if (isStartOfLineInsertion && line >= startLine) {
 					// Content at/below the insertion point moved down.
-					newItems.push({ ...item, line: item.line + lineDelta });
-					itemsChanged = true;
-				} else if (item.line < startLine) {
+					return line + lineDelta;
+				} else if (line < startLine) {
 					// Before the change: unaffected
-					newItems.push(item);
-				} else if (item.line > endLine) {
+					return line;
+				} else if (line > endLine) {
 					// After the change: shift line number
-					newItems.push({ ...item, line: item.line + lineDelta });
-					itemsChanged = true;
-				} else if (lineDelta < 0 && item.line > startLine + newLineCount - 1) {
+					return line + lineDelta;
+				} else if (endLineMovesTo !== null && line === endLine) {
+					return endLineMovesTo;
+				} else if (lineDelta < 0 && line > joinedLine) {
 					// Within the changed range, on a line that was deleted
-					itemsChanged = true;
-					// Don't push - remove this item
+					return null;
 				} else {
 					// Within the changed range but on a line that still exists
 					// (content may have changed; will be corrected by the re-run)
+					return line;
+				}
+			};
+
+			const newItems: IVisualizationItem[] = [];
+			for (const item of this.visualizationItems) {
+				const line = shiftedLine(item.line);
+				if (line === null) {
+					itemsChanged = true;
+				} else if (line === item.line) {
 					newItems.push(item);
+				} else {
+					newItems.push({ ...item, line });
+					itemsChanged = true;
 				}
 			}
-
 			this.visualizationItems = newItems;
 
 			// Keep linked-selection keys aligned with the shifted visualizer
@@ -4869,18 +4907,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 				const survivingLinks: typeof this.linkedSelections = [];
 				const deadLinks: typeof this.linkedSelections = [];
 				for (const link of this.linkedSelections) {
-					if (isStartOfLineInsertion && link.line >= startLine) {
-						link.line += lineDelta;
-						survivingLinks.push(link);
-					} else if (link.line < startLine) {
-						survivingLinks.push(link);
-					} else if (link.line > endLine) {
-						link.line += lineDelta;
-						survivingLinks.push(link);
-					} else if (lineDelta < 0 && link.line > startLine + newLineCount - 1) {
+					const line = shiftedLine(link.line);
+					if (line === null) {
 						// The visualizer's trigger line was deleted; tear down.
 						deadLinks.push(link);
 					} else {
+						link.line = line;
 						survivingLinks.push(link);
 					}
 				}
@@ -4897,14 +4929,41 @@ export class SNCController extends Disposable implements IEditorContribution {
 			// answered by handleSetConfigComment's own bounds check, and a
 			// missing key would silently read as "never moved".
 			for (const [reported, current] of this.reportedLineNow) {
-				if (isStartOfLineInsertion ? current >= startLine : current > endLine) {
-					this.reportedLineNow.set(reported, current + lineDelta);
+				const line = shiftedLine(current);
+				if (line !== null) {
+					this.reportedLineNow.set(reported, line);
 				}
 			}
 		}
 
-		if (itemsChanged) {
+		if (!itemsChanged) {
+			return;
+		}
+		if (!zoneLeftBehind) {
 			this.updateVisualizationWidgets(this.visualizationItems);
+			return;
+		}
+		// Monaco moves a view zone with the lines below it, and a newline typed
+		// at column 1 of a line inserts, as far as the model is concerned, the
+		// line *below*: the line itself is emptied and its text becomes the new
+		// next line. So the zone stays under the now-blank line while the code
+		// (and the item, shifted above) has moved down past it, and the render
+		// here is what moves the zone down after the code. Two things saw the
+		// zone in the wrong place first. The editor revealed the cursor against
+		// that layout, so if the code line sat low in the view it may have
+		// scrolled down for a line that is about to come back up. And the
+		// render's own scroll anchoring would measure the cursor line with the
+		// zone still above it and then hold it there, scrolling the view by the
+		// zone's height for every newline. So the anchoring sits this render
+		// out, the scroll goes back to where it was before the edit -- the
+		// newline moves the code down a line, as it does anywhere else -- and
+		// the cursor is revealed again against the layout as it now stands.
+		const scrollTop = this.scrollTopBeforeEdit;
+		this.updateVisualizationWidgets(this.visualizationItems, false);
+		this.editor.setScrollTop(scrollTop, ScrollType.Immediate);
+		const position = this.editor.getPosition();
+		if (position) {
+			this.editor.revealPosition(position, ScrollType.Smooth);
 		}
 	}
 
@@ -5663,7 +5722,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// 	return `${line}:${visIndex ?? 0}`;
 	// }
 
-	private updateVisualizationWidgets(visualizationData: IVisualizationItem[]): void {
+	/**
+	 * `stabilizeScroll` false skips the scroll anchoring below: the caller
+	 * knows the layout it is rendering from is not the one the user saw, and
+	 * settles the scroll itself.
+	 */
+	private updateVisualizationWidgets(visualizationData: IVisualizationItem[], stabilizeScroll = true): void {
 		if (!this.widgetsVisible) {
 			// Nothing to draw into; the items are kept for when the widgets are
 			// shown again. As far as anything waiting on the DOM is concerned,
@@ -5719,7 +5783,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// focusing a visualizer shrinks the previously-focused one above it, and
 		// the focused line must stay anchored even when the file is at the top.
 		const scrollTop = this.editor.getScrollTop();
-		const shouldStabilizeScroll = !this.editor.hasPendingScrollAnimation();
+		const shouldStabilizeScroll = stabilizeScroll && !this.editor.hasPendingScrollAnimation();
 		let anchorLineNumber = 0;
 		let anchorDelta = 0;
 
