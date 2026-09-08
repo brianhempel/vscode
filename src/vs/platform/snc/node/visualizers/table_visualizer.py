@@ -516,17 +516,6 @@ class ActionButtonClick:
     copy: bool
 
 @dataclass(frozen=True, slots=True)
-class ActionButtonDwell:
-    """The pointer resting on an action button, in a cell of a table.
-
-    Only a cell asks for one (see _render_action_buttons): there it swaps the
-    phantom column the table above draws for this table to that action's
-    reading, and adopts the action. At the top level a hover writes nothing,
-    so nothing is asked for and one arriving anyway changes nothing.
-    """
-    action: str
-
-@dataclass(frozen=True, slots=True)
 class PhantomColumnCommit:
     """A click on the phantom column, header or cell: keep it (see _set_phantom)."""
     pass
@@ -10355,11 +10344,6 @@ def _render_search_box_input(model, eval_in_scope=None):
 JOIN_SEP_TOOLTIP = 'The separator, as a Python expression (no $ here)'
 
 
-def _dwell_attr(action: str) -> str:
-    """What a button asks to hear when the pointer rests on it, in a cell."""
-    return f' snc-dwell-slow="{html.escape(repr(ActionButtonDwell(action=action)))}"'
-
-
 def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
     """Render the .action-buttons bar (no outer wrapper).
 
@@ -10388,10 +10372,6 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
         match_count = len(lst)
 
     linked_action = model.get('linked_action')
-    # In a cell (which is what having every_row_exps means) a rest on a button
-    # swaps the phantom column the table above draws; at the top level it
-    # would change nothing, so it is not asked for and costs no run.
-    dwell = every_row_exps is not None
 
     # Nothing generate_action declines to write should offer a button that
     # looks like it will. For a list that is every action; for a dict the
@@ -10420,10 +10400,9 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
                                            attr='data-action-expr')
                      if enabled else '')
         title_attr = f' title="{html.escape(title)}"' if title else ''
-        dwell_attr = _dwell_attr(action) if enabled and dwell else ''
         return (
             f'<span class="{cls}" snc-mouse-down="{html.escape(event)}"'
-            f'{expr_attr}{title_attr}{dwell_attr}>{label}</span>'
+            f'{expr_attr}{title_attr}>{label}</span>'
         )
 
     def dropdown_row(label, action, enabled):
@@ -10436,9 +10415,8 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
                                              every_row_exps, draggable=False,
                                              align='right')
                        if enabled else '')
-        dwell_attr = _dwell_attr(action) if enabled and dwell else ''
         return (
-            f'<div class="{cls}"{py_exp_attr}{dwell_attr}>'
+            f'<div class="{cls}"{py_exp_attr}>'
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">{label}</span>'
             f'</div>'
         )
@@ -10568,9 +10546,8 @@ def _render_action_buttons(model, lst, eval_in_scope=None, every_row_exps=None):
                                              every_row_exps, draggable=False,
                                              align='right')
                        if join_enabled else '')
-        dwell_attr = _dwell_attr(act_action) if join_enabled and dwell else ''
         rows.append(
-            f'<div class="snc-dropdown-option"{py_exp_attr}{dwell_attr}>'
+            f'<div class="snc-dropdown-option"{py_exp_attr}>'
             f'<span snc-mouse-down="{html.escape(act_event)}" class="snc-dropdown-option-label">'
             f'{html.escape(sep_expr)}</span>'
             f'</div>'
@@ -12953,8 +12930,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
             study_note(action=('copy.action' if copy else 'link.set-action'
                                if model.get('linked_action') else 'code.action'),
                        codeAction=action, joinSep=join_sep, wrote=False)
-            if (model.get('linked_action') and not copy
-                    and not is_nested(var_and_exp)):
+            if model.get('linked_action') and not copy:
                 model['linked_action'] = action
                 ctx = _get_search_context(model, var_and_exp,
                                           source_expr=model['linked_source_expr'],
@@ -12972,7 +12948,8 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                     study_note(wrote=bool(result))
                     if result:
                         _emit_linked_update(result[1], model, commands,
-                                            suggest_name=result[0], rename=True)
+                                            suggest_name=result[0], rename=True,
+                                            nested=is_nested(var_and_exp))
             else:
                 ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
                 if ctx is None:
@@ -12986,47 +12963,24 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
                         if copy:
                             commands.append(CopyToClipboard(text=with_pass_body(result[1])))
                         else:
-                            commands.append(new_code_command(
-                                result, code_imports,
-                                config=_inherited_config(action, ctx, model,
-                                                         value, get_visualizer)))
-                            # Link the freshly inserted LOC to this action so
-                            # subsequent interactions edit it in place (via
-                            # ChangeSelectedText) instead of stacking new lines.
-                            # Nested there is no line to own (see is_nested),
-                            # but the action is adopted all the same: it is
-                            # what the phantom column the table above draws
-                            # previews from here on.
+                            # Nested there is no line to own (see is_nested):
+                            # the table above draws the code as a phantom
+                            # column instead, and a click on that is what
+                            # keeps it. Either way the action is adopted, so
+                            # what follows edits this line, or this phantom,
+                            # rather than stacking up new ones.
+                            if is_nested(var_and_exp):
+                                if not opens_block(result[1]):
+                                    commands.append(Phantom(new_code_command(result, code_imports)))
+                            else:
+                                commands.append(new_code_command(
+                                    result, code_imports,
+                                    config=_inherited_config(action, ctx, model,
+                                                             value, get_visualizer)))
                             model['linked_action'] = action
                             model['linked_source_expr'] = ctx.get('source_expr')
                             model['last_linked_expr'] = result[1]
                             model['auto_linked_once'] = True
-
-        case ActionButtonDwell(action=action):
-            # Only in a cell (see the class): the phantom column the table
-            # above draws for this table swaps to this action's reading, and
-            # the action is adopted so the next keystroke keeps previewing it.
-            # A statement is a line and only a line -- a column holds an
-            # expression -- so it, and an action with nothing to say, change
-            # nothing.
-            if is_nested(var_and_exp):
-                join_sep = None
-                if action.startswith('join:'):
-                    join_sep, action = action[5:], 'join'
-                ctx = _get_search_context(model, var_and_exp, eval_in_scope=eval_in_scope)
-                if ctx is None:
-                    ctx = _get_whole_list_context(model, var_and_exp)
-                if ctx and join_sep is not None:
-                    ctx['join_separator'] = join_sep
-                result = generate_action(action, ctx) if ctx else None
-                study_note(action='phantom.dwell', codeAction=action,
-                           wrote=bool(result) and not opens_block(result[1]))
-                if result and not opens_block(result[1]):
-                    model['linked_action'] = action
-                    model['linked_source_expr'] = ctx.get('source_expr')
-                    model['auto_linked_once'] = True
-                    _emit_linked_update(result[1], model, commands,
-                                        suggest_name=result[0], nested=True)
 
         case Unlink():
             # Stash the action so the chain icon can resume it on relink.
@@ -13080,7 +13034,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     # (see visualizer_utils.Phantom).
     nested = is_nested(var_and_exp)
 
-    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, ActionButtonDwell, Unlink, Relink, LineChanged)):
+    if model.get('linked_action') and not isinstance(msg, (ActionButtonClick, Unlink, Relink, LineChanged)):
         ctx = _get_search_context(model, var_and_exp,
                                   source_expr=model['linked_source_expr'],
                                   eval_in_scope=eval_in_scope)
@@ -13092,7 +13046,7 @@ def update(event, var_and_exp, model: Any, value, get_visualizer=None, eval_in_s
     elif (not model.get('linked_action')
           and not model.get('auto_linked_once')
           and not commands
-          and not isinstance(msg, (ActionButtonDwell, Unlink, Relink, LineChanged))):
+          and not isinstance(msg, (Unlink, Relink, LineChanged))):
         # First meaningful interaction: if it yields a parseable expression,
         # auto-insert a line of code and self-link so subsequent interactions
         # update it in place via ChangeSelectedText (the linked block above).

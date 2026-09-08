@@ -7082,6 +7082,14 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
             commands += cmds
         return model, commands, eval_in_scope
 
+    def _commit(self, model, rows, eval_in_scope):
+        """An action click previews (a phantom column); the phantom's own
+        click is what keeps the column. Returns (model, commands)."""
+        import string_visualizer
+        get_vis = lambda v: string_visualizer if isinstance(v, str) else table_visualizer
+        return update(make_phantom_commit_event(), ('rows', 'rows'), model, rows,
+                      get_vis, eval_in_scope=eval_in_scope)
+
     def test_pick_then_action_yields_a_column_that_evaluates_for_every_row(self):
         import string_visualizer
         rows = ['foo bar', 'baz foo']
@@ -7089,6 +7097,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
             string_visualizer.SegmentToggle(segment_id='prefix'),
             string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
         ])
+        model, _ = self._commit(model, rows, eval_in_scope)
         added = [c for c in model['columns'] if c != '$']
         self.assertEqual(len(added), 1, f"expected one new column, got {model['columns']}")
         col = added[0]
@@ -7121,7 +7130,8 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         visualizer never emits ChangeSelectedText. It does adopt the action:
         that is what the phantom column the table draws for it previews (see
         TestPhantomColumn), a property of the cell's column and never a column
-        of its own."""
+        of its own -- an action click switches the preview, it writes
+        nothing."""
         import string_visualizer
         rows = ['foo bar', 'baz foo']
         model, commands, _eval = self._drive(rows, '$', [
@@ -7134,8 +7144,9 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
                          'a cell must not rewrite editor text')
         cell = model['children'][f'0{CELL_KEY_SEP}$']
         self.assertEqual(cell.get('linked_action'), 'find_or_map')
-        # The one explicit action click is the only thing that adds a column.
-        self.assertEqual(len([c for c in model['columns'] if c != '$']), 1)
+        # Nothing added a column; the preview is a property of the cell's own.
+        self.assertEqual(list(model['columns']), ['$'])
+        self.assertIn('phantom', model['columns']['$'])
 
     def test_copy_from_a_cell_yields_pasteable_code(self):
         """Clipboard text is pasted into the editor as-is, so unlike a stored
@@ -7200,9 +7211,13 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         the column to show. The action asks for it the way any other would."""
         import string_visualizer
         rows = ['a,b,c', 'd,e,f']
-        model, commands, _eval = self._drive(rows, '$', [
+        model, commands, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.ActionButtonClick(action='split', copy=False),
         ], search="r','")
+        # Previewing asks for nothing: the phantom's cells bind what they need
+        # themselves. Keeping the column is what asks.
+        self.assertEqual([c for c in commands if isinstance(c, AddImports)], [])
+        model, commands = self._commit(model, rows, eval_in_scope)
         self.assertIn("re.split(r',', ($), flags=re.M)", model['columns'])
         self.assertEqual([c for c in commands if isinstance(c, AddImports)],
                          [AddImports(imports=('import re',))])
@@ -7254,9 +7269,10 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
     def test_an_action_that_needs_nothing_asks_for_nothing(self):
         import string_visualizer
         rows = ['a,b,c', 'd,e,f']
-        model, commands, _eval = self._drive(rows, '$', [
+        model, _cmds, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.ActionButtonClick(action='split', copy=False),
         ], search="','")
+        model, commands = self._commit(model, rows, eval_in_scope)
         self.assertIn("($).split(',')", model['columns'])
         self.assertEqual([c for c in commands if isinstance(c, AddImports)], [])
 
@@ -7266,9 +7282,10 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
         import string_visualizer
         from table_visualizer import SortCodeClick
         rows = ['foo bar', 'baz foo']
-        model, _cmds, _eval = self._drive(rows, '$', [
+        model, _cmds, eval_in_scope = self._drive(rows, '$', [
             string_visualizer.ActionButtonClick(action='delete', copy=False),
         ])
+        model, _ = self._commit(model, rows, eval_in_scope)
         col = [c for c in model['columns'] if c != '$'][0]
         event = make_column_mouse_event(
             repr(SortCodeClick(col=col, direction='asc')))
@@ -7292,6 +7309,7 @@ class TestNestedStringCellProducesUsableColumn(unittest.TestCase):
             string_visualizer.SegmentToggle(segment_id='prefix'),
             string_visualizer.ActionButtonClick(action='find_or_map', copy=False),
         ])
+        model, _ = self._commit(model, rows, eval_in_scope)
         added = [c for c in model['columns'] if c != '$.name']
         self.assertEqual(len(added), 1, f"expected one new column, got {model['columns']}")
         col = added[0]
@@ -13911,8 +13929,12 @@ class TestNestedTableActionsStayRowGeneric(unittest.TestCase):
         for band in ('pre', 'match', 'post'):
             model, _ = self.fire(PickToggle(region_id=f'{band}_col_1'), model)
         _, cmds = self.fire(ActionButtonClick(action='extract', copy=False), model)
-        self.assertEqual(self.code(cmds),
-                         f"[x['k'] for x in ({CHILD_SOURCE_BINDER})]")
+        # An action click in a cell previews (see TestPhantomColumn); the
+        # preview travels up written against the binder like a line would.
+        from visualizer_utils import Phantom
+        previews = [c.new_code[1] for c in cmds if isinstance(c, Phantom)]
+        self.assertEqual(previews, [f"[x['k'] for x in ({CHILD_SOURCE_BINDER})]"])
+        self.assertEqual([c for c in cmds if is_new_code(c)], [])
 
     def test_the_parent_takes_it_as_a_column_of_every_row(self):
         """Through the table above: the binder resolves to the cell's own
@@ -23537,15 +23559,13 @@ class TestPhantomTravelsToTheOutermostTable(unittest.TestCase):
 class TestNestedTableActionsPreviewAsPhantom(unittest.TestCase):
     """A table in a cell previews like a string in one does."""
 
-    def test_a_dwell_previews_and_adopts_the_action(self):
+    def test_a_click_previews_and_adopts_the_action(self):
         from visualizer_utils import Phantom
-        from table_visualizer import ActionButtonDwell
         lst = [10, 20, 30]
         model = init_model(lst, mock_get_visualizer)
         model['search'] = '$ > 15'
-        event = {'pythonEventStr': repr(ActionButtonDwell(action='count')),
-                 'eventJSON': {'type': 'mouseover'}}
-        model, commands = update(event, (None, CHILD_SOURCE_BINDER), model, lst,
+        model, commands = update(make_action_button_event('count'),
+                                 (None, CHILD_SOURCE_BINDER), model, lst,
                                  mock_get_visualizer, eval_in_scope=eval)
         self.assertEqual(model['linked_action'], 'count')
         codes = [c.new_code[1] for c in commands if isinstance(c, Phantom)]
@@ -23564,17 +23584,6 @@ class TestNestedTableActionsPreviewAsPhantom(unittest.TestCase):
         self.assertEqual(len([c for c in commands if isinstance(c, Phantom)]), 1)
         self.assertEqual([c for c in commands if isinstance(c, tuple)], [])
 
-    def test_a_cells_buttons_carry_the_dwell(self):
-        from table_visualizer import ActionButtonDwell
-        lst = [10, 20, 30]
-        model = init_model(lst, mock_get_visualizer)
-        model['search'] = '$ > 15'
-        model['_source_expr'] = 'x[0]'
-        out = table_visualizer._render_action_buttons(model, lst, eval,
-                                                      every_row_exps=lambda c: [])
-        self.assertIn(html.escape(repr(ActionButtonDwell(action='count'))), out)
-        out = table_visualizer._render_action_buttons(model, lst, eval)
-        self.assertNotIn('snc-dwell', out)
 
 
 class TestPhantomColumnWithARealStringCell(unittest.TestCase):
@@ -23605,13 +23614,14 @@ class TestPhantomColumnWithARealStringCell(unittest.TestCase):
         self.assertEqual(len(tds), 2)
         self.assertNotIn('NameError', out)
         self.assertIn(html.escape(repr(['foo'])), tds[0])
-        # A dwell on Count swaps it.
+        # A click on Count swaps it, and adds nothing.
         event = {'pythonEventStr': repr(ChildEvent(
-                     child_key=key, py_ev_str=repr(string_visualizer.ActionButtonDwell(action='count')))),
-                 'eventJSON': {'type': 'mouseover'}}
+                     child_key=key, py_ev_str=repr(string_visualizer.ActionButtonClick(action='count', copy=False)))),
+                 'eventJSON': {'type': 'mousedown'}}
         model, cmds = update(event, ('rows', 'rows'), model, rows, get_vis,
                              eval_in_scope=eval_in_scope)
         self.assertTrue(model['columns']['$']['phantom'].startswith('sum(1 for'))
+        self.assertEqual(list(model['columns']), ['$'])
         # Clicking the phantom keeps it and asks for the import.
         model, cmds = update(make_phantom_commit_event(), ('rows', 'rows'), model,
                              rows, get_vis, eval_in_scope=eval_in_scope)

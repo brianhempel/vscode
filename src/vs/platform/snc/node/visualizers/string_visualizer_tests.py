@@ -9342,6 +9342,64 @@ class TestReplaceToggle(unittest.TestCase):
                           self.var_and_exp, model, self.value)
         self.assertFalse(model['replace_visible'])
 
+    def test_open_turns_on_capture_groups_for_multi_segment_regex(self):
+        """Opening the replace box turns capture groups on so $[N] can be used."""
+        self.model['search'] = r"r'hello.*world'"
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertTrue(model['replace_visible'])
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'c")
+        self.assertIn(r"r'hello.*world'", model['undoHistory'])
+
+    def test_close_turns_off_capture_groups(self):
+        """Closing the replace box turns capture groups back off."""
+        self.model['search'] = r"r'(hello)(.*)(world)'c"
+        self.model['replace_visible'] = True
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertFalse(model['replace_visible'])
+        self.assertEqual(model['search'], r"r'hello.*world'")
+        self.assertIn(r"r'(hello)(.*)(world)'c", model['undoHistory'])
+
+    def test_open_close_roundtrip_restores_search(self):
+        self.model['search'] = r"r'hello.*world'1i"
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['search'], r"r'(hello)(.*)(world)'1ic")
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, model, self.value)
+        self.assertEqual(model['search'], r"r'hello.*world'1i")
+
+    def test_open_leaves_single_segment_regex_alone(self):
+        """One segment means $[1] would equal $[0]; no groups are added."""
+        self.model['search'] = r"r'hello'"
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertTrue(model['replace_visible'])
+        self.assertEqual(model['search'], r"r'hello'")
+        self.assertEqual(model['undoHistory'], [])
+
+    def test_open_leaves_non_regex_search_alone(self):
+        self.model['search'] = "'hello'"
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertEqual(model['search'], "'hello'")
+
+    def test_open_with_no_search(self):
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertTrue(model['replace_visible'])
+        self.assertIsNone(model['search'])
+
+    def test_close_when_capture_groups_already_off_is_a_no_op_on_search(self):
+        self.model['search'] = r"r'hello.*world'"
+        self.model['replace_visible'] = True
+        model, _ = update(make_replace_toggle_event(),
+                          self.var_and_exp, self.model, self.value)
+        self.assertFalse(model['replace_visible'])
+        self.assertEqual(model['search'], r"r'hello.*world'")
+        self.assertEqual(model['undoHistory'], [])
+
 
 def make_expand_toggle_event() -> dict:
     """Create an ExpandToggle event dict (simulates clicking the expand/collapse toggle)."""
@@ -17090,14 +17148,6 @@ class TestSubstrsIsTheDefaultOutput(unittest.TestCase):
 # Nested: the linked line's stand-in is a phantom column
 # =============================================================================
 
-def make_action_button_dwell_event(action: str) -> dict:
-    from string_visualizer import ActionButtonDwell
-    return {
-        'pythonEventStr': repr(ActionButtonDwell(action=action)),
-        'eventJSON': {'type': 'mouseover'},
-    }
-
-
 class TestNestedInteractionsPreviewAsPhantom(unittest.TestCase):
     """A string in a table cell has no line to link. What a linked line would
     have shown, the table above shows as a phantom column instead: the child
@@ -17137,71 +17187,38 @@ class TestNestedInteractionsPreviewAsPhantom(unittest.TestCase):
                              self.var_and_exp, model, self.value)
         self.assertEqual(len(self.phantoms(commands)), 1)
 
-    def test_dwelling_on_an_action_button_previews_that_action(self):
-        model, _ = update(make_search_box_input_event(r"r'hello'"),
-                          self.var_and_exp, self.model, self.value)
-        model, commands = update(make_action_button_dwell_event('count'),
-                                 self.var_and_exp, model, self.value)
-        self.assertEqual(model['linked_action'], 'count')
-        codes = [nc[1] for nc in self.phantoms(commands)]
-        self.assertEqual(len(codes), 1)
-        self.assertTrue(codes[0].startswith('sum(1 for'), codes[0])
-
-    def test_dwelling_on_a_statement_action_previews_nothing(self):
-        # A loop header is a line and only a line; a column holds an expression.
-        model, _ = update(make_search_box_input_event(r"r'hello'"),
-                          self.var_and_exp, self.model, self.value)
-        model, commands = update(make_action_button_dwell_event('loop'),
-                                 self.var_and_exp, model, self.value)
-        self.assertEqual(model['linked_action'], 'match_strings')
-        self.assertEqual(commands, [])
-
-    def test_clicking_still_writes_the_column_and_adopts_the_action(self):
+    def test_clicking_an_action_switches_the_preview_to_it(self):
+        # As at the top level, where a click rewrites the linked line: the
+        # phantom swaps to this action's reading, and nothing is written.
+        # Keeping the column is the phantom's own click (see the table).
         model, _ = update(make_search_box_input_event(r"r'hello'"),
                           self.var_and_exp, self.model, self.value)
         model, commands = update(make_action_button_event('count'),
                                  self.var_and_exp, model, self.value)
-        tuples = [c for c in commands if isinstance(c, tuple)]
-        self.assertEqual(len(tuples), 1)
-        self.assertTrue(tuples[0][1].startswith('sum(1 for'), tuples[0][1])
-        self.assertEqual(self.phantoms(commands), [])
+        self.assertEqual([c for c in commands if isinstance(c, tuple)], [])
+        codes = [nc[1] for nc in self.phantoms(commands)]
+        self.assertEqual(len(codes), 1)
+        self.assertTrue(codes[0].startswith('sum(1 for'), codes[0])
         self.assertEqual(model['linked_action'], 'count')
 
-    def test_at_the_top_level_a_dwell_does_nothing(self):
-        var_and_exp = ('x', 'x')
+    def test_a_first_click_previews_too(self):
+        # No search interaction came first, so nothing is linked yet; the click
+        # is what adopts the action, and nested it previews rather than writes.
         model = init_model(self.value)
-        model, _ = update(make_search_box_input_event(r"r'hello'"),
-                          var_and_exp, model, self.value)
-        model, commands = update(make_action_button_dwell_event('count'),
-                                 var_and_exp, model, self.value)
-        self.assertEqual(model['linked_action'], 'match_strings')
-        self.assertEqual(commands, [])
-
-
-class TestActionButtonsAskForDwellOnlyInACell(unittest.TestCase):
-    """The front end sends a dwell only where the render asks for one, and
-    the render asks only where dwelling changes something: in a cell, where
-    it swaps the phantom column. At the top level a hover costs nothing."""
-
-    def render(self, every_row_exps=None):
-        model = init_model("hello world", var_and_exp=('x', 'x'))
         model['search'] = r"r'hello'"
-        return visualize("hello world", model, None, lambda c: eval(c),
-                         max_width=400, var_and_exp=('x', 'x'),
-                         every_row_exps=every_row_exps)
+        model, commands = update(make_action_button_event('count'),
+                                 self.var_and_exp, model, self.value)
+        self.assertEqual([c for c in commands if isinstance(c, tuple)], [])
+        self.assertEqual(len(self.phantoms(commands)), 1)
+        self.assertEqual(model['linked_action'], 'count')
 
-    def test_a_cells_buttons_and_menu_rows_carry_the_dwell(self):
-        from string_visualizer import ActionButtonDwell
-        out = self.render(every_row_exps=lambda col: [])
-        self.assertIn(
-            f'snc-dwell-slow="{_html.escape(repr(ActionButtonDwell(action="count")))}"',
-            out)
-        self.assertIn(
-            f'snc-dwell-slow="{_html.escape(repr(ActionButtonDwell(action="any")))}"',
-            out)
-
-    def test_top_level_buttons_do_not(self):
-        self.assertNotIn('snc-dwell', self.render())
+    def test_clicking_a_statement_action_previews_nothing(self):
+        # A loop header is a line and only a line; a column holds an expression.
+        model, _ = update(make_search_box_input_event(r"r'hello'"),
+                          self.var_and_exp, self.model, self.value)
+        model, commands = update(make_action_button_event('loop'),
+                                 self.var_and_exp, model, self.value)
+        self.assertEqual(commands, [])
 
 
 class TestIndexSearchSwitchesToASliceAction(unittest.TestCase):

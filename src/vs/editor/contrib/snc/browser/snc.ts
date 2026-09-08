@@ -273,10 +273,6 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// How long the pointer must rest on an [snc-dwell] element before its event
 	// is sent. Long enough that crossing a menu on the way somewhere else opens
 	// nothing, short enough to feel like the menu is following the pointer.
-	// An [snc-dwell-slow] element -- a nested visualizer's action button, whose
-	// rest swaps the phantom column and so re-renders the table -- waits twice
-	// as long, so a pointer crossing the bar to reach one button does not
-	// preview every button on the way.
 	private static readonly DWELL_MS = 150;
 
 	// How long the mouse must rest on a snc-py-exps handle before its expression
@@ -827,13 +823,11 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	/**
-	 * Send an element's `snc-dwell` (or `snc-dwell-slow`) event once the
-	 * pointer has rested on it.
+	 * Send an element's `snc-dwell` event once the pointer has rested on it.
 	 *
 	 * What dwelling means is the renderer's to say — the column ▾ menu uses it
 	 * to open the submenu a row names, and to put away the open one over a row
-	 * that names none; a nested action button uses the slow form to swap the
-	 * phantom column — so this only decides when a rest has happened. Python
+	 * that names none — so this only decides when a rest has happened. Python
 	 * renders the attribute solely where dwelling would change something, so
 	 * every event sent here is one worth the re-run it costs.
 	 *
@@ -849,10 +843,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		};
 		return [
 			dom.addDisposableListener(root, 'mouseover', (ev: MouseEvent) => {
-				// The nearer of the two kinds, should one ever sit inside the other.
-				const quick = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell', stopAt);
-				const slow = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell-slow', stopAt);
-				const target = quick && slow ? (quick.contains(slow) ? slow : quick) : (quick ?? slow);
+				const target = this.findAncestorWithAttr(ev.target as Node, 'snc-dwell', stopAt);
 				if (target === this.dwellTarget) {
 					return;
 				}
@@ -863,16 +854,14 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					this.dwellSent = null;
 					return;
 				}
-				const attr = target === slow ? 'snc-dwell-slow' : 'snc-dwell';
-				const event = wrapEvent(target.getAttribute(attr) ?? '', target);
+				const event = wrapEvent(target.getAttribute('snc-dwell') ?? '', target);
 				// The render a dwell causes replaces the element under the
 				// pointer, and the browser answers with a mouseover on its
-				// successor -- the same button, asking for the same thing. Sent
+				// successor -- the same row, asking for the same thing. Sent
 				// again it would cost a second run to arrive at the same model.
 				if (event === this.dwellSent) {
 					return;
 				}
-				const delay = VisualizationWidget.DWELL_MS * (attr === 'snc-dwell-slow' ? 2 : 1);
 				this.dwellTarget = target;
 				this.dwellTimer = setTimeout(() => {
 					// The render this armed against is gone if the pointer has
@@ -884,7 +873,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					cancel();
 					this.dwellSent = event;
 					this.onPointerEvent(event, ev);
-				}, delay);
+				}, VisualizationWidget.DWELL_MS);
 			}),
 			dom.addDisposableListener(root, 'mouseleave', () => {
 				cancel();
@@ -3809,8 +3798,10 @@ function editLineCount(edit: NewCodeEdit): number {
 }
 
 /**
- * The edit that leaves the file ending in a blank line, to go in with the
- * code being inserted -- or nothing, when the file will end blank anyway.
+ * The edit that leaves the file ending in a blank line -- or nothing, when
+ * the file will end blank anyway. Goes in with code being inserted, and on
+ * its own once a render puts a visualizer on the last line (see
+ * SNCController.keepBlankLineBelowLastVisualizer).
  *
  * A visualizer takes so much of the screen that when its line is the last
  * one, there is nowhere below it to click and press return for the next
@@ -4357,6 +4348,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// model-content change doesn't make pruneDeadLinks react to the momentary
 	// mid-edit decoration collapse.
 	private isApplyingLinkedEdit = false;
+	// Guards our own appending of the file's trailing blank line (see
+	// keepBlankLineBelowLastVisualizer) so the cursor listener ignores the
+	// cursor's momentary trip onto the new line and back.
+	private isAppendingTrailingBlankLine = false;
 	// (line:visIndex) keys that already received a reconciliation Unlink, so we
 	// don't repeatedly re-send it while Python converges. Cleared once the model
 	// stops claiming to be linked.
@@ -4922,6 +4917,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	private onCursorPositionChanged(): void {
+		if (this.isAppendingTrailingBlankLine) {
+			return;
+		}
 		// Re-render visualizations when cursor moves; do NOT rerun the program
 		const data = this.visualizationItems;
 		if (!data || data.length === 0) {
@@ -5929,6 +5927,48 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// it, and that render caught up with nothing.
 		if (visualizationData === this._visualizationItems) {
 			this.renderedVersion = this.itemsVersion;
+		}
+
+		this.keepBlankLineBelowLastVisualizer(presentLines);
+	}
+
+	/**
+	 * Keep a blank line below a visualizer on the last line of the file.
+	 *
+	 * Code the visualizers write brings its own trailing blank line (see
+	 * trailingBlankLineEdit), but code the user types does not, and under
+	 * live-only visualizers (clickacode.liveOnlyVisualizers) typing is the
+	 * only way code arrives. So once a render shows a visualizer on the last
+	 * line, the file gets its blank line here. The edit re-runs the program
+	 * like any other; that run finds the file ending blank and does nothing.
+	 *
+	 * The edit stays off the undo stack: as its own step, undoing it would
+	 * only have the next run put it back, and a step the user never took
+	 * should not sit between them and the one they did. Nothing in the stack
+	 * reaches past the old end of the file, so earlier steps still undo
+	 * cleanly. The cursor is usually right where the newline goes, at the end
+	 * of the line just typed; it is held there rather than carried onto the
+	 * new line, and the cursor listener sits out the momentary move, which
+	 * would otherwise drop a pinned focus and schedule a focus re-run.
+	 */
+	private keepBlankLineBelowLastVisualizer(visualizerLines: ReadonlySet<number>): void {
+		const model = this.editor.getModel();
+		if (!model || !visualizerLines.has(model.getLineCount())) {
+			return;
+		}
+		const edit = trailingBlankLineEdit(model, undefined);
+		if (!edit) {
+			return;
+		}
+		const selections = this.editor.getSelections();
+		this.isAppendingTrailingBlankLine = true;
+		try {
+			studyLog.withEditOrigin('TrailingBlankLine', () => model.applyEdits([edit]));
+			if (selections) {
+				this.editor.setSelections(selections);
+			}
+		} finally {
+			this.isAppendingTrailingBlankLine = false;
 		}
 	}
 
