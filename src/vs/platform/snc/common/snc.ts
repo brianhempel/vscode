@@ -41,6 +41,12 @@ export interface IVisualizationItem {
 	 * body counts as a loop over its calls (`[defLine, callNumber]`).
 	 */
 	path: LoopPath;
+	/**
+	 * Set on the table a `for` loop logs on its last line once it ends: the
+	 * loop's header line. While the cursor is outside the loop, the table is
+	 * shown in place of the loop's body; while it is inside, the body is.
+	 */
+	forLoopLine?: number;
 }
 
 export type LoopPath = [number, number][];
@@ -153,7 +159,8 @@ export interface NewCodeEdit {
 	text: string;
 	// How many of the inserted lines are the statement's header. A visualizer
 	// links only its header; the body below belongs to the user. Absent on
-	// incidental edits (e.g. an auto-added import).
+	// incidental edits (e.g. an auto-added import, or a step a loop's table
+	// adds to the loop), which are never linked.
 	headerLines?: number;
 }
 

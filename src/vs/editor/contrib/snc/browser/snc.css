@@ -2681,6 +2681,12 @@
 	padding: 4px 3px;
 }
 
+/* "12 more iterations" under a for loop's table: what didn't get a row. */
+.for-loop-visualizer > .for-loop-note {
+	color: var(--snc-text-muted);
+	padding: 4px 3px 0;
+}
+
 .list-visualizer tr.row-match {
 	border-left: 2px solid var(--snc-string-color);
 }

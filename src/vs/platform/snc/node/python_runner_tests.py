@@ -2170,11 +2170,12 @@ class TestLoopIterations(unittest.TestCase):
 
     @staticmethod
     def _items(msgs):
-        """[(line, visIndex, path, value_text)] in emission order."""
+        """[(line, visIndex, path, value_text)] in emission order. A `for`
+        loop's table is left out: it is TestForLoopTable's."""
         import re
         out = []
         for m in msgs:
-            if m.get('type') != 'item':
+            if m.get('type') != 'item' or 'forLoopLine' in m['item']:
                 continue
             it = m['item']
             found = re.search(r'snc-generic-visualizer">(.*?)</span>', it['html'])
@@ -2343,14 +2344,193 @@ class TestLoopIterations(unittest.TestCase):
                                'events': [{'pythonEventStr': 'e', 'eventJSON': {}}]}])
         import_code, body_code = split_leading_imports(self.SRC)
         saved = python_runner._visualizers
-        python_runner._visualizers = lambda: [Vis]
+        # The real ones behind it, for the loop's table.
+        python_runner._visualizers = lambda: [Vis, *saved()]
         try:
             with capture_stream_messages() as msgs:
                 python_runner._execute_run(body_code, m_and_e, 'run-1', import_code=import_code)
         finally:
             python_runner._visualizers = saved
-        htmls = [m['item']['html'] for m in msgs.all() if m.get('type') == 'item' and m['item']['line'] == 2]
+        htmls = [m['item']['html'] for m in msgs.all()
+                 if m.get('type') == 'item' and (m['item']['line'], m['item']['visIndex']) == (2, 0)]
         self.assertEqual(htmls, ['<b>6</b>'] * 3)
+
+
+class TestForLoopTable(unittest.TestCase):
+    """A `for` loop logs, once it ends, a ForLoopTable on its last line: what
+    each iteration did, for for_loop_visualizer to draw in place of the body.
+
+    Columns are the names the loop binds and the assignments directly in its
+    body, the latter labeled with their source; a variable only read gets
+    none. Rows are recorded whichever iteration the editor has pinned for the
+    inline widgets."""
+
+    SRC = (
+        "array_of_integers = [1, 2, 3, 4, 5]\n"
+        "\n"
+        "count = 0\n"
+        "\n"
+        "for element in array_of_integers:\n"
+        "    count += 1\n"
+        "\n"
+        "count\n"
+    )
+
+    def _run(self, source_code, loop_selections=None):
+        """(messages, every ForLoopTable logged, in order)."""
+        from visualizer_utils import ForLoopTable
+        tables = []
+
+        class Recorder:
+            @staticmethod
+            def can_visualize(value):
+                if isinstance(value, ForLoopTable):
+                    tables.append(value)
+                return False
+
+        import_code, body_code = split_leading_imports(source_code)
+        saved = python_runner._visualizers
+        python_runner._visualizers = lambda: [Recorder, *saved()]
+        try:
+            with capture_stream_messages() as msgs:
+                python_runner._execute_run(body_code, '', 'run-1', import_code=import_code,
+                                           loop_selections=loop_selections)
+        finally:
+            python_runner._visualizers = saved
+        return msgs, tables
+
+    @staticmethod
+    def _table_items(msgs):
+        return [(m['item']['line'], m['item']['visIndex'], m['item']['path'], m['item']['forLoopLine'])
+                for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+
+    def test_the_table_is_an_item_on_the_loops_last_line(self):
+        msgs, _ = self._run(self.SRC)
+        # Line 6's own site is the assignment's; the table takes the next.
+        self.assertEqual(self._table_items(msgs), [(6, 1, [], 5)])
+        items = [m['item'] for m in msgs.all() if m.get('type') == 'item']
+        self.assertEqual([(it['line'], it['path']) for it in items][-2:], [(6, []), (8, [])])
+        self.assertIn('for-loop-visualizer', items[-2]['html'])
+
+    def test_the_example_records_a_row_per_iteration(self):
+        from visualizer_utils import ForLoopTable
+        _, tables = self._run(self.SRC)
+        self.assertEqual(tables, [ForLoopTable(
+            line=5, end_line=6, indent='', body_indent='    ',
+            columns=('element', 'count += 1'),
+            rows=(('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')),
+            targets=('element',),
+            defined=frozenset({'array_of_integers', 'count', 'element'}),
+        )])
+
+    def test_the_rows_ignore_the_pinned_iteration(self):
+        msgs, tables = self._run(self.SRC, {'5': 2})
+        self.assertEqual(tables[0].rows, (('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')))
+        # The inline items are still only the pinned iteration's.
+        inline = [(m['item']['line'], m['item']['path']) for m in msgs.all()
+                  if m.get('type') == 'item' and m['item']['path']]
+        self.assertEqual(inline, [(5, [[5, 2]]), (6, [[5, 2]])])
+
+    def test_cells_are_the_values_when_each_statement_ran(self):
+        src = (
+            "total = 0\n"
+            "for n in [10, 20, 30]:\n"
+            "    total += n\n"
+            "    doubled = total * 2\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual(tables[0].columns, ('n', 'total += n', 'doubled = total * 2'))
+        self.assertEqual(tables[0].rows, (('10', '10', '20'), ('20', '30', '60'), ('30', '60', '120')))
+
+    def test_recording_does_not_run_user_code_again(self):
+        src = (
+            "count = 0\n"
+            "for element in [1, 2, 3]:\n"
+            "    count += 1\n"
+            "    print(element)\n"
+        )
+        msgs, tables = self._run(src)
+        self.assertEqual(msgs.text_of('stdout'), '1\n2\n3\n')
+        self.assertEqual(tables[0].rows, (('1', '1'), ('2', '2'), ('3', '3')))
+
+    def test_rerunning_starts_the_rows_afresh(self):
+        self._run(self.SRC)
+        src = self.SRC.replace('[1, 2, 3, 4, 5]', '[7, 8]').replace(
+            '    count += 1', '    count += 1\n    count += 2')
+        _, tables = self._run(src, {'5': 1})
+        self.assertEqual([t.rows for t in tables], [(('7', '1', '3'), ('8', '4', '6'))])
+
+    def test_an_iteration_cut_short_leaves_its_later_cells_empty(self):
+        src = (
+            "for i in [1, 2]:\n"
+            "    a = i\n"
+            "    if i == 2:\n"
+            "        break\n"
+            "    b = i\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual(tables[0].rows, (('1', '1', '1'), ('2', '2', None)))
+
+    def test_a_loop_that_raises_still_logs_what_it_did(self):
+        msgs, tables = self._run("for i in [1, 2]:\n    x = 10 // (2 - i)\n")
+        self.assertEqual(tables[0].rows, (('1', '10'), ('2', None)))
+        self.assertEqual([line for line, *_ in self._table_items(msgs)], [2])
+
+    def test_the_last_line_includes_a_multiline_body_and_the_else(self):
+        src = (
+            "for i in range(1):\n"
+            "    for j in range(1):\n"
+            "        x = (\n"
+            "            i + j\n"
+            "        )\n"
+            "else:\n"
+            "    x = 5\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([(t.line, t.end_line) for t in tables], [(2, 5), (1, 7)])
+
+    def test_a_nested_loop_logs_under_the_outer_iteration_it_ran_in(self):
+        src = (
+            "for i in range(2):\n"
+            "    for j in range(3):\n"
+            "        y = i * j\n"
+        )
+        msgs, tables = self._run(src)
+        self.assertEqual(self._table_items(msgs), [(3, 1, [[1, 0]], 2), (3, 1, [[1, 1]], 2), (3, 2, [], 1)])
+        self.assertEqual(tables[1].rows, (('0', '0'), ('1', '1'), ('2', '2')))
+        # The outer loop's columns are its own: `y` is not directly in its body.
+        self.assertEqual(tables[2].columns, ('i',))
+        msgs, tables = self._run(src, {'1': 1})
+        self.assertEqual(self._table_items(msgs), [(3, 1, [[1, 1]], 2), (3, 2, [], 1)])
+
+    def test_a_loop_inside_a_function_knows_its_locals_and_indentation(self):
+        src = (
+            "def f(xs):\n"
+            "    count = 0\n"
+            "    for x in xs:\n"
+            "        count += 1\n"
+            "    return count\n"
+            "f([7, 8])\n"
+        )
+        _, tables = self._run(src)
+        t = tables[0]
+        self.assertEqual((t.line, t.end_line, t.indent, t.body_indent), (3, 4, '    ', '        '))
+        self.assertEqual(t.rows, (('7', '1'), ('8', '2')))
+        self.assertEqual(t.defined, frozenset({'xs', 'count', 'x'}))
+
+    def test_a_long_loop_says_how_many_rows_it_left_out(self):
+        _, tables = self._run(f"for i in range({python_runner.MAX_FOR_TABLE_ROWS + 3}):\n    pass\n")
+        self.assertEqual((len(tables[0].rows), tables[0].hidden_rows), (python_runner.MAX_FOR_TABLE_ROWS, 3))
+
+    def test_insert_lines_goes_out_as_unlinked_new_code(self):
+        from visualizer_utils import InsertLines
+        self.assertEqual(
+            _commands_to_dicts([InsertLines(((4, 'total = 0'), (6, '    total += x')))],
+                               line=6, idx_in_line=1, model=None, source_code=''),
+            [{'type': 'NewCode', 'triggerLine': 6, 'triggerVisIndex': 1, 'imports': [], 'edits': [
+                {'type': 'insert', 'afterLine': 4, 'text': 'total = 0'},
+                {'type': 'insert', 'afterLine': 6, 'text': '    total += x'},
+            ]}])
 
 
 def fake_stdin(test):

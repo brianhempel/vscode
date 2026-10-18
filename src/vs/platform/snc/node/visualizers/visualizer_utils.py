@@ -1138,6 +1138,33 @@ class UncaughtError:
     exception: BaseException
 
 
+@dataclass(frozen=True)
+class ForLoopTable:
+    """What a `for` loop did, logged on its last line once it has finished.
+
+    A row per iteration and a column per value the loop computes: each name it
+    binds, and each assignment directly in its body, labeled with its source.
+    A cell is the value's repr when the statement ran -- a list appended to
+    later must not rewrite the rows before -- or None where an iteration never
+    got to it (it broke out or raised first).
+
+    The rest is what code written into the loop needs: where it starts and
+    ends, how its header and body are indented, the names it binds (what a
+    step can be over) and the names already bound by the time it ends (an
+    accumulator that needs no initializer).
+    """
+    line: int
+    end_line: int
+    indent: str
+    body_indent: str
+    columns: Tuple[str, ...]
+    rows: Tuple[Tuple[Optional[str], ...], ...]
+    targets: Tuple[str, ...] = ()
+    defined: FrozenSet[str] = frozenset()
+    # Iterations that ran but have no row: past MAX_FOR_TABLE_ROWS in the runner.
+    hidden_rows: int = 0
+
+
 def error_text(exception: BaseException) -> str:
     """`TypeError: unsupported operand ...`, or a bare type name when the
     exception carries no message."""
@@ -1188,6 +1215,22 @@ class AddImports:
     editor's to answer, exactly as for a NewCode command.
     """
     imports: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class InsertLines:
+    """Asks the editor for lines of code at places the visualizer names.
+
+    A NewCode tuple is an assignment going in under the visualizer's own line.
+    Some code belongs elsewhere: a step added to a loop goes at the end of the
+    loop's body, and the accumulator it updates is initialized above the
+    loop's header. Each entry is ``(after_line, text)``: 1-indexed, 0 meaning
+    before the first line, with `text` already indented.
+
+    It goes out as a NewCode command whose edits are all incidental: none of
+    them is linked to the visualizer, which has nothing to rewrite them with.
+    """
+    lines: Tuple[Tuple[int, str], ...]
 
 
 @dataclass(frozen=True, slots=True)

@@ -149,6 +149,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	private lastOnscreenPixelPosition: IOverlayWidgetPositionCoordinates | null = null;
 	/** Room left at the end of the line for a loop slider ahead of this widget. */
 	leftInset = 0;
+	/**
+	 * The line whose indentation the widget lines up with when it sits below
+	 * its line, when that isn't its own: a for loop's table is on the loop's
+	 * last line but lines up under its header, as the code after it does.
+	 */
+	indentLine: number | null = null;
 	private readonly visIndex: number;
 	private readonly lineNumber: number;
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
@@ -2228,7 +2234,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			const lineContent = model.getLineContent(lineNumber);
 			const endColumn = lineContent.length + 1;
 			const lineHeight = this.editor.getOption(EditorOption.lineHeight);
-			const firstNonWhitespaceColumn = model.getLineFirstNonWhitespaceColumn(lineNumber);
+			const indentLine = this.indentLine !== null && this.indentLine <= model.getLineCount() ? this.indentLine : lineNumber;
+			const firstNonWhitespaceColumn = model.getLineFirstNonWhitespaceColumn(indentLine);
 			const indentationColumn = firstNonWhitespaceColumn > 0 ? firstNonWhitespaceColumn : 1;
 			const targetColumn = this.useBlockLayout ? indentationColumn : endColumn;
 
@@ -3792,6 +3799,11 @@ export function carryForwardItems(items: readonly IVisualizationItem[], currentR
 		.map(item => item.runId === currentRunId ? item : { ...item, runId: currentRunId });
 }
 
+/** Whether `edit` is the visualizer's own line, the one NewCode links. */
+function isMainNewCodeEdit(edit: NewCodeEdit, triggerLine: number): boolean {
+	return edit.afterLine === triggerLine && edit.headerLines !== undefined;
+}
+
 /** How many lines an insert edit adds; several imports can share one edit. */
 function editLineCount(edit: NewCodeEdit): number {
 	return edit.text.split('\n').length;
@@ -4888,12 +4900,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 			const newItems: IVisualizationItem[] = [];
 			for (const item of this.visualizationItems) {
 				const line = shiftedLine(item.line);
-				if (line === null) {
+				// A loop's table moves with its header too: that is what says
+				// which lines it stands in for (see collapsedForLoops).
+				const forLoopLine = item.forLoopLine === undefined ? undefined : shiftedLine(item.forLoopLine);
+				if (line === null || forLoopLine === null) {
 					itemsChanged = true;
-				} else if (line === item.line) {
+				} else if (line === item.line && forLoopLine === item.forLoopLine) {
 					newItems.push(item);
 				} else {
-					newItems.push({ ...item, line });
+					newItems.push(forLoopLine === undefined ? { ...item, line } : { ...item, line, forLoopLine });
 					itemsChanged = true;
 				}
 			}
@@ -5738,9 +5753,17 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		// console.log("visualizationData", visualizationData);
 
+		// Which loops show as their table rather than their body depends on
+		// where focus is, so it is settled here, on every render.
+		const collapsedLoops = this.collapsedForLoops(visualizationData);
+		this.updateLoopSliders(collapsedLoops);
+
 		// Group visualization items by line number
 		const groupedByLine = new Map<number, IVisualizationItem[]>();
 		for (const item of visualizationData) {
+			if (!this.isShownWith(item, collapsedLoops)) {
+				continue;
+			}
 			if (!groupedByLine.has(item.line)) {
 				groupedByLine.set(item.line, []);
 			}
@@ -5847,7 +5870,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 				// console.log("existing", lineNumber, existing)
 
 
-				if (existing && existing.length === stepItems.length) {
+				// A loop opening or closing swaps which sites a line shows (its
+				// body's items for its table), so the same count is not enough.
+				if (existing && existing.length === stepItems.length
+					&& existing.every((widget, i) => widget.getVisIndex() === stepItems[i].visIndex)) {
 					// Incremental update: reuse widgets, just update content
 					let anyChanged = false;
 					for (let i = 0; i < stepItems.length; i++) {
@@ -5923,6 +5949,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							this.clipboardService
 						);
 						widget.leftInset = this.loopSliders.has(lineNumber) ? LoopSliderWidget.WIDTH : 0;
+						widget.indentLine = item.forLoopLine ?? null;
 						widget.updateContent(item.html);
 						widgets.push(widget);
 					}
@@ -6315,8 +6342,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 					if (!inv) {
 						continue;
 					}
-					// The main inserted line is the edit on the trigger line.
-					if (edit.afterLine === command.triggerLine) {
+					// The main inserted line is the visualizer's own: the edit on
+					// the trigger line that says where its header ends. One
+					// without is incidental (InsertLines in visualizer_utils.py)
+					// and stays unlinked, even when it lands on the trigger line.
+					if (isMainNewCodeEdit(edit, command.triggerLine)) {
 						mainInverseRange = inv.range;
 					}
 					if (!renameSel) {
@@ -6342,7 +6372,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 				// trigger line. Derive the linked range directly from that line
 				// rather than from inverse-range arithmetic, which is unreliable
 				// across the multi-region edit when an import is also inserted.
-				const mainEdit = edits.find(e => e.afterLine === command.triggerLine);
+				const mainEdit = edits.find(e => isMainNewCodeEdit(e, command.triggerLine));
 				const insertedLine = actualTriggerLine + 1;
 				// A statement's body is the user's, so the link covers only the
 				// header lines Python reported -- and not the trailing config
@@ -7299,14 +7329,52 @@ export class SNCController extends Disposable implements IEditorContribution {
 		}
 	}
 
-	/** One slider per loop/def line that ran more than once; none elsewhere. */
-	private updateLoopSliders(): void {
+	/**
+	 * The `for` loops that show as their table, as `[headerLine, lastLine]`:
+	 * every loop that logged one, unless focus is inside it. A loop nested in
+	 * one of these is inside its table already, so only the outermost counts.
+	 */
+	private collapsedForLoops(items: readonly IVisualizationItem[]): [number, number][] {
+		const focusedLine = this.effectiveFocusedLine();
+		const loops = items
+			.filter(item => item.forLoopLine !== undefined)
+			.map((item): [number, number] => [item.forLoopLine!, item.line])
+			.filter(([start, end]) => focusedLine === null || focusedLine < start || focusedLine > end)
+			.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+		const collapsed: [number, number][] = [];
+		for (const [start, end] of loops) {
+			if (!collapsed.some(([outerStart, outerEnd]) => start >= outerStart && end <= outerEnd)) {
+				collapsed.push([start, end]);
+			}
+		}
+		return collapsed;
+	}
+
+	/**
+	 * Whether `item` is drawn while `collapsedLoops` show as their tables: a
+	 * collapsed loop hides its body -- the lines inside it, and anything run
+	 * under one of its iterations, such as a function it calls -- and shows its
+	 * table; every other table stays hidden, its loop's body showing instead.
+	 */
+	private isShownWith(item: IVisualizationItem, collapsedLoops: readonly [number, number][]): boolean {
+		if (item.forLoopLine !== undefined) {
+			return collapsedLoops.some(([start, end]) => start === item.forLoopLine && end === item.line);
+		}
+		return !collapsedLoops.some(([start, end]) =>
+			(item.line >= start && item.line <= end) || item.path.some(([header]) => header === start));
+	}
+
+	/**
+	 * One slider per loop/def line that ran more than once, unless the loop
+	 * is collapsed into its table (or inside one that is); none elsewhere.
+	 */
+	private updateLoopSliders(collapsedLoops = this.collapsedForLoops(this.visualizationItems)): void {
 		if (!this.widgetsVisible) {
 			return;
 		}
 		for (const [line, count] of this.loopCounts) {
 			let slider = this.loopSliders.get(line);
-			if (count < 2) {
+			if (count < 2 || collapsedLoops.some(([start, end]) => line >= start && line <= end)) {
 				if (slider) {
 					slider.dispose();
 					this.loopSliders.delete(line);

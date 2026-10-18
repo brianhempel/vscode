@@ -15,6 +15,7 @@ The main flow is:
 User Code → AST Parsing → AST Transformation → Code Generation → Execution → JSON Output
 """
 
+import dataclasses
 from dataclasses import dataclass
 import sys
 import json
@@ -29,7 +30,7 @@ import importlib.util
 import glob
 import random
 import time
-from typing import List, Dict, Any, Optional, Callable, Protocol, TextIO, Tuple, cast
+from typing import List, Dict, Any, FrozenSet, Optional, Callable, Protocol, Set, TextIO, Tuple, cast
 
 # Make the built-in visualizers dir importable so we can share helpers (e.g.
 # wrap_drag_grab) with the visualizer modules. The same dir is also added per
@@ -39,7 +40,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, ForLoopTable, InsertLines, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes, truncate_repr  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -75,6 +76,15 @@ _loop_selections: Dict[int, int] = {}
 # run (inside a loop) replays its pending events on the first logging and
 # carries the resulting model through the rest.
 _run_models: Dict[Tuple[int, int], Tuple[str, Any]] = {}
+# id(frame) -> the table a running `for` loop is filling in, one row per
+# iteration (see loop_enter). Recorded before the pinned-iteration filter, so
+# the editor's table shows every iteration whichever one is inline.
+_for_tables: Dict[int, Dict[str, Any]] = {}
+# Most rows a loop's table records. Past this the loop still runs; its table
+# just says how many iterations it didn't show.
+MAX_FOR_TABLE_ROWS = 500
+# Longest repr a table cell carries.
+MAX_FOR_TABLE_CELL_CHARS = 120
 _current_run_id: str = ""  # Run ID for preload mode, included in item/command messages
 # 1-indexed line whose top-level visualizer should render full-size; everything
 # else gets small=True. None means render everything full (e.g. before the
@@ -444,7 +454,18 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
                 # a nested visualizer emits one and its table consumes it; one
                 # that got past every parent is nothing the editor can act on.
                 continue
-            if isinstance(cmd, AddImports):
+            if isinstance(cmd, InsertLines):
+                cmd_dict = {
+                    "type": "NewCode",
+                    "triggerLine": line,
+                    "triggerVisIndex": idx_in_line,
+                    # No headerLines: none of these is the visualizer's own
+                    # line, so the editor links none of them.
+                    "edits": [{"type": "insert", "afterLine": after, "text": text}
+                              for after, text in cmd.lines],
+                    "imports": [],
+                }
+            elif isinstance(cmd, AddImports):
                 # Nothing to ask for is nothing to send: a command the editor
                 # would answer with no edit at all never reaches it.
                 if not cmd.imports:
@@ -549,6 +570,12 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     """
     global execution_step
     execution_step += 1
+
+    # A `for` loop's table keeps every iteration, so it reads the value before
+    # the pinned-iteration filter below drops it. (An explicit `path` is an
+    # uncaught error logged after its loops unwound: no table's to keep.)
+    if path is None and _for_tables:
+        _record_for_table_cell(line, site, value)
 
     # Which iteration of which loops this value was produced under. A loop the
     # editor has pinned to some other iteration means this value isn't shown.
@@ -744,6 +771,10 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     # never written. On one message, the editor either applies both or neither.
     if cmd_dicts:
         item["commands"] = cmd_dicts
+    # The editor shows a loop's table in place of the loop's body while the
+    # cursor is outside it, so it has to know which loop the table is for.
+    if isinstance(value, ForLoopTable):
+        item["forLoopLine"] = value.line
 
     # Stream this item immediately to stdout (bypassing redirected stdout)
     _emit({"type": "item", "item": item})
@@ -794,12 +825,70 @@ def _count_key(id_line: int) -> str:
     return _path_key([f for f in _current_path() if f[0] != id_line])
 
 
-def loop_enter(id_line: int) -> None:
+def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
     """Injected before a loop (`_snc_loop_enter`): push its frame. Counting
     resumes where an earlier entry under the same path left off, so a function
-    body called twice from one place is call 0 and call 1."""
+    body called twice from one place is call 0 and call 1.
+
+    A `for` also passes the static half of its ForLoopTable (see
+    CodeTransformer.visit_For): `(end_line, site, indent, body_indent,
+    columns, targets, defined)`, where `columns` is the (line, site, label) of
+    each log site whose value is a column. Rows are recorded only for a loop
+    running under a path the editor is looking at; one it isn't is never
+    shown, so its table isn't either."""
     prev = _ctx_counts.get(_count_key(id_line), {}).get(id_line, 0)
-    _ctx_stack.append([id_line, prev - 1])
+    frame = [id_line, prev - 1]
+    _ctx_stack.append(frame)
+    if table is not None and _path_selected(_current_path()):
+        end_line, site, indent, body_indent, columns, targets, defined = table
+        _for_tables[id(frame)] = {
+            "frame": frame,
+            "first": prev,
+            "end_line": end_line,
+            "site": site,
+            "columns": {(line, col_site): i for i, (line, col_site, _) in enumerate(columns)},
+            "rows": {},
+            "table": ForLoopTable(
+                line=id_line, end_line=end_line, indent=indent, body_indent=body_indent,
+                columns=tuple(label for _, _, label in columns), rows=(),
+                targets=tuple(targets), defined=frozenset(defined)),
+        }
+
+
+def _record_for_table_cell(line: int, site: int, value: Any) -> None:
+    """Put a just-logged value in its cell of the innermost loop's table, if
+    (line, site) is one of its columns. Only the innermost frame is looked at:
+    a column is a statement directly in the loop's body, so a value logged
+    from inside a function the body calls belongs to no column of it."""
+    if not _ctx_stack:
+        return
+    frame = _ctx_stack[-1]
+    table = _for_tables.get(id(frame))
+    if table is None or table["frame"] is not frame:
+        return
+    col = table["columns"].get((line, site))
+    if col is None:
+        return
+    row = frame[1] - table["first"]
+    if row < 0 or row >= MAX_FOR_TABLE_ROWS:
+        return
+    cells = table["rows"].setdefault(row, [None] * len(table["columns"]))
+    # The value as it was when the statement ran: a list appended to later
+    # must not rewrite the rows before.
+    cells[col] = truncate_repr(value, MAX_FOR_TABLE_CELL_CHARS)
+
+
+def _log_for_table(frame: List[int], table: Dict[str, Any]) -> None:
+    """Log what the loop that just ended did on its last line, for
+    for_loop_visualizer: a row per iteration it ran."""
+    ran = max(frame[1] + 1 - table["first"], 0)
+    shown = min(ran, MAX_FOR_TABLE_ROWS)
+    empty = (None,) * len(table["columns"])
+    value = dataclasses.replace(
+        table["table"],
+        rows=tuple(tuple(table["rows"][i]) if i in table["rows"] else empty for i in range(shown)),
+        hidden_rows=ran - shown)
+    log_value(table["end_line"], value, table["site"])
 
 
 def loop_iter(id_line: int) -> None:
@@ -838,9 +927,11 @@ def ctx_exit(id_line: int, kind: str = 'loop') -> None:
     """Injected in a `finally` after a loop or around a function body
     (`_snc_ctx_exit`): pop the frame, remember how many iterations it ran,
     and tell the editor -- which is what sizes the slider -- when the path
-    it ran under is one the editor is looking at."""
+    it ran under is one the editor is looking at. A `for` that recorded a
+    table (see loop_enter) logs it now, however the loop ended."""
     while _ctx_stack:
         frame = _ctx_stack.pop()
+        table = _for_tables.pop(id(frame), None)
         if frame[0] == id_line:
             break
     else:
@@ -849,6 +940,8 @@ def ctx_exit(id_line: int, kind: str = 'loop') -> None:
     # Recursive activations exit innermost first; the count is how many began.
     count = max(frame[1] + 1, counts.get(id_line, 0))
     counts[id_line] = count
+    if table is not None and table["frame"] is frame:
+        _log_for_table(frame, table)
     path = _current_path()
     if not _path_selected(path):
         return
@@ -875,11 +968,12 @@ def runtime_globals() -> Dict[str, Any]:
 
 
 def _reset_run_state(loop_selections: Optional[Dict[str, int]] = None) -> None:
-    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models
+    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models, _for_tables
     execution_step = 0
     _ctx_stack = []
     _ctx_counts = {}
     _run_models = {}
+    _for_tables = {}
     _loop_selections = {}
     for k, v in (loop_selections or {}).items():
         try:
@@ -1129,6 +1223,53 @@ def _eval_in_scope_keyword(lineno: int, col_offset: int) -> ast.keyword:
     return ast.keyword(arg='eval_in_scope', value=lam, lineno=lineno, col_offset=col_offset, end_lineno=lineno, end_col_offset=col_offset)
 
 
+def _stored_names(target: ast.AST) -> List[str]:
+    """Names an assignment target binds, in source order."""
+    return [n.id for n in ast.walk(target)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
+
+
+def _annotate_for_scopes(statements: List[ast.stmt], defined: FrozenSet[str] = frozenset()) -> Set[str]:
+    """Note on each `for` loop, as `_snc_defined`, the names bound in its
+    scope by the time it ends -- before it, or by it. A step added to the loop
+    (see for_loop_visualizer) initializes its accumulator only when it isn't
+    one of them. Returns the names `statements` bind.
+
+    Read off the source before the transformer rewrites it, so the names are
+    the user's own. A function body is a scope of its own, starting from its
+    parameters; whatever it binds stays inside it."""
+    bound: Set[str] = set()
+    for node in statements:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            params = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+            params.update(a.arg for a in (args.vararg, args.kwarg) if a is not None)
+            _annotate_for_scopes(node.body, frozenset(params))
+            bound.add(node.name)
+            continue
+        if isinstance(node, ast.ClassDef):
+            _annotate_for_scopes(node.body)
+            bound.add(node.name)
+            continue
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound.update(name for target in targets for name in _stored_names(target))
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            bound.update(_stored_names(node.target))
+            bound |= _annotate_for_scopes(node.body, defined | bound)
+            node._snc_defined = defined | bound  # type: ignore[attr-defined]
+            bound |= _annotate_for_scopes(node.orelse, defined | bound)
+            continue
+        # Any other block (if, while, with, try, match): its bodies run in
+        # this scope, and might bind before the loop after it.
+        bodies = [getattr(node, field, None) or [] for field in ('body', 'orelse', 'finalbody')]
+        bodies += [h.body for h in getattr(node, 'handlers', [])]
+        bodies += [c.body for c in getattr(node, 'cases', [])]
+        for body in bodies:
+            bound |= _annotate_for_scopes(body, defined | bound)
+    return bound
+
+
 class CodeTransformer(ast.NodeTransformer):
     """
     AST transformer that injects logging statements into Python code.
@@ -1187,23 +1328,29 @@ class CodeTransformer(ast.NodeTransformer):
             lineno=lineno, col_offset=col_offset, end_lineno=lineno, end_col_offset=col_offset,
         )
 
-    def _hook_call(self, name: str, id_line: int, at: ast.AST) -> ast.Expr:
-        """`name(id_line)` as a statement, located where `at` is."""
-        loc = dict(lineno=at.lineno, col_offset=at.col_offset,
-                   end_lineno=getattr(at, 'end_lineno', None) or at.lineno,
-                   end_col_offset=getattr(at, 'end_col_offset', None) or at.col_offset)
+    @staticmethod
+    def _loc(at: ast.AST) -> Dict[str, int]:
+        """Location attributes for a generated node standing where `at` is."""
+        return dict(lineno=at.lineno, col_offset=at.col_offset,
+                    end_lineno=getattr(at, 'end_lineno', None) or at.lineno,
+                    end_col_offset=getattr(at, 'end_col_offset', None) or at.col_offset)
+
+    def _hook_call(self, name: str, id_line: int, at: ast.AST,
+                   kwargs: Optional[Dict[str, ast.expr]] = None) -> ast.Expr:
+        """`name(id_line, **kwargs)` as a statement, located where `at` is."""
+        loc = self._loc(at)
+        keywords = [ast.keyword(arg=k, value=v, **loc) for k, v in (kwargs or {}).items()]
         return ast.Expr(value=ast.Call(
             func=ast.Name(id=name, ctx=ast.Load(), **loc),
-            args=[ast.Constant(value=id_line, **loc)], keywords=[], **loc), **loc)
+            args=[ast.Constant(value=id_line, **loc)], keywords=keywords, **loc), **loc)
 
-    def _wrap_context(self, id_line: int, enter: str, body: List[ast.stmt], at: ast.AST, exit: str = '_snc_ctx_exit') -> List[ast.stmt]:
+    def _wrap_context(self, id_line: int, enter: str, body: List[ast.stmt], at: ast.AST, exit: str = '_snc_ctx_exit',
+                      enter_kwargs: Optional[Dict[str, ast.expr]] = None) -> List[ast.stmt]:
         """`enter(id_line); try: body except BaseException as e:
         _snc_ctx_error(e); raise finally: exit(id_line)` -- the frame is popped
         however the body leaves (fall-through, break, return, or an exception),
         and an exception is told where it came from before that."""
-        loc = dict(lineno=at.lineno, col_offset=at.col_offset,
-                   end_lineno=getattr(at, 'end_lineno', None) or at.lineno,
-                   end_col_offset=getattr(at, 'end_col_offset', None) or at.col_offset)
+        loc = self._loc(at)
         handler = ast.ExceptHandler(
             type=ast.Name(id='BaseException', ctx=ast.Load(), **loc), name='_snc_err',
             body=[
@@ -1213,10 +1360,16 @@ class CodeTransformer(ast.NodeTransformer):
                 ast.Raise(exc=None, cause=None, **loc),
             ], **loc)
         return [
-            self._hook_call(enter, id_line, at),
+            self._hook_call(enter, id_line, at, enter_kwargs),
             ast.Try(body=body, handlers=[handler], orelse=[],
                     finalbody=[self._hook_call(exit, id_line, at)], **loc),
         ]
+
+    def _line_indent(self, line: int) -> str:
+        """The whitespace `line` of the source starts with."""
+        lines = self.source_code.split('\n')
+        text = lines[line - 1] if 1 <= line <= len(lines) else ''
+        return text[:len(text) - len(text.lstrip())]
 
     def _source_segment(self, node: ast.AST) -> str:
         """Get the original source text for an AST node, falling back to ast.unparse."""
@@ -1630,21 +1783,39 @@ class CodeTransformer(ast.NodeTransformer):
 
     def visit_For(self, node: ast.For) -> List[ast.stmt]:
         """Transform for loops to log iteration variables, including tuple
-        unpacking, and to track which iteration is running (see loop_enter)."""
+        unpacking, and to track which iteration is running (see loop_enter).
+
+        The loop's table (see loop_enter) has a column per log site that is
+        either a name the loop binds or an assignment directly in its body --
+        its role, not whether a name appears: a variable the body only reads
+        gets none. It is logged on the loop's last line, at a site of its own
+        taken after the body's, so a loop nested inside takes the one before."""
         if True:
             # Each iteration begins by advancing the loop's frame, before any
             # of its values are logged.
             new_body = [self._hook_call('_snc_loop_iter', node.lineno, node)]
+            columns: List[Tuple[int, int, str]] = []
 
             target_names = self._extract_target_names(node.target)
             for i, var_name in enumerate(target_names):
                 col_offset = node.col_offset + (i * 50)
                 vae = (var_name, var_name)
+                columns.append((node.lineno, self.site_counter.get(node.lineno, 0), var_name))
                 log_call = self._create_log_call('_log_value', node.lineno, var_name, node.lineno, col_offset, var_and_exp=vae)
                 new_body.append(log_call)
 
-            # Add the original body statements (transformed) using helper
-            new_body.extend(self._transform_statement_list(node.body))
+            # Add the original body statements (transformed), noting the log
+            # site of each assignment as a column labeled with its source.
+            for stmt in node.body:
+                is_column = (isinstance(stmt, ast.Assign)
+                             or (isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name)))
+                label = ' '.join(self._source_segment(stmt).split()) if is_column else ''
+                transformed = self.visit(stmt)
+                new_body.extend(transformed if isinstance(transformed, list) else [transformed])
+                if is_column:
+                    # The assignment's own log call is the last site visiting
+                    # it assigned on its line (see visit_Assign).
+                    columns.append((stmt.lineno, self.site_counter[stmt.lineno] - 1, label))
 
             # Transform orelse if present using helper
             new_orelse = self._transform_statement_list(node.orelse)
@@ -1659,7 +1830,13 @@ class CodeTransformer(ast.NodeTransformer):
                 end_lineno=node.end_lineno if hasattr(node, 'end_lineno') else node.lineno,
                 end_col_offset=node.end_col_offset if hasattr(node, 'end_col_offset') else node.col_offset + 10
             )
-            return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node)
+            end_line = node.end_lineno or node.lineno
+            table = (end_line, self._next_site(end_line),
+                     self._line_indent(node.lineno), self._line_indent(node.body[0].lineno),
+                     tuple(columns), tuple(target_names),
+                     tuple(sorted(getattr(node, '_snc_defined', ()))))
+            return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node,
+                                      enter_kwargs={'table': ast.Constant(value=table, **self._loc(node))})
 
     def visit_While(self, node: ast.While) -> List[ast.stmt]:
         """Transform while loops: their bodies, and which iteration is running."""
@@ -2205,6 +2382,7 @@ def split_leading_imports(source_code: str):
         body_code_object: compiled transformed body (with logging).
     """
     tree = ast.parse(source_code)
+    _annotate_for_scopes(tree.body)
     import_stmts, body_stmts = _leading_import_stmts(tree)
 
     # Compile raw imports (no transformation — no logging side effects)
@@ -2408,6 +2586,7 @@ def transform_code_to_ast(source_code: str) -> ast.Module:
     # Transform the AST using our custom transformer
     # This is where the magic happens - assignments, conditionals, and loops
     # get transformed to include logging calls
+    _annotate_for_scopes(tree.body)
     transformer = CodeTransformer(source_code)
 
     # Transform each statement in the module
