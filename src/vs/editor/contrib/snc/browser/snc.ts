@@ -143,6 +143,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	/** Root of a table visualizer; a widget holding one always takes block layout. */
 	private static readonly DATA_STRUCTURE_SELECTOR = '.list-table-scroll';
 	private static readonly MIN_AVAILABLE_WIDTH_PX = 200;
+	/** Space between block-layout widgets stacked under one line. */
+	static readonly BLOCK_STACK_GAP_PX = 4;
 	private readonly editor: ICodeEditor;
 	private readonly domNode: HTMLElement;
 	private position: Position | null = null;
@@ -155,6 +157,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	 * last line but lines up under its header, as the code after it does.
 	 */
 	indentLine: number | null = null;
+	/**
+	 * In block layout, how far below the top of its line's view zone the widget
+	 * starts: the block-layout widgets on one line stack, each under the one
+	 * before it.
+	 */
+	blockOffset = 0;
 	private readonly visIndex: number;
 	private readonly lineNumber: number;
 	private readonly onPointerEvent: (pythonEventStr: string, ev: MouseEvent, overrideRect?: DOMRect) => void;
@@ -417,6 +425,12 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				const targetNode = ev.target as Node | null;
 				const targetEl = targetNode instanceof Element ? targetNode : (targetNode?.parentElement ?? null);
 				if (targetEl && targetEl.closest('[snc-unfocused-clickable]')) {
+					// A box takes the press itself, so the caret lands where
+					// it was clicked; it has no Python event to send.
+					if (targetEl.tagName === 'INPUT' || targetEl.tagName === 'TEXTAREA') {
+						ev.stopPropagation();
+						return;
+					}
 					// A handle that is dragged as well as clicked (the tiny-len
 					// counts on the expand bar) needs the press left alone:
 					// preventDefault cancels the browser's drag before it can
@@ -1970,8 +1984,18 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 		}
 	}
 
+	/**
+	 * Whether `target` is inside a control marked snc-unfocused-clickable,
+	 * which works while its widget is small: a for loop's table is never
+	 * focused, and its column box still has to hear what is typed into it.
+	 */
+	private inUnfocusedControl(target: EventTarget | null): boolean {
+		const el = target instanceof Element ? target : (target instanceof Node ? target.parentElement : null);
+		return !!el?.closest('[snc-unfocused-clickable]');
+	}
+
 	private dispatch_keyboard_event(attr_name: string, ev: KeyboardEvent): void {
-		if (!this.isFocused()) { return; }
+		if (!this.isFocused() && !this.inUnfocusedControl(ev.target)) { return; }
 		if (!ev.target) { return; }
 
 		let node = ev.target as Node;
@@ -2116,7 +2140,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	}
 
 	private dispatch_input_event(attr_name: string, ev: Event): void {
-		if (!this.isFocused()) { return; }
+		if (!this.isFocused() && !this.inUnfocusedControl(ev.target)) { return; }
 		const target = ev.target as HTMLElement;
 		if (!target) { return; }
 
@@ -2250,7 +2274,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 
 			// Align first line of text with 1px border; block layout starts on the next
 			// visual line to render below the code line.
-			pixelPosition.top += this.useBlockLayout ? lineHeight : -1;
+			pixelPosition.top += this.useBlockLayout ? lineHeight + this.blockOffset : -1;
 
 			// 8px of padding for visualizers on the same line
 			pixelPosition.left += this.useBlockLayout ? 0 : 8 + this.leftInset;
@@ -5773,16 +5797,31 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 		const presentLines = new Set<number>(Array.from(groupedByLine.keys()));
 		const lineHeight = this.editor.getOption(EditorOption.lineHeight);
-		const getViewZoneHeightInPx = (widgets: VisualizationWidget[]): number => {
+		// Lays out a line's widgets and returns the view zone they need under it.
+		// The block-layout ones stack, in site order, rather than all taking the
+		// spot under the line: an uncaught error and the table of the loop it
+		// stopped share the loop's last line, and would sit on top of each other.
+		const stackLineWidgets = (widgets: VisualizationWidget[]): number => {
 			if (widgets.length === 0) {
 				return 0;
 			}
 
-			const maxHeight = Math.max(...widgets.map(w => w.getDomNode().getBoundingClientRect().height));
-			const usesBlockLayout = widgets.some(w => w.usesBlockLayout());
+			const heights = widgets.map(w => w.getDomNode().getBoundingClientRect().height);
+			const maxHeight = Math.max(...heights);
+			let stackHeight = 0;
+			for (let i = 0; i < widgets.length; i++) {
+				if (!widgets[i].usesBlockLayout()) {
+					continue;
+				}
+				if (stackHeight > 0) {
+					stackHeight += VisualizationWidget.BLOCK_STACK_GAP_PX;
+				}
+				widgets[i].blockOffset = stackHeight;
+				stackHeight += heights[i];
+			}
 
-			if (usesBlockLayout) {
-				return Math.max(Math.ceil(maxHeight) + 10, lineHeight);
+			if (stackHeight > 0) {
+				return Math.max(Math.ceil(Math.max(stackHeight, maxHeight)) + 10, lineHeight);
 			}
 
 			if (maxHeight > 22) {
@@ -5886,7 +5925,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 						widgetsToReposition.push(...existing);
 
 						// Adjust view zone height if needed
-						const viewZoneHeightInPx = getViewZoneHeightInPx(existing);
+						const viewZoneHeightInPx = stackLineWidgets(existing);
 						const existingZoneId = this.viewZones.get(lineNumber);
 						if (viewZoneHeightInPx > 0) {
 							// A zone's height can only be changed by replacing it, and that
@@ -5958,7 +5997,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 						widgetsToReposition.push(...widgets);
 					}
 
-					const viewZoneHeightInPx = getViewZoneHeightInPx(widgets);
+					const viewZoneHeightInPx = stackLineWidgets(widgets);
 					if (viewZoneHeightInPx > 0) {
 						const viewZone: IViewZone = {
 							afterLineNumber: lineNumber,
@@ -6330,12 +6369,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 				editOperations.push(blankLineEdit);
 			}
 
-			// After inserting, capture (a) the inverse range of the main inserted
-			// line so we can link it for live updates, and (b) a rename selection
-			// if a new variable name was introduced.
+			// After inserting, capture the inverse range of the main inserted
+			// line so we can link it for live updates.
 			let mainInverseRange: Range | null = null;
-			const newSelections = studyLog.withEditOrigin('NewCode', () => model.pushEditOperations([], editOperations, (inverseEdits) => {
-				let renameSel: Selection | null = null;
+			studyLog.withEditOrigin('NewCode', () => model.pushEditOperations([], editOperations, (inverseEdits) => {
 				for (let i = 0; i < sortedEdits.length; i++) {
 					const edit = sortedEdits[i];
 					const inv = inverseEdits[i];
@@ -6349,11 +6386,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 					if (isMainNewCodeEdit(edit, command.triggerLine)) {
 						mainInverseRange = inv.range;
 					}
-					if (!renameSel) {
-						renameSel = computeRenameSelectionForEdit(edit.text, edit.afterLine === 0, inv.range);
-					}
 				}
-				return renameSel ? [renameSel] : null;
+				return null;
 			}));
 
 			// Link the freshly inserted line so subsequent visualizer interactions
@@ -6391,10 +6425,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 				// stays focused/expanded and the user can keep interacting.
 				const triggerCol = model.getLineMaxColumn(actualTriggerLine);
 				this.editor.setPosition({ lineNumber: actualTriggerLine, column: triggerCol });
-			} else if (newSelections && newSelections.length > 0) {
-				this.editor.setSelection(newSelections[0]);
-				this.editor.focus();
 			}
+			// Edits that are only incidental (InsertLines, AddImports) leave
+			// the cursor where it is. Selecting the name a new line binds, for
+			// renaming, moved it there -- into the loop, for a line a loop's
+			// table adds, which put the table away.
 
 			// Restore the scroll offset so the anchored line stays visually put.
 			// Lines inserted strictly above the anchor (e.g. an auto-added
@@ -6415,6 +6450,8 @@ export class SNCController extends Disposable implements IEditorContribution {
 			);
 		} else if (command.type === 'ChangeSourceExpr') {
 			this.handleChangeSourceExpr(command);
+		} else if (command.type === 'ReplaceLines') {
+			this.handleReplaceLines(command);
 		} else if (command.type === 'SetConfigComment') {
 			this.handleSetConfigComment(command);
 		} else if (command.type === 'CopyToClipboard') {
@@ -6896,6 +6933,48 @@ export class SNCController extends Disposable implements IEditorContribution {
 	}
 
 	/**
+	 * Rewrite whole lines, or remove them: a for loop's table editing or
+	 * deleting the statement one of its columns is. The cursor is left where
+	 * it is -- moved into the loop, it would put the table away -- and so is
+	 * the view: lines removed above it would otherwise pull it up.
+	 */
+	private handleReplaceLines(command: Extract<SNCCommand, { type: 'ReplaceLines' }>): void {
+		const model = this.editor.getModel();
+		if (!model) {
+			return;
+		}
+		const lineCount = model.getLineCount();
+		if (command.first < 1 || command.last < command.first || command.last > lineCount) {
+			// The file has moved on since the lines were reported.
+			return;
+		}
+		let range: Range;
+		if (command.text !== null) {
+			range = new Range(command.first, 1, command.last, model.getLineMaxColumn(command.last));
+		} else if (command.last < lineCount) {
+			range = new Range(command.first, 1, command.last + 1, 1);
+		} else if (command.first > 1) {
+			range = new Range(command.first - 1, model.getLineMaxColumn(command.first - 1), command.last, model.getLineMaxColumn(command.last));
+		} else {
+			range = new Range(command.first, 1, command.last, model.getLineMaxColumn(command.last));
+		}
+		const text = command.text ?? '';
+		if (model.getValueInRange(range) === text) {
+			return;
+		}
+
+		const firstVisibleLine = this.editor.getVisibleRanges()[0]?.startLineNumber;
+		const anchorDelta = firstVisibleLine !== undefined
+			? this.editor.getScrollTop() - this.editor.getTopForLineNumber(firstVisibleLine)
+			: 0;
+		studyLog.withEditOrigin('ReplaceLines', () => model.pushEditOperations([], [{ range, text }], () => null));
+		if (firstVisibleLine !== undefined && command.last < firstVisibleLine) {
+			const linesAdded = (command.text === null ? 0 : command.text.split('\n').length) - (command.last - command.first + 1);
+			this.editor.setScrollTop(this.editor.getTopForLineNumber(firstVisibleLine + linesAdded) + anchorDelta, ScrollType.Immediate);
+		}
+	}
+
+	/**
 	 * Rewrite (or write, or remove) the trailing `#%click` comment on the
 	 * visualizer's line. Replacing in place rather than appending makes a
 	 * repeated command -- an event replayed across two runs -- harmless.
@@ -7355,10 +7434,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * collapsed loop hides its body -- the lines inside it, and anything run
 	 * under one of its iterations, such as a function it calls -- and shows its
 	 * table; every other table stays hidden, its loop's body showing instead.
+	 * The error that ended the run is the exception: it stays under its line,
+	 * body or not, alongside the table.
 	 */
 	private isShownWith(item: IVisualizationItem, collapsedLoops: readonly [number, number][]): boolean {
 		if (item.forLoopLine !== undefined) {
 			return collapsedLoops.some(([start, end]) => start === item.forLoopLine && end === item.line);
+		}
+		if (item.uncaughtError) {
+			return true;
 		}
 		return !collapsedLoops.some(([start, end]) =>
 			(item.line >= start && item.line <= end) || item.path.some(([header]) => header === start));

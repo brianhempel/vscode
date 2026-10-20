@@ -1140,7 +1140,8 @@ class UncaughtError:
 
 @dataclass(frozen=True)
 class ForLoopTable:
-    """What a `for` loop did, logged on its last line once it has finished.
+    """What a `for` loop did, logged on its last line once it has finished
+    (and, with no rows yet, as it starts).
 
     A row per iteration and a column per value the loop computes: each name it
     binds, and each assignment directly in its body, labeled with its source.
@@ -1163,6 +1164,13 @@ class ForLoopTable:
     defined: FrozenSet[str] = frozenset()
     # Iterations that ran but have no row: past MAX_FOR_TABLE_ROWS in the runner.
     hidden_rows: int = 0
+    # Per column, the (first, last) lines of the statement it is, or None for a
+    # name the loop binds: what editing or deleting the column rewrites.
+    spans: Tuple[Optional[Tuple[int, int]], ...] = ()
+    # The first and last lines of the body -- not of an `else:` after it.
+    body_lines: Tuple[int, int] = (0, 0)
+    # Logged as the loop starts, before any row: the loop is still running.
+    running: bool = False
 
 
 def error_text(exception: BaseException) -> str:
@@ -1231,6 +1239,19 @@ class InsertLines:
     them is linked to the visualizer, which has nothing to rewrite them with.
     """
     lines: Tuple[Tuple[int, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaceLines:
+    """Asks the editor to rewrite whole lines of code away from the
+    visualizer's own: lines `first` through `last` (1-indexed, inclusive)
+    become `text`, already indented, or go altogether when it is None. A loop's
+    table edits and deletes the statements its columns are this way. Like
+    InsertLines, nothing it writes is linked, and the cursor stays put.
+    """
+    first: int
+    last: int
+    text: Optional[str]
 
 
 @dataclass(frozen=True, slots=True)

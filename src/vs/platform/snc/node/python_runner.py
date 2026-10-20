@@ -775,6 +775,10 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     # cursor is outside it, so it has to know which loop the table is for.
     if isinstance(value, ForLoopTable):
         item["forLoopLine"] = value.line
+    # ...and it keeps the error that ended the run showing under the line that
+    # raised it, even inside a loop shown as its table.
+    if isinstance(value, UncaughtError):
+        item["uncaughtError"] = True
 
     # Stream this item immediately to stdout (bypassing redirected stdout)
     _emit({"type": "item", "item": item})
@@ -832,27 +836,39 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
 
     A `for` also passes the static half of its ForLoopTable (see
     CodeTransformer.visit_For): `(end_line, site, indent, body_indent,
-    columns, targets, defined)`, where `columns` is the (line, site, label) of
-    each log site whose value is a column. Rows are recorded only for a loop
+    columns, targets, defined, body_lines)`, where `columns` is the (line,
+    site, label, span) of each log site whose value is a column -- `span` the
+    lines of its statement, None for a name the loop binds -- and
+    `body_lines` the body's first and last. Rows are recorded only for a loop
     running under a path the editor is looking at; one it isn't is never
-    shown, so its table isn't either."""
+    shown, so its table isn't either.
+
+    The table is logged here once already, with no rows, so a loop that never
+    gets to its end -- a run killed partway through it, a body stuck waiting
+    on input -- still has a table to be fixed from. It goes out before the
+    frame is pushed: under the path the one logged at the end (see ctx_exit)
+    goes out under, which then replaces it. An event on the table is answered
+    by this one; the one at the end carries its model forward."""
     prev = _ctx_counts.get(_count_key(id_line), {}).get(id_line, 0)
     frame = [id_line, prev - 1]
-    _ctx_stack.append(frame)
     if table is not None and _path_selected(_current_path()):
-        end_line, site, indent, body_indent, columns, targets, defined = table
+        end_line, site, indent, body_indent, columns, targets, defined, body_lines = table
         _for_tables[id(frame)] = {
             "frame": frame,
             "first": prev,
             "end_line": end_line,
             "site": site,
-            "columns": {(line, col_site): i for i, (line, col_site, _) in enumerate(columns)},
+            "columns": {(line, col_site): i for i, (line, col_site, _, _) in enumerate(columns)},
             "rows": {},
             "table": ForLoopTable(
                 line=id_line, end_line=end_line, indent=indent, body_indent=body_indent,
-                columns=tuple(label for _, _, label in columns), rows=(),
-                targets=tuple(targets), defined=frozenset(defined)),
+                columns=tuple(label for _, _, label, _ in columns), rows=(),
+                targets=tuple(targets), defined=frozenset(defined),
+                spans=tuple(span for _, _, _, span in columns), body_lines=body_lines,
+                running=True),
         }
+        log_value(end_line, _for_tables[id(frame)]["table"], site)
+    _ctx_stack.append(frame)
 
 
 def _record_for_table_cell(line: int, site: int, value: Any) -> None:
@@ -887,7 +903,8 @@ def _log_for_table(frame: List[int], table: Dict[str, Any]) -> None:
     value = dataclasses.replace(
         table["table"],
         rows=tuple(tuple(table["rows"][i]) if i in table["rows"] else empty for i in range(shown)),
-        hidden_rows=ran - shown)
+        hidden_rows=ran - shown,
+        running=False)
     log_value(table["end_line"], value, table["site"])
 
 
@@ -1800,7 +1817,7 @@ class CodeTransformer(ast.NodeTransformer):
             for i, var_name in enumerate(target_names):
                 col_offset = node.col_offset + (i * 50)
                 vae = (var_name, var_name)
-                columns.append((node.lineno, self.site_counter.get(node.lineno, 0), var_name))
+                columns.append((node.lineno, self.site_counter.get(node.lineno, 0), var_name, None))
                 log_call = self._create_log_call('_log_value', node.lineno, var_name, node.lineno, col_offset, var_and_exp=vae)
                 new_body.append(log_call)
 
@@ -1815,7 +1832,8 @@ class CodeTransformer(ast.NodeTransformer):
                 if is_column:
                     # The assignment's own log call is the last site visiting
                     # it assigned on its line (see visit_Assign).
-                    columns.append((stmt.lineno, self.site_counter[stmt.lineno] - 1, label))
+                    columns.append((stmt.lineno, self.site_counter[stmt.lineno] - 1, label,
+                                    (stmt.lineno, stmt.end_lineno or stmt.lineno)))
 
             # Transform orelse if present using helper
             new_orelse = self._transform_statement_list(node.orelse)
@@ -1834,7 +1852,8 @@ class CodeTransformer(ast.NodeTransformer):
             table = (end_line, self._next_site(end_line),
                      self._line_indent(node.lineno), self._line_indent(node.body[0].lineno),
                      tuple(columns), tuple(target_names),
-                     tuple(sorted(getattr(node, '_snc_defined', ()))))
+                     tuple(sorted(getattr(node, '_snc_defined', ()))),
+                     (node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno))
             return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node,
                                       enter_kwargs={'table': ast.Constant(value=table, **self._loc(node))})
 

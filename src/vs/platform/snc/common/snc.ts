@@ -42,11 +42,17 @@ export interface IVisualizationItem {
 	 */
 	path: LoopPath;
 	/**
-	 * Set on the table a `for` loop logs on its last line once it ends: the
-	 * loop's header line. While the cursor is outside the loop, the table is
+	 * Set on the table a `for` loop logs on its last line -- empty as it
+	 * starts, filled in once it ends: the loop's header line. While the cursor is outside the loop, the table is
 	 * shown in place of the loop's body; while it is inside, the body is.
 	 */
 	forLoopLine?: number;
+	/**
+	 * Set on the error that ended the run. It stays under the line that raised
+	 * it even while that line's loop shows as its table: the table says where
+	 * the loop got to, this says why it stopped there.
+	 */
+	uncaughtError?: boolean;
 }
 
 export type LoopPath = [number, number][];
@@ -208,7 +214,12 @@ export type SNCCommand =
 		end_col: number;
 		triggerLine: number;
 		triggerVisIndex: number;
-	};
+	}
+	// Rewrite whole lines `first` through `last` (1-indexed, inclusive) as
+	// `text`, already indented, or remove them when it is null -- how a for
+	// loop's table edits and deletes the statements its columns are. Nothing
+	// is linked and the cursor stays where it is.
+	| { type: 'ReplaceLines'; first: number; last: number; text: string | null; triggerLine: number; triggerVisIndex: number };
 
 /**
  * Timing data for visualizer performance measurement.

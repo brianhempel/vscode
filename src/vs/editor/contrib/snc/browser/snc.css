@@ -2681,6 +2681,32 @@
 	padding: 4px 3px;
 }
 
+/* A for loop's statement column: double-click the label to edit the line, the
+   x beside it (shown while the header is hovered) deletes it. */
+.for-loop-visualizer th.for-loop-col {
+	white-space: nowrap;
+}
+
+.for-loop-visualizer .for-loop-col-label {
+	cursor: text;
+}
+
+.for-loop-visualizer .for-loop-col-delete {
+	visibility: hidden;
+	margin-left: 4px;
+	color: var(--snc-text-muted);
+	cursor: pointer;
+	user-select: none;
+}
+
+.for-loop-visualizer th.for-loop-col:hover .for-loop-col-delete {
+	visibility: visible;
+}
+
+.for-loop-visualizer .for-loop-col-delete:hover {
+	color: var(--vscode-errorForeground);
+}
+
 /* "12 more iterations" under a for loop's table: what didn't get a row. */
 .for-loop-visualizer > .for-loop-note {
 	color: var(--snc-text-muted);

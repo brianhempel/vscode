@@ -7,6 +7,7 @@ Run:
 
 import __future__
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import json
@@ -2091,8 +2092,9 @@ class TestPoolWorkerCheckpoint3(unittest.TestCase):
         proc = self._worker()
         warm = self._warm(proc, code, (2, 0), loop_selections={'1': 2})
         self.assertTrue(self._paused(warm))
-        # Six logged values: the loop variable and x, three times over.
-        self.assertEqual(warm[-1]['step'], 6)
+        # Seven logged values: the loop's empty table, then the loop variable
+        # and x, three times over.
+        self.assertEqual(warm[-1]['step'], 7)
 
     def test_a_widget_hit_before_and_after_the_pause_reports_the_later_step(self):
         # The editor keeps the last emission's step, so this widget lands on
@@ -2359,6 +2361,9 @@ class TestLoopIterations(unittest.TestCase):
 class TestForLoopTable(unittest.TestCase):
     """A `for` loop logs, once it ends, a ForLoopTable on its last line: what
     each iteration did, for for_loop_visualizer to draw in place of the body.
+    It logs one with no rows there before it starts, too, so a loop that never
+    gets to the end -- a run killed partway, an endless body -- still has its
+    table to fix it from.
 
     Columns are the names the loop binds and the assignments directly in its
     body, the latter labeled with their source; a variable only read gets
@@ -2407,7 +2412,8 @@ class TestForLoopTable(unittest.TestCase):
     def test_the_table_is_an_item_on_the_loops_last_line(self):
         msgs, _ = self._run(self.SRC)
         # Line 6's own site is the assignment's; the table takes the next.
-        self.assertEqual(self._table_items(msgs), [(6, 1, [], 5)])
+        # Once before the loop, once after.
+        self.assertEqual(self._table_items(msgs), [(6, 1, [], 5)] * 2)
         items = [m['item'] for m in msgs.all() if m.get('type') == 'item']
         self.assertEqual([(it['line'], it['path']) for it in items][-2:], [(6, []), (8, [])])
         self.assertIn('for-loop-visualizer', items[-2]['html'])
@@ -2415,17 +2421,68 @@ class TestForLoopTable(unittest.TestCase):
     def test_the_example_records_a_row_per_iteration(self):
         from visualizer_utils import ForLoopTable
         _, tables = self._run(self.SRC)
-        self.assertEqual(tables, [ForLoopTable(
+        before = ForLoopTable(
             line=5, end_line=6, indent='', body_indent='    ',
             columns=('element', 'count += 1'),
-            rows=(('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')),
+            rows=(),
             targets=('element',),
             defined=frozenset({'array_of_integers', 'count', 'element'}),
-        )])
+            spans=(None, (6, 6)),
+            body_lines=(6, 6),
+            running=True,
+        )
+        self.assertEqual(tables, [before, dataclasses.replace(
+            before, rows=(('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')), running=False)])
+
+    def test_a_column_knows_the_lines_its_statement_spans_and_the_body_stops_before_the_else(self):
+        """What the table edits a column's statement through, and where it
+        writes a new one: a name the loop binds has no statement of its own,
+        and the `else:` is not the body."""
+        src = (
+            "for i in range(1):\n"
+            "    for j in range(1):\n"
+            "        x = (\n"
+            "            i + j\n"
+            "        )\n"
+            "else:\n"
+            "    x = 5\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([(t.line, t.spans, t.body_lines) for t in tables[-2:]],
+                         [(2, (None, (3, 5)), (3, 5)), (1, (None,), (2, 5))])
+
+    def test_the_empty_table_is_logged_before_the_body_runs(self):
+        """Ahead of everything the body logs, so a run killed partway through
+        the loop -- an endless body, one waiting on input -- has shown it."""
+        msgs, _ = self._run(self.SRC)
+        items = [m['item'] for m in msgs.all() if m.get('type') == 'item']
+        self.assertEqual([(it['line'], it['path'], 'forLoopLine' in it) for it in items], [
+            (1, [], False), (3, [], False),
+            (6, [], True),
+            (5, [[5, 0]], False), (6, [[5, 0]], False),
+            (5, [[5, 1]], False), (6, [[5, 1]], False),
+            (5, [[5, 2]], False), (6, [[5, 2]], False),
+            (5, [[5, 3]], False), (6, [[5, 3]], False),
+            (5, [[5, 4]], False), (6, [[5, 4]], False),
+            (6, [], True), (8, [], False),
+        ])
+
+    def test_an_event_on_the_table_is_answered_once_before_the_loop_runs(self):
+        from visualizer_utils import ForLoopTable
+        model = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                 '_source_expr_sig': None, 'adding_column': True, 'column_input': 'doubled = element * 2'}
+        m_and_e = json.dumps([{'line': 6, 'visIndex': 1, 'model': model, 'events': [
+            {'id': 1, 'pythonEventStr': 'ColumnKeyDown()', 'eventJSON': {'key': 'Enter'}}]}])
+        import_code, body_code = split_leading_imports(self.SRC)
+        with capture_stream_messages() as msgs:
+            python_runner._execute_run(body_code, m_and_e, 'run-1', import_code=import_code)
+        tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        self.assertEqual([(t['handledEventIds'], len(t.get('commands', []))) for t in tables],
+                         [([1], 1), ([], 0)])
 
     def test_the_rows_ignore_the_pinned_iteration(self):
         msgs, tables = self._run(self.SRC, {'5': 2})
-        self.assertEqual(tables[0].rows, (('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')))
+        self.assertEqual(tables[-1].rows, (('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')))
         # The inline items are still only the pinned iteration's.
         inline = [(m['item']['line'], m['item']['path']) for m in msgs.all()
                   if m.get('type') == 'item' and m['item']['path']]
@@ -2439,8 +2496,8 @@ class TestForLoopTable(unittest.TestCase):
             "    doubled = total * 2\n"
         )
         _, tables = self._run(src)
-        self.assertEqual(tables[0].columns, ('n', 'total += n', 'doubled = total * 2'))
-        self.assertEqual(tables[0].rows, (('10', '10', '20'), ('20', '30', '60'), ('30', '60', '120')))
+        self.assertEqual(tables[-1].columns, ('n', 'total += n', 'doubled = total * 2'))
+        self.assertEqual(tables[-1].rows, (('10', '10', '20'), ('20', '30', '60'), ('30', '60', '120')))
 
     def test_recording_does_not_run_user_code_again(self):
         src = (
@@ -2451,14 +2508,14 @@ class TestForLoopTable(unittest.TestCase):
         )
         msgs, tables = self._run(src)
         self.assertEqual(msgs.text_of('stdout'), '1\n2\n3\n')
-        self.assertEqual(tables[0].rows, (('1', '1'), ('2', '2'), ('3', '3')))
+        self.assertEqual(tables[-1].rows, (('1', '1'), ('2', '2'), ('3', '3')))
 
     def test_rerunning_starts_the_rows_afresh(self):
         self._run(self.SRC)
         src = self.SRC.replace('[1, 2, 3, 4, 5]', '[7, 8]').replace(
             '    count += 1', '    count += 1\n    count += 2')
         _, tables = self._run(src, {'5': 1})
-        self.assertEqual([t.rows for t in tables], [(('7', '1', '3'), ('8', '4', '6'))])
+        self.assertEqual([t.rows for t in tables], [(), (('7', '1', '3'), ('8', '4', '6'))])
 
     def test_an_iteration_cut_short_leaves_its_later_cells_empty(self):
         src = (
@@ -2469,12 +2526,21 @@ class TestForLoopTable(unittest.TestCase):
             "    b = i\n"
         )
         _, tables = self._run(src)
-        self.assertEqual(tables[0].rows, (('1', '1', '1'), ('2', '2', None)))
+        self.assertEqual(tables[-1].rows, (('1', '1', '1'), ('2', '2', None)))
 
     def test_a_loop_that_raises_still_logs_what_it_did(self):
         msgs, tables = self._run("for i in [1, 2]:\n    x = 10 // (2 - i)\n")
-        self.assertEqual(tables[0].rows, (('1', '10'), ('2', None)))
-        self.assertEqual([line for line, *_ in self._table_items(msgs)], [2])
+        self.assertEqual(tables[-1].rows, (('1', '10'), ('2', None)))
+        self.assertEqual([line for line, *_ in self._table_items(msgs)], [2, 2])
+
+    def test_the_error_that_ended_the_loop_is_marked_as_one(self):
+        """The editor keeps the error under the line that raised it while the
+        loop shows as its table, so it has to tell that item from the body's
+        values -- and from a table cell, which draws a raise the same way."""
+        msgs, _ = self._run("for i in [1, 2]:\n    x = 10 // (2 - i)\n")
+        items = [m['item'] for m in msgs.all() if m.get('type') == 'item']
+        self.assertEqual([(it['line'], it['path']) for it in items if it.get('uncaughtError')],
+                         [(2, [[1, 1]])])
 
     def test_the_last_line_includes_a_multiline_body_and_the_else(self):
         src = (
@@ -2487,7 +2553,7 @@ class TestForLoopTable(unittest.TestCase):
             "    x = 5\n"
         )
         _, tables = self._run(src)
-        self.assertEqual([(t.line, t.end_line) for t in tables], [(2, 5), (1, 7)])
+        self.assertEqual([(t.line, t.end_line) for t in tables], [(1, 7), (2, 5), (2, 5), (1, 7)])
 
     def test_a_nested_loop_logs_under_the_outer_iteration_it_ran_in(self):
         src = (
@@ -2496,12 +2562,15 @@ class TestForLoopTable(unittest.TestCase):
             "        y = i * j\n"
         )
         msgs, tables = self._run(src)
-        self.assertEqual(self._table_items(msgs), [(3, 1, [[1, 0]], 2), (3, 1, [[1, 1]], 2), (3, 2, [], 1)])
-        self.assertEqual(tables[1].rows, (('0', '0'), ('1', '1'), ('2', '2')))
+        self.assertEqual(self._table_items(msgs), [(3, 2, [], 1),
+                                                   (3, 1, [[1, 0]], 2), (3, 1, [[1, 0]], 2),
+                                                   (3, 1, [[1, 1]], 2), (3, 1, [[1, 1]], 2),
+                                                   (3, 2, [], 1)])
+        self.assertEqual(tables[4].rows, (('0', '0'), ('1', '1'), ('2', '2')))
         # The outer loop's columns are its own: `y` is not directly in its body.
-        self.assertEqual(tables[2].columns, ('i',))
+        self.assertEqual(tables[-1].columns, ('i',))
         msgs, tables = self._run(src, {'1': 1})
-        self.assertEqual(self._table_items(msgs), [(3, 1, [[1, 1]], 2), (3, 2, [], 1)])
+        self.assertEqual(self._table_items(msgs), [(3, 2, [], 1), (3, 1, [[1, 1]], 2), (3, 1, [[1, 1]], 2), (3, 2, [], 1)])
 
     def test_a_loop_inside_a_function_knows_its_locals_and_indentation(self):
         src = (
@@ -2513,14 +2582,14 @@ class TestForLoopTable(unittest.TestCase):
             "f([7, 8])\n"
         )
         _, tables = self._run(src)
-        t = tables[0]
+        t = tables[-1]
         self.assertEqual((t.line, t.end_line, t.indent, t.body_indent), (3, 4, '    ', '        '))
         self.assertEqual(t.rows, (('7', '1'), ('8', '2')))
         self.assertEqual(t.defined, frozenset({'xs', 'count', 'x'}))
 
     def test_a_long_loop_says_how_many_rows_it_left_out(self):
         _, tables = self._run(f"for i in range({python_runner.MAX_FOR_TABLE_ROWS + 3}):\n    pass\n")
-        self.assertEqual((len(tables[0].rows), tables[0].hidden_rows), (python_runner.MAX_FOR_TABLE_ROWS, 3))
+        self.assertEqual((len(tables[-1].rows), tables[-1].hidden_rows), (python_runner.MAX_FOR_TABLE_ROWS, 3))
 
     def test_insert_lines_goes_out_as_unlinked_new_code(self):
         from visualizer_utils import InsertLines
