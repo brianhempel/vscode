@@ -19,10 +19,12 @@ import unittest
 
 import visualizer_utils
 from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, CollectClick, ColumnClick,
-                                 ColumnHideAll, ColumnInput, ColumnInputBlur, ColumnKeyDown, ColumnResize,
-                                 ColumnShowAll, ColumnToggle, DeleteColumnClick, InitCellClick, LoadMoreRows,
-                                 can_visualize, init_model, update, visualize)
-from visualizer_utils import ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
+                                 ColumnHideAll, ColumnInput, ColumnInputBlur, ColumnKeyDown, ColumnMenuDismiss,
+                                 ColumnMenuToggle, ColumnResize, ColumnShowAll, ColumnToggle, ComputeCodeClick,
+                                 ComputeFreeInput, ComputeToggle, ConvertColumnClick, ConvertToggle,
+                                 DeleteColumnClick, GroupByClick, InitCellClick, InsertColumnClick, LoadMoreRows,
+                                 SubmenuDwell, SubmenuToggle, can_visualize, init_model, update, visualize)
+from visualizer_utils import AddImports, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
 
 def bound(name):
@@ -53,6 +55,7 @@ def table(**overrides):
         line=2, end_line=3, indent='', body_indent='    ',
         columns=(bound('element'), COUNT),
         rows=(('1', '1'), ('2', '2')),
+        values=((1, 1), (2, 2)),
         targets=('element',),
         defined=frozenset({'count', 'element'}),
         body_lines=(3, 3),
@@ -69,7 +72,8 @@ def plain(**overrides):
         2      twice = element * 2
     """
     fields = dict(line=1, end_line=2, columns=(bound('element'), statement('twice = element * 2', 2, 'twice')),
-                  rows=(('1', '2'), ('2', '4')), defined=frozenset({'element', 'twice'}), body_lines=(2, 2),
+                  rows=(('1', '2'), ('2', '4')), values=((1, 2), (2, 4)),
+                  defined=frozenset({'element', 'twice'}), body_lines=(2, 2),
                   init=(None, None))
     fields.update(overrides)
     return table(**fields)
@@ -100,24 +104,51 @@ def typed(text):
 def adding(text):
     """The model while the box adding a column is open holding `text`."""
     return {'adding_column': True, 'editing_column': None, 'editing_init': None,
-            'collecting_column': None, 'column_input': text}
+            'collecting_column': None, 'grouping_column': None, 'column_input': text}
 
 
 def editing(col, text):
     """The model while column `col`'s box is open holding `text`."""
     return {'adding_column': False, 'editing_column': col, 'editing_init': None,
-            'collecting_column': None, 'column_input': text}
+            'collecting_column': None, 'grouping_column': None, 'column_input': text}
 
 
 def header_cells(html_text):
-    """Each <th> of the header row."""
+    """Each <th> of the header row, an open menu and all."""
     return re.findall(r'<th[^>]*>.*?</th>', re.search(r'<thead.*?</thead>', html_text).group(0))
 
 
+def col_menu_of(html_text):
+    """The open column menu's panel, submenus and all, or None while shut."""
+    found = re.search(r'<div class="snc-dropdown-panel flyout col-menu-panel[^"]*".*?</div><!--/col-menu-->', html_text, re.S)
+    return found.group(0) if found else None
+
+
+def menu_options(html_text):
+    """The rows of the open column menu, as (text, selectable)."""
+    menu = col_menu_of(html_text)
+    return [(text_of(label), 'unselectable' not in cls)
+            for cls, label in re.findall(
+                r'<div class="snc-dropdown-option([^"]*)"[^>]*><span class="snc-dropdown-option-label[^"]*"[^>]*>'
+                r'(.*?)</span>', menu)]
+
+
+def submenu_rows(html_text):
+    """The rows of the open submenu, as (text, checked, selectable)."""
+    panel = re.search(r'<div class="snc-dropdown-panel flyout col-compute-panel[^"]*".*?</div><!--/submenu-->',
+                      col_menu_of(html_text), re.S).group(0)
+    rows = []
+    for cls, body in re.findall(r'<div class="col-compute-row([^"]*)"[^>]*>(.*?)</div>', panel, re.S):
+        if 'col-compute-row-aside' in cls:
+            continue
+        name = re.search(r'<span class="col-compute-name">(.*?)</span>', body)
+        rows.append((text_of(name.group(1)) if name else '', ' checked' in cls, 'unselectable' not in cls))
+    return rows
+
+
 def header_labels(html_text):
-    """The text of each header, without its menu or its x."""
-    return [text_of(re.sub(r'<span class="snc-dropdown-trigger for-loop-col-menu".*?</div></div></span>'
-                           r'|<span class="for-loop-col-delete".*?</span>', '', c))
+    """The text of each header, without its ▾."""
+    return [text_of(re.sub(r'<span class="snc-dropdown-trigger col-menu-trigger">.*', '', c))
             for c in header_cells(html_text)]
 
 
@@ -135,14 +166,14 @@ def text_of(html_text):
 def init_editing(col, text):
     """The model while column `col`'s starting value box is open holding `text`."""
     return {'adding_column': False, 'editing_column': None, 'editing_init': col,
-            'collecting_column': None, 'column_input': text}
+            'collecting_column': None, 'grouping_column': None, 'column_input': text}
 
 
 def collecting(col, text):
     """The model while the box naming the list column `col` is collected into
     is open holding `text`."""
     return {'adding_column': False, 'editing_column': None, 'editing_init': None,
-            'collecting_column': col, 'column_input': text}
+            'collecting_column': col, 'grouping_column': None, 'column_input': text}
 
 
 class TestCanVisualize(unittest.TestCase):
@@ -420,7 +451,7 @@ class TestAddMenu(unittest.TestCase):
         t = plain(columns=(bound('element'), statement('twice = element * 2', 2, 'twice'),
                            statement('print(twice)', 3)), rows=(('1', '2', 'None'),), init=(None, None, None))
         out = visualize(t, {'hidden_columns': ['twice = element * 2']})
-        self.assertIn(repr(DeleteColumnClick(col=2, label='print(twice)')), events_in(out))
+        self.assertIn(repr(ColumnClick(col=2, label='print(twice)')), events_in(out))
 
     def test_no_menu_when_visualizers_are_live_only(self):
         visualizer_utils.set_live_only(True)
@@ -499,6 +530,261 @@ class TestChrome(unittest.TestCase):
                 self.assertEqual(update(msg, None, {}, table()), ({}, []))
 
 
+def grouping(col, text):
+    """The model while the box naming the dict column `col` groups by is open
+    holding `text`."""
+    return {'adding_column': False, 'editing_column': None, 'editing_init': None,
+            'collecting_column': None, 'grouping_column': col, 'column_input': text}
+
+
+def two_lines():
+    """A loop with two statements of its own:
+
+        1  total = 0
+        2  for element in [1, 2]:
+        3      twice = element * 2
+        4      total += twice
+    """
+    return table(line=2, end_line=4, columns=(bound('element'), statement('twice = element * 2', 3, 'twice'),
+                                              statement('total += twice', 4, 'total', accumulator=True,
+                                                        init_span=(1, 1))),
+                 rows=(('1', '2', '2'), ('2', '4', '6')), values=((1, 2, 2), (2, 4, 6)),
+                 defined=frozenset({'element', 'twice', 'total'}), body_lines=(3, 4), init=(None, None, '0'))
+
+
+class TestColumnMenu(unittest.TestCase):
+    """A column's ▾ opens the menu a table's does -- Remove, Insert Left and
+    Right, Group By, Change Type, Compute -- with Collect into List among them.
+    A press opens it, as a table's does, and a click anywhere else puts it
+    away."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_toggle_opens_one_columns_menu_and_puts_the_plus_menu_away(self):
+        model, cmds = update(click(ColumnMenuToggle(label='count += 1')), None, {'add_menu_open': True}, table())
+        self.assertEqual((model, cmds), ({'add_menu_open': False, 'col_menu': 'count += 1', 'submenu': None}, []))
+        model, _ = update(click(ColumnMenuToggle(label='count += 1')), None, model, table())
+        self.assertIsNone(model['col_menu'])
+        model, _ = update(click(ColumnMenuToggle(label='element')), None, {'col_menu': 'count += 1'}, table())
+        self.assertEqual(model['col_menu'], 'element')
+
+    def test_a_click_anywhere_else_puts_it_away(self):
+        out = visualize(table(), {'col_menu': 'count += 1'})
+        self.assertIn(f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}"', col_menu_of(out))
+        model, _ = update({'pythonEventStr': repr(ColumnMenuDismiss()), 'eventJSON': {}}, None,
+                          {'col_menu': 'count += 1', 'submenu': 'compute'}, table())
+        self.assertEqual((model['col_menu'], model['submenu']), (None, None))
+
+    def test_shut_until_its_toggle_is_pressed_and_the_toggle_lights_while_open(self):
+        self.assertIsNone(col_menu_of(visualize(table(), {})))
+        self.assertIn('col-menu snc-hover-hidden full-opacity-on-hover open',
+                      visualize(table(), {'col_menu': 'count += 1'}))
+
+    def test_a_statements_menu(self):
+        self.assertEqual(menu_options(visualize(table(), {'col_menu': 'count += 1'})), [
+            ('Remove', True), ('Insert Left', True), ('Insert Right', True),
+            ('Group By', True), ('Change Type', True), ('Compute', True), ('Collect into List', True)])
+
+    def test_a_bound_name_has_no_line_to_remove_or_put_anything_before(self):
+        self.assertEqual(menu_options(visualize(table(), {'col_menu': 'element'})), [
+            ('Remove', False), ('Insert Left', False), ('Insert Right', True),
+            ('Group By', True), ('Change Type', True), ('Compute', True), ('Collect into List', True)])
+
+    def test_a_menu_works_without_the_table_being_focused(self):
+        out = visualize(table(), {'col_menu': 'count += 1', 'submenu': 'compute'}, small=True)
+        for button in re.findall(r'<(?:span|div)[^>]*snc-mouse-down[^>]*>', out):
+            self.assertIn('snc-unfocused-clickable', button)
+
+    def test_no_menu_when_visualizers_are_live_only(self):
+        visualizer_utils.set_live_only(True)
+        out = visualize(table(), {'col_menu': 'count += 1'})
+        self.assertIsNone(col_menu_of(out))
+        self.assertNotIn('ColumnMenuToggle', html.unescape(out))
+
+    def test_a_menu_for_a_column_the_table_no_longer_has_draws_shut(self):
+        self.assertIsNone(col_menu_of(visualize(table(), {'col_menu': 'count += 2'})))
+
+    # -- Insert Left / Right --------------------------------------------------
+
+    def test_insert_opens_a_box_beside_the_column(self):
+        for after, cells in ((True, ['itr', 'element', 'twice = element * 2', '', 'total += twice']),
+                             (False, ['itr', 'element', '', 'twice = element * 2', 'total += twice'])):
+            with self.subTest(after=after):
+                model, cmds = update(click(InsertColumnClick(col=1, label='twice = element * 2', after=after)),
+                                     None, {'col_menu': 'twice = element * 2'}, two_lines())
+                self.assertEqual(cmds, [])
+                self.assertIsNone(model.get('col_menu'))
+                out = visualize(two_lines(), model)
+                self.assertEqual(header_labels(out), cells)
+                self.assertIn('autofocus', header_cells(out)[cells.index('')])
+
+    def test_enter_writes_the_line_beside_the_statement(self):
+        for after, line in ((True, 3), (False, 2)):
+            with self.subTest(after=after):
+                model, _ = update(click(InsertColumnClick(col=1, label='twice = element * 2', after=after)),
+                                  None, {}, two_lines())
+                model, _ = update(typed('half = element / 2'), None, model, two_lines())
+                model, cmds = update(key('Enter'), None, model, two_lines())
+                self.assertEqual(cmds, [InsertLines(((line, '    half = element / 2'),))])
+                self.assertFalse(model['adding_column'])
+
+    def test_right_of_a_bound_name_is_the_top_of_the_body(self):
+        model, _ = update(click(InsertColumnClick(col=0, label='element', after=True)), None, {}, two_lines())
+        model, _ = update(typed('half = element / 2'), None, model, two_lines())
+        _, cmds = update(key('Enter'), None, model, two_lines())
+        self.assertEqual(cmds, [InsertLines(((2, '    half = element / 2'),))])
+
+    def test_left_of_a_bound_name_is_nowhere(self):
+        self.assertEqual(update(click(InsertColumnClick(col=0, label='element', after=False)), None, {},
+                                two_lines()), ({}, []))
+
+    # -- Group By ---------------------------------------------------------------
+
+    def test_group_by_opens_a_box_naming_the_dict(self):
+        model, cmds = update(click(GroupByClick(col=1, label='twice = element * 2')), None,
+                             {'col_menu': 'twice = element * 2'}, two_lines())
+        self.assertEqual((model, cmds), (grouping(1, 'by_twice'), []))
+        self.assertIn('value="by_twice"', visualize(two_lines(), model))
+
+    def test_enter_writes_the_dict_above_the_loop_and_what_goes_in_it_at_the_end_of_the_body(self):
+        _, cmds = update(key('Enter'), None, grouping(1, 'by_twice'), two_lines())
+        self.assertEqual(cmds, [InsertLines(((1, 'by_twice = {}'),
+                                             (4, '    by_twice.setdefault(twice, []).append(element)')))])
+
+    def test_a_loop_binding_several_names_groups_all_of_them(self):
+        t = two_lines()
+        t = table(**{**{f: getattr(t, f) for f in ('line', 'end_line', 'rows', 'body_lines', 'init')},
+                     'columns': (bound('i'), *t.columns), 'targets': ('i', 'element'),
+                     'defined': t.defined | {'i'}})
+        _, cmds = update(key('Enter'), None, grouping(2, 'by_twice'), t)
+        self.assertEqual(cmds[0].lines[1], (4, '    by_twice.setdefault(twice, []).append((i, element))'))
+
+    def test_a_name_already_taken_is_not_written(self):
+        self.assertEqual(update(key('Enter'), None, grouping(1, 'total'), two_lines()),
+                         (grouping(1, 'total'), []))
+
+    # -- Change Type ------------------------------------------------------------
+
+    def test_change_type_is_a_submenu_that_opens_on_a_press_or_a_rest(self):
+        model, _ = update(click(SubmenuToggle(submenu='convert')), None, {'col_menu': 'element'}, table())
+        self.assertEqual(model['submenu'], 'convert')
+        model, _ = update(click(SubmenuToggle(submenu='convert')), None, model, table())
+        self.assertIsNone(model['submenu'])
+        model, _ = update({'pythonEventStr': repr(SubmenuDwell(submenu='compute')), 'eventJSON': {}}, None,
+                          {'col_menu': 'element', 'submenu': 'convert'}, table())
+        self.assertEqual(model['submenu'], 'compute')
+
+    def test_resting_on_a_row_without_a_submenu_puts_the_open_one_away(self):
+        out = visualize(table(), {'col_menu': 'count += 1', 'submenu': 'convert'})
+        self.assertIn(f'snc-dwell="{html.escape(repr(SubmenuDwell(submenu=None)))}"', col_menu_of(out))
+        # And nothing to do while none is.
+        self.assertNotIn('SubmenuDwell(submenu=None)', html.unescape(col_menu_of(
+            visualize(table(), {'col_menu': 'count += 1'}))))
+
+    def test_an_assignments_types_and_which_one_it_reads_as(self):
+        t = two_lines()
+        out = visualize(t, {'col_menu': 'twice = element * 2', 'submenu': 'convert'})
+        self.assertEqual(submenu_rows(out), [('int', False, True), ('float', False, True),
+                                             ('str', False, True), ('bool', False, True)])
+        t = table(**{**{f: getattr(t, f) for f in ('line', 'end_line', 'rows', 'body_lines', 'init', 'defined')},
+                     'columns': (bound('element'), statement('twice = int(element * 2)', 3, 'twice'), t.columns[2])})
+        out = visualize(t, {'col_menu': 'twice = int(element * 2)', 'submenu': 'convert'})
+        self.assertEqual(submenu_rows(out)[0], ('int', True, True))
+
+    def test_ticking_a_type_wraps_the_assignment_and_unticking_unwraps_it(self):
+        _, cmds = update(click(ConvertToggle(col=1, label='twice = element * 2', to='int')), None, {}, two_lines())
+        self.assertEqual(cmds, [ReplaceLines(3, 3, '    twice = int(element * 2)')])
+        t = table(**{**{f: getattr(two_lines(), f) for f in ('line', 'end_line', 'rows', 'body_lines', 'init')},
+                     'columns': (bound('element'), statement('twice = int(element * 2)', 3, 'twice'))})
+        for to, line in (('int', '    twice = element * 2'), ('float', '    twice = float(element * 2)')):
+            with self.subTest(to=to):
+                _, cmds = update(click(ConvertToggle(col=1, label='twice = int(element * 2)', to=to)), None, {}, t)
+                self.assertEqual(cmds, [ReplaceLines(3, 3, line)])
+
+    def test_what_is_not_a_plain_assignment_cannot_be_wrapped(self):
+        out = visualize(two_lines(), {'col_menu': 'total += twice', 'submenu': 'convert'})
+        self.assertEqual([selectable for _, _, selectable in submenu_rows(out)], [False] * 4)
+        self.assertEqual(update(click(ConvertToggle(col=2, label='total += twice', to='int')), None, {},
+                                two_lines()), ({}, []))
+
+    def test_the_new_column_rows_write_a_converted_copy_beside_it(self):
+        _, cmds = update(click(ConvertColumnClick(col=2, label='total += twice', to='str')), None, {}, two_lines())
+        self.assertEqual(cmds, [InsertLines(((4, '    total_str = str(total)'),))])
+        _, cmds = update(click(ConvertColumnClick(col=0, label='element', to='float')), None, {}, two_lines())
+        self.assertEqual(cmds, [InsertLines(((2, '    element_float = float(element)'),))])
+
+    # -- Compute ----------------------------------------------------------------
+
+    def test_compute_previews_every_answer_from_the_columns_values(self):
+        out = visualize(two_lines(), {'col_menu': 'total += twice', 'submenu': 'compute'})
+        rows = dict((name, selectable) for name, _, selectable in submenu_rows(out))
+        self.assertTrue(rows['Sum'])
+        preview = re.search(r'>Sum</span><span class="col-compute-preview">(.*?)</span>', out).group(1)
+        self.assertEqual(text_of(preview), '8')
+
+    def test_ticking_an_answer_keeps_it_under_the_table(self):
+        model, cmds = update(click(ComputeToggle(label='total += twice', template='sum($)')), None,
+                             {'col_menu': 'total += twice', 'submenu': 'compute'}, two_lines())
+        self.assertEqual((model['computes'], cmds), ({'total += twice': ['sum($)']}, []))
+        foot = re.search(r'<tfoot class="col-agg-rows">(.*?)</tfoot>', visualize(two_lines(), model)).group(1)
+        cells = [text_of(c) for c in re.findall(r'<td[^>]*>.*?</td>', foot)]
+        self.assertEqual(cells, ['', '', '', 'Sum8'])
+        model, _ = update(click(ComputeToggle(label='total += twice', template='sum($)')), None, model, two_lines())
+        self.assertEqual(model['computes'], {'total += twice': []})
+        self.assertNotIn('<tfoot', visualize(two_lines(), model))
+
+    def test_an_answer_of_your_own(self):
+        model, _ = update({'pythonEventStr': repr(ComputeFreeInput(label='twice = element * 2', value='')),
+                           'eventJSON': {}}, None, {}, two_lines())
+        event = {'pythonEventStr': f"lambda e: ComputeFreeInput(label={'twice = element * 2'!r}, "
+                                   f"value=e.get('value', ''))", 'eventJSON': {'value': 'max($) - min($)'}}
+        model, _ = update(event, None, {'col_menu': 'twice = element * 2', 'submenu': 'compute'}, two_lines())
+        model, _ = update(key('Enter'), None, model, two_lines())
+        self.assertEqual(model['computes'], {'twice = element * 2': ['max($) - min($)']})
+        self.assertIn('max($) - min($)', visualize(two_lines(), model))
+
+    def test_unique_and_tally_write_what_collects_them(self):
+        _, cmds = update(click(ComputeCodeClick(col=1, label='twice = element * 2', kind='unique')), None, {},
+                         two_lines())
+        self.assertEqual(cmds, [InsertLines(((1, 'unique_twice = set()'), (4, '    unique_twice.add(twice)')))])
+        _, cmds = update(click(ComputeCodeClick(col=1, label='twice = element * 2', kind='tally')), None, {},
+                         two_lines())
+        self.assertEqual(cmds, [AddImports(('from collections import Counter',)),
+                                InsertLines(((1, 'tally_twice = Counter()'), (4, '    tally_twice[twice] += 1')))])
+
+    def test_sum_min_and_max_write_an_accumulator(self):
+        for kind, lines in (('sum', ('sum_twice = 0', '    sum_twice += twice')),
+                            ('min', ('min_twice = None',
+                                     '    min_twice = twice if min_twice is None else min(min_twice, twice)')),
+                            ('max', ('max_twice = None',
+                                     '    max_twice = twice if max_twice is None else max(max_twice, twice)'))):
+            with self.subTest(kind=kind):
+                _, cmds = update(click(ComputeCodeClick(col=1, label='twice = element * 2', kind=kind)), None, {},
+                                 two_lines())
+                self.assertEqual(cmds, [InsertLines(((1, lines[0]), (4, lines[1])))])
+
+    def test_a_column_with_no_name_of_its_own_computes_but_writes_nothing(self):
+        t = two_lines()
+        t = table(**{**{f: getattr(t, f) for f in ('line', 'end_line', 'rows', 'body_lines', 'init', 'defined',
+                                                    'values')},
+                     'columns': (*t.columns[:2], statement('d[element] = 1', 4, None, underline=10))})
+        out = visualize(t, {'col_menu': 'd[element] = 1', 'submenu': 'compute'})
+        rows = dict((name, selectable) for name, _, selectable in submenu_rows(out))
+        self.assertEqual((rows['Sum'], rows['Unique'], rows['Tally']), (True, False, False))
+        self.assertIn(('Group By', False), menu_options(out))
+        self.assertEqual(update(click(ComputeCodeClick(col=2, label='d[element] = 1', kind='unique')), None, {}, t),
+                         ({}, []))
+
+    def test_a_running_table_has_no_values_to_compute_with(self):
+        out = visualize(table(rows=(), values=(), running=True), {'col_menu': 'count += 1', 'submenu': 'compute'})
+        rows = dict((name, selectable) for name, _, selectable in submenu_rows(out))
+        self.assertFalse(rows['Sum'])
+
+
 class TestEditColumn(unittest.TestCase):
     """Double-clicking a column's header opens a box holding its statement, as
     a table's does; Enter writes what it then holds over the statement."""
@@ -509,13 +795,12 @@ class TestEditColumn(unittest.TestCase):
     def tearDown(self):
         visualizer_utils.set_live_only(False)
 
-    def test_a_statements_header_can_be_edited_and_deleted_and_a_bound_names_cannot(self):
+    def test_a_statements_header_can_be_edited_and_a_bound_names_cannot(self):
         cells = header_cells(visualize(table(), {}))
         self.assertEqual([events_in(c) for c in cells], [
             [],
-            [repr(CollectClick(col=0, label='element'))],
-            [repr(ColumnClick(col=1, label='count += 1')), repr(CollectClick(col=1, label='count += 1')),
-             repr(DeleteColumnClick(col=1, label='count += 1'))],
+            [repr(ColumnMenuToggle(label='element'))],
+            [repr(ColumnClick(col=1, label='count += 1')), repr(ColumnMenuToggle(label='count += 1'))],
         ])
 
     def test_a_double_click_opens_the_box_holding_the_statement(self):
@@ -577,7 +862,7 @@ class TestEditColumn(unittest.TestCase):
 
 
 class TestDeleteColumn(unittest.TestCase):
-    """The x on a column's header deletes the statement the column is."""
+    """Remove, in a column's menu, deletes the statement the column is."""
 
     def setUp(self):
         visualizer_utils.set_live_only(False)
@@ -589,9 +874,11 @@ class TestDeleteColumn(unittest.TestCase):
         return table(end_line=4, columns=(bound('element'), COUNT, statement('twice = element * 2', 4, 'twice')),
                      rows=(('1', '1', '2'),), body_lines=(3, 4), init=(None, '0', None))
 
-    def test_deletes_the_statement(self):
-        _, cmds = update(click(DeleteColumnClick(col=2, label='twice = element * 2')), None, {}, self.two_statements())
+    def test_deletes_the_statement_and_puts_the_menu_away(self):
+        model, cmds = update(click(DeleteColumnClick(col=2, label='twice = element * 2')), None,
+                             {'col_menu': 'twice = element * 2'}, self.two_statements())
         self.assertEqual(cmds, [ReplaceLines(4, 4, None)])
+        self.assertIsNone(model['col_menu'])
 
     def test_the_last_statement_in_the_body_leaves_a_pass(self):
         _, cmds = update(click(DeleteColumnClick(col=1, label='count += 1')), None, {}, table())
@@ -835,29 +1122,26 @@ class TestCollect(unittest.TestCase):
     def tearDown(self):
         visualizer_utils.set_live_only(False)
 
-    def test_the_menu_is_on_every_column_showing_a_name_it_can_collect(self):
+    def test_the_menu_of_every_column_showing_a_name_it_can_collect_offers_it(self):
         t = table(columns=(bound('element'), COUNT, statement('arr2.append(element)', 4, 'arr2', in_place=True,
                                                               accumulator=True),
                            statement('d[element] = 1', 5, None, underline=10)),
-                  init=(None, '0', '[]', None))
-        cells = header_cells(visualize(t, {}))
+                  init=(None, '0', '[]', None), values=())
         # A list appended to in place is one object in every row; there is
         # no name to collect in d[element].
-        self.assertEqual([[e for e in events_in(c) if e.startswith('CollectClick')] for c in cells],
-                         [[], [repr(CollectClick(col=0, label='element'))],
-                          [repr(CollectClick(col=1, label='count += 1'))], [], []])
-        menu = re.search(r'<span class="snc-dropdown-trigger for-loop-col-menu"[^>]*>.*?</span></div></div></span>',
-                         cells[1]).group(0)
-        self.assertIn('data-hover-menu', menu)
-        self.assertIn('Collect into List', menu)
-        self.assertIn('snc-unfocused-clickable', menu)
+        for col, label, offered in ((0, 'element', True), (1, 'count += 1', True),
+                                    (2, 'arr2.append(element)', False), (3, 'd[element] = 1', False)):
+            with self.subTest(label=label):
+                out = visualize(t, {'col_menu': label})
+                self.assertEqual(('Collect into List', True) in menu_options(out), offered)
+                self.assertEqual(repr(CollectClick(col=col, label=label)) in events_in(col_menu_of(out)), offered)
 
     def test_no_menu_when_visualizers_are_live_only(self):
         visualizer_utils.set_live_only(True)
         self.assertNotIn('CollectClick', html.unescape(visualize(table(), {})))
 
     def test_collect_opens_a_box_naming_the_list(self):
-        model, cmds = update(click(CollectClick(col=0, label='element')), None, {}, table())
+        model, cmds = update(click(CollectClick(col=0, label='element')), None, {'col_menu': 'element'}, table())
         self.assertEqual((model, cmds), (collecting(0, 'elements'), []))
         cells = header_cells(visualize(table(), model))
         self.assertEqual(len(cells), 4)

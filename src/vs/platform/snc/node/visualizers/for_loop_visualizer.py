@@ -15,8 +15,8 @@ reads as what it did rather than as one iteration of it.
 the loop binds, then Show all and Hide all over a box per line of its body --
 the shape of a table's, whose row columns are what every table has and whose
 fields are what this one's rows turned out to hold. A loop's columns are code,
-though, so a box only shows or hides a column of the table, by its label; the
-x is what deletes the line. Like a table's, the menu stays open as boxes are
+though, so a box only shows or hides a column of the table, by its label;
+Remove, in the column's menu, is what deletes the line. Like a table's, the menu stays open as boxes are
 ticked, and a click anywhere else puts it away.
 
 **Add Column adds a column of the user's own.** It opens a box at the end of
@@ -30,11 +30,10 @@ that is a view, and this is code. The (+) is a bar beside the table, as a
 table's is, except that a table only draws its own once it is focused, and this
 one draws it either way.
 
-**A column is edited and deleted through its header.** Double-clicking a
-statement's header opens the same box over it, holding the statement; Enter
-writes what it then holds over the statement's lines. The x beside it deletes
-them, leaving a `pass` when nothing else would be left in the body. A name the
-loop binds has no statement of its own, so its header does neither.
+**A column is edited through its header.** Double-clicking a statement's
+header opens the same box over it, holding the statement; Enter writes what it
+then holds over the statement's lines. A name the loop binds has no statement
+of its own, so its header has nothing to edit.
 
 **A header underlines what its column shows.** A statement is not a value:
 `arr2.append(x)` shows arr2 after the call, `total += x` shows total. The
@@ -49,11 +48,29 @@ the loop, or as a new line above the loop when nothing there did. A column
 added with the (+) that turns out to need one opens that box by itself once it
 is back.
 
-**A column's ▾ collects it into a list.** A hover menu, so it needs no state of
-its own; Collect into List opens the box on a name for the list, and Enter
-writes `name = []` above the loop and `name.append(subject)` at the end of its
-body, which comes back as a column of its own, starting from []. A column that
-changes its name in place has one object in every row, so it offers none.
+**A column's ▾ opens a table's column menu**, held open by the model as a
+table's is (`col_menu`, and `submenu` for the one flying out of it), and put
+away by a click anywhere else. What it does to a loop is write loop code:
+
+- Remove deletes the statement, leaving a `pass` when nothing else would be
+  left in the body. Insert Left / Right open the box beside the column, and
+  Enter writes the line before or after its statement -- right of a name the
+  loop binds is the top of the body, and there is nothing left of one.
+- Group By opens the box on a name for a dict; Enter writes `name = {}` above
+  the loop and `name.setdefault(subject, []).append(item)` at the end of its
+  body, `item` being the names the loop binds.
+- Change Type ticks a type to wrap a plain assignment's value in it (and
+  unticking unwraps it); beside each, a button writes `subject_int =
+  int(subject)` beside the column.
+- Compute previews the table's catalog of answers off the column's values, and
+  a tick keeps one under the table, as a table's does. Sum, Min and Max, and
+  the Unique and Tally rows, also write what builds the answer up as the loop
+  runs: a name set above it, and a line at the end of its body.
+- Collect into List opens the box on a name for the list, and Enter writes
+  `name = []` above the loop and `name.append(subject)` at the end of its
+  body, which comes back as a column of its own, starting from []. A column
+  that changes its name in place has one object in every row, so it offers
+  none.
 
 **While the loop runs, the rows of last time.** The table logged as the loop
 starts has none of its own yet, and the finished one replaces it a moment
@@ -86,8 +103,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from visualizer_utils import (EXPANDED_PANE_MAX_HEIGHT, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines,
-                              is_live_only)
+from table_visualizer import COMPUTE_AGGS, CONVERT_TYPES, NO_THING, _agg_answer_html, _agg_value
+from visualizer_utils import (EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, AddImports, ForLoopColumn, ForLoopTable,
+                              InsertLines, ReplaceLines, is_live_only)
 
 
 @dataclass(frozen=True)
@@ -165,6 +183,92 @@ class ColumnResize:
 @dataclass(frozen=True)
 class LoadMoreRows:
     """The row standing in for the iterations not drawn: draw another page."""
+
+
+@dataclass(frozen=True)
+class ColumnMenuToggle:
+    """A press on the ▾ of the column labeled `label`: open its menu, or put
+    it away."""
+    label: str
+
+
+@dataclass(frozen=True)
+class ColumnMenuDismiss:
+    """A press outside the open column menu: put it away."""
+
+
+@dataclass(frozen=True)
+class SubmenuToggle:
+    """A press on a row of the column menu that opens a submenu (`compute`,
+    `convert`): open it, or put it away."""
+    submenu: str
+
+
+@dataclass(frozen=True)
+class SubmenuDwell:
+    """The pointer came to rest on a row of the column menu: open the
+    submenu it has, or put away the open one when it has none (None)."""
+    submenu: Optional[str]
+
+
+@dataclass(frozen=True)
+class InsertColumnClick:
+    """Insert Left or Right, in the menu of column `col`: open the box, beside
+    it, that writes a line before or after its statement."""
+    col: int
+    label: str
+    after: bool
+
+
+@dataclass(frozen=True)
+class GroupByClick:
+    """Group By, in the menu of column `col`: open the box naming the dict the
+    loop's iterations are grouped into by the column's value."""
+    col: int
+    label: str
+
+
+@dataclass(frozen=True)
+class ConvertToggle:
+    """A type ticked in the Change Type submenu of column `col`: its
+    assignment reads its value as `to`, or stops reading it as one."""
+    col: int
+    label: str
+    to: str
+
+
+@dataclass(frozen=True)
+class ConvertColumnClick:
+    """A type's new-column button in the Change Type submenu: a line beside the
+    column's that reads its value as `to`."""
+    col: int
+    label: str
+    to: str
+
+
+@dataclass(frozen=True)
+class ComputeToggle:
+    """An answer ticked in the Compute submenu of the column labeled `label`:
+    keep it under the table, or stop."""
+    label: str
+    template: str
+
+
+@dataclass(frozen=True)
+class ComputeFreeInput:
+    """The Compute submenu's own box, for an answer of the user's, now holds
+    `value`."""
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ComputeCodeClick:
+    """A Compute row that writes code: what builds the answer up as the loop
+    runs (`unique`, `tally`, `sum`, `min`, `max`)."""
+    col: int
+    label: str
+    kind: str
 
 
 @dataclass(frozen=True)
@@ -257,7 +361,11 @@ def _list_name(value: ForLoopTable, subject: str) -> str:
     return name
 
 
-BOX_KEYS = ('adding_column', 'editing_column', 'editing_init', 'collecting_column')
+BOX_KEYS = ('adding_column', 'editing_column', 'editing_init', 'collecting_column', 'grouping_column')
+
+# What a box opening puts away: the menus it was opened from, and where an
+# earlier Insert would have put the line.
+MENU_KEYS = ('add_menu_open', 'col_menu', 'submenu', 'insert_at')
 
 
 def _box_open(model) -> bool:
@@ -267,9 +375,9 @@ def _box_open(model) -> bool:
 def _opened(model, key: str, col, text: str):
     """The model with one box open -- `key`, on column `col` -- holding
     `text`, and the (+) menu put away."""
-    model = {k: v for k, v in model.items() if k != 'add_menu_open'}
+    model = {k: v for k, v in model.items() if k not in MENU_KEYS}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
-            'collecting_column': None, key: col, 'column_input': text}
+            'collecting_column': None, 'grouping_column': None, key: col, 'column_input': text}
 
 
 def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: str = 'Line of code',
@@ -296,22 +404,246 @@ def _render_label(column: ForLoopColumn) -> str:
     return f'<span class="for-loop-col-subject">{html.escape(shown)}</span>{html.escape(rest)}'
 
 
-def _render_menu(value: ForLoopTable, col: int) -> str:
-    """The ▾ with what can be done to the whole column: a hover menu, which the
-    editor lifts out of the table, so it needs no state of its own."""
-    column = value.columns[col]
-    if _collectable(value, col, column.label) is None:
+def _press(event) -> str:
+    """What a row of a menu sends when pressed, focused or not."""
+    return f' snc-unfocused-clickable draggable="false" snc-mouse-down="{html.escape(repr(event))}"'
+
+
+def _dwell(model, opens: Optional[str] = None) -> str:
+    """What resting on a row of the column menu does, as a table's: a row with
+    a submenu opens it, the rest put away the one open. Only where that would
+    change something -- every event costs a run."""
+    if model.get('submenu') == opens:
         return ''
-    collect = repr(CollectClick(col=col, label=column.label))
-    return (f'<span class="snc-dropdown-trigger for-loop-col-menu" snc-unfocused-clickable draggable="false">'
-            f'<span class="for-loop-col-menu-icon">▾</span>'
-            f'<div class="snc-dropdown-panel left" snc-dropdown-align="left" data-hover-menu>'
-            f'<div class="snc-dropdown-option">'
-            f'<span class="snc-dropdown-option-label" snc-unfocused-clickable draggable="false" '
-            f'snc-mouse-down="{html.escape(collect)}" '
-            f'data-tooltip="{html.escape(f"A list of every {column.subject}, built as the loop runs")}">'
-            f'Collect into List</span>'
-            f'</div></div></span>')
+    return f' snc-dwell="{html.escape(repr(SubmenuDwell(submenu=opens)))}"'
+
+
+def _render_option(model, text: str, event, tooltip: str = '') -> str:
+    """A plain row of the column menu: inert without an event."""
+    tip = f' data-tooltip="{html.escape(tooltip)}"' if tooltip else ''
+    if event is None:
+        return (f'<div class="snc-dropdown-option unselectable"{_dwell(model)}{tip}>'
+                f'<span class="snc-dropdown-option-label">{html.escape(text)}</span></div>')
+    return (f'<div class="snc-dropdown-option"{_dwell(model)}{tip}>'
+            f'<span class="snc-dropdown-option-label"{_press(event)}>{html.escape(text)}</span></div>')
+
+
+def _render_submenu_row(model, submenu: str, text: str, tooltip: str, panel) -> str:
+    """A row of the column menu that opens a submenu flying out of it."""
+    is_open = model.get('submenu') == submenu
+    return (f'<div class="snc-dropdown-trigger col-compute col-{submenu}"{_dwell(model, submenu)}>'
+            f'<div class="snc-dropdown-option col-compute-trigger{" open" if is_open else ""}" '
+            f'data-tooltip="{html.escape(tooltip)}"{_press(SubmenuToggle(submenu=submenu))}>'
+            f'<span class="snc-dropdown-option-label col-compute-title">{html.escape(text)}</span>'
+            f'<span class="submenu-right-arrow">▸</span></div>'
+            f'{panel() if is_open else ""}</div>')
+
+
+def _render_column_menu(value: ForLoopTable, model, col: int) -> str:
+    """What can be done to a whole column, in a table's order: Remove and
+    Insert, then the rows that ask about its values."""
+    column = value.columns[col]
+    label = column.label
+    statement = column.span is not None
+    rows = [
+        _render_option(model, 'Remove', DeleteColumnClick(col=col, label=label) if statement else None,
+                       '' if statement else 'A name the loop binds has no line to remove'),
+        _render_option(model, 'Insert Left', InsertColumnClick(col=col, label=label, after=False)
+                       if statement else None),
+        _render_option(model, 'Insert Right', InsertColumnClick(col=col, label=label, after=True)),
+        '<div class="col-compute-sep"></div>',
+        _render_option(model, 'Group By', GroupByClick(col=col, label=label) if column.subject else None,
+                       f'Every iteration, grouped by {column.subject}' if column.subject else ''),
+        _render_submenu_row(model, 'convert', 'Change Type', "Read this column's values as another type",
+                            lambda: _render_convert_panel(value, col)),
+        _render_submenu_row(model, 'compute', 'Compute', 'Summarize this column',
+                            lambda: _render_compute_panel(value, model, col)),
+        _render_option(model, 'Collect into List', CollectClick(col=col, label=label)
+                       if _collectable(value, col, label) is not None else None,
+                       f'A list of every {column.subject}, built as the loop runs' if column.subject else ''),
+    ]
+    return (f'<div class="snc-dropdown-panel flyout col-menu-panel col-menu-no-search" snc-dropdown-align="flyout" '
+            f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{"".join(rows)}</div><!--/col-menu-->')
+
+
+def _check(checked: bool, disabled: bool = False) -> str:
+    """A menu row's box, which only reports `checked`: the click is the row's."""
+    return (f'<input type="checkbox" class="col-tally-check"{" checked" if checked else ""}'
+            f'{" disabled" if disabled else ""} />')
+
+
+def _submenu(kind: str, rows: List[str]) -> str:
+    return (f'<div class="snc-dropdown-panel flyout col-compute-panel col-{kind}-panel" '
+            f'snc-dropdown-align="flyout">{"".join(rows)}</div><!--/submenu-->')
+
+
+def _render_convert_panel(value: ForLoopTable, col: int) -> str:
+    """A box per type, ticked while the column's assignment reads its value as
+    that type, and beside each a button writing a line that reads it so."""
+    column = value.columns[col]
+    assignment = _plain_assignment(column.label) if column.span is not None else None
+    current = _converted(assignment[1])[0] if assignment else None
+    rows = []
+    for to in CONVERT_TYPES:
+        checked = current == to
+        toggle = '' if assignment is None else _press(ConvertToggle(col=col, label=column.label, to=to))
+        row = (f'<div class="col-compute-row col-convert-row{" checked" if checked else ""}'
+               f'{"" if assignment else " unselectable"}">'
+               f'<span class="col-compute-toggle"{toggle}>{_check(checked, disabled=assignment is None)}'
+               f'<span class="col-compute-name">{to}</span></span></div>')
+        aside_press = '' if not column.subject else _press(ConvertColumnClick(col=col, label=column.label, to=to))
+        aside = (f'<div class="col-compute-row col-convert-row col-compute-row-aside'
+                 f'{"" if column.subject else " unselectable"}">'
+                 f'<span class="col-compute-toggle"{aside_press} data-tooltip="Insert as a new column">'
+                 f'{ICONS["column-right"]}</span></div>')
+        rows.append(f'<div class="col-convert-wrapper">{row}{aside}</div>')
+    return _submenu('convert', rows)
+
+
+# The Compute rows that also write what builds their answer up as the loop runs.
+COMPUTE_CODE_KINDS = {'sum($)': 'sum', 'min($)': 'min', 'max($)': 'max'}
+COMPUTE_CODE_ROWS = (('Unique', 'unique'), ('Tally', 'tally'))
+
+
+def _column_values(value: ForLoopTable, col: int) -> Optional[list]:
+    """Every value column `col` had, in order, skipping the iterations that
+    never got to it; None while the loop runs and there are none yet."""
+    if not value.values:
+        return None
+    return [row[col] for row in value.values if col < len(row) and row[col] is not NO_VALUE]
+
+
+def _answer(template: str, values: Optional[list]):
+    return NO_THING if values is None else _agg_value(template, values)
+
+
+def _compute_label(template: str) -> str:
+    return next((name for name, t in COMPUTE_AGGS if t == template), template)
+
+
+def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
+    """The table's catalog of answers, each previewed from the column's values
+    and ticked to keep it under the table; the rows that write what builds an
+    answer up as the loop runs; and the answers of the user's own, with a box
+    at the foot to write another."""
+    column = value.columns[col]
+    label = column.label
+    values = _column_values(value, col)
+    kept = (model.get('computes') or {}).get(label, [])
+    catalog = {t for _, t in COMPUTE_AGGS}
+
+    def answer_row(name: str, template: str, classes: str = '') -> str:
+        answer = _answer(template, values)
+        checked = template in kept
+        inert = answer is NO_THING and not checked
+        press = '' if inert else _press(ComputeToggle(label=label, template=template))
+        preview = '' if answer is NO_THING else _agg_answer_html(template, answer)
+        return (f'<div class="col-compute-row{classes}{" checked" if checked else ""}{" unselectable" if inert else ""}">'
+                f'<span class="col-compute-toggle"{press}>{_check(checked, disabled=inert)}'
+                f'<span class="col-compute-name">{html.escape(name)}</span>'
+                f'<span class="col-compute-preview">{preview}</span></span></div>')
+
+    def code_button(kind: str, inner: str, tooltip: str, aside: bool) -> str:
+        press = '' if not column.subject else _press(ComputeCodeClick(col=col, label=label, kind=kind))
+        classes = ' col-compute-row-aside' if aside else ' col-compute-code'
+        return (f'<div class="col-compute-row{classes}{"" if column.subject else " unselectable"}">'
+                f'<span class="col-compute-toggle"{press} data-tooltip="{html.escape(tooltip)}">{inner}</span></div>')
+
+    rows = []
+    for name, template in COMPUTE_AGGS:
+        row = answer_row(name, template)
+        if template in COMPUTE_CODE_KINDS:
+            row = (f'<div class="col-convert-wrapper">{row}'
+                   f'{code_button(COMPUTE_CODE_KINDS[template], ICONS["plus"], "Insert as new code", True)}</div>')
+        rows.append(row)
+    rows.append('<div class="col-compute-sep"></div>')
+    rows += [code_button(kind, f'<span class="col-compute-nocheck"></span><span class="col-compute-name">{name}</span>',
+                         f'Write what builds this up as the loop runs', False)
+             for name, kind in COMPUTE_CODE_ROWS]
+    rows.append('<div class="col-compute-sep"></div>')
+    rows += [answer_row(template, template, ' col-compute-free') for template in kept if template not in catalog]
+    free = (model.get('compute_free') or {})
+    text = free.get('text', '') if free.get('label') == label else ''
+    input_event = f"lambda e: ComputeFreeInput(label={label!r}, value=e.get('value', ''))"
+    rows.append(f'<div class="col-compute-row col-compute-free">'
+                f'<input type="text" class="col-compute-expr search-box" snc-unfocused-clickable spellcheck="false" '
+                f'snc-input="{html.escape(input_event)}" snc-key-down="{html.escape(repr(ColumnKeyDown()))}" '
+                f'value="{html.escape(text)}" placeholder="Expr" '
+                f'data-tooltip="$ is every value of this column" /></div>')
+    return _submenu('compute', rows)
+
+
+def _render_agg_rows(value: ForLoopTable, model, shown: List[int]) -> str:
+    """The answers kept under the table, a row per level, as a table's: each
+    column's answers stacked in the order they were ticked."""
+    computes = model.get('computes') or {}
+    asked = [computes.get(value.columns[col].label) or [] for col in shown]
+    levels = max((len(templates) for templates in asked), default=0)
+    if not levels:
+        return ''
+    rows = []
+    for level in range(levels):
+        cells = []
+        for col, templates in zip(shown, asked):
+            if level >= len(templates):
+                cells.append('<td class="col-agg-blank"></td>')
+                continue
+            template = templates[level]
+            answer = _answer(template, _column_values(value, col))
+            text = '' if answer is NO_THING else _agg_answer_html(template, answer)
+            cells.append(f'<td class="col-agg-cell"{_col_attrs(model, value.columns[col].label)}>'
+                         f'<div class="col-agg"><span class="col-agg-label">{html.escape(_compute_label(template))}'
+                         f'</span><div class="col-agg-value">{text}</div></div></td>')
+        rows.append(f'<tr class="col-agg-row"><td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
+    return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
+
+
+def _plain_assignment(label: str) -> Optional[Tuple[str, str]]:
+    """(name, right-hand side) of `name = value`, or None for any other
+    statement: the only kind whose value can be read as another type in place."""
+    try:
+        tree = ast.parse(label)
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Assign):
+        return None
+    stmt = tree.body[0]
+    if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+        return None
+    return stmt.targets[0].id, ast.get_source_segment(label, stmt.value)
+
+
+def _converted(rhs: str) -> Tuple[Optional[str], str]:
+    """(type, what it converts) when `rhs` is a conversion to one of the
+    types, else (None, rhs)."""
+    try:
+        node = ast.parse(rhs, mode='eval').body
+    except SyntaxError:
+        return None, rhs
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in CONVERT_TYPES
+            and len(node.args) == 1 and not node.keywords and not isinstance(node.args[0], ast.Starred)):
+        return node.func.id, ast.get_source_segment(rhs, node.args[0])
+    return None, rhs
+
+
+def _unique_name(value: ForLoopTable, base: str) -> str:
+    """`base`, or `base2`, ... -- whichever nothing in the loop's scope has."""
+    name, n = base, 2
+    while name in value.defined:
+        name, n = f'{base}{n}', n + 1
+    return name
+
+
+def _beside(value: ForLoopTable, column: ForLoopColumn, after: bool) -> int:
+    """The line a new statement goes after to be drawn beside `column`: a
+    bound name's right is the top of the body."""
+    if column.span is None:
+        return value.body_lines[0] - 1
+    return column.span[1] if after else column.span[0] - 1
+
+
+def _body_end(value: ForLoopTable) -> int:
+    return value.body_lines[1] or value.end_line
 
 
 def _valid_width(width) -> Optional[int]:
@@ -351,18 +683,28 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool) -> str
     if live_only:
         inner = _render_label(column)
     elif column.span is None:
-        inner = f'{_render_label(column)}{_render_menu(value, col)}'
+        inner = f'<span class="col-name">{_render_label(column)}</span>{_render_menu_trigger(value, model, col)}'
     else:
         edit = repr(ColumnClick(col=col, label=label))
-        delete = repr(DeleteColumnClick(col=col, label=label))
-        inner = (f'<span class="for-loop-col-label" snc-unfocused-clickable draggable="false" '
+        inner = (f'<span class="col-name for-loop-col-label" snc-unfocused-clickable draggable="false" '
                  f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit">'
                  f'{_render_label(column)}</span>'
-                 f'{_render_menu(value, col)}'
-                 f'<span class="for-loop-col-delete" snc-unfocused-clickable draggable="false" '
-                 f'snc-mouse-down="{html.escape(delete)}" data-tooltip="Delete this line">×</span>')
-    return (f'<th class="col-header for-loop-col"{_col_attrs(model, label, clip=False)}>'
+                 f'{_render_menu_trigger(value, model, col)}')
+    return (f'<th class="snc-hover-hidden-parent col-header for-loop-col"{_col_attrs(model, label, clip=False)}>'
             f'<span class="col-header-inner">{inner}{resize}</span></th>')
+
+
+def _render_menu_trigger(value: ForLoopTable, model, col: int) -> str:
+    """The ▾ at a header's right end, and the menu it opens, as a table's: lit
+    while open, since the panel is lifted out of the header and the pointer
+    leaves it to reach it."""
+    label = value.columns[col].label
+    menu_open = model.get('col_menu') == label
+    classes = 'col-menu snc-hover-hidden full-opacity-on-hover' + (' open' if menu_open else '')
+    return (f'<span class="snc-dropdown-trigger col-menu-trigger">'
+            f'<span snc-mouse-down="{html.escape(repr(ColumnMenuToggle(label=label)))}" snc-unfocused-clickable '
+            f'draggable="false" data-tooltip="Column actions" class="{classes}">▾</span>'
+            f'{_render_column_menu(value, model, col) if menu_open else ""}</span>')
 
 
 def _render_add_bar(value: ForLoopTable, model) -> str:
@@ -509,15 +851,29 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
             '<th class="row-index-header" data-tooltip="itr is the iteration, counting from 0">itr</th>']
     hidden = set(model.get('hidden_columns') or [])
     shown = [col for col, column in enumerate(value.columns) if column.label not in hidden]
-    strs += [_render_header(value, model, col, live_only) for col in shown]
+    # Insert Left / Right put the box beside its column; anywhere else, or
+    # once that column is gone, it ends the row.
+    insert_at = model.get('insert_at') if not live_only and model.get('adding_column') else None
+    beside = next((col for col in shown if insert_at and value.columns[col].label == insert_at['label']), None)
+    for col in shown:
+        if col == beside and not insert_at['after']:
+            strs.append(_render_box(model))
+        strs.append(_render_header(value, model, col, live_only))
+        if col == beside and insert_at['after']:
+            strs.append(_render_box(model))
     # Every column it adds is code, so live-only leaves it out.
-    if not live_only and model.get('adding_column'):
+    if not live_only and model.get('adding_column') and beside is None:
         strs.append(_render_box(model))
     collecting = model.get('collecting_column')
     if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
         subject = value.columns[collecting].subject
         strs.append(_render_box(model, select_all=True, placeholder='List name',
                                 tooltip=f'Every {subject}, collected into this list'))
+    grouping = model.get('grouping_column')
+    if not live_only and grouping is not None and 0 <= grouping < len(value.columns):
+        subject = value.columns[grouping].subject
+        strs.append(_render_box(model, select_all=True, placeholder='Dict name',
+                                tooltip=f'Every iteration, grouped by {subject}'))
     strs.append('</tr></thead><tbody>')
     if any(value.columns[col].accumulator and value.columns[col].subject for col in shown):
         strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
@@ -533,7 +889,9 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
         strs += [_render_cell(model, value.columns[col].label, row[col] if col < len(row) else None)
                  for col in shown]
         strs.append('</tr>')
-    strs.append('</tbody></table></div>')
+    strs.append('</tbody>')
+    strs.append(_render_agg_rows(value, model, shown))
+    strs.append('</table></div>')
     if not live_only:
         strs.append(_render_add_bar(value, model))
     strs.append('</div>')
@@ -563,7 +921,71 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
             if width is not None and label in (column.label for column in value.columns):
                 return ({**model, 'widths': {**(model.get('widths') or {}), label: width}}, [])
         case AddMenuToggle():
-            return ({**model, 'add_menu_open': not model.get('add_menu_open')}, [])
+            others = {k: v for k, v in model.items() if k not in ('col_menu', 'submenu')}
+            return ({**others, 'add_menu_open': not model.get('add_menu_open')}, [])
+        case ColumnMenuToggle(label=label):
+            opening = model.get('col_menu') != label
+            return ({**model, 'add_menu_open': False, 'col_menu': label if opening else None, 'submenu': None}, [])
+        case ColumnMenuDismiss():
+            return (_menus_closed(model), [])
+        case SubmenuToggle(submenu=submenu):
+            return ({**model, 'submenu': None if model.get('submenu') == submenu else submenu}, [])
+        case SubmenuDwell(submenu=submenu):
+            return ({**model, 'submenu': submenu}, [])
+        case InsertColumnClick(col=col, label=label, after=after):
+            column = _column(value, col, label)
+            if column is not None and (after or column.span is not None) and not is_live_only():
+                return ({**_opened(model, 'adding_column', True, ''), 'insert_at': {'label': label, 'after': after}},
+                        [])
+        case GroupByClick(col=col, label=label):
+            column = _column(value, col, label)
+            if column is not None and column.subject and not is_live_only():
+                return (_opened(model, 'grouping_column', col, _unique_name(value, f'by_{column.subject}')), [])
+        case ConvertToggle(col=col, label=label, to=to):
+            column = _column(value, col, label)
+            assignment = _plain_assignment(label) if column is not None and column.span else None
+            if assignment is not None and to in CONVERT_TYPES and not is_live_only():
+                name, rhs = assignment
+                current, inner = _converted(rhs)
+                new_rhs = inner if current == to else f'{to}({inner})'
+                return (_menus_closed(model),
+                        [ReplaceLines(column.span[0], column.span[1], f'{value.body_indent}{name} = {new_rhs}')])
+        case ConvertColumnClick(col=col, label=label, to=to):
+            column = _column(value, col, label)
+            if column is not None and column.subject and to in CONVERT_TYPES and not is_live_only():
+                name = _unique_name(value, f'{column.subject}_{to}')
+                line = f'{value.body_indent}{name} = {to}({column.subject})'
+                return (_menus_closed(model), [InsertLines(((_beside(value, column, True), line),))])
+        case ComputeToggle(label=label, template=template):
+            computes = dict(model.get('computes') or {})
+            kept = list(computes.get(label, []))
+            if template in kept:
+                kept.remove(template)
+            elif label in (column.label for column in value.columns):
+                kept.append(template)
+            else:
+                return (model, [])
+            computes[label] = kept
+            return ({**model, 'computes': computes}, [])
+        case ComputeFreeInput(label=label, value=text):
+            return ({**model, 'compute_free': {'label': label, 'text': text}}, [])
+        case ColumnKeyDown() if not _box_open(model) and (model.get('compute_free') or {}).get('text'):
+            free = model['compute_free']
+            if event_json.get('key') == 'Enter':
+                computes = dict(model.get('computes') or {})
+                kept = list(computes.get(free['label'], []))
+                if free['text'].strip() not in kept:
+                    kept.append(free['text'].strip())
+                computes[free['label']] = kept
+                return ({**model, 'computes': computes, 'compute_free': None}, [])
+            if event_json.get('key') == 'Escape':
+                return ({**model, 'compute_free': None}, [])
+        case ComputeCodeClick(col=col, label=label, kind=kind):
+            column = _column(value, col, label)
+            if column is not None and column.subject and not is_live_only():
+                code = _compute_code(value, column.subject, kind)
+                if code:
+                    return (_menus_closed(model), code)
         case AddMenuDismiss():
             return ({**model, 'add_menu_open': False}, [])
         case ColumnToggle(label=label):
@@ -598,7 +1020,7 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
             if span is not None and not is_live_only():
                 # A body can't be empty: the last statement in it leaves a pass.
                 text = f'{value.body_indent}pass' if span == value.body_lines else None
-                return (model, [ReplaceLines(span[0], span[1], text)])
+                return (_menus_closed(model), [ReplaceLines(span[0], span[1], text)])
         case ColumnInput(value=typed) if _box_open(model):
             return ({**model, 'column_input': typed}, [])
         case ColumnKeyDown() if _box_open(model):
@@ -613,8 +1035,33 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
 
 
 def _closed(model):
+    model = {k: v for k, v in model.items() if k != 'insert_at'}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
-            'collecting_column': None, 'column_input': ''}
+            'collecting_column': None, 'grouping_column': None, 'column_input': ''}
+
+
+def _menus_closed(model):
+    """The model with the column menu put away, as anything it did does."""
+    return {**model, 'col_menu': None, 'submenu': None}
+
+
+def _compute_code(value: ForLoopTable, subject: str, kind: str) -> List[Any]:
+    """What builds an answer about `subject` up as the loop runs: a name set
+    above the loop, and a line at the end of its body adding to it."""
+    lines = {
+        'unique': ('unique', 'set()', '{n}.add({s})'),
+        'tally': ('tally', 'Counter()', '{n}[{s}] += 1'),
+        'sum': ('sum', '0', '{n} += {s}'),
+        'min': ('min', 'None', '{n} = {s} if {n} is None else min({n}, {s})'),
+        'max': ('max', 'None', '{n} = {s} if {n} is None else max({n}, {s})'),
+    }.get(kind)
+    if lines is None:
+        return []
+    prefix, start, step = lines
+    name = _unique_name(value, f'{prefix}_{subject}')
+    insert = InsertLines(((value.line - 1, f'{value.indent}{name} = {start}'),
+                          (_body_end(value), f'{value.body_indent}{step.format(n=name, s=subject)}')))
+    return [AddImports(('from collections import Counter',)), insert] if kind == 'tally' else [insert]
 
 
 def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
@@ -623,6 +1070,8 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
         return _write_init(model, value)
     if model.get('collecting_column') is not None:
         return _write_collect(model, value)
+    if model.get('grouping_column') is not None:
+        return _write_group_by(model, value)
     statement = model.get('column_input', '').strip()
     if statement and not _parses(statement):
         # Left open, as typed: written, it would break the whole file.
@@ -631,7 +1080,11 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     if not statement or is_live_only():
         return (_closed(model), [])
     if col is None:
-        after = value.body_lines[1] or value.end_line
+        after = _body_end(value)
+        insert_at = model.get('insert_at')
+        column = next((c for c in value.columns if insert_at and c.label == insert_at['label']), None)
+        if column is not None:
+            after = _beside(value, column, insert_at['after'])
         # If it comes back an accumulator with nothing to start from, its
         # starting value is the next thing to type.
         pending = {'label': ' '.join(statement.split()), 'labels': [column.label for column in value.columns]}
@@ -659,6 +1112,25 @@ def _write_init(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     if column.init_span is not None:
         return (_closed(model), [ReplaceLines(column.init_span[0], column.init_span[1], text)])
     return (_closed(model), [InsertLines(((value.line - 1, text),))])
+
+
+def _write_group_by(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
+    """Enter in the box naming a dict: the dict above the loop, and the line
+    at the end of its body putting each iteration's names under its value of
+    the column."""
+    name = model.get('column_input', '').strip()
+    col = model['grouping_column']
+    column = value.columns[col] if 0 <= col < len(value.columns) else None
+    if not name or is_live_only() or column is None or not column.subject:
+        return (_closed(model), [])
+    if not name.isidentifier() or keyword.iskeyword(name) or name in value.defined:
+        return (model, [])
+    targets = value.targets or (column.subject,)
+    item = targets[0] if len(targets) == 1 else f'({", ".join(targets)})'
+    return (_closed(model), [InsertLines(((value.line - 1, f'{value.indent}{name} = {{}}'),
+                                          (_body_end(value),
+                                           f'{value.body_indent}{name}.setdefault({column.subject}, [])'
+                                           f'.append({item})')))])
 
 
 def _write_collect(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:

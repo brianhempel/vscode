@@ -2681,8 +2681,7 @@
 	padding: 4px 3px;
 }
 
-/* A for loop's statement column: double-click the label to edit the line, the
-   x beside it (shown while the header is hovered) deletes it. */
+/* A for loop's statement column: double-click the label to edit the line. */
 .for-loop-visualizer th.for-loop-col {
 	white-space: nowrap;
 }
@@ -2691,41 +2690,11 @@
 	cursor: text;
 }
 
-.for-loop-visualizer .for-loop-col-delete {
-	visibility: hidden;
-	margin-left: 4px;
-	color: var(--snc-text-muted);
-	cursor: pointer;
-	user-select: none;
-}
-
-.for-loop-visualizer th.for-loop-col:hover .for-loop-col-delete {
-	visibility: visible;
-}
-
-.for-loop-visualizer .for-loop-col-delete:hover {
-	color: var(--vscode-errorForeground);
-}
-
 /* The part of a statement's header that is the value its column shows:
    `arr2` in `arr2.append(x)`, `total` in `total += x`. */
 .for-loop-visualizer .for-loop-col-subject {
 	text-decoration: underline;
 	text-underline-offset: 2px;
-}
-
-/* The ▾ whose hover menu collects the column into a list; shown, like the x,
-   while the header is hovered. */
-.for-loop-visualizer .for-loop-col-menu {
-	visibility: hidden;
-	margin-left: 4px;
-	color: var(--snc-text-muted);
-	cursor: pointer;
-	user-select: none;
-}
-
-.for-loop-visualizer th.for-loop-col:hover .for-loop-col-menu {
-	visibility: visible;
 }
 
 /* Where each accumulator starts, above the first iteration: set apart from the
