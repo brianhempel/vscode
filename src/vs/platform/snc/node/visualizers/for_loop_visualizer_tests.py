@@ -23,7 +23,11 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
                                  ColumnMenuToggle, ColumnResize, ColumnShowAll, ColumnToggle, ComputeCodeClick,
                                  ComputeFreeInput, ComputeToggle, ConvertColumnClick, ConvertToggle,
                                  DeleteColumnClick, GroupByClick, InitCellClick, InsertColumnClick, LoadMoreRows,
-                                 SubmenuDwell, SubmenuToggle, can_visualize, init_model, update, visualize)
+                                 SubmenuDwell, SubmenuToggle, can_visualize, init_model, update, visualize,
+                                 ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
+                                 FirstMatchToggle, SearchBoxInput, SortToggle, TallyExcludeToggle,
+                                 TallyFilterInput, TallyItemToggle, TallySelectAll, TallySelectNone,
+                                 TallySortSelect)
 from visualizer_utils import AddImports, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
 
@@ -215,9 +219,8 @@ class TestVisualize(unittest.TestCase):
         self.assertIn('1 more iteration<', visualize(table(hidden_rows=1), {}))
         self.assertNotIn('more iteration', visualize(table(), {}))
 
-    def test_has_no_bar_of_buttons_under_the_table(self):
+    def test_has_no_step_buttons_under_the_table(self):
         out = visualize(table(targets=('i', 'element')), {})
-        self.assertNotIn('action-button', out)
         self.assertNotIn('AddStep', html.unescape(out))
 
     def test_the_plus_and_its_menu_work_without_the_table_being_focused(self):
@@ -241,7 +244,7 @@ class TestVisualize(unittest.TestCase):
                 bar = re.search(r'</table></div>(<div class="snc-dropdown-trigger col-add-trigger">.*?</div>)', out)
                 self.assertEqual(events_in(bar.group(1)), [repr(AddMenuToggle())])
                 self.assertIn('<div class="snc-tool-and-visualizer"><div class="list-table-scroll', out)
-                self.assertNotIn('<input', out)
+                self.assertNotIn('<input', re.search(r'<thead.*?</thead>', out).group(0))
 
     def test_an_open_box_is_a_last_header_cell_holding_what_was_typed(self):
         out = visualize(table(), adding('doubled = element * 2'))
@@ -587,12 +590,14 @@ class TestColumnMenu(unittest.TestCase):
     def test_a_statements_menu(self):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'count += 1'})), [
             ('Remove', True), ('Insert Left', True), ('Insert Right', True),
-            ('Group By', True), ('Change Type', True), ('Compute', True), ('Collect into List', True)])
+            ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
+            ('Collect into List', True)])
 
     def test_a_bound_name_has_no_line_to_remove_or_put_anything_before(self):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'element'})), [
             ('Remove', False), ('Insert Left', False), ('Insert Right', True),
-            ('Group By', True), ('Change Type', True), ('Compute', True), ('Collect into List', True)])
+            ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
+            ('Collect into List', True)])
 
     def test_a_menu_works_without_the_table_being_focused(self):
         out = visualize(table(), {'col_menu': 'count += 1', 'submenu': 'compute'}, small=True)
@@ -783,6 +788,233 @@ class TestColumnMenu(unittest.TestCase):
         out = visualize(table(rows=(), values=(), running=True), {'col_menu': 'count += 1', 'submenu': 'compute'})
         rows = dict((name, selectable) for name, _, selectable in submenu_rows(out))
         self.assertFalse(rows['Sum'])
+
+
+def scores():
+    """A loop over five scores, counting the high ones:
+
+        1  high = 0
+        2  for score in [3, 9, 4, 9, 1]:
+        3      high += score > 5
+    """
+    vals = [3, 9, 4, 9, 1]
+    highs = [0, 1, 1, 2, 2]
+    return table(line=2, end_line=3, columns=(bound('score'), statement('high += score > 5', 3, 'high',
+                                                                       accumulator=True, init_span=(1, 1))),
+                 rows=tuple((repr(v), repr(h)) for v, h in zip(vals, highs)),
+                 values=tuple(zip(vals, highs)), targets=('score',), defined=frozenset({'score', 'high'}),
+                 body_lines=(3, 3), init=(None, '0'))
+
+
+def row_classes(html_text):
+    """The class of each iteration's row, '' for none."""
+    body = re.search(r'<tbody>(.*?)</tbody>', html_text, re.S).group(1)
+    return [cls for cls, first in re.findall(r'<tr(?: class="([^"]*)")?><td class="row-index">([^<]*)</td>', body)
+            if first != 'init']
+
+
+def typed_into(event_lambda_attr, html_text, text):
+    """The event typing `text` into the box whose snc-input starts as given."""
+    found = re.search(r'snc-input="(' + re.escape(html.escape(event_lambda_attr)) + r'[^"]*)"', html_text)
+    return {'pythonEventStr': html.unescape(found.group(1)), 'eventJSON': {'value': text}}
+
+
+class TestSearch(unittest.TestCase):
+    """A focused table's footer, as a table's: a search box that marks the
+    iterations it matches and dims the rest, a 1st that keeps only the first,
+    the count of what matched, and a tab counting every iteration. Nothing it
+    does is written: a loop's iterations are not a list to filter."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_a_focused_table_has_a_search_box_and_counts_the_iterations(self):
+        out = visualize(scores(), {}, small=False)
+        self.assertIn('class="search-box"', out)
+        self.assertIn('<div class="tiny-len">5 iterations</div>', out)
+        self.assertIn('Count: 5', out)
+        self.assertIn('1 iteration<', visualize(table(rows=(('1', '1'),), values=((1, 1),)), {}))
+        self.assertIn('7 iterations', visualize(table(hidden_rows=5), {}))
+
+    def test_not_while_small_or_live_only(self):
+        self.assertNotIn('search-box', visualize(scores(), {}, small=True))
+        visualizer_utils.set_live_only(True)
+        self.assertNotIn('search-box', visualize(scores(), {}))
+
+    def test_typing_a_condition_over_the_loops_names_marks_what_it_matches(self):
+        model, cmds = update(typed_into('lambda e: SearchBoxInput', visualize(scores(), {}), 'score > 5'), None,
+                             {}, scores())
+        self.assertEqual((model, cmds), ({'search': 'score > 5'}, []))
+        out = visualize(scores(), model)
+        self.assertEqual(row_classes(out), ['row-dim', 'row-match', 'row-dim', 'row-match', 'row-dim'])
+        self.assertIn('Count: 2', out)
+
+    def test_it_reads_a_statements_name_too(self):
+        out = visualize(scores(), {'search': 'high == 1'})
+        self.assertEqual(row_classes(out), ['row-dim', 'row-match', 'row-match', 'row-dim', 'row-dim'])
+
+    def test_first_match_keeps_only_the_first(self):
+        model, _ = update(click(FirstMatchToggle()), None, {'search': 'score > 5'}, scores())
+        self.assertTrue(model['first_match'])
+        out = visualize(scores(), model)
+        self.assertEqual(row_classes(out), ['row-dim', 'row-match', 'row-dim', 'row-dim', 'row-dim'])
+        self.assertIn('search-button active', out)
+
+    def test_a_search_that_matches_nothing_or_does_not_run_dims_nothing(self):
+        for search in ('score > 100', 'score >', 'nope == 1'):
+            with self.subTest(search=search):
+                self.assertEqual(set(row_classes(visualize(scores(), {'search': search}))), {''})
+
+    def test_an_empty_box_is_no_search(self):
+        model, _ = update({'pythonEventStr': repr(SearchBoxInput(value='')), 'eventJSON': {}}, None,
+                          {'search': 'score > 5'}, scores())
+        self.assertIsNone(model['search'])
+
+
+class TestColumnSearch(unittest.TestCase):
+    """The search row atop a column's menu: an operator, what to compare the
+    column's value against, and how it goes with the other columns' -- folded
+    into the footer's search, as a table's are."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_menu_opens_with_a_search_row(self):
+        out = visualize(scores(), {'col_menu': 'score'})
+        self.assertIn('class="col-search-input search-box"', col_menu_of(out))
+        self.assertNotIn('col-menu-no-search', col_menu_of(out))
+
+    def test_typing_compares_the_columns_value(self):
+        out = visualize(scores(), {'col_menu': 'score'})
+        model, _ = update(typed_into('lambda e: ColumnSearchInput', out, '9'), None, {'col_menu': 'score'}, scores())
+        self.assertEqual(model['col_search'], {'score': {'compose': 'and', 'op': '==', 'text': '9', 'exclude': False}})
+        self.assertEqual(row_classes(visualize(scores(), model)),
+                         ['row-dim', 'row-match', 'row-dim', 'row-match', 'row-dim'])
+
+    def test_the_operator_and_how_it_composes_are_chips(self):
+        model = {'col_menu': 'score', 'col_search': {'score': {'compose': 'and', 'op': '==', 'text': '4',
+                                                               'exclude': False}}}
+        model, _ = update(click(ColumnSearchOpSelect(label='score', op='>=')), None, model, scores())
+        self.assertEqual(row_classes(visualize(scores(), model)),
+                         ['row-dim', 'row-match', 'row-match', 'row-match', 'row-dim'])
+        model['search'] = 'score == 1'
+        model, _ = update(click(ColumnSearchComposeSelect(label='score', compose='or')), None, model, scores())
+        self.assertEqual(row_classes(visualize(scores(), model)),
+                         ['row-dim', 'row-match', 'row-match', 'row-match', 'row-match'])
+
+    def test_escape_in_the_search_row_walks_out_a_level(self):
+        model, _ = update(key('Escape'), None, {'col_menu': 'score', 'submenu': 'sort'}, scores())
+        self.assertEqual((model['col_menu'], model['submenu']), ('score', None))
+        model, _ = update(key('Escape'), None, model, scores())
+        self.assertIsNone(model['col_menu'])
+
+    def test_a_filtered_columns_header_says_so(self):
+        model = {'col_search': {'score': {'compose': 'and', 'op': '==', 'text': '9', 'exclude': False}}}
+        self.assertIn('col-filtered', header_cells(visualize(scores(), model))[1])
+
+
+class TestSort(unittest.TestCase):
+    """Sort, in a column's menu: the iterations drawn in the column's order,
+    still numbered by when they ran. A view of the loop, so nothing is
+    written."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_sort_is_a_submenu_of_ascending_and_descending(self):
+        out = visualize(scores(), {'col_menu': 'score', 'submenu': 'sort'})
+        self.assertEqual(submenu_rows(out), [('Ascending', False, True), ('Descending', False, True)])
+        self.assertIn(('Sort', True), menu_options(out))
+
+    def test_ticking_an_order_draws_the_rows_in_it(self):
+        model, cmds = update(click(SortToggle(label='score', direction='asc')), None, {'col_menu': 'score'}, scores())
+        self.assertEqual((model['sort'], cmds), ({'label': 'score', 'direction': 'asc'}, []))
+        self.assertEqual([r[:2] for r in body_rows(visualize(scores(), model))[1:]],
+                         [['4', '1'], ['0', '3'], ['2', '4'], ['1', '9'], ['3', '9']])
+        model, _ = update(click(SortToggle(label='score', direction='desc')), None, model, scores())
+        self.assertEqual([r[1] for r in body_rows(visualize(scores(), model))[1:]], ['9', '9', '4', '3', '1'])
+
+    def test_ticking_it_again_puts_the_loops_order_back(self):
+        model, _ = update(click(SortToggle(label='score', direction='asc')), None,
+                          {'sort': {'label': 'score', 'direction': 'asc'}}, scores())
+        self.assertIsNone(model['sort'])
+
+    def test_the_checked_order_is_the_one_drawn(self):
+        out = visualize(scores(), {'col_menu': 'score', 'submenu': 'sort',
+                                   'sort': {'label': 'score', 'direction': 'desc'}})
+        self.assertEqual(submenu_rows(out), [('Ascending', False, True), ('Descending', True, True)])
+
+    def test_values_of_different_kinds_sort_by_how_they_read(self):
+        t = table(columns=(bound('x'),), rows=(("'b'",), ('2',), ("'a'",)), values=(('b',), (2,), ('a',)),
+                  init=(None,))
+        out = visualize(t, {'sort': {'label': 'x', 'direction': 'asc'}})
+        self.assertEqual([r[1] for r in body_rows(out)], ["'a'", "'b'", '2'])
+
+    def test_a_running_table_has_no_values_to_sort_by(self):
+        t = table(rows=(), values=(), running=True)
+        model = {'last_rows': [{'element': '2', 'count += 1': '1'}, {'element': '1', 'count += 1': '2'}],
+                 'sort': {'label': 'element', 'direction': 'asc'}}
+        self.assertEqual([r[1] for r in body_rows(visualize(t, model))[1:]], ['2', '1'])
+
+
+class TestTally(unittest.TestCase):
+    """The foot of a column's menu: each value it took and how many
+    iterations took it, ticked to search for them, as a table's."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    @staticmethod
+    def tally_rows(html_text):
+        return [(text_of(item), int(count), ' checked' in cls) for cls, item, count in re.findall(
+            r'<div class="col-tally-row([^"]*)"[^>]*>.*?<span class="col-tally-item snc-code">(.*?)</span>'
+            r'<span class="col-tally-count">(\d+)</span>', col_menu_of(html_text), re.S)]
+
+    def test_every_value_and_how_often(self):
+        self.assertEqual(self.tally_rows(visualize(scores(), {'col_menu': 'score'})),
+                         [('3', 1, False), ('9', 2, False), ('4', 1, False), ('1', 1, False)])
+
+    def test_ticking_values_searches_for_them(self):
+        model, _ = update(click(TallyItemToggle(label='score', literal='9')), None, {'col_menu': 'score'}, scores())
+        self.assertEqual(model['col_search']['score']['op'], '==')
+        model, _ = update(click(TallyItemToggle(label='score', literal='1')), None, model, scores())
+        self.assertEqual((model['col_search']['score']['op'], model['col_search']['score']['text']), ('in', '[9, 1]'))
+        out = visualize(scores(), model)
+        self.assertEqual(row_classes(out), ['row-dim', 'row-match', 'row-dim', 'row-match', 'row-match'])
+        self.assertEqual([checked for _, _, checked in self.tally_rows(out)], [False, True, False, True])
+
+    def test_exclude_all_and_none(self):
+        model, _ = update(click(TallyItemToggle(label='score', literal='9')), None, {'col_menu': 'score'}, scores())
+        model, _ = update(click(TallyExcludeToggle(label='score')), None, model, scores())
+        self.assertEqual(row_classes(visualize(scores(), model)),
+                         ['row-match', 'row-dim', 'row-match', 'row-dim', 'row-match'])
+        model, _ = update(click(TallySelectNone(label='score')), None, model, scores())
+        self.assertEqual(model['col_search']['score']['text'], '')
+        model, _ = update(click(TallySelectAll(label='score')), None, model, scores())
+        self.assertEqual(model['col_search']['score']['text'], '[3, 9, 4, 1]')
+
+    def test_the_filter_box_and_the_order(self):
+        out = visualize(scores(), {'col_menu': 'score'})
+        model, _ = update(typed_into('lambda e: TallyFilterInput', out, '9'), None, {'col_menu': 'score'}, scores())
+        self.assertEqual(self.tally_rows(visualize(scores(), model)), [('9', 2, False)])
+        model, _ = update(click(TallySortSelect(sort='common')), None, {'col_menu': 'score'}, scores())
+        self.assertEqual(self.tally_rows(visualize(scores(), model))[0], ('9', 2, False))
+
+    def test_a_column_of_values_that_cannot_be_counted_says_so(self):
+        t = table(columns=(bound('x'),), rows=(('[1]',),), values=(([1],),), init=(None,))
+        self.assertIn('not counted', col_menu_of(visualize(t, {'col_menu': 'x'})))
 
 
 class TestEditColumn(unittest.TestCase):

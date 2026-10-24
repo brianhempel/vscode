@@ -72,6 +72,17 @@ away by a click anywhere else. What it does to a loop is write loop code:
   that changes its name in place has one object in every row, so it offers
   none.
 
+**Searching, sorting and tallying are views, as a table's are.** The footer's
+search box takes a condition over the loop's names (`score > 5`), each row's
+values bound to them; the iterations it holds for are marked and the rest
+dimmed, and 1st keeps only the first. A column's menu opens with a search row
+of its own, its value compared against what is typed, composed with the
+searches before it; its tally, at the menu's foot, is the table's -- ticking
+values writes them into that row as a table's does. Sort draws the iterations
+in a column's order, still numbered by when they ran. None of it writes code:
+a loop's iterations are not a list to filter, and all of it reads the values
+the runner copied, so a loop still running has none to search.
+
 **While the loop runs, the rows of last time.** The table logged as the loop
 starts has none of its own yet, and the finished one replaces it a moment
 later. Drawn empty, it would shrink and regrow the table on every run -- every
@@ -103,7 +114,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from table_visualizer import COMPUTE_AGGS, CONVERT_TYPES, NO_THING, _agg_answer_html, _agg_value
+from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, COMPUTE_AGGS, CONVERT_TYPES, NO_THING,
+                               TALLY_COUNT_EXTREME_OPS, TALLY_COUNT_OPS, TALLY_SORTS, _TALLY_NOTES, _agg_answer_html,
+                               _agg_value, _column_search_value_label, _in_tally_order, _tally, _tally_count_op,
+                               _tally_count_op_label, _tally_extreme, _tally_lists, _tally_rows, _tally_selection,
+                               _tally_shown, _tally_sort, _tally_sort_label)
 from visualizer_utils import (EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, AddImports, ForLoopColumn, ForLoopTable,
                               InsertLines, ReplaceLines, is_live_only)
 
@@ -272,6 +287,101 @@ class ComputeCodeClick:
 
 
 @dataclass(frozen=True)
+class SearchBoxInput:
+    """The footer's search box now holds `value`: a condition over the loop's
+    names, marking the iterations it holds for."""
+    value: str
+
+
+@dataclass(frozen=True)
+class FirstMatchToggle:
+    """The 1st beside the search box: mark only the first match, or every one."""
+
+
+@dataclass(frozen=True)
+class ColumnSearchInput:
+    """The search row atop the menu of the column labeled `label` now holds
+    `value`, what the column's value is compared against."""
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ColumnSearchOpSelect:
+    """The comparison a column's search makes."""
+    label: str
+    op: str
+
+
+@dataclass(frozen=True)
+class ColumnSearchComposeSelect:
+    """How a column's search goes with the searches before it."""
+    label: str
+    compose: str
+
+
+@dataclass(frozen=True)
+class SortToggle:
+    """Ascending or Descending, in the Sort submenu of the column labeled
+    `label`: draw the iterations in that order, or in the loop's again."""
+    label: str
+    direction: str
+
+
+@dataclass(frozen=True)
+class TallyItemToggle:
+    """A value in a column's tally: search for it too, or stop."""
+    label: str
+    literal: str
+
+
+@dataclass(frozen=True)
+class TallySelectAll:
+    """All, in a column's tally: search for every value it shows."""
+    label: str
+
+
+@dataclass(frozen=True)
+class TallySelectNone:
+    """None, in a column's tally: search for none of the values it shows."""
+    label: str
+
+
+@dataclass(frozen=True)
+class TallyExcludeToggle:
+    """Exclude, in a column's tally: search for everything but its values."""
+    label: str
+
+
+@dataclass(frozen=True)
+class TallyFilterInput:
+    """The tally's own box now holds `value`: only values reading so are shown."""
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class TallyCountFilterInput:
+    """The tally's count box now holds `value`: only values with so many
+    iterations are shown."""
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class TallyCountOpSelect:
+    """How the tally's count box compares."""
+    label: str
+    op: str
+
+
+@dataclass(frozen=True)
+class TallySortSelect:
+    """The order the tally lists its values in."""
+    sort: str
+
+
+@dataclass(frozen=True)
 class ColumnInput:
     """The column box now holds `value`."""
     value: str
@@ -404,16 +514,129 @@ def _render_label(column: ForLoopColumn) -> str:
     return f'<span class="for-loop-col-subject">{html.escape(shown)}</span>{html.escape(rest)}'
 
 
+# A column's search, before anything is typed into it: the same shape as a
+# table's, which is what lets its tally read its selection back out of it.
+COLUMN_SEARCH_DEFAULT = {'compose': 'and', 'op': '==', 'text': '', 'exclude': False}
+
+# The submenu slot holds the chips on the search row and the tally too; resting
+# on the row a chip belongs to is not a way of leaving it.
+SEARCH_CHIPS = ('op', 'compose')
+TALLY_CHIPS = ('tally-sort', 'tally-count-op')
+SORT_DIRECTIONS = (('asc', 'Ascending'), ('desc', 'Descending'))
+
+
+def _column_search(model, label: str) -> dict:
+    return {**COLUMN_SEARCH_DEFAULT, **((model.get('col_search') or {}).get(label) or {})}
+
+
+def _set_column_search(model, label: str, **fields) -> dict:
+    """The model with the search of the column labeled `label` changed."""
+    searches = dict(model.get('col_search') or {})
+    searches[label] = {**_column_search(model, label), **fields}
+    return {**model, 'col_search': searches}
+
+
+def _write_selection(model, label: str, literals, exclude: bool) -> dict:
+    """A tally's selection written as its column's search, as a table writes
+    it: nothing selected is no search, one value compares, several are a
+    membership."""
+    if not literals:
+        return _set_column_search(model, label, op='==', text='', exclude=exclude)
+    if len(literals) == 1:
+        return _set_column_search(model, label, op='!=' if exclude else '==', text=literals[0], exclude=exclude)
+    return _set_column_search(model, label, op='not in' if exclude else 'in', text=f'[{", ".join(literals)}]',
+                              exclude=exclude)
+
+
+def _eval(code: str, names: dict):
+    return eval(code, {'math': math}, names)
+
+
+def _row_names(value: ForLoopTable, row: Tuple[Any, ...]) -> dict:
+    """What each of the loop's names held in one iteration, for a search to
+    read: the names it binds, and those its statements set."""
+    return {column.subject: cell for column, cell in zip(value.columns, row)
+            if column.subject and cell is not NO_VALUE}
+
+
+def _holds(code: str, names: dict) -> bool:
+    try:
+        return bool(_eval(code, names))
+    except Exception:
+        return False
+
+
+def _column_holds(search: dict, cell, names: dict) -> bool:
+    """Whether a column's search holds for its value `cell`: compared with
+    what was typed, or -- with no comparison -- what was typed, `$` being it."""
+    if cell is NO_VALUE:
+        return False
+    text, op = search['text'].strip(), search['op']
+    code = f'_v {op} ({text})' if op else text.replace('$', '_v')
+    return _holds(code, {**names, '_v': cell})
+
+
+def _active_searches(value: ForLoopTable, model) -> List[Tuple[int, dict]]:
+    return [(col, _column_search(model, column.label)) for col, column in enumerate(value.columns)
+            if _column_search(model, column.label)['text'].strip()]
+
+
+def _matches(value: ForLoopTable, model) -> Optional[List[int]]:
+    """The iterations every search holds for, the footer's then each column's
+    in turn, composed as each says; None when nothing is being searched for.
+    Read off the values, so a loop still running has none to search."""
+    search = (model.get('search') or '').strip()
+    columns = _active_searches(value, model)
+    if not search and not columns:
+        return None
+    matched = []
+    for i, row in enumerate(value.values):
+        names = _row_names(value, row)
+        held = _holds(search, names) if search else None
+        for col, column_search in columns:
+            this = _column_holds(column_search, row[col] if col < len(row) else NO_VALUE, names)
+            if held is None:
+                held = this
+            elif column_search['compose'] == 'or':
+                held = held or this
+            else:
+                held = held and this
+        if held:
+            matched.append(i)
+    return matched[:1] if model.get('first_match') else matched
+
+
+def _draw_order(value: ForLoopTable, model, n_rows: int) -> List[int]:
+    """The iterations in the order they are drawn: the loop's, or a column's
+    when it is sorted -- by value, or by how the values read when they won't
+    order -- with the ones that never got to it last."""
+    order = list(range(n_rows))
+    sort = model.get('sort') or {}
+    labels = [column.label for column in value.columns]
+    if not sort or sort.get('label') not in labels or len(value.values) != n_rows:
+        return order
+    col = labels.index(sort['label'])
+    have = [i for i in order if col < len(value.values[i]) and value.values[i][col] is not NO_VALUE]
+    lacking = [i for i in order if i not in set(have)]
+    reverse = sort.get('direction') == 'desc'
+    try:
+        have = sorted(have, key=lambda i: value.values[i][col], reverse=reverse)
+    except Exception:
+        have = sorted(have, key=lambda i: value.rows[i][col] or '', reverse=reverse)
+    return have + lacking
+
+
 def _press(event) -> str:
     """What a row of a menu sends when pressed, focused or not."""
     return f' snc-unfocused-clickable draggable="false" snc-mouse-down="{html.escape(repr(event))}"'
 
 
-def _dwell(model, opens: Optional[str] = None) -> str:
+def _dwell(model, opens: Optional[str] = None, owns=()) -> str:
     """What resting on a row of the column menu does, as a table's: a row with
-    a submenu opens it, the rest put away the one open. Only where that would
-    change something -- every event costs a run."""
-    if model.get('submenu') == opens:
+    a submenu opens it, the rest put away the one open -- unless it is one of
+    the chips the row `owns`. Only where that would change something -- every
+    event costs a run."""
+    if model.get('submenu') == opens or (opens is None and model.get('submenu') in owns):
         return ''
     return f' snc-dwell="{html.escape(repr(SubmenuDwell(submenu=opens)))}"'
 
@@ -446,12 +669,15 @@ def _render_column_menu(value: ForLoopTable, model, col: int) -> str:
     label = column.label
     statement = column.span is not None
     rows = [
+        _render_search_row(model, label),
         _render_option(model, 'Remove', DeleteColumnClick(col=col, label=label) if statement else None,
                        '' if statement else 'A name the loop binds has no line to remove'),
         _render_option(model, 'Insert Left', InsertColumnClick(col=col, label=label, after=False)
                        if statement else None),
         _render_option(model, 'Insert Right', InsertColumnClick(col=col, label=label, after=True)),
         '<div class="col-compute-sep"></div>',
+        _render_submenu_row(model, 'sort', 'Sort', 'Draw the iterations in this column\'s order',
+                            lambda: _render_sort_panel(model, label)),
         _render_option(model, 'Group By', GroupByClick(col=col, label=label) if column.subject else None,
                        f'Every iteration, grouped by {column.subject}' if column.subject else ''),
         _render_submenu_row(model, 'convert', 'Change Type', "Read this column's values as another type",
@@ -461,9 +687,150 @@ def _render_column_menu(value: ForLoopTable, model, col: int) -> str:
         _render_option(model, 'Collect into List', CollectClick(col=col, label=label)
                        if _collectable(value, col, label) is not None else None,
                        f'A list of every {column.subject}, built as the loop runs' if column.subject else ''),
+        '<div class="col-compute-sep"></div>',
+        _render_tally(value, model, col),
     ]
-    return (f'<div class="snc-dropdown-panel flyout col-menu-panel col-menu-no-search" snc-dropdown-align="flyout" '
+    return (f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout" '
             f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{"".join(rows)}</div><!--/col-menu-->')
+
+
+def _render_chip(model, chip: str, current: str, options, make_event, chip_class: str, tooltip: str = '',
+                 label=_column_search_value_label) -> str:
+    """One of the small drop-downs in a column's menu -- the search row's two,
+    and the tally's -- held open by the submenu slot, as a table's are."""
+    is_open = model.get('submenu') == chip
+    panel = ''
+    if is_open:
+        rows = ''.join(f'<div class="snc-dropdown-option{" selected" if option == current else ""}"'
+                       f'{_press(make_event(option))}>{label(option)}</div>' for option in options)
+        panel = f'<div class="snc-dropdown-panel flyout col-search-chip-panel" snc-dropdown-align="flyout">{rows}</div>'
+    tip = f' data-tooltip="{html.escape(tooltip)}"' if tooltip else ''
+    return (f'<span class="snc-dropdown-trigger"><span class="col-search-chip {chip_class}{" open" if is_open else ""}"'
+            f'{tip}{_press(SubmenuToggle(submenu=chip))}>{label(current)}'
+            f'<span class="col-search-chip-arrow">▾</span></span>{panel}</span>')
+
+
+def _render_search_row(model, label: str) -> str:
+    """A column's search, atop its menu as a table's is: what its value is
+    compared against, the comparison, and how it goes with the searches
+    before it. Escape in it walks out of the menu a level at a time."""
+    search = _column_search(model, label)
+    op = _render_chip(model, 'op', search['op'], COLUMN_SEARCH_OPS,
+                      lambda v: ColumnSearchOpSelect(label=label, op=v), 'col-search-op', 'Search Operation')
+    compose = _render_chip(model, 'compose', search['compose'], COLUMN_SEARCH_COMPOSE,
+                           lambda v: ColumnSearchComposeSelect(label=label, compose=v), 'col-search-compose',
+                           "How this composes with the other searches")
+    input_event = f"lambda e: ColumnSearchInput(label={label!r}, value=e.get('value', ''))"
+    return (f'<div class="col-search-area"{_dwell(model, owns=SEARCH_CHIPS)}><div class="search-box-wrapper">'
+            f'<input type="text" class="col-search-input search-box" snc-unfocused-clickable spellcheck="false" '
+            f'snc-input="{html.escape(input_event)}" snc-key-down="{html.escape(repr(ColumnKeyDown()))}" '
+            f'value="{html.escape(search["text"])}" placeholder="Search" '
+            f'data-tooltip="$ is this column\'s value" />'
+            f'<span class="col-search-chips-right">{op}{compose}</span></div></div>')
+
+
+def _render_sort_panel(model, label: str) -> str:
+    """Ascending and Descending, ticked while the iterations are drawn so."""
+    sort = model.get('sort') or {}
+    rows = []
+    for direction, name in SORT_DIRECTIONS:
+        checked = sort.get('label') == label and sort.get('direction') == direction
+        rows.append(f'<div class="col-compute-row col-sort-row{" checked" if checked else ""}">'
+                    f'<span class="col-compute-toggle"{_press(SortToggle(label=label, direction=direction))}>'
+                    f'{_check(checked)}<span class="col-compute-name">{name}</span></span></div>')
+    return _submenu('sort', rows)
+
+
+def _render_tally(value: ForLoopTable, model, col: int) -> str:
+    """Each value the column took and how many iterations took it, as a
+    table's tally: ticked to search for them, narrowed by what they read as
+    or how often they occur, and listed in the order picked."""
+    label = value.columns[col].label
+    values = _column_values(value, col)
+    tally = _tally(values) if values is not None else None
+    dwell = _dwell(model, owns=TALLY_CHIPS)
+    if tally is None:
+        return ''
+    if not isinstance(tally, dict):
+        return f'<div class="col-tally"{dwell}><div class="col-tally-note">{_TALLY_NOTES[tally]}</div></div>'
+    selected, exclude = _tally_selection(_column_search(model, label))
+    rows = _tally_rows(tally, model)
+    extreme = _tally_extreme(model, rows)
+    items = []
+    for text, count, literal in rows:
+        if not _tally_lists(model, text, count, extreme):
+            continue
+        shown = html.escape(text if len(text) <= 60 else text[:59] + '…')
+        if literal is None:
+            items.append(f'<div class="col-tally-row unselectable">{_check(False, disabled=True)}'
+                         f'<span class="col-tally-item snc-code">{shown}</span>'
+                         f'<span class="col-tally-count">{count}</span></div>')
+            continue
+        checked = literal in selected
+        items.append(f'<div class="col-tally-row{" checked" if checked else ""}"'
+                     f'{_press(TallyItemToggle(label=label, literal=literal))}>{_check(checked)}'
+                     f'<span class="col-tally-item snc-code">{shown}</span>'
+                     f'<span class="col-tally-count">{count}</span></div>')
+    filter_event = f"lambda e: TallyFilterInput(label={label!r}, value=e.get('value', ''))"
+    count_event = f"lambda e: TallyCountFilterInput(label={label!r}, value=e.get('value', ''))"
+    count_op = _tally_count_op(model)
+    extreme_op = count_op in TALLY_COUNT_EXTREME_OPS
+    count_box = (f'<div class="search-box-wrapper col-tally-count-box">'
+                 f'<input type="text" class="col-tally-count-filter search-box" snc-unfocused-clickable '
+                 f'snc-input="{html.escape(count_event)}" '
+                 f'value="{"" if extreme_op else html.escape(model.get("tally_count_filter") or "")}" '
+                 f'placeholder="{"" if extreme_op else "N"}" spellcheck="false"{" disabled" if extreme_op else ""} />'
+                 f'<span class="col-search-chips">'
+                 + _render_chip(model, 'tally-count-op', count_op, TALLY_COUNT_OPS,
+                                lambda v: TallyCountOpSelect(label=label, op=v), 'col-tally-count-op',
+                                label=_tally_count_op_label)
+                 + '</span></div>')
+    sort = _render_chip(model, 'tally-sort', _tally_sort(model), TALLY_SORTS, lambda v: TallySortSelect(sort=v),
+                        'col-tally-sort', 'Order the values are listed in', _tally_sort_label)
+    controls = (f'<div class="col-tally-controls">'
+                f'<span class="col-search-chip" data-tooltip="Select every value shown"'
+                f'{_press(TallySelectAll(label=label))}>All</span>'
+                f'<span class="col-search-chip" data-tooltip="Select none of the values shown"'
+                f'{_press(TallySelectNone(label=label))}>None</span>'
+                f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
+                f'data-tooltip="Search for everything but the selected values"'
+                f'{_press(TallyExcludeToggle(label=label))}>Exclude</span>'
+                f'<div class="col-tally-sort-box"><div class="col-tally-sort-icon">{ICONS["sort"]}</div>{sort}</div>'
+                f'</div>')
+    body = (f'<div class="col-tally-list-header"><span class="col-tally-item-header">Tally</span>'
+            f'<span class="col-tally-count-header">Counts {count_box}</span></div>')
+    body += (f'<div class="col-tally-list">{"".join(items)}</div>' if items
+             else '<div class="col-tally-note">No values match</div>')
+    filter_box = (f'<div class="col-tally-filter-wrapper"><input type="text" class="col-tally-filter search-box" '
+                  f'snc-unfocused-clickable snc-input="{html.escape(filter_event)}" '
+                  f'value="{html.escape(model.get("tally_filter") or "")}" placeholder="Search tally" '
+                  f'data-tooltip="Show only values containing this text" spellcheck="false" /></div>')
+    return f'<div class="col-tally"{dwell}>{filter_box}{controls}{body}</div>'
+
+
+def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_rows: int, hidden_rows: int) -> str:
+    """A focused table's footer, as a table's: the search box and its 1st,
+    how many iterations matched, and a tab counting every one the loop ran."""
+    input_event = "lambda e: SearchBoxInput(value=e.get('value', ''))"
+    first = bool(model.get('first_match'))
+    names = ', '.join(column.subject for column in value.columns if column.subject)
+    count = n_rows if matches is None else len(matches)
+    ran = n_rows + hidden_rows
+    return (f'<div class="search-div toolbar-anchor">'
+            f'<div class="search-div-row"><div class="search-replace-container"><div class="search-box-wrapper">'
+            f'<input type="text" tabindex="0" snc-input="{html.escape(input_event)}" '
+            f'value="{html.escape(model.get("search") or "")}" placeholder="Search" '
+            f'data-tooltip="{html.escape(f"A condition over {names}" if names else "A condition")}" '
+            f'spellcheck="false" class="search-box" />'
+            f'<span class="search-toggles-container">'
+            f'<span class="search-button {"active" if first else "inactive"}" data-tooltip="First match only"'
+            f'{_press(FirstMatchToggle())}>{ICONS["match-first"]}</span></span>'
+            f'</div></div></div>'
+            f'<div class="search-div-row"><div class="action-buttons">'
+            f'<span class="action-button" data-tooltip="Count of matches"><span class="text">Count: {count}</span>'
+            f'</span></div></div>'
+            f'<div class="auxiliary-attributes"><div class="tiny-len">{ran} iteration{"" if ran == 1 else "s"}</div>'
+            f'</div></div>')
 
 
 def _check(checked: bool, disabled: bool = False) -> str:
@@ -690,8 +1057,9 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool) -> str
                  f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit">'
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col)}')
-    return (f'<th class="snc-hover-hidden-parent col-header for-loop-col"{_col_attrs(model, label, clip=False)}>'
-            f'<span class="col-header-inner">{inner}{resize}</span></th>')
+    filtered = ' col-filtered' if _column_search(model, label)['text'].strip() else ''
+    return (f'<th class="snc-hover-hidden-parent col-header for-loop-col{filtered}"'
+            f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">{inner}{resize}</span></th>')
 
 
 def _render_menu_trigger(value: ForLoopTable, model, col: int) -> str:
@@ -880,12 +1248,16 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
         strs += [_render_init_cell(value, model, col, live_only) for col in shown]
         strs.append('</tr>')
     gap = _hidden_page(len(rows), model)
-    for i, row in enumerate(rows):
-        if gap is not None and gap[0] <= i < gap[1]:
-            if i == gap[0]:
+    matches = None if small or live_only and not model.get('search') else _matches(value, model)
+    marked = set(matches) if matches else set()
+    for position, i in enumerate(_draw_order(value, model, len(rows))):
+        row = rows[i]
+        if gap is not None and gap[0] <= position < gap[1]:
+            if position == gap[0]:
                 strs.append(_render_load_more_row(gap[1] - gap[0], len(shown) + 1, small))
             continue
-        strs.append(f'<tr><td class="row-index">{i}</td>')
+        row_class = '' if not marked else (' class="row-match"' if i in marked else ' class="row-dim"')
+        strs.append(f'<tr{row_class}><td class="row-index">{i}</td>')
         strs += [_render_cell(model, value.columns[col].label, row[col] if col < len(row) else None)
                  for col in shown]
         strs.append('</tr>')
@@ -898,6 +1270,8 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
     if hidden_rows:
         noun = 'iteration' if hidden_rows == 1 else 'iterations'
         strs.append(f'<div class="for-loop-note">{hidden_rows} more {noun}</div>')
+    if not small and not live_only:
+        strs.append(_render_footer(value, model, matches, len(rows), hidden_rows))
     strs.append('</div>')
     return ''.join(strs)
 
@@ -925,7 +1299,51 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
             return ({**others, 'add_menu_open': not model.get('add_menu_open')}, [])
         case ColumnMenuToggle(label=label):
             opening = model.get('col_menu') != label
-            return ({**model, 'add_menu_open': False, 'col_menu': label if opening else None, 'submenu': None}, [])
+            # The tally's view belongs to the menu it was narrowed in.
+            others = {k: v for k, v in model.items() if k not in ('tally_filter', 'tally_count_filter')}
+            return ({**others, 'add_menu_open': False, 'col_menu': label if opening else None, 'submenu': None}, [])
+        case SearchBoxInput(value=text):
+            return ({**model, 'search': text or None}, [])
+        case FirstMatchToggle():
+            return ({**model, 'first_match': not model.get('first_match')}, [])
+        case ColumnSearchInput(label=label, value=text):
+            return (_set_column_search(model, label, text=text), [])
+        case ColumnSearchOpSelect(label=label, op=op) if op in COLUMN_SEARCH_OPS:
+            return ({**_set_column_search(model, label, op=op), 'submenu': None}, [])
+        case ColumnSearchComposeSelect(label=label, compose=compose) if compose in COLUMN_SEARCH_COMPOSE:
+            return ({**_set_column_search(model, label, compose=compose), 'submenu': None}, [])
+        case SortToggle(label=label, direction=direction):
+            same = model.get('sort') == {'label': label, 'direction': direction}
+            return ({**model, 'sort': None if same else {'label': label, 'direction': direction}}, [])
+        case TallyItemToggle(label=label, literal=literal):
+            col = next((i for i, c in enumerate(value.columns) if c.label == label), None)
+            if col is not None:
+                selected, exclude = _tally_selection(_column_search(model, label))
+                selected = [lit for lit in selected if lit != literal] if literal in selected else selected + [literal]
+                return (_write_selection(model, label, _in_tally_order(selected, _tally_order(value, model, col)),
+                                         exclude), [])
+        case TallySelectAll(label=label) | TallySelectNone(label=label):
+            col = next((i for i, c in enumerate(value.columns) if c.label == label), None)
+            if col is not None:
+                selected, exclude = _tally_selection(_column_search(model, label))
+                rows = _tally_rows_of(value, model, col)
+                shown = _tally_shown(model, rows)
+                kept = [lit for lit in selected if lit not in set(shown)]
+                if isinstance(msg, TallySelectAll):
+                    kept = kept + shown
+                return (_write_selection(model, label, _in_tally_order(kept, _tally_order(value, model, col)),
+                                         exclude), [])
+        case TallyExcludeToggle(label=label):
+            selected, exclude = _tally_selection(_column_search(model, label))
+            return (_write_selection(model, label, selected, not exclude), [])
+        case TallyFilterInput(value=text):
+            return ({**model, 'tally_filter': text}, [])
+        case TallyCountFilterInput(value=text):
+            return ({**model, 'tally_count_filter': text}, [])
+        case TallyCountOpSelect(op=op) if op in TALLY_COUNT_OPS:
+            return ({**model, 'tally_count_op': op, 'submenu': None}, [])
+        case TallySortSelect(sort=sort) if sort in TALLY_SORTS:
+            return ({**model, 'tally_sort': sort, 'submenu': None}, [])
         case ColumnMenuDismiss():
             return (_menus_closed(model), [])
         case SubmenuToggle(submenu=submenu):
@@ -969,6 +1387,12 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
             return ({**model, 'computes': computes}, [])
         case ComputeFreeInput(label=label, value=text):
             return ({**model, 'compute_free': {'label': label, 'text': text}}, [])
+        case ColumnKeyDown() if not _box_open(model) and model.get('col_menu') and event_json.get('key') == 'Escape' \
+                and not (model.get('compute_free') or {}).get('text'):
+            # Out a level at a time, as a table's menu walks out.
+            if model.get('submenu'):
+                return ({**model, 'submenu': None}, [])
+            return (_menus_closed(model), [])
         case ColumnKeyDown() if not _box_open(model) and (model.get('compute_free') or {}).get('text'):
             free = model['compute_free']
             if event_json.get('key') == 'Enter':
@@ -1043,6 +1467,16 @@ def _closed(model):
 def _menus_closed(model):
     """The model with the column menu put away, as anything it did does."""
     return {**model, 'col_menu': None, 'submenu': None}
+
+
+def _tally_rows_of(value: ForLoopTable, model, col: int):
+    tally = _tally(_column_values(value, col) or [])
+    return _tally_rows(tally, model) if isinstance(tally, dict) else []
+
+
+def _tally_order(value: ForLoopTable, model, col: int) -> List[str]:
+    """Every literal a column's tally can search for, in the order it lists them."""
+    return [literal for _text, _count, literal in _tally_rows_of(value, model, col) if literal is not None]
 
 
 def _compute_code(value: ForLoopTable, subject: str, kind: str) -> List[Any]:
