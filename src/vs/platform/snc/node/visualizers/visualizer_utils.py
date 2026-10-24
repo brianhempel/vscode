@@ -1139,15 +1139,48 @@ class UncaughtError:
 
 
 @dataclass(frozen=True)
+class ForLoopColumn:
+    """One column of a ForLoopTable: a name the loop binds, or a statement
+    directly in its body that computes a value -- an assignment, or a method
+    called on a name (`arr2.append(x)`), which shows the name after the call.
+
+    Read off the source, so it says what the column would show even when the
+    loop never gets to it: a statement updating a name nothing set yet is
+    still an accumulator, and its missing starting value is what to fix.
+    """
+    # Its source, whitespace collapsed: what its header reads.
+    label: str
+    # The (first, last) lines of its statement, or None for a name the loop
+    # binds: what editing or deleting the column rewrites.
+    span: Optional[Tuple[int, int]] = None
+    # The name whose value the column shows, if it is a bare name: what an
+    # accumulator starts from, and what collecting the column collects.
+    subject: Optional[str] = None
+    # How much of the label, from its start, is the thing shown: underlined in
+    # the header, since a statement is not itself a value.
+    underline: int = 0
+    # The statement reads the value the iteration before left in its subject,
+    # so the value before the loop is where it starts (the table's `init`).
+    accumulator: bool = False
+    # The statement changes its subject in place rather than rebinding it, so
+    # every row is the one object: collecting it would collect that object
+    # over and over.
+    in_place: bool = False
+    # The lines of the assignment that sets an accumulator's starting value
+    # right before the loop -- the last thing there to touch its name -- or
+    # None, when setting it means a new line above the loop.
+    init_span: Optional[Tuple[int, int]] = None
+
+
+@dataclass(frozen=True)
 class ForLoopTable:
     """What a `for` loop did, logged on its last line once it has finished
     (and, with no rows yet, as it starts).
 
-    A row per iteration and a column per value the loop computes: each name it
-    binds, and each assignment directly in its body, labeled with its source.
-    A cell is the value's repr when the statement ran -- a list appended to
-    later must not rewrite the rows before -- or None where an iteration never
-    got to it (it broke out or raised first).
+    A row per iteration and a column per value the loop computes (see
+    ForLoopColumn). A cell is the value's repr when the statement ran -- a
+    list appended to later must not rewrite the rows before -- or None where
+    an iteration never got to it (it broke out or raised first).
 
     The rest is what code written into the loop needs: where it starts and
     ends, how its header and body are indented, the names it binds (what a
@@ -1158,19 +1191,19 @@ class ForLoopTable:
     end_line: int
     indent: str
     body_indent: str
-    columns: Tuple[str, ...]
+    columns: Tuple[ForLoopColumn, ...]
     rows: Tuple[Tuple[Optional[str], ...], ...]
     targets: Tuple[str, ...] = ()
     defined: FrozenSet[str] = frozenset()
     # Iterations that ran but have no row: past MAX_FOR_TABLE_ROWS in the runner.
     hidden_rows: int = 0
-    # Per column, the (first, last) lines of the statement it is, or None for a
-    # name the loop binds: what editing or deleting the column rewrites.
-    spans: Tuple[Optional[Tuple[int, int]], ...] = ()
     # The first and last lines of the body -- not of an `else:` after it.
     body_lines: Tuple[int, int] = (0, 0)
     # Logged as the loop starts, before any row: the loop is still running.
     running: bool = False
+    # Per column, an accumulator's value as the loop started, as a repr; None
+    # for one with no value yet, and for every other column.
+    init: Tuple[Optional[str], ...] = ()
 
 
 def error_text(exception: BaseException) -> str:

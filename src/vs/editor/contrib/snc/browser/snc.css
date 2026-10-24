@@ -2707,6 +2707,43 @@
 	color: var(--vscode-errorForeground);
 }
 
+/* The part of a statement's header that is the value its column shows:
+   `arr2` in `arr2.append(x)`, `total` in `total += x`. */
+.for-loop-visualizer .for-loop-col-subject {
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+/* The ▾ whose hover menu collects the column into a list; shown, like the x,
+   while the header is hovered. */
+.for-loop-visualizer .for-loop-col-menu {
+	visibility: hidden;
+	margin-left: 4px;
+	color: var(--snc-text-muted);
+	cursor: pointer;
+	user-select: none;
+}
+
+.for-loop-visualizer th.for-loop-col:hover .for-loop-col-menu {
+	visibility: visible;
+}
+
+/* Where each accumulator starts, above the first iteration: set apart from the
+   iterations, since it is the value before any of them ran. */
+.for-loop-visualizer tr.for-loop-init-row > td {
+	font-style: italic;
+	border-bottom: 1px solid var(--snc-border-color);
+}
+
+.for-loop-visualizer .for-loop-init-cell > span {
+	cursor: text;
+}
+
+/* An accumulator with nothing to start from: the loop died on it. */
+.for-loop-visualizer .for-loop-init-unset {
+	color: var(--vscode-editorWarning-foreground);
+}
+
 /* "12 more iterations" under a for loop's table: what didn't get a row. */
 .for-loop-visualizer > .for-loop-note {
 	color: var(--snc-text-muted);

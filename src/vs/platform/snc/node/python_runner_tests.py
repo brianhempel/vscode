@@ -2405,6 +2405,10 @@ class TestForLoopTable(unittest.TestCase):
         return msgs, tables
 
     @staticmethod
+    def _labels(table):
+        return tuple(c.label for c in table.columns)
+
+    @staticmethod
     def _table_items(msgs):
         return [(m['item']['line'], m['item']['visIndex'], m['item']['path'], m['item']['forLoopLine'])
                 for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
@@ -2419,17 +2423,19 @@ class TestForLoopTable(unittest.TestCase):
         self.assertIn('for-loop-visualizer', items[-2]['html'])
 
     def test_the_example_records_a_row_per_iteration(self):
-        from visualizer_utils import ForLoopTable
+        from visualizer_utils import ForLoopColumn, ForLoopTable
         _, tables = self._run(self.SRC)
         before = ForLoopTable(
             line=5, end_line=6, indent='', body_indent='    ',
-            columns=('element', 'count += 1'),
+            columns=(ForLoopColumn('element', subject='element'),
+                     ForLoopColumn('count += 1', span=(6, 6), subject='count', underline=5,
+                                   accumulator=True, init_span=(3, 3))),
             rows=(),
             targets=('element',),
             defined=frozenset({'array_of_integers', 'count', 'element'}),
-            spans=(None, (6, 6)),
             body_lines=(6, 6),
             running=True,
+            init=(None, '0'),
         )
         self.assertEqual(tables, [before, dataclasses.replace(
             before, rows=(('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5')), running=False)])
@@ -2448,7 +2454,7 @@ class TestForLoopTable(unittest.TestCase):
             "    x = 5\n"
         )
         _, tables = self._run(src)
-        self.assertEqual([(t.line, t.spans, t.body_lines) for t in tables[-2:]],
+        self.assertEqual([(t.line, tuple(c.span for c in t.columns), t.body_lines) for t in tables[-2:]],
                          [(2, (None, (3, 5)), (3, 5)), (1, (None,), (2, 5))])
 
     def test_the_empty_table_is_logged_before_the_body_runs(self):
@@ -2496,7 +2502,7 @@ class TestForLoopTable(unittest.TestCase):
             "    doubled = total * 2\n"
         )
         _, tables = self._run(src)
-        self.assertEqual(tables[-1].columns, ('n', 'total += n', 'doubled = total * 2'))
+        self.assertEqual(self._labels(tables[-1]), ('n', 'total += n', 'doubled = total * 2'))
         self.assertEqual(tables[-1].rows, (('10', '10', '20'), ('20', '30', '60'), ('30', '60', '120')))
 
     def test_recording_does_not_run_user_code_again(self):
@@ -2568,7 +2574,7 @@ class TestForLoopTable(unittest.TestCase):
                                                    (3, 2, [], 1)])
         self.assertEqual(tables[4].rows, (('0', '0'), ('1', '1'), ('2', '2')))
         # The outer loop's columns are its own: `y` is not directly in its body.
-        self.assertEqual(tables[-1].columns, ('i',))
+        self.assertEqual(self._labels(tables[-1]), ('i',))
         msgs, tables = self._run(src, {'1': 1})
         self.assertEqual(self._table_items(msgs), [(3, 2, [], 1), (3, 1, [[1, 1]], 2), (3, 1, [[1, 1]], 2), (3, 2, [], 1)])
 
@@ -2586,6 +2592,134 @@ class TestForLoopTable(unittest.TestCase):
         self.assertEqual((t.line, t.end_line, t.indent, t.body_indent), (3, 4, '    ', '        '))
         self.assertEqual(t.rows, (('7', '1'), ('8', '2')))
         self.assertEqual(t.defined, frozenset({'xs', 'count', 'x'}))
+
+    def test_a_method_called_on_a_name_is_a_column_of_that_name_after_the_call(self):
+        """`arr2.append(x)` returns None, which says nothing: what the line
+        does is change arr2, so its column is arr2 as the call left it."""
+        src = (
+            "arr2 = []\n"
+            "for item in [0, 2]:\n"
+            "    new_item = item + 1\n"
+            "    arr2.append(new_item)\n"
+        )
+        _, tables = self._run(src)
+        t = tables[-1]
+        self.assertEqual((self._labels(t), t.rows),
+                         (('item', 'new_item = item + 1', 'arr2.append(new_item)'),
+                          (('0', '1', '[1]'), ('2', '3', '[1, 3]'))))
+
+    def test_each_column_knows_what_it_shows_and_whether_it_carries_over(self):
+        """The subject is the name the column shows, underlined in its header
+        by how much of the label it is; an accumulator reads the value the
+        iteration before left in it, and none other has a starting value."""
+        src = (
+            "total, d, seen = 0, {}, set()\n"
+            "for x in [1]:\n"
+            "    y = x + 1\n"
+            "    total += x\n"
+            "    total = total + y\n"
+            "    d[x] = y\n"
+            "    a, b = x, y\n"
+            "    seen.add(x)\n"
+            "    print(x)\n"
+            "    s = []\n"
+            "    s.append(x)\n"
+            "    x += 1\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([(c.label, c.subject, c.underline, c.accumulator, c.in_place) for c in tables[-1].columns], [
+            ('x', 'x', 0, False, False),
+            ('y = x + 1', 'y', 1, False, False),
+            ('total += x', 'total', 5, True, False),
+            # Reads the total the line above just set, not last iteration's.
+            ('total = total + y', 'total', 5, False, False),
+            ('d[x] = y', None, 4, False, False),
+            ('a, b = x, y', None, 4, False, False),
+            ('seen.add(x)', 'seen', 4, True, True),
+            # Set fresh earlier in the same iteration: nothing carries over.
+            ('s = []', 's', 1, False, False),
+            ('s.append(x)', 's', 1, False, True),
+            # The loop sets x itself each time round.
+            ('x += 1', 'x', 1, False, False),
+        ])
+
+    def test_an_accumulator_starts_from_its_value_before_the_loop(self):
+        """Taken as the loop starts, so the empty table logged then has it
+        too, and as it was then: the loop appending to it later doesn't
+        rewrite it."""
+        src = (
+            "arr2 = []\n"
+            "for item in [1, 2]:\n"
+            "    arr2.append(item)\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([t.init for t in tables], [(None, '[]'), (None, '[]')])
+
+    def test_an_accumulator_never_set_before_the_loop_has_no_starting_value(self):
+        """The loop dies on its first iteration, and its table says why."""
+        msgs, tables = self._run("for x in [1, 2]:\n    total += x\n")
+        self.assertEqual([(t.init, t.rows) for t in tables], [((None, None), ()), ((None, None), (('1', None),))])
+        errors = [m['item']['line'] for m in msgs.all() if m.get('type') == 'item' and m['item'].get('uncaughtError')]
+        self.assertEqual(errors, [2])
+
+    def test_an_accumulator_starts_from_a_local_inside_a_function(self):
+        src = (
+            "total = 100\n"
+            "def f(xs):\n"
+            "    total = 5\n"
+            "    for x in xs:\n"
+            "        total += x\n"
+            "    return total\n"
+            "f([1])\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual(tables[-1].init, (None, '5'))
+
+    def test_a_local_not_yet_set_does_not_start_from_a_global_of_its_name(self):
+        """Python raises UnboundLocalError there rather than reading the
+        global, so the table mustn't show the global as where it starts."""
+        src = (
+            "total = 100\n"
+            "def f(xs):\n"
+            "    for x in xs:\n"
+            "        total += x\n"
+            "f([1])\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual(tables[-1].init, (None, None))
+
+    def test_an_accumulator_knows_the_line_that_last_set_it_before_the_loop(self):
+        """What setting its starting value rewrites. Only an assignment of the
+        name alone, the last thing before the loop to touch it at all: one
+        changed after it would undo whatever was written over it, so then
+        there is no such line and a new one goes in above the loop."""
+        src = (
+            "total = (\n"
+            "    0\n"
+            ")\n"
+            "arr2 = []\n"
+            "arr2.append(9)\n"
+            "seen: set = set()\n"
+            "for x in [1]:\n"
+            "    total += x\n"
+            "    arr2.append(x)\n"
+            "    seen.add(x)\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([c.init_span for c in tables[-1].columns], [None, (1, 3), None, None])
+
+    def test_an_accumulators_setting_line_is_looked_for_in_the_loops_own_block(self):
+        src = (
+            "total = 1\n"
+            "if True:\n"
+            "    for x in [1]:\n"
+            "        total += x\n"
+            "total = 5\n"
+            "for x in [1]:\n"
+            "    total += x\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([(t.line, t.columns[1].init_span) for t in tables[1::2]], [(3, None), (6, (5, 5))])
 
     def test_a_long_loop_says_how_many_rows_it_left_out(self):
         _, tables = self._run(f"for i in range({python_runner.MAX_FOR_TABLE_ROWS + 3}):\n    pass\n")

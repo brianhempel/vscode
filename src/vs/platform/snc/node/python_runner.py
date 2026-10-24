@@ -40,7 +40,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, ForLoopTable, InsertLines, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes, truncate_repr  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, ForLoopColumn, ForLoopTable, InsertLines, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes, truncate_repr  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -837,11 +837,13 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
     A `for` also passes the static half of its ForLoopTable (see
     CodeTransformer.visit_For): `(end_line, site, indent, body_indent,
     columns, targets, defined, body_lines)`, where `columns` is the (line,
-    site, label, span) of each log site whose value is a column -- `span` the
-    lines of its statement, None for a name the loop binds -- and
-    `body_lines` the body's first and last. Rows are recorded only for a loop
-    running under a path the editor is looking at; one it isn't is never
-    shown, so its table isn't either.
+    site, fields) of each log site whose value is a column, `fields` its
+    ForLoopColumn's, and `body_lines` the body's first and last. Rows are
+    recorded only for a loop running under a path the editor is looking at;
+    one it isn't is never shown, so its table isn't either.
+
+    Each accumulator's starting value is read here, from the scope the loop
+    runs in, before its first iteration can change it.
 
     The table is logged here once already, with no rows, so a loop that never
     gets to its end -- a run killed partway through it, a body stuck waiting
@@ -853,22 +855,58 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
     frame = [id_line, prev - 1]
     if table is not None and _path_selected(_current_path()):
         end_line, site, indent, body_indent, columns, targets, defined, body_lines = table
+        for_columns = tuple(ForLoopColumn(*fields) for _, _, fields in columns)
         _for_tables[id(frame)] = {
             "frame": frame,
             "first": prev,
             "end_line": end_line,
             "site": site,
-            "columns": {(line, col_site): i for i, (line, col_site, _, _) in enumerate(columns)},
+            "columns": {(line, col_site): i for i, (line, col_site, _) in enumerate(columns)},
             "rows": {},
             "table": ForLoopTable(
                 line=id_line, end_line=end_line, indent=indent, body_indent=body_indent,
-                columns=tuple(label for _, _, label, _ in columns), rows=(),
+                columns=for_columns, rows=(),
                 targets=tuple(targets), defined=frozenset(defined),
-                spans=tuple(span for _, _, _, span in columns), body_lines=body_lines,
-                running=True),
+                body_lines=body_lines, running=True,
+                init=_initial_values(for_columns, sys._getframe(1))),
         }
         log_value(end_line, _for_tables[id(frame)]["table"], site)
     _ctx_stack.append(frame)
+
+
+def _initial_values(columns: Tuple[ForLoopColumn, ...], frame: Any) -> Tuple[Optional[str], ...]:
+    """Each accumulator's value in `frame`, the scope its loop runs in, as a
+    repr: None for one with no value yet, and for every other column. A local
+    not yet set is None even with a global of its name, which Python wouldn't
+    read either."""
+    code = frame.f_code
+    is_function = bool(code.co_flags & 0x02)  # CO_NEWLOCALS: a function's own scope
+
+    def initial(column: ForLoopColumn) -> Optional[str]:
+        name = column.subject
+        if not column.accumulator or name is None:
+            return None
+        scopes = [frame.f_locals]
+        if not (is_function and (name in code.co_varnames or name in code.co_cellvars)):
+            scopes.append(frame.f_globals)
+        for scope in scopes:
+            if name in scope:
+                try:
+                    return truncate_repr(scope[name], MAX_FOR_TABLE_CELL_CHARS)
+                except Exception:
+                    return None
+        return None
+
+    return tuple(initial(column) for column in columns)
+
+
+def record_cell(line: int, site: int, value: Any) -> None:
+    """Injected after a method called on a name in a `for` body
+    (`_snc_record_cell`): the name, after the call, into its column. Nothing
+    is logged -- the line's own item is the call's -- so it goes straight to
+    the table."""
+    if _for_tables:
+        _record_for_table_cell(line, site, value)
 
 
 def _record_for_table_cell(line: int, site: int, value: Any) -> None:
@@ -976,6 +1014,7 @@ def _runtime_hooks() -> Dict[str, Any]:
         '_snc_ctx_exit': ctx_exit,
         '_snc_call_exit': call_exit,
         '_snc_ctx_error': ctx_error,
+        '_snc_record_cell': record_cell,
     }
 
 
@@ -1252,11 +1291,26 @@ def _annotate_for_scopes(statements: List[ast.stmt], defined: FrozenSet[str] = f
     (see for_loop_visualizer) initializes its accumulator only when it isn't
     one of them. Returns the names `statements` bind.
 
+    Each loop also gets, as `_snc_initializers`, the lines of the assignment
+    that last set each name right before it in its own block: `name = ...`,
+    with nothing between it and the loop touching the name. Setting an
+    accumulator's starting value (see for_loop_visualizer) rewrites that line.
+
     Read off the source before the transformer rewrites it, so the names are
     the user's own. A function body is a scope of its own, starting from its
     parameters; whatever it binds stays inside it."""
     bound: Set[str] = set()
+    initializers: Dict[str, Tuple[int, int]] = {}
     for node in statements:
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            node._snc_initializers = dict(initializers)  # type: ignore[attr-defined]
+        # Anything after an initializer that so much as names it -- `x += 1`,
+        # `x.append(1)` -- means rewriting it would no longer set the value
+        # the loop starts from.
+        for name in {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}:
+            initializers.pop(name, None)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            initializers[node.targets[0].id] = (node.lineno, node.end_lineno or node.lineno)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             args = node.args
             params = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
@@ -1811,29 +1865,45 @@ class CodeTransformer(ast.NodeTransformer):
             # Each iteration begins by advancing the loop's frame, before any
             # of its values are logged.
             new_body = [self._hook_call('_snc_loop_iter', node.lineno, node)]
-            columns: List[Tuple[int, int, str]] = []
+            columns: List[Tuple[int, int, Tuple[Any, ...]]] = []
 
             target_names = self._extract_target_names(node.target)
             for i, var_name in enumerate(target_names):
                 col_offset = node.col_offset + (i * 50)
                 vae = (var_name, var_name)
-                columns.append((node.lineno, self.site_counter.get(node.lineno, 0), var_name, None))
+                columns.append((node.lineno, self.site_counter.get(node.lineno, 0),
+                                dataclasses.astuple(ForLoopColumn(var_name, subject=var_name))))
                 log_call = self._create_log_call('_log_value', node.lineno, var_name, node.lineno, col_offset, var_and_exp=vae)
                 new_body.append(log_call)
 
             # Add the original body statements (transformed), noting the log
-            # site of each assignment as a column labeled with its source.
+            # site of each one that is a column. Names the loop or an earlier
+            # statement sets this iteration carry nothing over from the last.
+            assigned = set(target_names)
+            initializers = getattr(node, '_snc_initializers', {})
             for stmt in node.body:
-                is_column = (isinstance(stmt, ast.Assign)
-                             or (isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name)))
-                label = ' '.join(self._source_segment(stmt).split()) if is_column else ''
+                column = self._for_column(stmt, assigned, initializers)
+                assigned.update(n.id for n in ast.walk(stmt)
+                                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
                 transformed = self.visit(stmt)
                 new_body.extend(transformed if isinstance(transformed, list) else [transformed])
-                if is_column:
+                if column is None:
+                    continue
+                if column.in_place and column.subject:
+                    # Its line's own site is the call's return value. The name
+                    # after it is recorded under a key no log site has, one per
+                    # statement however many share the line.
+                    site = -1 - stmt.col_offset
+                    new_body.append(self._hook_call('_snc_record_cell', stmt.lineno, stmt, {
+                        'site': ast.Constant(value=site, **self._loc(stmt)),
+                        'value': ast.Name(id=column.subject, ctx=ast.Load(), **self._loc(stmt)),
+                    }))
+                else:
                     # The assignment's own log call is the last site visiting
                     # it assigned on its line (see visit_Assign).
-                    columns.append((stmt.lineno, self.site_counter[stmt.lineno] - 1, label,
-                                    (stmt.lineno, stmt.end_lineno or stmt.lineno)))
+                    site = self.site_counter[stmt.lineno] - 1
+                # Plain tuples, to be a constant in the code; loop_enter rebuilds it.
+                columns.append((stmt.lineno, site, dataclasses.astuple(column)))
 
             # Transform orelse if present using helper
             new_orelse = self._transform_statement_list(node.orelse)
@@ -1856,6 +1926,42 @@ class CodeTransformer(ast.NodeTransformer):
                      (node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno))
             return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node,
                                       enter_kwargs={'table': ast.Constant(value=table, **self._loc(node))})
+
+    def _for_column(self, stmt: ast.stmt, assigned: Set[str],
+                    initializers: Dict[str, Tuple[int, int]]) -> Optional[ForLoopColumn]:
+        """The ForLoopColumn of a statement directly in a `for` body,
+        or None when it isn't a column: an assignment, or a method called on a
+        name, whose column is the name after the call -- `arr2.append(x)`
+        returns None, and its line is there to change arr2.
+
+        An accumulator reads its subject's value from the iteration before:
+        it reads the name, and nothing earlier in this iteration -- `assigned`
+        -- has set it fresh."""
+        subject: Optional[str] = None
+        reads = in_place = False
+        if isinstance(stmt, ast.Assign):
+            shown: ast.expr = stmt.targets[0]
+            if len(stmt.targets) == 1 and isinstance(shown, ast.Name):
+                subject = shown.id
+                reads = any(isinstance(n, ast.Name) and n.id == subject and isinstance(n.ctx, ast.Load)
+                            for n in ast.walk(stmt.value))
+        elif isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+            shown = stmt.target
+            subject, reads = shown.id, True
+        elif (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+              and isinstance(stmt.value.func, ast.Attribute) and isinstance(stmt.value.func.value, ast.Name)):
+            shown = stmt.value.func.value
+            subject, reads, in_place = shown.id, True, True
+        else:
+            return None
+        label = ' '.join(self._source_segment(stmt).split())
+        # Whatever is shown starts the statement, unless it is parenthesized.
+        shown_text = ' '.join(self._source_segment(shown).split())
+        underline = len(shown_text) if label.startswith(shown_text) else 0
+        accumulator = reads and subject not in assigned
+        init_span = initializers.get(subject) if accumulator and subject is not None else None
+        return ForLoopColumn(label, (stmt.lineno, stmt.end_lineno or stmt.lineno), subject, underline,
+                             accumulator, in_place, init_span)
 
     def visit_While(self, node: ast.While) -> List[ast.stmt]:
         """Transform while loops: their bodies, and which iteration is running."""
