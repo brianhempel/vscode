@@ -28,7 +28,7 @@ visualizer sits on, so it goes out as InsertLines rather than a NewCode tuple.
 Leaving the box closes it unwritten: a table's column box writes on blur, but
 that is a view, and this is code. The (+) is a bar beside the table, as a
 table's is, except that a table only draws its own once it is focused, and this
-one never is.
+one draws it either way.
 
 **A column is edited and deleted through its header.** Double-clicking a
 statement's header opens the same box over it, holding the statement; Enter
@@ -62,10 +62,18 @@ key typed in its box -- and move everything under it with it. So a finished
 table leaves its rows in the model, and the running one draws them, matched to
 its columns by label.
 
-**Never focused.** The table only shows while the cursor is elsewhere, so the
-(+), the headers, the init cells and the menus are snc-unfocused-clickable; a press on the table itself expands it like
-any other small visualizer, which moves the cursor into the loop. The box takes
-the keyboard as it opens, for the same reason.
+**Focused by a click, as a table is.** The table only shows while the cursor
+is outside the loop, so a press on it pins focus to the table itself and the
+editor keeps the loop collapsed (see collapsedForLoops in snc.ts); the cursor
+going into the loop's code is what opens it. Focused, it is drawn as a focused
+table is -- a taller pane, and the rest of a table's chrome. Unfocused, the
+(+), the headers, the init cells and the menus still work without spending
+the press on focus: they are snc-unfocused-clickable. The box takes the
+keyboard as it opens, for the same reason.
+
+**A page of rows at a time.** Fifty, then the last three, with a row between
+that loads the next fifty -- a table's paging. Columns drag wider by their
+header's right edge, the width kept by label in the model.
 
 Sorts before `z_object_visualizer` (which claims everything) so that the table
 reaches it rather than being shown as a dataclass's fields.
@@ -74,6 +82,7 @@ reaches it rather than being shown as a dataclass's fields.
 import ast
 import html
 import keyword
+import math
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -146,6 +155,19 @@ class CollectClick:
 
 
 @dataclass(frozen=True)
+class ColumnResize:
+    """The column labeled `label` was dragged to `width` pixels. The width
+    comes first: the editor writes it over the `width=0` it was drawn with."""
+    width: Any
+    label: str
+
+
+@dataclass(frozen=True)
+class LoadMoreRows:
+    """The row standing in for the iterations not drawn: draw another page."""
+
+
+@dataclass(frozen=True)
 class ColumnInput:
     """The column box now holds `value`."""
     value: str
@@ -159,6 +181,15 @@ class ColumnKeyDown:
 @dataclass(frozen=True)
 class ColumnInputBlur:
     """The column box lost the keyboard: it closes, unwritten."""
+
+
+# A page of rows at a time, and the last few always, as a table draws them.
+ROWS_PER_PAGE = 50
+TAIL_ROWS = 3
+
+# How tall the pane gets: a table's, on a line that isn't focused and on one
+# that is.
+SMALL_MAX_HEIGHT = 212
 
 
 def can_visualize(value):
@@ -283,24 +314,55 @@ def _render_menu(value: ForLoopTable, col: int) -> str:
             f'</div></div></span>')
 
 
+def _valid_width(width) -> Optional[int]:
+    """A dragged width in whole pixels, or None when it is not one (a bool is
+    an int, so it is refused by name)."""
+    if isinstance(width, bool) or not isinstance(width, (int, float)) or not math.isfinite(width) or width <= 0:
+        return None
+    return round(width)
+
+
+def _width_style(model, label: str, clip: bool = True) -> str:
+    """The style pinning a column to the width it was dragged to, as a table's
+    does: a body cell clips to it, a header cell can't, since its resize
+    handle hangs past its edge (.col-header-inner clips instead)."""
+    width = _valid_width((model.get('widths') or {}).get(label))
+    if width is None:
+        return ''
+    overflow = ' overflow: hidden;' if clip else ''
+    return f' style="min-width: {width}px; max-width: {width}px;{overflow}"'
+
+
+def _col_attrs(model, label: str, clip: bool = True) -> str:
+    """What ties a cell to its column for the editor: which cells a resize
+    drags along with the header, and the width it was left at."""
+    return f' data-col="{html.escape(repr(label))}"{_width_style(model, label, clip)}'
+
+
 def _render_header(value: ForLoopTable, model, col: int, live_only: bool) -> str:
+    """A column's header, marked up as a table's: its label, then the ▾ and
+    the x, then the handle on its right edge that drags it wider."""
     column = value.columns[col]
     label = column.label
-    if live_only:
-        return f'<th>{_render_label(column)}</th>'
-    if column.span is None:
-        return f'<th class="for-loop-col">{_render_label(column)}{_render_menu(value, col)}</th>'
-    if model.get('editing_column') == col:
+    if not live_only and column.span is not None and model.get('editing_column') == col:
         return _render_box(model, select_all=True, tooltip='Written over this line of the loop')
-    edit = repr(ColumnClick(col=col, label=label))
-    delete = repr(DeleteColumnClick(col=col, label=label))
-    return (f'<th class="for-loop-col">'
-            f'<span class="for-loop-col-label" snc-unfocused-clickable draggable="false" '
-            f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit">{_render_label(column)}</span>'
-            f'{_render_menu(value, col)}'
-            f'<span class="for-loop-col-delete" snc-unfocused-clickable draggable="false" '
-            f'snc-mouse-down="{html.escape(delete)}" data-tooltip="Delete this line">×</span>'
-            f'</th>')
+    resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
+              f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
+    if live_only:
+        inner = _render_label(column)
+    elif column.span is None:
+        inner = f'{_render_label(column)}{_render_menu(value, col)}'
+    else:
+        edit = repr(ColumnClick(col=col, label=label))
+        delete = repr(DeleteColumnClick(col=col, label=label))
+        inner = (f'<span class="for-loop-col-label" snc-unfocused-clickable draggable="false" '
+                 f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit">'
+                 f'{_render_label(column)}</span>'
+                 f'{_render_menu(value, col)}'
+                 f'<span class="for-loop-col-delete" snc-unfocused-clickable draggable="false" '
+                 f'snc-mouse-down="{html.escape(delete)}" data-tooltip="Delete this line">×</span>')
+    return (f'<th class="col-header for-loop-col"{_col_attrs(model, label, clip=False)}>'
+            f'<span class="col-header-inner">{inner}{resize}</span></th>')
 
 
 def _render_add_bar(value: ForLoopTable, model) -> str:
@@ -349,17 +411,38 @@ def _render_add_menu(value: ForLoopTable, model) -> str:
             f'snc-dismiss="{html.escape(repr(AddMenuDismiss()))}">{"".join(rows)}</div>')
 
 
-def _render_cell(text) -> str:
+def _render_cell(model, label: str, text) -> str:
+    attrs = _col_attrs(model, label)
     if text is None:
-        return '<td class="list-table-cell">—</td>'
-    return f'<td class="list-table-cell"><span class="snc-code">{html.escape(text)}</span></td>'
+        return f'<td class="list-table-cell"{attrs}>—</td>'
+    return f'<td class="list-table-cell"{attrs}><span class="snc-code">{html.escape(text)}</span></td>'
+
+
+def _hidden_page(n_rows: int, model) -> Optional[Tuple[int, int]]:
+    """The rows left out, as [start, stop), or None when every row is drawn:
+    a page, then however many more were loaded, then the last few -- nothing
+    held back when the gap would be empty."""
+    stop = n_rows - TAIL_ROWS
+    shown = model.get('shown_rows', ROWS_PER_PAGE)
+    return (shown, stop) if stop > shown else None
+
+
+def _render_load_more_row(n_hidden: int, colspan: int, small: bool) -> str:
+    """The row standing in for the rows not drawn, as a table's: what a click
+    does and how much is behind it. Unfocused it acts on the press."""
+    next_n = min(ROWS_PER_PAGE, n_hidden)
+    label = f'Load {next_n} more' + (f' ({n_hidden} hidden)' if n_hidden > next_n else '')
+    preview_attrs = ' draggable="false" snc-unfocused-clickable' if small else ''
+    return (f'<tr class="row-load-more"><td class="load-more" colspan="{colspan}"{preview_attrs} '
+            f'snc-mouse-down="{html.escape(repr(LoadMoreRows()))}">{label}</td></tr>')
 
 
 def _render_init_cell(value: ForLoopTable, model, col: int, live_only: bool) -> str:
     """Where column `col` starts: blank unless it is an accumulator."""
     column = value.columns[col]
+    attrs = _col_attrs(model, column.label)
     if not column.accumulator or not column.subject:
-        return '<td class="list-table-cell"></td>'
+        return f'<td class="list-table-cell"{attrs}></td>'
     if not live_only and model.get('editing_init') == col:
         return _render_box(model, tag='td', select_all=True, placeholder='Starting value',
                            tooltip=f'Sets {column.subject} before the loop')
@@ -369,9 +452,9 @@ def _render_init_cell(value: ForLoopTable, model, col: int, live_only: bool) -> 
     else:
         text = f'<span class="snc-code">{html.escape(init)}</span>'
     if live_only:
-        return f'<td class="list-table-cell">{text}</td>'
+        return f'<td class="list-table-cell"{attrs}>{text}</td>'
     click = repr(InitCellClick(col=col, label=column.label))
-    return (f'<td class="list-table-cell for-loop-init-cell">'
+    return (f'<td class="list-table-cell for-loop-init-cell"{attrs}>'
             f'<span snc-unfocused-clickable draggable="false" snc-mouse-down="{html.escape(click)}" '
             f'data-tooltip="Double-click to set where it starts">{text}</span></td>')
 
@@ -417,13 +500,13 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
     if not live_only:
         _open_pending_init(value, model)
     key_handler = '' if live_only else f' snc-key-down="{html.escape(repr(ColumnKeyDown()))}"'
-    # Capped like a table nested in a cell: the loop's own code is right
-    # above, and a long loop shouldn't push the rest of the file away.
-    strs = [f'<div class="list-visualizer small for-loop-visualizer"{key_handler}>',
+    small_class = ' small' if small else ''
+    max_height = SMALL_MAX_HEIGHT if small else EXPANDED_PANE_MAX_HEIGHT
+    strs = [f'<div class="visualizer-container list-visualizer for-loop-visualizer{small_class}"{key_handler}>',
             '<div class="snc-tool-and-visualizer">',
-            f'<div class="list-table-scroll snc-base-visualizer" style="max-height: {EXPANDED_PANE_MAX_HEIGHT // 2}px;">',
+            f'<div class="list-table-scroll snc-base-visualizer" style="max-height: {max_height}px;">',
             '<table><thead class="col-header-rows"><tr>',
-            '<th class="row-index-header">itr</th>']
+            '<th class="row-index-header" data-tooltip="itr is the iteration, counting from 0">itr</th>']
     hidden = set(model.get('hidden_columns') or [])
     shown = [col for col, column in enumerate(value.columns) if column.label not in hidden]
     strs += [_render_header(value, model, col, live_only) for col in shown]
@@ -440,9 +523,15 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
         strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
         strs += [_render_init_cell(value, model, col, live_only) for col in shown]
         strs.append('</tr>')
+    gap = _hidden_page(len(rows), model)
     for i, row in enumerate(rows):
+        if gap is not None and gap[0] <= i < gap[1]:
+            if i == gap[0]:
+                strs.append(_render_load_more_row(gap[1] - gap[0], len(shown) + 1, small))
+            continue
         strs.append(f'<tr><td class="row-index">{i}</td>')
-        strs += [_render_cell(row[col] if col < len(row) else None) for col in shown]
+        strs += [_render_cell(model, value.columns[col].label, row[col] if col < len(row) else None)
+                 for col in shown]
         strs.append('</tr>')
     strs.append('</tbody></table></div>')
     if not live_only:
@@ -467,6 +556,12 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
     model = dict(model or {})
     double_click = event_json.get('detail', 1) >= 2
     match msg:
+        case LoadMoreRows():
+            return ({**model, 'shown_rows': model.get('shown_rows', ROWS_PER_PAGE) + ROWS_PER_PAGE}, [])
+        case ColumnResize(width=width, label=label):
+            width = _valid_width(width)
+            if width is not None and label in (column.label for column in value.columns):
+                return ({**model, 'widths': {**(model.get('widths') or {}), label: width}}, [])
         case AddMenuToggle():
             return ({**model, 'add_menu_open': not model.get('add_menu_open')}, [])
         case AddMenuDismiss():

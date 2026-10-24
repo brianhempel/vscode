@@ -19,9 +19,9 @@ import unittest
 
 import visualizer_utils
 from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, CollectClick, ColumnClick,
-                                 ColumnHideAll, ColumnInput, ColumnInputBlur, ColumnKeyDown, ColumnShowAll,
-                                 ColumnToggle, DeleteColumnClick, InitCellClick, can_visualize, init_model,
-                                 update, visualize)
+                                 ColumnHideAll, ColumnInput, ColumnInputBlur, ColumnKeyDown, ColumnResize,
+                                 ColumnShowAll, ColumnToggle, DeleteColumnClick, InitCellClick, LoadMoreRows,
+                                 can_visualize, init_model, update, visualize)
 from visualizer_utils import ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
 
@@ -177,7 +177,7 @@ class TestVisualize(unittest.TestCase):
 
     def test_an_iteration_that_never_reached_a_statement_shows_a_dash(self):
         out = visualize(table(rows=(('1', None),)), {})
-        self.assertIn('<td class="list-table-cell">—</td>', out)
+        self.assertEqual(body_rows(out)[-1], ['0', '1', '—'])
 
     def test_says_how_many_iterations_it_leaves_out(self):
         self.assertIn('3 more iterations', visualize(table(hidden_rows=3), {}))
@@ -427,6 +427,76 @@ class TestAddMenu(unittest.TestCase):
         out = visualize(table(), {'add_menu_open': True})
         self.assertIsNone(menu_of(out))
         self.assertEqual(events_in(out), [])
+
+
+def many(n):
+    """plain(), run for `n` iterations."""
+    return plain(rows=tuple((str(i), str(2 * i)) for i in range(n)))
+
+
+class TestChrome(unittest.TestCase):
+    """What a table has around its rows: a pane as tall as a table's, focused
+    or not, a count of what is in it, a page of rows at a time, and columns
+    that can be dragged wider."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_pane_is_as_tall_as_a_tables_focused_or_not(self):
+        self.assertIn('max-height: 600px', visualize(table(), {}, small=False))
+        self.assertIn('max-height: 212px', visualize(table(), {}, small=True))
+
+    def test_the_iteration_column_says_what_it_counts(self):
+        out = visualize(table(), {})
+        self.assertIn('<th class="row-index-header" data-tooltip="itr is the iteration, counting from 0">itr</th>', out)
+
+    def test_a_page_of_rows_then_a_row_that_loads_more_then_the_last_few(self):
+        out = visualize(many(60), {})
+        rows = body_rows(out)
+        self.assertEqual([r[0] for r in rows], [str(i) for i in range(50)] + ['Load 7 more'] + ['57', '58', '59'])
+        self.assertIn(f'snc-mouse-down="{html.escape(repr(LoadMoreRows()))}"', out)
+
+    def test_the_load_more_row_says_how_many_are_left_when_more_than_a_page(self):
+        rows = body_rows(visualize(many(200), {}))
+        self.assertIn(['Load 50 more (147 hidden)'], rows)
+
+    def test_load_more_draws_another_page(self):
+        model, cmds = update(click(LoadMoreRows()), None, {}, many(200))
+        self.assertEqual((model, cmds), ({'shown_rows': 100}, []))
+        rows = body_rows(visualize(many(200), model))
+        self.assertEqual(len(rows), 100 + 1 + 3)
+
+    def test_a_short_loop_draws_every_row(self):
+        self.assertEqual(len(body_rows(visualize(many(52), {}))), 52)
+
+    def test_load_more_works_unfocused(self):
+        out = visualize(many(60), {}, small=True)
+        cell = re.search(r'<td class="load-more"[^>]*>', out).group(0)
+        self.assertIn('snc-unfocused-clickable', cell)
+
+    def test_every_column_has_a_handle_to_drag_it_wider(self):
+        out = visualize(table(), {})
+        self.assertEqual(
+            [html.unescape(e) for e in re.findall(r'snc-resize-col="([^"]*)"', out)],
+            [repr(ColumnResize(width=0, label='element')), repr(ColumnResize(width=0, label='count += 1'))])
+
+    def test_a_dragged_width_sticks_to_the_column_by_its_label(self):
+        msg = {'pythonEventStr': repr(ColumnResize(width=120, label='count += 1')), 'eventJSON': {}}
+        model, cmds = update(msg, None, {}, table())
+        self.assertEqual((model, cmds), ({'widths': {'count += 1': 120}}, []))
+        out = visualize(table(), model)
+        styled = re.findall(r'<t[hd][^>]*min-width: 120px; max-width: 120px;[^>]*>', out)
+        # Its header, its init cell and both its rows.
+        self.assertEqual(len(styled), 4)
+
+    def test_a_width_that_is_not_one_is_ignored(self):
+        for width in (0, -5, True, 'wide'):
+            with self.subTest(width=width):
+                msg = {'pythonEventStr': repr(ColumnResize(width=width, label='element')), 'eventJSON': {}}
+                self.assertEqual(update(msg, None, {}, table()), ({}, []))
 
 
 class TestEditColumn(unittest.TestCase):
