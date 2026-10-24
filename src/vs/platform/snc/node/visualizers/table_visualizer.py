@@ -5994,9 +5994,14 @@ def _agg_eval(body: str, column_expr: str, values, lst, eval_in_scope=None):
         code = (f'lambda np, math, _v, _lst: '
                 f'{replace_dollars_in_py_exp(body, levels, capture=True)}')
         agg = eval_in_scope(code) if eval_in_scope is not None else eval(code)
+        # Without numpy installed, only what reaches for it goes unanswered.
+        try:
+            np = _numpy()
+        except ImportError:
+            np = None
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            return agg(_numpy(), math, values, lst)
+            return agg(np, math, values, lst)
     except Exception:
         return NO_THING
 

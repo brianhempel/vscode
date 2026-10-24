@@ -14305,6 +14305,20 @@ class TestAggValues(unittest.TestCase):
         self.assertEqual(_agg_value('np.mean($)', [1, 2, 3],
                                     lambda code: eval(code, {}, {})), 3 - 1)
 
+    def test_without_numpy_installed_what_needs_none_still_answers(self):
+        # numpy is only handed in; an aggregation that never touches it is no
+        # reason to come back empty when it can't be imported.
+        import table_visualizer
+        saved = table_visualizer._numpy
+        def missing():
+            raise ImportError('No module named numpy')
+        table_visualizer._numpy = missing
+        try:
+            self.assertEqual(self.value('Sum'), 14)
+            self.assertIs(self.value('Mean'), NO_THING)
+        finally:
+            table_visualizer._numpy = saved
+
     def test_math_resolves_without_the_file_importing_it(self):
         # Nor any math, and #NaN is written with math.isnan.
         self.assertEqual(_agg_value('sum(math.isnan(x) for x in $)',
