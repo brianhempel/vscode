@@ -14,6 +14,7 @@ Or use pytest with verbose output:
 """
 
 import html
+import json
 import re
 import unittest
 
@@ -27,7 +28,9 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
                                  ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
                                  FirstMatchToggle, SearchBoxInput, SortToggle, TallyExcludeToggle,
                                  TallyFilterInput, TallyItemToggle, TallySelectAll, TallySelectNone,
-                                 TallySortSelect, SubcolExprInput, SubcolHideAll, SubcolShowAll, SubcolToggle)
+                                 TallySortSelect, SubcolExprInput, SubcolHideAll, SubcolShowAll, SubcolToggle,
+                                 ActionButtonClick, ColumnSelect, PickToggle, RowActionClick, RowMenuToggle,
+                                 ToolSelect)
 from visualizer_utils import NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
 
@@ -157,8 +160,9 @@ def header_labels(html_text):
 
 
 def body_rows(html_text):
-    """Each <tr> of the body, as the text of its cells."""
-    body = re.search(r'<tbody>(.*?)</tbody>', html_text).group(1)
+    """Each <tr> of the body, as the text of its cells, without a row's ▾."""
+    body = re.search(r'<tbody>(.*?)</tbody>', html_text, re.S).group(1)
+    body = re.sub(r'<span class="snc-dropdown-trigger row-menu-trigger">.*?</span></span>', '', body)
     return [[html.unescape(re.sub(r'<[^>]*>', '', c)) for c in re.findall(r'<td[^>]*>.*?</td>', tr)]
             for tr in re.findall(r'<tr[^>]*>.*?</tr>', body)]
 
@@ -233,7 +237,9 @@ class TestVisualize(unittest.TestCase):
                 self.assertTrue(buttons)
                 for button in buttons:
                     self.assertIn('snc-unfocused-clickable', button)
-                    self.assertIn('draggable="false"', button)
+                    # A header is a drag handle too: the editor holds its
+                    # press until the mouseup says no drag happened.
+                    self.assertIn('draggable="true"' if 'snc-py-exps' in button else 'draggable="false"', button)
 
     def test_the_plus_is_a_bar_beside_the_table_drawn_focused_or_not(self):
         # A table's (+), except that a table only draws its own once it is
@@ -243,7 +249,7 @@ class TestVisualize(unittest.TestCase):
                 out = visualize(table(), {}, small=small)
                 bar = re.search(r'</table></div>(<div class="snc-dropdown-trigger col-add-trigger">.*?</div>)', out)
                 self.assertEqual(events_in(bar.group(1)), [repr(AddMenuToggle())])
-                self.assertIn('<div class="snc-tool-and-visualizer"><div class="list-table-scroll', out)
+                self.assertIn('<div class="list-table-scroll', out)
                 self.assertNotIn('<input', re.search(r'<thead.*?</thead>', out).group(0))
 
     def test_an_open_box_is_a_last_header_cell_holding_what_was_typed(self):
@@ -809,7 +815,8 @@ def scores():
 def row_classes(html_text):
     """The class of each iteration's row, '' for none."""
     body = re.search(r'<tbody>(.*?)</tbody>', html_text, re.S).group(1)
-    return [cls for cls, first in re.findall(r'<tr(?: class="([^"]*)")?><td class="row-index">([^<]*)</td>', body)
+    return [cls for cls, first in re.findall(r'<tr(?: class="([^"]*)")?><td class="row-index">(?:<span[^>]*>)?([^<]*)',
+                                             body)
             if first != 'init']
 
 
@@ -1153,6 +1160,189 @@ class TestSubcolumns(unittest.TestCase):
     def test_a_field_that_does_not_read_shows_its_error(self):
         out = visualize(people(), {'subcols': {'person': ["$['nope']"]}})
         self.assertIn('KeyError', body_rows(out)[0][1])
+
+
+def suggestions(html_text):
+    return [text_of(x) for x in re.findall(r'<div class="snc-dropdown-option col-suggestion[^"]*"[^>]*>(.*?)</div>',
+                                           html_text)]
+
+
+class TestAutocomplete(unittest.TestCase):
+    """The box a line is written in suggests how to finish the name being
+    typed, as a table's suggests columns: the loop's names, and the fields of
+    the values it binds."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_it_suggests_names_and_fields_that_finish_what_is_typed(self):
+        self.assertEqual(suggestions(visualize(people(), adding('x = per'), cells_of)),
+                         ['person', "person['name']", "person['age']"])
+        self.assertEqual(suggestions(visualize(people(), adding("x = person['n"), cells_of)), ["person['name']"])
+
+    def test_nothing_to_suggest_before_anything_is_typed_or_once_it_is_whole(self):
+        self.assertEqual(suggestions(visualize(people(), adding(''), cells_of)), [])
+        self.assertEqual(suggestions(visualize(people(), adding('x = person'), cells_of)),
+                         ["person['name']", "person['age']"])
+
+    def test_picking_one_finishes_the_name_and_the_box_stays_open(self):
+        model, cmds = update(click(ColumnSelect(text="person['age']")), None, adding('x = per'), people(), cells_of)
+        self.assertEqual((model, cmds), (adding("x = person['age']"), []))
+
+    def test_arrows_move_through_them_and_enter_picks_the_one_selected(self):
+        model, _ = update(key('ArrowDown'), None, adding('x = per'), people(), cells_of)
+        model, _ = update(key('ArrowDown'), None, model, people(), cells_of)
+        self.assertEqual(model['selected_suggestion'], 1)
+        self.assertIn('col-suggestion selected', visualize(people(), model, cells_of))
+        model, cmds = update(key('Enter'), None, model, people(), cells_of)
+        self.assertEqual((model['column_input'], cmds), ("x = person['name']", []))
+        model, _ = update(key('ArrowUp'), None, {**adding('x = per'), 'selected_suggestion': 0}, people(), cells_of)
+        self.assertIsNone(model['selected_suggestion'])
+
+
+class TestDragOut(unittest.TestCase):
+    """A header hands over the name its column shows, as a table's hands over
+    its column."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_a_header_drags_out_the_name_it_shows(self):
+        cells = header_cells(visualize(table(), {}))
+        exps = [re.findall(r'snc-py-exps="([^"]*)"', c) for c in cells]
+        self.assertEqual([[json.loads(html.unescape(e))[0]['expr'] for e in found] for found in exps],
+                         [[], ['element'], ['count']])
+
+    def test_not_live_only(self):
+        visualizer_utils.set_live_only(True)
+        self.assertNotIn('snc-py-exps', visualize(table(), {}))
+
+
+class TestActionButtons(unittest.TestCase):
+    """The footer's buttons, as a table's: each writes what its name says
+    about the iterations the search holds for -- as loop code, a name set
+    above the loop and a line at the end of its body."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def buttons(self, model):
+        return [(text_of(label), 'dimmed' not in cls) for cls, label in re.findall(
+            r'<span class="(action-button[^"]*)"[^>]*>(.*?)</span>(?=<span class="action-button|</div>)',
+            visualize(scores(), model))]
+
+    def test_the_buttons_and_which_need_a_search(self):
+        self.assertEqual(self.buttons({}), [('Count: 5', True), ('Extract', True), ('Filter', False),
+                                            ('Any', False), ('All', False)])
+        self.assertEqual(self.buttons({'search': 'score > 5'}),
+                         [('Count: 2', True), ('Extract', True), ('Filter', True), ('Any', True), ('All', True)])
+
+    def test_each_writes_its_code(self):
+        for action, lines in (
+                ('count', ((1, 'n_matching = 0'), (3, '    if score > 5:\n        n_matching += 1'))),
+                ('extract', ((1, 'matching = []'), (3, '    if score > 5:\n        matching.append(score)'))),
+                ('any', ((1, 'any_matching = False'), (3, '    if score > 5:\n        any_matching = True'))),
+                ('all', ((1, 'all_matching = True'), (3, '    if not (score > 5):\n        all_matching = False')))):
+            with self.subTest(action=action):
+                _, cmds = update(click(ActionButtonClick(action=action)), None, {'search': 'score > 5'}, scores())
+                self.assertEqual(cmds, [InsertLines(lines)])
+
+    def test_filter_skips_the_rest_at_the_top_of_the_body(self):
+        _, cmds = update(click(ActionButtonClick(action='filter')), None, {'search': 'score > 5'}, scores())
+        self.assertEqual(cmds, [InsertLines(((2, '    if not (score > 5):\n        continue'),))])
+
+    def test_with_no_search_count_and_extract_take_every_iteration(self):
+        _, cmds = update(click(ActionButtonClick(action='count')), None, {}, scores())
+        self.assertEqual(cmds, [InsertLines(((1, 'n_iterations = 0'), (3, '    n_iterations += 1')))])
+
+    def test_first_match_extracts_the_first_one(self):
+        _, cmds = update(click(ActionButtonClick(action='extract')), None, {'search': 'score > 5', 'first_match': True},
+                         scores())
+        self.assertEqual(cmds, [InsertLines(((1, 'first_matching = None'),
+                                             (3, '    if first_matching is None and score > 5:\n'
+                                                 '        first_matching = score')))])
+
+    def test_column_searches_are_folded_into_the_condition(self):
+        model = {'search': 'score > 2', 'col_search': {'high += score > 5': {'compose': 'and', 'op': '>=',
+                                                                            'text': '1', 'exclude': False}}}
+        _, cmds = update(click(ActionButtonClick(action='count')), None, model, scores())
+        self.assertEqual(cmds[0].lines[1], (3, '    if (score > 2) and (high >= (1)):\n        n_matching += 1'))
+
+    def test_a_search_that_is_not_python_writes_nothing(self):
+        self.assertEqual(update(click(ActionButtonClick(action='count')), None, {'search': 'score >'}, scores())[1],
+                         [])
+
+
+class TestRowMenu(unittest.TestCase):
+    """The ▾ on an iteration's number, as on a table's row: what can be
+    written about iterations like it."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_menu_opens_on_its_number(self):
+        model, _ = update(click(RowMenuToggle(row=1)), None, {}, scores())
+        self.assertEqual(model['row_menu'], 1)
+        out = visualize(scores(), model)
+        labels = [text_of(x) for x in re.findall(r'<span class="snc-dropdown-option-label"[^>]*>(.*?)</span>',
+                                                 re.search(r'col-row-menu-panel.*?</div><!--/row-menu-->', out).group(0))]
+        self.assertEqual(labels, ['Skip Iterations Where score == 9', 'Stop at the First Where score == 9',
+                                  'Extract Row Cells'])
+
+    def test_skip_and_stop_guard_the_top_of_the_body(self):
+        for action, line in (('skip', '    if score == 9: continue'), ('stop', '    if score == 9: break')):
+            with self.subTest(action=action):
+                model, cmds = update(click(RowActionClick(row=1, action=action)), None, {'row_menu': 1}, scores())
+                self.assertEqual(cmds, [InsertLines(((2, line),))])
+                self.assertIsNone(model['row_menu'])
+
+    def test_extract_row_cells_writes_them_after_the_loop(self):
+        _, cmds = update(click(RowActionClick(row=1, action='extract')), None, {}, scores())
+        self.assertEqual(cmds, [InsertLines(((3, "row_1 = {'score': 9, 'high': 1}"),))])
+
+    def test_values_with_no_literal_have_nothing_to_compare_with(self):
+        t = table(columns=(bound('x'),), rows=(('<object>',),), values=((object(),),), init=(None,))
+        self.assertEqual(update(click(RowActionClick(row=0, action='skip')), None, {}, t), ({}, []))
+
+
+class TestPickTool(unittest.TestCase):
+    """The toolbar in a focused table's corner, as a table's: Pick marks
+    whole columns, and Extract then collects what they show."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_a_focused_table_has_the_toolbar(self):
+        out = visualize(scores(), {})
+        self.assertIn('class="tool-toolbar', out)
+        self.assertIn(html.escape(repr(ToolSelect(tool='pick'))), out)
+        self.assertNotIn('tool-toolbar', visualize(scores(), {}, small=True))
+
+    def test_pick_draws_a_region_down_every_column_and_picking_one_marks_it(self):
+        model, _ = update(click(ToolSelect(tool='pick')), None, {}, scores())
+        out = visualize(scores(), model)
+        self.assertIn('pick-tool-selected', out)
+        self.assertEqual(out.count(html.escape(repr(PickToggle(label='score')))), 5)
+        model, _ = update(click(PickToggle(label='score')), None, model, scores())
+        self.assertEqual(model['picked'], ['score'])
+        self.assertIn('pick-region pick-band-all pick-region-first selected', visualize(scores(), model))
+
+    def test_extract_collects_the_picked_columns(self):
+        model = {'tool': 'pick', 'picked': ['score', 'high += score > 5']}
+        _, cmds = update(click(ActionButtonClick(action='extract')), None, model, scores())
+        self.assertEqual(cmds, [InsertLines(((1, 'matching = []'), (3, '    matching.append((score, high))')))])
 
 
 class TestEditColumn(unittest.TestCase):

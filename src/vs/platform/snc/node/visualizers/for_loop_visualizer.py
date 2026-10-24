@@ -91,6 +91,17 @@ being drawn is visualized. Subcolumns, in a column's menu, spreads its values'
 fields into columns of their own under its header, as a table's does: a view,
 so nothing is written.
 
+**What a table writes about its rows, a loop writes as loop code.** The
+footer's buttons -- Count, Extract, Filter, Any, All -- turn the search into
+a name set above the loop and a line at the end of its body building it up
+(Filter: a `continue` at the top); under the pick tool, Extract collects the
+picked columns. An iteration's ▾ writes `if score == 9: continue` or `break`
+at the top of the body, or its cells as a dict after the loop. A header hands
+over the name its column shows, and the line box suggests how to finish the
+name being typed -- the loop's names, and the fields of what it binds. Not
+the table's chain link: what a loop's buttons write lands in two places, and
+a link is one line under the visualizer's own.
+
 **While the loop runs, the rows of last time.** The table logged as the loop
 starts has none of its own yet, and the finished one replaces it a moment
 later. Drawn empty, it would shrink and regrow the table on every run -- every
@@ -119,19 +130,21 @@ import ast
 import html
 import keyword
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, COMPUTE_AGGS, CONVERT_TYPES, NO_THING,
-                               TALLY_COUNT_EXTREME_OPS, TALLY_COUNT_OPS, TALLY_SORTS, _TALLY_NOTES, _agg_answer_html,
+                               TALLY_COUNT_EXTREME_OPS, TALLY_COUNT_OPS, TALLY_SORTS, _TALLY_NOTES,
+                               _TOOL_TOOLBAR_TOOLS, _agg_answer_html,
                                _agg_value, _column_search_value_label, _get_all_possible_columns, _in_tally_order,
                                _tally, _tally_count_op,
                                _tally_count_op_label, _tally_extreme, _tally_lists, _tally_rows, _tally_selection,
-                               _tally_shown, _tally_sort, _tally_sort_label)
+                               _tally_literal, _tally_shown, _tally_sort, _tally_sort_label)
 from visualizer_utils import (EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, AddImports, ChildEvent, ForLoopColumn,
                               ForLoopTable, InsertLines, ReplaceLines, aggregate_handled_keys,
                               call_with_supported_kwargs, child_nesting_kwargs, error_html, eval_dollar_expr,
-                              is_live_only,
+                              is_live_only, py_exp_attrs, render_tool_toolbar,
                               route_child_event, truncate_repr, wrap_child_prefix, wrap_child_suffix)
 
 
@@ -422,6 +435,46 @@ class SubcolExprInput:
 
 
 @dataclass(frozen=True)
+class ColumnSelect:
+    """A suggestion under the line box: it finishes the name being typed."""
+    text: str
+
+
+@dataclass(frozen=True)
+class ActionButtonClick:
+    """A button in the footer: write what it names about the iterations the
+    search holds for (`count`, `extract`, `filter`, `any`, `all`)."""
+    action: str
+
+
+@dataclass(frozen=True)
+class RowMenuToggle:
+    """The ▾ on iteration `row`'s number: open its menu, or put it away."""
+    row: int
+
+
+@dataclass(frozen=True)
+class RowActionClick:
+    """A row of iteration `row`'s menu: skip iterations like it, stop at the
+    first, or write its cells after the loop (`skip`, `stop`, `extract`)."""
+    row: int
+    action: str
+
+
+@dataclass(frozen=True)
+class ToolSelect:
+    """A tool in the corner's toolbar: `normal`, or `pick`."""
+    tool: str
+
+
+@dataclass(frozen=True)
+class PickToggle:
+    """Under the pick tool, a press on the column labeled `label`: pick it,
+    or stop."""
+    label: str
+
+
+@dataclass(frozen=True)
 class ColumnInput:
     """The column box now holds `value`."""
     value: str
@@ -527,7 +580,7 @@ BOX_KEYS = ('adding_column', 'editing_column', 'editing_init', 'collecting_colum
 
 # What a box opening puts away: the menus it was opened from, and where an
 # earlier Insert would have put the line.
-MENU_KEYS = ('add_menu_open', 'col_menu', 'submenu', 'insert_at')
+MENU_KEYS = ('add_menu_open', 'col_menu', 'submenu', 'insert_at', 'row_menu')
 
 
 def _box_open(model) -> bool:
@@ -543,7 +596,7 @@ def _opened(model, key: str, col, text: str):
 
 
 def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: str = 'Line of code',
-                tooltip: str = 'Written at the end of the loop', span_attrs: str = '') -> str:
+                tooltip: str = 'Written at the end of the loop', span_attrs: str = '', suggestions=()) -> str:
     """The box code is typed in: a new column's, one being edited, a starting
     value, or the name of a list a column is collected into."""
     input_event = "lambda e: ColumnInput(value=e.get('value', ''))"
@@ -555,7 +608,18 @@ def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: s
             f'value="{html.escape(model.get("column_input", ""))}" '
             f'placeholder="{html.escape(placeholder)}" '
             f'data-tooltip="{html.escape(tooltip)}" />'
-            f'</span></{tag}>')
+            f'{_render_suggestions(model, suggestions)}</span></{tag}>')
+
+
+def _render_suggestions(model, suggestions) -> str:
+    """What could finish the name being typed, under the box as a table's."""
+    if not suggestions:
+        return ''
+    selected = model.get('selected_suggestion')
+    items = ''.join(f'<div class="snc-dropdown-option col-suggestion{" selected" if n == selected else ""}"'
+                    f'{_press(ColumnSelect(text=text))}>{html.escape(text)}</div>'
+                    for n, text in enumerate(suggestions))
+    return f'<div class="snc-dropdown-panel left col-suggest-panel" snc-dropdown-align="left">{items}</div>'
 
 
 def _render_label(column: ForLoopColumn) -> str:
@@ -717,6 +781,186 @@ def _subcol_candidates(value: ForLoopTable, col: int, get_visualizer) -> List[st
     if get_visualizer is None or not values:
         return []
     return _get_all_possible_columns(values, get_visualizer) or []
+
+
+# The tools of the corner's toolbar: a table's Normal and Pick.
+TOOLS = _TOOL_TOOLBAR_TOOLS
+
+# The trailing name a suggestion would finish: a name, and what reads through it.
+_TYPED_NAME_RE = re.compile(r"[A-Za-z_][\w\[\]'\".]*$")
+
+
+def _suggestions(value: ForLoopTable, model, get_visualizer) -> List[str]:
+    """What could finish the name at the end of the line box: the loop's names,
+    and the fields of the values it binds (`person['name']`), as a table's
+    box suggests columns. Nothing before a name is started, and nothing it
+    already is."""
+    if not (model.get('adding_column') or model.get('editing_column') is not None):
+        return []
+    typed = _TYPED_NAME_RE.search(model.get('column_input', ''))
+    if typed is None:
+        return []
+    names = list(value.targets) + sorted(value.defined - set(value.targets))
+    for col, column in enumerate(value.columns):
+        if column.span is None and column.subject:
+            names += [field.replace('$', column.subject, 1)
+                      for field in _subcol_candidates(value, col, get_visualizer) if field.startswith('$')]
+    prefix = typed.group(0)
+    return [name for name in dict.fromkeys(names) if name.startswith(prefix) and name != prefix][:10]
+
+
+def _finished(model, text: str) -> str:
+    """The line box with the name at its end finished as `text`."""
+    typed = model.get('column_input', '')
+    found = _TYPED_NAME_RE.search(typed)
+    return (typed[:found.start()] if found else typed) + text
+
+
+def _condition(value: ForLoopTable, model) -> Optional[str]:
+    """The search, as the condition loop code would test: the footer's, and
+    each column's in turn, composed as it says. '' when nothing is searched for;
+    None when it can't be written -- a search that isn't Python, or one on a
+    column with no name to compare."""
+    parts = []
+    search = (model.get('search') or '').strip()
+    if search:
+        if not _is_value(search):
+            return None
+        parts.append(('and', search))
+    for col, column_search in _active_searches(value, model):
+        subject = value.columns[col].subject
+        if not subject:
+            return None
+        text, op = column_search['text'].strip(), column_search['op']
+        code = f'{subject} {op} ({text})' if op else text.replace('$', subject)
+        if not _is_value(code):
+            return None
+        parts.append((column_search['compose'], code))
+    if len(parts) == 1:
+        return parts[0][1]
+    condition = ''
+    for compose, code in parts:
+        condition = f'({code})' if not condition else f'{condition} {compose} ({code})'
+    return condition
+
+
+def _items(value: ForLoopTable, subjects: Optional[List[str]] = None) -> str:
+    """What one iteration hands over: the names given, or those the loop binds
+    -- a tuple of several."""
+    names = subjects or list(value.targets) or [c.subject for c in value.columns if c.subject][:1]
+    return names[0] if len(names) == 1 else f'({", ".join(names)})'
+
+
+def _guarded(value: ForLoopTable, condition: str, step: str, negate: bool = False) -> str:
+    """`step` at the end of the body, under the condition when there is one."""
+    indent = value.body_indent
+    if not condition:
+        return f'{indent}{step}'
+    test = f'not ({condition})' if negate else condition
+    return f'{indent}if {test}:\n{indent}    {step}'
+
+
+def _action_code(value: ForLoopTable, model, action: str) -> List[Any]:
+    """What a footer button writes: a name above the loop and a line at the
+    end of its body that builds it up over the iterations the search holds for
+    -- or, for Filter, a line at the top skipping the rest."""
+    condition = _condition(value, model)
+    if condition is None or (not condition and action in ('filter', 'any', 'all')):
+        return []
+    picked = [c.subject for c in value.columns if c.label in (model.get('picked') or []) and c.subject]
+    item = _items(value, picked if model.get('tool') == 'pick' else None)
+    end = _body_end(value)
+    above = value.line - 1
+    if action == 'filter':
+        return [InsertLines(((value.body_lines[0] - 1, _guarded(value, condition, 'continue', negate=True)),))]
+    if action == 'count':
+        name = _unique_name(value, 'n_matching' if condition else 'n_iterations')
+        return [InsertLines(((above, f'{value.indent}{name} = 0'), (end, _guarded(value, condition, f'{name} += 1'))))]
+    if action == 'extract' and model.get('first_match') and condition:
+        name = _unique_name(value, 'first_matching')
+        return [InsertLines(((above, f'{value.indent}{name} = None'),
+                             (end, _guarded(value, f'{name} is None and {condition}', f'{name} = {item}'))))]
+    if action == 'extract':
+        name = _unique_name(value, 'matching')
+        return [InsertLines(((above, f'{value.indent}{name} = []'),
+                             (end, _guarded(value, condition, f'{name}.append({item})'))))]
+    if action == 'any':
+        name = _unique_name(value, 'any_matching')
+        return [InsertLines(((above, f'{value.indent}{name} = False'),
+                             (end, _guarded(value, condition, f'{name} = True'))))]
+    if action == 'all':
+        name = _unique_name(value, 'all_matching')
+        return [InsertLines(((above, f'{value.indent}{name} = True'),
+                             (end, _guarded(value, condition, f'{name} = False', negate=True))))]
+    return []
+
+
+def _row_literals(value: ForLoopTable, i: int, bound_only: bool) -> List[Tuple[str, str]]:
+    """(name, literal) of each name iteration `i` held that can be written as
+    Python: the names the loop binds, or every name it has."""
+    row = value.values[i] if i < len(value.values) else ()
+    out = []
+    for column, cell in zip(value.columns, row):
+        if not column.subject or cell is NO_VALUE or (bound_only and column.span is not None):
+            continue
+        literal = _tally_literal(cell)
+        if literal is not None and column.subject not in dict(out):
+            out.append((column.subject, literal))
+    return out
+
+
+def _row_condition(value: ForLoopTable, i: int) -> Optional[str]:
+    literals = _row_literals(value, i, bound_only=True)
+    if not literals or len(literals) < len([c for c in value.columns if c.span is None and c.subject]):
+        return None
+    return ' and '.join(f'{name} == {literal}' for name, literal in literals)
+
+
+def _row_action_code(value: ForLoopTable, i: int, action: str) -> List[Any]:
+    if action in ('skip', 'stop'):
+        condition = _row_condition(value, i)
+        if condition is None:
+            return []
+        step = 'continue' if action == 'skip' else 'break'
+        return [InsertLines(((value.body_lines[0] - 1, f'{value.body_indent}if {condition}: {step}'),))]
+    if action == 'extract':
+        literals = _row_literals(value, i, bound_only=False)
+        if not literals:
+            return []
+        name = _unique_name(value, f'row_{i}')
+        cells = ', '.join(f'{n!r}: {literal}' for n, literal in literals)
+        return [InsertLines(((value.end_line, f'{value.indent}{name} = {{{cells}}}'),))]
+    return []
+
+
+def _render_row_menu(value: ForLoopTable, model, i: int) -> str:
+    """Iteration `i`'s ▾ and its menu, as a table row's."""
+    is_open = model.get('row_menu') == i
+    panel = ''
+    if is_open:
+        condition = _row_condition(value, i)
+        options = [(f'Skip Iterations Where {condition}' if condition else 'Skip Iterations Like This',
+                    'skip', condition is not None),
+                   (f'Stop at the First Where {condition}' if condition else 'Stop at the First Like This',
+                    'stop', condition is not None),
+                   ('Extract Row Cells', 'extract', bool(_row_literals(value, i, bound_only=False)))]
+        rows = ''.join(_render_option(model, text, RowActionClick(row=i, action=action) if enabled else None)
+                       for text, action, enabled in options)
+        panel = (f'<div class="snc-dropdown-panel flyout col-row-menu-panel" snc-dropdown-align="flyout" '
+                 f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{rows}</div><!--/row-menu-->')
+    classes = 'row-menu snc-hover-hidden full-opacity-on-hover' + (' open' if is_open else '')
+    return (f'<span class="snc-dropdown-trigger row-menu-trigger"><span class="{classes}" '
+            f'data-tooltip="Row actions"{_press(RowMenuToggle(row=i))}>▾</span>{panel}</span>')
+
+
+def _render_pick_region(model, label: str, position: int, n_drawn: int) -> str:
+    """One cell's piece of a picked column's outline, as a table draws its
+    regions: the ends round off the stack, the middles only draw its sides."""
+    edge = ('pick-region-only' if n_drawn == 1 else 'pick-region-first' if position == 0
+            else 'pick-region-last' if position == n_drawn - 1 else 'pick-region-mid')
+    selected = ' selected' if label in (model.get('picked') or []) else ''
+    return (f'<span class="pick-region pick-band-all {edge}{selected}" data-pick-region="{html.escape(label)}" '
+            f'snc-mouse-down="{html.escape(repr(PickToggle(label=label)))}"></span>')
 
 
 def _press(event) -> str:
@@ -933,6 +1177,25 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
     return f'<div class="col-tally"{dwell}>{filter_box}{controls}{body}</div>'
 
 
+def _render_action_buttons(value: ForLoopTable, model, count: int) -> str:
+    """The footer's buttons, as a table's: each writes what it names about the
+    iterations the search holds for. Those that need a search to say anything
+    are dimmed without one, and all of them while it isn't Python."""
+    condition = _condition(value, model)
+    buttons = []
+    for action, label, title, needs_search in (
+            ('count', f'Count: {count}', 'Count of matches', False),
+            ('extract', 'Extract', 'Every matching iteration\'s names', False),
+            ('filter', 'Filter', 'Skip the iterations that don\'t match', True),
+            ('any', 'Any', 'Whether any iteration matches', True),
+            ('all', 'All', 'Whether every iteration matches', True)):
+        enabled = condition is not None and (bool(condition) or not needs_search)
+        press = _press(ActionButtonClick(action=action)) if enabled else ''
+        buttons.append(f'<span class="action-button{"" if enabled else " dimmed"}" title="{html.escape(title)}"'
+                       f'{press}><span class="text">{html.escape(label)}</span></span>')
+    return ''.join(buttons)
+
+
 def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_rows: int, hidden_rows: int) -> str:
     """A focused table's footer, as a table's: the search box and its 1st,
     how many iterations matched, and a tab counting every one the loop ran."""
@@ -951,9 +1214,8 @@ def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_r
             f'<span class="search-button {"active" if first else "inactive"}" data-tooltip="First match only"'
             f'{_press(FirstMatchToggle())}>{ICONS["match-first"]}</span></span>'
             f'</div></div></div>'
-            f'<div class="search-div-row"><div class="action-buttons">'
-            f'<span class="action-button" data-tooltip="Count of matches"><span class="text">Count: {count}</span>'
-            f'</span></div></div>'
+            f'<div class="search-div-row"><div class="action-buttons">{_render_action_buttons(value, model, count)}'
+            f'</div></div>'
             f'<div class="auxiliary-attributes"><div class="tiny-len">{ran} iteration{"" if ran == 1 else "s"}</div>'
             f'</div></div>')
 
@@ -1178,12 +1440,13 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
     if live_only:
         inner = _render_label(column)
     elif column.span is None:
-        inner = (f'<span class="col-name">{_render_label(column)}</span>'
+        inner = (f'<span class="col-name"{py_exp_attrs(column.subject)}>{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
     else:
         edit = repr(ColumnClick(col=col, label=label))
-        inner = (f'<span class="col-name for-loop-col-label" snc-unfocused-clickable draggable="false" '
-                 f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit">'
+        inner = (f'<span class="col-name for-loop-col-label" snc-unfocused-clickable '
+                 f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit"'
+                 f'{py_exp_attrs(column.subject) or ' draggable="false"'}>'
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
     filtered = ' col-filtered' if _column_search(model, label)['text'].strip() else ''
@@ -1390,8 +1653,14 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     key_handler = '' if live_only else f' snc-key-down="{html.escape(repr(ColumnKeyDown()))}"'
     small_class = ' small' if small else ''
     max_height = SMALL_MAX_HEIGHT if small else EXPANDED_PANE_MAX_HEIGHT
-    strs = [f'<div class="visualizer-container list-visualizer for-loop-visualizer{small_class}"{key_handler}>',
-            '<div class="snc-tool-and-visualizer">',
+    pick = model.get('tool') == 'pick' and not small and not live_only
+    tool_class = '' if small else f' {"pick" if pick else "normal"}-tool-selected'
+    strs = [f'<div class="visualizer-container list-visualizer for-loop-visualizer{small_class}{tool_class}"'
+            f'{key_handler}>',
+            '<div class="snc-tool-and-visualizer">']
+    if not small and not live_only:
+        strs.append(render_tool_toolbar(TOOLS, model.get('tool', 'normal'), lambda tool: repr(ToolSelect(tool=tool))))
+    strs += [
             f'<div class="list-table-scroll snc-base-visualizer" style="max-height: {max_height}px;">',
             '<table><thead class="col-header-rows"><tr>']
     hidden = set(model.get('hidden_columns') or [])
@@ -1409,14 +1678,15 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     beside = next((col for col in shown if insert_at and value.columns[col].label == insert_at['label']), None)
     for col in shown:
         if col == beside and not insert_at['after']:
-            strs.append(_render_box(model, span_attrs=tall))
+            strs.append(_render_box(model, span_attrs=tall, suggestions=_suggestions(value, model, get_visualizer)))
         span = f' colspan="{spans[col]}"' if spans.get(col, 1) > 1 else ('' if col in subcols else tall)
         strs.append(_render_header(value, model, col, live_only, span, get_visualizer))
         if col == beside and insert_at['after']:
-            strs.append(_render_box(model, span_attrs=tall))
+            strs.append(_render_box(model, span_attrs=tall, suggestions=_suggestions(value, model, get_visualizer)))
     # Every column it adds is code, so live-only leaves it out.
+    suggested = _suggestions(value, model, get_visualizer) if not live_only else []
     if not live_only and model.get('adding_column') and beside is None:
-        strs.append(_render_box(model, span_attrs=tall))
+        strs.append(_render_box(model, span_attrs=tall, suggestions=suggested))
     collecting = model.get('collecting_column')
     if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
         subject = value.columns[collecting].subject
@@ -1442,17 +1712,27 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     gap = _hidden_page(len(rows), model)
     matches = None if small or live_only and not model.get('search') else _matches(value, model)
     marked = set(matches) if matches else set()
-    for position, i in enumerate(_draw_order(value, model, len(rows))):
+    order = _draw_order(value, model, len(rows))
+    drawn = [p for p in range(len(order)) if gap is None or not gap[0] <= p < gap[1]]
+    for position, i in enumerate(order):
         row = rows[i]
         if gap is not None and gap[0] <= position < gap[1]:
             if position == gap[0]:
                 strs.append(_render_load_more_row(gap[1] - gap[0], len(leaves) + 1, small))
             continue
         row_class = '' if not marked else (' class="row-match"' if i in marked else ' class="row-dim"')
-        strs.append(f'<tr{row_class}><td class="row-index">{i}</td>')
-        strs += [_render_leaf(value, model, i, col, sub, row[col] if col < len(row) else None, has_values,
-                              get_visualizer, eval_in_scope, small)
-                 for col, sub in leaves]
+        if small or live_only:
+            strs.append(f'<tr{row_class}><td class="row-index">{i}</td>')
+        else:
+            strs.append(f'<tr{row_class}><td class="row-index"><span class="snc-hover-hidden-parent">{i}'
+                        f'{_render_row_menu(value, model, i)}</span></td>')
+        for col, sub in leaves:
+            cell = _render_leaf(value, model, i, col, sub, row[col] if col < len(row) else None, has_values,
+                                get_visualizer, eval_in_scope, small)
+            if pick and sub is None:
+                overlay = _render_pick_region(model, value.columns[col].label, drawn.index(position), len(drawn))
+                cell = cell[:-len('</td>')] + overlay + '</td>'
+            strs.append(cell)
         strs.append('</tr>')
     strs.append('</tbody>')
     strs.append(_render_agg_rows(value, model, shown, spans))
@@ -1677,7 +1957,46 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 text = f'{value.body_indent}pass' if span == value.body_lines else None
                 return (_menus_closed(model), [ReplaceLines(span[0], span[1], text)])
         case ColumnInput(value=typed) if _box_open(model):
-            return ({**model, 'column_input': typed}, [])
+            others = {k: v for k, v in model.items() if k != 'selected_suggestion'}
+            return ({**others, 'column_input': typed}, [])
+        case ColumnSelect(text=text) if _box_open(model):
+            others = {k: v for k, v in model.items() if k != 'selected_suggestion'}
+            return ({**others, 'column_input': _finished(model, text)}, [])
+        case ColumnKeyDown() if _box_open(model) and event_json.get('key') in ('ArrowDown', 'ArrowUp'):
+            offered = _suggestions(value, model, get_visualizer)
+            if offered:
+                at = model.get('selected_suggestion')
+                if event_json['key'] == 'ArrowDown':
+                    at = 0 if at is None else min(at + 1, len(offered) - 1)
+                else:
+                    at = None if not at else at - 1
+                return ({**model, 'selected_suggestion': at}, [])
+        case ColumnKeyDown() if _box_open(model) and event_json.get('key') == 'Enter' \
+                and model.get('selected_suggestion') is not None:
+            offered = _suggestions(value, model, get_visualizer)
+            at = model['selected_suggestion']
+            if at < len(offered):
+                return ({**model, 'column_input': _finished(model, offered[at]), 'selected_suggestion': None}, [])
+        case ActionButtonClick(action=action) if not is_live_only():
+            code = _action_code(value, model, action)
+            if code:
+                return (model, code)
+        case RowMenuToggle(row=row):
+            return ({**_menus_closed(model), 'add_menu_open': False,
+                     'row_menu': None if model.get('row_menu') == row else row}, [])
+        case RowActionClick(row=row, action=action) if not is_live_only():
+            code = _row_action_code(value, row, action)
+            if code:
+                return (_menus_closed(model), code)
+        case ToolSelect(tool=tool) if tool in ('normal', 'pick'):
+            return ({**model, 'tool': tool}, [])
+        case PickToggle(label=label):
+            picked = list(model.get('picked') or [])
+            if label in picked:
+                picked.remove(label)
+            elif label in (column.label for column in value.columns):
+                picked.append(label)
+            return ({**model, 'picked': picked}, [])
         case ColumnKeyDown() if _box_open(model):
             key = event_json.get('key')
             if key in ('Enter', 'Tab'):
@@ -1697,7 +2016,7 @@ def _closed(model):
 
 def _menus_closed(model):
     """The model with the column menu put away, as anything it did does."""
-    return {**model, 'col_menu': None, 'submenu': None}
+    return {**model, 'col_menu': None, 'submenu': None, 'row_menu': None}
 
 
 def _tally_rows_of(value: ForLoopTable, model, col: int):
