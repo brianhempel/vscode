@@ -15,6 +15,7 @@ The main flow is:
 User Code → AST Parsing → AST Transformation → Code Generation → Execution → JSON Output
 """
 
+import copy
 import dataclasses
 from dataclasses import dataclass
 import sys
@@ -40,7 +41,7 @@ _BUILTIN_VISUALIZERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__
 if _BUILTIN_VISUALIZERS_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_VISUALIZERS_DIR)
 
-from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, ForLoopColumn, ForLoopTable, InsertLines, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes, truncate_repr  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
+from visualizer_utils import wrap_drag_grab, with_pass_body, call_with_supported_kwargs, wants_kwarg, AddImports, ForLoopColumn, ForLoopTable, NO_VALUE, InsertLines, Phantom, UncaughtError, is_new_code, set_line_config, take_line_config, parse_config_comment, format_config_comment, config_sig, set_live_only, is_live_only, take_study_notes, truncate_repr  # type: ignore[import-not-found]  # resolved at runtime via the path inserted above
 
 import std_streams
 import url_cache
@@ -863,41 +864,53 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
             "site": site,
             "columns": {(line, col_site): i for i, (line, col_site, _) in enumerate(columns)},
             "rows": {},
+            "values": {},
             "table": ForLoopTable(
                 line=id_line, end_line=end_line, indent=indent, body_indent=body_indent,
                 columns=for_columns, rows=(),
                 targets=tuple(targets), defined=frozenset(defined),
                 body_lines=body_lines, running=True,
-                init=_initial_values(for_columns, sys._getframe(1))),
+                **_initial_values(for_columns, sys._getframe(1))),
         }
         log_value(end_line, _for_tables[id(frame)]["table"], site)
     _ctx_stack.append(frame)
 
 
-def _initial_values(columns: Tuple[ForLoopColumn, ...], frame: Any) -> Tuple[Optional[str], ...]:
-    """Each accumulator's value in `frame`, the scope its loop runs in, as a
-    repr: None for one with no value yet, and for every other column. A local
-    not yet set is None even with a global of its name, which Python wouldn't
-    read either."""
+def _copy_of(value: Any) -> Any:
+    """`value` as it is now, for a loop table to keep: a later change to it
+    must not reach the row it was recorded in. NO_VALUE when it won't copy."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return NO_VALUE
+
+
+def _initial_values(columns: Tuple[ForLoopColumn, ...], frame: Any) -> Dict[str, Tuple[Any, ...]]:
+    """Each accumulator's value in `frame`, the scope its loop runs in: as a
+    repr (`init`; None for one with no value yet, and for every other column)
+    and copied (`init_values`; NO_VALUE where `init` is None). A local not yet
+    set has none even with a global of its name, which Python wouldn't read
+    either."""
     code = frame.f_code
     is_function = bool(code.co_flags & 0x02)  # CO_NEWLOCALS: a function's own scope
 
-    def initial(column: ForLoopColumn) -> Optional[str]:
+    def initial(column: ForLoopColumn) -> Tuple[Optional[str], Any]:
         name = column.subject
         if not column.accumulator or name is None:
-            return None
+            return None, NO_VALUE
         scopes = [frame.f_locals]
         if not (is_function and (name in code.co_varnames or name in code.co_cellvars)):
             scopes.append(frame.f_globals)
         for scope in scopes:
             if name in scope:
                 try:
-                    return truncate_repr(scope[name], MAX_FOR_TABLE_CELL_CHARS)
+                    return truncate_repr(scope[name], MAX_FOR_TABLE_CELL_CHARS), _copy_of(scope[name])
                 except Exception:
-                    return None
-        return None
+                    return None, NO_VALUE
+        return None, NO_VALUE
 
-    return tuple(initial(column) for column in columns)
+    pairs = [initial(column) for column in columns]
+    return {"init": tuple(r for r, _ in pairs), "init_values": tuple(v for _, v in pairs)}
 
 
 def record_cell(line: int, site: int, value: Any) -> None:
@@ -930,6 +943,7 @@ def _record_for_table_cell(line: int, site: int, value: Any) -> None:
     # The value as it was when the statement ran: a list appended to later
     # must not rewrite the rows before.
     cells[col] = truncate_repr(value, MAX_FOR_TABLE_CELL_CHARS)
+    table["values"].setdefault(row, [NO_VALUE] * len(table["columns"]))[col] = _copy_of(value)
 
 
 def _log_for_table(frame: List[int], table: Dict[str, Any]) -> None:
@@ -938,9 +952,11 @@ def _log_for_table(frame: List[int], table: Dict[str, Any]) -> None:
     ran = max(frame[1] + 1 - table["first"], 0)
     shown = min(ran, MAX_FOR_TABLE_ROWS)
     empty = (None,) * len(table["columns"])
+    no_values = (NO_VALUE,) * len(table["columns"])
     value = dataclasses.replace(
         table["table"],
         rows=tuple(tuple(table["rows"][i]) if i in table["rows"] else empty for i in range(shown)),
+        values=tuple(tuple(table["values"][i]) if i in table["values"] else no_values for i in range(shown)),
         hidden_rows=ran - shown,
         running=False)
     log_value(table["end_line"], value, table["site"])

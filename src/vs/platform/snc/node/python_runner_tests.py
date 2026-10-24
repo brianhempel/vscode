@@ -2505,6 +2505,46 @@ class TestForLoopTable(unittest.TestCase):
         self.assertEqual(self._labels(tables[-1]), ('n', 'total += n', 'doubled = total * 2'))
         self.assertEqual(tables[-1].rows, (('10', '10', '20'), ('20', '30', '60'), ('30', '60', '120')))
 
+    def test_each_cell_also_keeps_a_copy_of_the_value_as_it_was(self):
+        """What the table searches, sorts and draws cells with: the value
+        itself, copied when the statement ran, so a list appended to later
+        does not rewrite the rows before."""
+        src = (
+            "arr = []\n"
+            "for x in [1, 2]:\n"
+            "    arr.append(x)\n"
+        )
+        _, tables = self._run(src)
+        values = tables[-1].values
+        self.assertEqual(values, ((1, [1]), (2, [1, 2])))
+        self.assertIsNot(values[0][1], values[1][1])
+
+    def test_a_value_that_cannot_be_copied_or_was_never_reached_has_none_to_keep(self):
+        from visualizer_utils import NO_VALUE
+        src = (
+            "for i in [1, 2]:\n"
+            "    g = (n for n in range(i))\n"
+            "    if i == 2:\n"
+            "        break\n"
+            "    b = i\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual(tables[-1].values, ((1, NO_VALUE, 1), (2, NO_VALUE, NO_VALUE)))
+        # The repr is still there for the one that couldn't be copied.
+        self.assertTrue(tables[-1].rows[0][1].startswith('<generator'))
+
+    def test_an_accumulators_starting_value_is_kept_too(self):
+        from visualizer_utils import NO_VALUE
+        _, tables = self._run(self.SRC)
+        self.assertEqual([t.init_values for t in tables], [(NO_VALUE, 0)] * 2)
+
+    def test_values_play_no_part_in_comparing_tables(self):
+        """A value's == can raise or answer elementwise (a numpy array), so
+        the tables compare by their reprs alone."""
+        from visualizer_utils import ForLoopTable
+        a = ForLoopTable(0, 0, '', '', (), (('1',),), values=((1,),))
+        self.assertEqual(a, dataclasses.replace(a, values=((2,),)))
+
     def test_recording_does_not_run_user_code_again(self):
         src = (
             "count = 0\n"

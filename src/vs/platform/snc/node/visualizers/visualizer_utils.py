@@ -1172,6 +1172,26 @@ class ForLoopColumn:
     init_span: Optional[Tuple[int, int]] = None
 
 
+class _NoValue:
+    """The value of a loop table's cell that has none to keep: the iteration
+    never got to its statement, or the value would not copy."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return 'NO_VALUE'
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+NO_VALUE = _NoValue()
+
+
 @dataclass(frozen=True)
 class ForLoopTable:
     """What a `for` loop did, logged on its last line once it has finished
@@ -1204,6 +1224,13 @@ class ForLoopTable:
     # Per column, an accumulator's value as the loop started, as a repr; None
     # for one with no value yet, and for every other column.
     init: Tuple[Optional[str], ...] = ()
+    # The values themselves, parallel to `rows` and `init`: each copied when
+    # its statement ran (NO_VALUE where there is none to keep), for what has
+    # to read a value rather than its repr -- searching, sorting, a cell's own
+    # visualizer. Left out of ==, which a value can answer elementwise or by
+    # raising; the reprs say whether two tables are the same.
+    values: Tuple[Tuple[Any, ...], ...] = dataclasses.field(default=(), compare=False, repr=False)
+    init_values: Tuple[Any, ...] = dataclasses.field(default=(), compare=False, repr=False)
 
 
 def error_text(exception: BaseException) -> str:

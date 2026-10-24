@@ -4367,6 +4367,11 @@ export class SNCController extends Disposable implements IEditorContribution {
 	// moves to a different line. The effective focused line is sent to Python
 	// on every run so log_value can render non-focused lines with small=True.
 	private explicitFocusedLine: number | null = null;
+	// The header line of the `for` loop whose table that click was on, if it
+	// was on one. The table is logged on the loop's last line, so pinning focus
+	// there alone would put focus inside the loop and open it back up into its
+	// body; this keeps it showing as its table, focused (see collapsedForLoops).
+	private explicitFocusedLoop: number | null = null;
 	private lastCursorLine: number | null = null;
 	private focusRerunTimer: any = null;
 	private readonly focusRerunDelay = 150; // ms
@@ -5040,6 +5045,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (newLine !== this.lastCursorLine) {
 			this.lastCursorLine = newLine;
 			this.explicitFocusedLine = null;
+			this.explicitFocusedLoop = null;
 			if (this.isPythonModel()) {
 				if (this.focusRerunTimer) { clearTimeout(this.focusRerunTimer); }
 				this.focusRerunTimer = setTimeout(() => {
@@ -5088,12 +5094,15 @@ export class SNCController extends Disposable implements IEditorContribution {
 	/**
 	 * Pin focus to `line` and immediately re-run so that line's top-level
 	 * widget renders with `small=False`. Called when the user clicks a small
-	 * (non-focused) widget.
+	 * (non-focused) widget. `forLoopLine` is the header of the loop whose table
+	 * was clicked, which stays collapsed into it rather than opening up.
 	 */
-	private requestExpand(line: number): void {
-		if (this.effectiveFocusedLine() === line) { return; }
-		studyLog.log('widget.expand', { line, previousFocusedLine: this.effectiveFocusedLine() }, this.editor.getModel()?.uri.toString());
+	private requestExpand(line: number, forLoopLine?: number): void {
+		const loop = forLoopLine ?? null;
+		if (this.effectiveFocusedLine() === line && this.explicitFocusedLoop === loop) { return; }
+		studyLog.log('widget.expand', { line, previousFocusedLine: this.effectiveFocusedLine(), ...(loop !== null ? { forLoopLine: loop } : {}) }, this.editor.getModel()?.uri.toString());
 		this.explicitFocusedLine = line;
+		this.explicitFocusedLoop = loop;
 		// Cancel any pending cursor-driven re-run; this click supersedes it.
 		if (this.focusRerunTimer) {
 			clearTimeout(this.focusRerunTimer);
@@ -5982,7 +5991,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							(pythonEventStr) => { this.onBlurEvent(lineNumber, visIndex, pythonEventStr); },
 							() => this.effectiveFocusedLine() === lineNumber,
 							() => this.isLiveOnly(),
-							() => this.requestExpand(lineNumber),
+							() => this.requestExpand(lineNumber, item.forLoopLine),
 							(expression, imports) => { this.insertNewVarFromExpression(lineNumber, expression, imports); },
 							() => { this.onLinkChainClick(lineNumber, visIndex); },
 							this.clipboardService
@@ -7410,15 +7419,18 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	/**
 	 * The `for` loops that show as their table, as `[headerLine, lastLine]`:
-	 * every loop that logged one, unless focus is inside it. A loop nested in
-	 * one of these is inside its table already, so only the outermost counts.
+	 * every loop that logged one, unless focus is inside it. Focus pinned on a
+	 * loop's own table is not inside it: the table is what is focused. A loop
+	 * nested in one of these is inside its table already, so only the
+	 * outermost counts.
 	 */
 	private collapsedForLoops(items: readonly IVisualizationItem[]): [number, number][] {
 		const focusedLine = this.effectiveFocusedLine();
 		const loops = items
 			.filter(item => item.forLoopLine !== undefined)
 			.map((item): [number, number] => [item.forLoopLine!, item.line])
-			.filter(([start, end]) => focusedLine === null || focusedLine < start || focusedLine > end)
+			.filter(([start, end]) => focusedLine === null || focusedLine < start || focusedLine > end
+				|| (start === this.explicitFocusedLoop && end === this.explicitFocusedLine))
 			.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
 		const collapsed: [number, number][] = [];
 		for (const [start, end] of loops) {
