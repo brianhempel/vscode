@@ -1170,6 +1170,19 @@ class ForLoopColumn:
     # right before the loop -- the last thing there to touch its name -- or
     # None, when setting it means a new line above the loop.
     init_span: Optional[Tuple[int, int]] = None
+    # The `if` branches it is inside, outermost first, each (the chain's
+    # first line, the branch's index in it, its header -- `if x > 0`,
+    # `elif ...`, `else` -- and its body's first and last lines). An `elif` is
+    # a branch of its chain, not an `if` nested in an `else`. Empty for one
+    # directly in the loop's body.
+    path: Tuple[Tuple[int, int, str, int, int], ...] = ()
+    # The condition of the innermost branch on `path` (`if`/`elif`) rather
+    # than a statement: its cell is the condition's value, and an empty one
+    # means the chain never got to testing it.
+    cond: bool = False
+    # Its line's indentation, what rewriting its statement keeps; None for a
+    # name the loop binds.
+    indent: Optional[str] = None
 
 
 class _NoValue:

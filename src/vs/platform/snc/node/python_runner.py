@@ -1301,6 +1301,14 @@ def _stored_names(target: ast.AST) -> List[str]:
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
 
 
+def _is_guard(node: ast.If) -> bool:
+    """An `if` that only skips the rest of the iteration or stops the loop --
+    what the loop table writes from an iteration's menu or its Filter button.
+    It says what happens to rows, not what the loop computes, so it gets no
+    columns."""
+    return not node.orelse and all(isinstance(s, (ast.Continue, ast.Break, ast.Pass)) for s in node.body)
+
+
 def _annotate_for_scopes(statements: List[ast.stmt], defined: FrozenSet[str] = frozenset()) -> Set[str]:
     """Note on each `for` loop, as `_snc_defined`, the names bound in its
     scope by the time it ends -- before it, or by it. A step added to the loop
@@ -1802,6 +1810,14 @@ class CodeTransformer(ast.NodeTransformer):
 
     def visit_If(self, node: ast.If) -> List[ast.stmt]:
         """Transform if statements to log condition results."""
+        return self._transform_if(node, self._transform_statement_list, self._transform_statement_list)
+
+    def _transform_if(self, node: ast.If, transform_body: Callable[[List[ast.stmt]], List[ast.stmt]],
+                      transform_orelse: Callable[[List[ast.stmt]], List[ast.stmt]]) -> List[ast.stmt]:
+        """visit_If, with its branches transformed by the functions given: a
+        `for` body's (see CodeTransformer._for_if) notes the columns in them.
+        The condition's log call takes the line's next site before either
+        branch is transformed."""
         # Create temporary variable for condition
         temp_var = self._get_temp_var()
 
@@ -1816,8 +1832,8 @@ class CodeTransformer(ast.NodeTransformer):
         log_call = self._create_log_call('_log_value', node.lineno, temp_var, node.lineno, log_col, var_and_exp=vae)
 
         # Transform the body and orelse recursively using helper
-        new_body = self._transform_statement_list(node.body)
-        new_orelse = self._transform_statement_list(node.orelse)
+        new_body = transform_body(node.body)
+        new_orelse = transform_orelse(node.orelse)
 
         # Create temp variable name node for the if condition
         temp_var_node = ast.Name(
@@ -1895,31 +1911,8 @@ class CodeTransformer(ast.NodeTransformer):
             # Add the original body statements (transformed), noting the log
             # site of each one that is a column. Names the loop or an earlier
             # statement sets this iteration carry nothing over from the last.
-            assigned = set(target_names)
-            initializers = getattr(node, '_snc_initializers', {})
-            for stmt in node.body:
-                column = self._for_column(stmt, assigned, initializers)
-                assigned.update(n.id for n in ast.walk(stmt)
-                                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
-                transformed = self.visit(stmt)
-                new_body.extend(transformed if isinstance(transformed, list) else [transformed])
-                if column is None:
-                    continue
-                if column.in_place and column.subject:
-                    # Its line's own site is the call's return value. The name
-                    # after it is recorded under a key no log site has, one per
-                    # statement however many share the line.
-                    site = -1 - stmt.col_offset
-                    new_body.append(self._hook_call('_snc_record_cell', stmt.lineno, stmt, {
-                        'site': ast.Constant(value=site, **self._loc(stmt)),
-                        'value': ast.Name(id=column.subject, ctx=ast.Load(), **self._loc(stmt)),
-                    }))
-                else:
-                    # The assignment's own log call is the last site visiting
-                    # it assigned on its line (see visit_Assign).
-                    site = self.site_counter[stmt.lineno] - 1
-                # Plain tuples, to be a constant in the code; loop_enter rebuilds it.
-                columns.append((stmt.lineno, site, dataclasses.astuple(column)))
+            new_body.extend(self._for_body(node.body, set(target_names),
+                                           getattr(node, '_snc_initializers', {}), columns, ()))
 
             # Transform orelse if present using helper
             new_orelse = self._transform_statement_list(node.orelse)
@@ -1942,6 +1935,77 @@ class CodeTransformer(ast.NodeTransformer):
                      (node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno))
             return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node,
                                       enter_kwargs={'table': ast.Constant(value=table, **self._loc(node))})
+
+    def _for_body(self, statements: List[ast.stmt], assigned: Set[str],
+                  initializers: Dict[str, Tuple[int, int]],
+                  columns: List[Tuple[int, int, Tuple[Any, ...]]],
+                  path: Tuple[Tuple[int, int, str, int, int], ...]) -> List[ast.stmt]:
+        """`statements` of a `for` body, or of an `if` branch in one at
+        `path`, transformed, appending to `columns` the (line, site, fields)
+        of each that is a column. `assigned` is what this iteration has set
+        by the time they run, and grows as they do."""
+        new_body: List[ast.stmt] = []
+        for stmt in statements:
+            if isinstance(stmt, ast.If) and not _is_guard(stmt):
+                new_body.extend(self._for_if(stmt, assigned, initializers, columns, path, stmt.lineno, 0))
+                continue
+            column = self._for_column(stmt, assigned, initializers)
+            assigned.update(n.id for n in ast.walk(stmt)
+                            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+            transformed = self.visit(stmt)
+            new_body.extend(transformed if isinstance(transformed, list) else [transformed])
+            if column is None:
+                continue
+            column = dataclasses.replace(column, path=path)
+            if column.in_place and column.subject:
+                # Its line's own site is the call's return value. The name
+                # after it is recorded under a key no log site has, one per
+                # statement however many share the line.
+                site = -1 - stmt.col_offset
+                new_body.append(self._hook_call('_snc_record_cell', stmt.lineno, stmt, {
+                    'site': ast.Constant(value=site, **self._loc(stmt)),
+                    'value': ast.Name(id=column.subject, ctx=ast.Load(), **self._loc(stmt)),
+                }))
+            else:
+                # The assignment's own log call is the last site visiting
+                # it assigned on its line (see visit_Assign).
+                site = self.site_counter[stmt.lineno] - 1
+            # Plain tuples, to be a constant in the code; loop_enter rebuilds it.
+            columns.append((stmt.lineno, site, dataclasses.astuple(column)))
+        return new_body
+
+    def _for_if(self, node: ast.If, assigned: Set[str], initializers: Dict[str, Tuple[int, int]],
+                columns: List[Tuple[int, int, Tuple[Any, ...]]],
+                path: Tuple[Tuple[int, int, str, int, int], ...],
+                chain: int, branch: int) -> List[ast.stmt]:
+        """An `if` in a `for` body, branch `branch` of the chain starting on
+        line `chain`: a column for its condition, then its branches' columns
+        under `path` and the branch. An `elif` continues the chain; an `if`
+        inside an `else:` block starts one of its own.
+
+        Each branch starts from what was set before the chain, since only one
+        runs, and nothing it sets counts as set after it."""
+        header = f"{'if' if branch == 0 else 'elif'} {' '.join(self._source_segment(node.test).split())}"
+        here = path + ((chain, branch, header, node.body[0].lineno,
+                        node.body[-1].end_lineno or node.body[-1].lineno),)
+        # The site the condition's log call is about to take.
+        cond_site = self.site_counter.get(node.lineno, 0)
+        columns.append((node.lineno, cond_site, dataclasses.astuple(ForLoopColumn(
+            header, path=here, cond=True, indent=self._line_indent(node.lineno)))))
+
+        def transform_orelse(orelse: List[ast.stmt]) -> List[ast.stmt]:
+            if not orelse:
+                return []
+            first = orelse[0]
+            if (len(orelse) == 1 and isinstance(first, ast.If)
+                    and first.col_offset == node.col_offset and first.lineno != node.lineno):
+                return self._for_if(first, assigned, initializers, columns, path, chain, branch + 1)
+            last = orelse[-1].end_lineno or orelse[-1].lineno
+            return self._for_body(orelse, set(assigned), initializers, columns,
+                                  path + ((chain, branch + 1, 'else', first.lineno, last),))
+
+        return self._transform_if(
+            node, lambda body: self._for_body(body, set(assigned), initializers, columns, here), transform_orelse)
 
     def _for_column(self, stmt: ast.stmt, assigned: Set[str],
                     initializers: Dict[str, Tuple[int, int]]) -> Optional[ForLoopColumn]:
@@ -1977,7 +2041,7 @@ class CodeTransformer(ast.NodeTransformer):
         accumulator = reads and subject not in assigned
         init_span = initializers.get(subject) if accumulator and subject is not None else None
         return ForLoopColumn(label, (stmt.lineno, stmt.end_lineno or stmt.lineno), subject, underline,
-                             accumulator, in_place, init_span)
+                             accumulator, in_place, init_span, indent=self._line_indent(stmt.lineno))
 
     def visit_While(self, node: ast.While) -> List[ast.stmt]:
         """Transform while loops: their bodies, and which iteration is running."""

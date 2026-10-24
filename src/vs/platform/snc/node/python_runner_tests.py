@@ -2429,7 +2429,7 @@ class TestForLoopTable(unittest.TestCase):
             line=5, end_line=6, indent='', body_indent='    ',
             columns=(ForLoopColumn('element', subject='element'),
                      ForLoopColumn('count += 1', span=(6, 6), subject='count', underline=5,
-                                   accumulator=True, init_span=(3, 3))),
+                                   accumulator=True, init_span=(3, 3), indent='    ')),
             rows=(),
             targets=('element',),
             defined=frozenset({'array_of_integers', 'count', 'element'}),
@@ -2682,6 +2682,91 @@ class TestForLoopTable(unittest.TestCase):
             # The loop sets x itself each time round.
             ('x += 1', 'x', 1, False, False),
         ])
+
+    IF_SRC = (
+        "total = 0\n"
+        "evens = []\n"
+        "for x in [3, 8, 5]:\n"
+        "    if x % 2 == 0:\n"
+        "        evens.append(x)\n"
+        "        tag = 'even'\n"
+        "    elif x > 4:\n"
+        "        tag = 'big'\n"
+        "    else:\n"
+        "        total += x\n"
+        "        tag = 'odd'\n"
+        "    done = True\n"
+    )
+
+    def test_statements_inside_an_if_are_columns_under_its_branch(self):
+        """An `if` chain is a column per condition and per statement in its
+        branches, each knowing the branch it is in by `path`: (the chain's
+        first line, the branch's index, its header, its body's first and last
+        lines). A condition column is `cond`, and an `elif` is a branch of the
+        same chain rather than an `if` nested in the `else`."""
+        _, tables = self._run(self.IF_SRC)
+        t = tables[-1]
+        if_branch = (4, 0, 'if x % 2 == 0', 5, 6)
+        elif_branch = (4, 1, 'elif x > 4', 8, 8)
+        else_branch = (4, 2, 'else', 10, 11)
+        self.assertEqual([(c.label, c.span, c.subject, c.accumulator, c.cond, c.path, c.indent)
+                          for c in t.columns], [
+            ('x', None, 'x', False, False, (), None),
+            ('if x % 2 == 0', None, None, False, True, (if_branch,), '    '),
+            ('evens.append(x)', (5, 5), 'evens', True, False, (if_branch,), '        '),
+            ("tag = 'even'", (6, 6), 'tag', False, False, (if_branch,), '        '),
+            ('elif x > 4', None, None, False, True, (elif_branch,), '    '),
+            ("tag = 'big'", (8, 8), 'tag', False, False, (elif_branch,), '        '),
+            ('total += x', (10, 10), 'total', True, False, (else_branch,), '        '),
+            ("tag = 'odd'", (11, 11), 'tag', False, False, (else_branch,), '        '),
+            ('done = True', (12, 12), 'done', False, False, (), '    '),
+        ])
+
+    def test_a_branch_not_taken_leaves_its_cells_empty(self):
+        """A condition's cell is its value; an `elif` that was never tested
+        has none, as does every statement in a branch that didn't run."""
+        _, tables = self._run(self.IF_SRC)
+        self.assertEqual(tables[-1].rows, (
+            ('3', 'False', None, None, 'False', None, '3', "'odd'", 'True'),
+            ('8', 'True', '[8]', "'even'", None, None, None, None, 'True'),
+            ('5', 'False', None, None, 'True', "'big'", None, None, 'True'),
+        ))
+
+    def test_ifs_nest_and_their_paths_say_so(self):
+        """An `if` in a branch is a chain of its own, its path continuing the
+        branch's; an `if` in an `else:` block -- not an `elif` -- nests too."""
+        src = (
+            "for x in [1]:\n"
+            "    if x:\n"
+            "        if x > 1:\n"
+            "            y = 1\n"
+            "    else:\n"
+            "        if x < 0:\n"
+            "            y = 2\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([(c.label, tuple(p[:3] for p in c.path)) for c in tables[-1].columns], [
+            ('x', ()),
+            ('if x', ((2, 0, 'if x'),)),
+            ('if x > 1', ((2, 0, 'if x'), (3, 0, 'if x > 1'))),
+            ('y = 1', ((2, 0, 'if x'), (3, 0, 'if x > 1'))),
+            ('if x < 0', ((2, 1, 'else'), (6, 0, 'if x < 0'))),
+            ('y = 2', ((2, 1, 'else'), (6, 0, 'if x < 0'))),
+        ])
+
+    def test_a_guard_that_only_skips_or_stops_is_no_column(self):
+        """What the table writes from an iteration's menu, or its Filter
+        button: `if cond: continue`. It says what happens to rows, not what
+        the loop computes."""
+        src = (
+            "for x in [1, 2]:\n"
+            "    if x == 1: continue\n"
+            "    if x == 5:\n"
+            "        break\n"
+            "    y = x\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual(self._labels(tables[-1]), ('x', 'y = x'))
 
     def test_an_accumulator_starts_from_its_value_before_the_loop(self):
         """Taken as the loop starts, so the empty table logged then has it

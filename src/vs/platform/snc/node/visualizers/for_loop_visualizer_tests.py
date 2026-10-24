@@ -1462,6 +1462,113 @@ class TestDeleteColumn(unittest.TestCase):
         self.assertEqual(cmds, [])
 
 
+IF_BRANCH = (3, 0, 'if x % 2 == 0', 4, 4)
+ELIF_BRANCH = (3, 1, 'elif x > 4', 6, 6)
+ELSE_BRANCH = (3, 2, 'else', 8, 8)
+
+
+def branched(**overrides):
+    """The loop in
+
+        1  total = 0
+        2  for x in [3, 8, 5]:
+        3      if x % 2 == 0:
+        4          tag = 'even'
+        5      elif x > 4:
+        6          tag = 'big'
+        7      else:
+        8          total += x
+
+    as the runner logs it: a column per condition and per statement in a
+    branch, each knowing its branch by `path`."""
+    fields = dict(
+        line=2, end_line=8, indent='', body_indent='    ',
+        columns=(bound('x'),
+                 ForLoopColumn('if x % 2 == 0', path=(IF_BRANCH,), cond=True, indent='    '),
+                 statement("tag = 'even'", 4, 'tag', path=(IF_BRANCH,), indent='        '),
+                 ForLoopColumn('elif x > 4', path=(ELIF_BRANCH,), cond=True, indent='    '),
+                 statement("tag = 'big'", 6, 'tag', path=(ELIF_BRANCH,), indent='        '),
+                 statement('total += x', 8, 'total', accumulator=True, init_span=(1, 1),
+                           path=(ELSE_BRANCH,), indent='        ')),
+        rows=(('3', 'False', None, 'False', None, '3'),
+              ('8', 'True', "'even'", None, None, None),
+              ('5', 'False', None, 'True', "'big'", None)),
+        values=((3, False, NO_VALUE, False, NO_VALUE, 3),
+                (8, True, 'even', NO_VALUE, NO_VALUE, NO_VALUE),
+                (5, False, NO_VALUE, True, 'big', NO_VALUE)),
+        targets=('x',),
+        defined=frozenset({'tag', 'total', 'x'}),
+        body_lines=(3, 8),
+        init=(None, None, None, None, None, '0'),
+    )
+    fields.update(overrides)
+    return ForLoopTable(**fields)
+
+
+class TestIfBranches(unittest.TestCase):
+    """What every drawing of an `if` in a loop needs to know: which branch of
+    a chain each iteration took, and so which cells' statements ran. Code
+    written into a branch keeps its indentation."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_each_iteration_took_one_branch_of_the_chain(self):
+        from for_loop_visualizer import branch_ran
+        t = branched()
+        self.assertEqual([branch_ran(t, i, 3) for i in range(3)], [2, 0, 1])
+
+    def test_with_no_else_every_condition_false_takes_none_and_a_chain_never_reached_is_none(self):
+        from for_loop_visualizer import NO_BRANCH, branch_ran
+        t = branched(columns=branched().columns[:5], rows=(('3', 'False', None, 'False', None),
+                                                           ('8', None, None, None, None)),
+                     values=((3, False, NO_VALUE, False, NO_VALUE), (8,) + (NO_VALUE,) * 4))
+        self.assertEqual([branch_ran(t, i, 3) for i in range(2)], [NO_BRANCH, None])
+
+    def test_a_condition_is_read_off_its_repr_while_the_loop_runs(self):
+        from for_loop_visualizer import branch_ran
+        t = branched(values=(), running=True)
+        self.assertEqual([branch_ran(t, i, 3) for i in range(3)], [2, 0, 1])
+
+    def test_a_cell_ran_when_every_branch_it_is_in_did(self):
+        from for_loop_visualizer import cell_ran
+        t = branched()
+        self.assertEqual([[cell_ran(t, i, col) for col in range(6)] for i in range(3)], [
+            [True, True, False, True, False, True],
+            [True, True, True, False, False, False],
+            [True, True, False, True, True, False],
+        ])
+
+    def test_editing_a_statement_in_a_branch_keeps_its_indentation(self):
+        _, cmds = update(key('Enter'), None, editing(2, "tag = 'EVEN'"), branched())
+        self.assertEqual(cmds, [ReplaceLines(4, 4, "        tag = 'EVEN'")])
+
+    def test_removing_the_last_statement_in_a_branch_leaves_a_pass_there(self):
+        _, cmds = update(click(DeleteColumnClick(col=2, label="tag = 'even'")), None, {}, branched())
+        self.assertEqual(cmds, [ReplaceLines(4, 4, '        pass')])
+
+    def test_a_condition_has_no_statement_to_edit_or_remove(self):
+        for msg in (click(ColumnClick(col=1, label='if x % 2 == 0'), detail=2),
+                    click(DeleteColumnClick(col=1, label='if x % 2 == 0'))):
+            with self.subTest(msg=msg):
+                self.assertEqual(update(msg, None, {}, branched()), ({}, []))
+
+    def test_inserting_beside_a_statement_in_a_branch_writes_into_that_branch(self):
+        t = branched()
+        model, _ = update(click(InsertColumnClick(col=2, label="tag = 'even'", after=True)), None, {}, t)
+        _, cmds = update(key('Enter'), None, {**model, 'column_input': 'y = 1'}, t)
+        self.assertEqual(cmds, [InsertLines(((4, '        y = 1'),))])
+
+    def test_inserting_right_of_a_condition_writes_at_the_top_of_its_branch(self):
+        t = branched()
+        model, _ = update(click(InsertColumnClick(col=3, label='elif x > 4', after=True)), None, {}, t)
+        _, cmds = update(key('Enter'), None, {**model, 'column_input': 'y = 1'}, t)
+        self.assertEqual(cmds, [InsertLines(((5, '        y = 1'),))])
+
+
 class TestWhileTheLoopRuns(unittest.TestCase):
     """The table logged as the loop starts has no rows yet, and the finished
     one replaces it a moment later. Drawn empty, it would shrink and regrow the

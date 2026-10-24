@@ -550,6 +550,65 @@ def _init_of(value: ForLoopTable, col: int) -> Optional[str]:
     return value.init[col] if col < len(value.init) else None
 
 
+# What branch_ran says when no branch of the chain with any column ran: every
+# condition was false and there is no `else` with a column in it.
+NO_BRANCH = -1
+
+# A condition's repr when there is no copy of its value to ask: the falsy
+# values a condition is most often.
+FALSY_REPRS = frozenset({'False', 'None', '0', '0.0', "''", '""', '[]', '{}', '()', 'set()'})
+
+
+def _truthy(value: ForLoopTable, i: int, col: int) -> bool:
+    """Whether condition column `col` held in iteration `i`: its copied
+    value's truth, or, with none (the loop still running), its repr's."""
+    if i < len(value.values) and col < len(value.values[i]) and value.values[i][col] is not NO_VALUE:
+        try:
+            return bool(value.values[i][col])
+        except Exception:
+            pass
+    return value.rows[i][col] not in FALSY_REPRS
+
+
+def branch_ran(value: ForLoopTable, i: int, chain: int) -> Optional[int]:
+    """The index of the branch of the `if` chain starting on line `chain`
+    that iteration `i` took: the first whose condition held, else the `else`.
+    None when the iteration never got to the chain, and NO_BRANCH when every
+    condition was false and no `else` with a column in it follows."""
+    row = value.rows[i]
+    conds = sorted((column.path[-1][1], col) for col, column in enumerate(value.columns)
+                   if column.cond and column.path and column.path[-1][0] == chain)
+    for branch, col in conds:
+        if col >= len(row) or row[col] is None:
+            return None
+        if _truthy(value, i, col):
+            return branch
+    otherwise = len(conds)
+    if any((chain, otherwise) == step[:2] for column in value.columns for step in column.path):
+        return otherwise
+    return NO_BRANCH
+
+
+def cell_ran(value: ForLoopTable, i: int, col: int) -> bool:
+    """Whether column `col`'s statement got to run in iteration `i`, as far
+    as the branches it is in say: every one of them was the one taken. A
+    condition ran when it was tested, which its cell says by being there."""
+    column = value.columns[col]
+    if column.cond:
+        row = value.rows[i]
+        return col < len(row) and row[col] is not None
+    return all(branch_ran(value, i, step[0]) == step[1] for step in column.path)
+
+
+def _indent(value: ForLoopTable, column: ForLoopColumn) -> str:
+    """What a statement written over `column`'s, or beside it, is indented
+    by: its own line's, in whatever branch it is in. A condition's beside is
+    its branch's body, a level in from it."""
+    if column.cond:
+        return (column.indent or '') + value.body_indent[len(value.indent):]
+    return column.indent if column.indent is not None else value.body_indent
+
+
 def _parses(statement: str) -> bool:
     try:
         ast.parse(statement)
@@ -1392,7 +1451,10 @@ def _unique_name(value: ForLoopTable, base: str) -> str:
 
 def _beside(value: ForLoopTable, column: ForLoopColumn, after: bool) -> int:
     """The line a new statement goes after to be drawn beside `column`: a
-    bound name's right is the top of the body."""
+    bound name's right is the top of the body, and a condition's the top of
+    its branch."""
+    if column.cond:
+        return column.path[-1][3] - 1
     if column.span is None:
         return value.body_lines[0] - 1
     return column.span[1] if after else column.span[0] - 1
@@ -1880,12 +1942,12 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 current, inner = _converted(rhs)
                 new_rhs = inner if current == to else f'{to}({inner})'
                 return (_menus_closed(model),
-                        [ReplaceLines(column.span[0], column.span[1], f'{value.body_indent}{name} = {new_rhs}')])
+                        [ReplaceLines(column.span[0], column.span[1], f'{_indent(value, column)}{name} = {new_rhs}')])
         case ConvertColumnClick(col=col, label=label, to=to):
             column = _column(value, col, label)
             if column is not None and column.subject and to in CONVERT_TYPES and not is_live_only():
                 name = _unique_name(value, f'{column.subject}_{to}')
-                line = f'{value.body_indent}{name} = {to}({column.subject})'
+                line = f'{_indent(value, column)}{name} = {to}({column.subject})'
                 return (_menus_closed(model), [InsertLines(((_beside(value, column, True), line),))])
         case ComputeToggle(label=label, template=template):
             computes = dict(model.get('computes') or {})
@@ -1955,8 +2017,11 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         case DeleteColumnClick(col=col, label=label):
             span = _statement_span(value, col, label)
             if span is not None and not is_live_only():
-                # A body can't be empty: the last statement in it leaves a pass.
-                text = f'{value.body_indent}pass' if span == value.body_lines else None
+                # A body can't be empty, nor can a branch: the last statement
+                # in it leaves a pass.
+                column = value.columns[col]
+                alone = span == value.body_lines or bool(column.path) and span == column.path[-1][3:5]
+                text = f'{_indent(value, column)}pass' if alone else None
                 return (_menus_closed(model), [ReplaceLines(span[0], span[1], text)])
         case ColumnInput(value=typed) if _box_open(model):
             others = {k: v for k, v in model.items() if k != 'selected_suggestion'}
@@ -2066,21 +2131,21 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     if not statement or is_live_only():
         return (_closed(model), [])
     if col is None:
-        after = _body_end(value)
+        after, indent = _body_end(value), value.body_indent
         insert_at = model.get('insert_at')
         column = next((c for c in value.columns if insert_at and c.label == insert_at['label']), None)
         if column is not None:
-            after = _beside(value, column, insert_at['after'])
+            after, indent = _beside(value, column, insert_at['after']), _indent(value, column)
         # If it comes back an accumulator with nothing to start from, its
         # starting value is the next thing to type.
         pending = {'label': ' '.join(statement.split()), 'labels': [column.label for column in value.columns]}
         return ({**_closed(model), 'pending_init': pending},
-                [InsertLines(((after, f'{value.body_indent}{statement}'),))])
+                [InsertLines(((after, f'{indent}{statement}'),))])
     label = value.columns[col].label if 0 <= col < len(value.columns) else ''
     span = _statement_span(value, col, label)
     if span is None or statement == label:
         return (_closed(model), [])
-    return (_closed(model), [ReplaceLines(span[0], span[1], f'{value.body_indent}{statement}')])
+    return (_closed(model), [ReplaceLines(span[0], span[1], f'{_indent(value, value.columns[col])}{statement}')])
 
 
 def _write_init(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
