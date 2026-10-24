@@ -11,8 +11,16 @@ reads as what it did rather than as one iteration of it.
     0   | 1       | 1
     1   | 2       | 2
 
-**The (+) adds a column of the user's own.** It ends the header row, as a
-table's does, and opens a box in its place. A loop's column is a line of its
+**The (+) opens the menu a table's does.** Add Column, then a box per name
+the loop binds, then Show all and Hide all over a box per line of its body --
+the shape of a table's, whose row columns are what every table has and whose
+fields are what this one's rows turned out to hold. A loop's columns are code,
+though, so a box only shows or hides a column of the table, by its label; the
+x is what deletes the line. Like a table's, the menu stays open as boxes are
+ticked, and a click anywhere else puts it away.
+
+**Add Column adds a column of the user's own.** It opens a box at the end of
+the header row, as a table's does. A loop's column is a line of its
 body rather than a table's view of its rows, so what is typed is a statement --
 `doubled = element * 2` -- and Enter writes it at the end of the body, where the
 next run draws it as the last column. That code lands away from the line this
@@ -74,8 +82,36 @@ from visualizer_utils import (EXPANDED_PANE_MAX_HEIGHT, ForLoopColumn, ForLoopTa
 
 
 @dataclass(frozen=True)
+class AddMenuToggle:
+    """A press on the (+): open its menu, or put it away."""
+
+
+@dataclass(frozen=True)
+class AddMenuDismiss:
+    """A press outside the open (+) menu: put it away."""
+
+
+@dataclass(frozen=True)
 class AddColumnClick:
-    """A press on the (+): open the box a column is written in."""
+    """Add Column, in the (+) menu: open the box a column is written in."""
+
+
+@dataclass(frozen=True)
+class ColumnToggle:
+    """The box of the column labeled `label`, in the (+) menu: hide it, or
+    show it again."""
+    label: str
+
+
+@dataclass(frozen=True)
+class ColumnShowAll:
+    """Show all, in the (+) menu: every line of the body gets its column back."""
+
+
+@dataclass(frozen=True)
+class ColumnHideAll:
+    """Hide all, in the (+) menu: every line of the body's column goes, and the
+    names the loop binds stay."""
 
 
 @dataclass(frozen=True)
@@ -198,7 +234,9 @@ def _box_open(model) -> bool:
 
 
 def _opened(model, key: str, col, text: str):
-    """The model with one box open -- `key`, on column `col` -- holding `text`."""
+    """The model with one box open -- `key`, on column `col` -- holding
+    `text`, and the (+) menu put away."""
+    model = {k: v for k, v in model.items() if k != 'add_menu_open'}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
             'collecting_column': None, key: col, 'column_input': text}
 
@@ -265,12 +303,50 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool) -> str
             f'</th>')
 
 
-def _render_add_bar() -> str:
-    """The (+), a bar down the table's right edge, as a table's is."""
+def _render_add_bar(value: ForLoopTable, model) -> str:
+    """The (+), a bar down the table's right edge, and the menu it opens, as a
+    table's are. The open menu pins the (+) lit, as a table's does: the panel
+    is lifted out of the table, so the pointer leaves the bar to reach it."""
+    menu_open = bool(model.get('add_menu_open'))
+    icon_classes = 'col-add-icon full-opacity-on-hover' + (' open' if menu_open else '')
     return (f'<div class="snc-dropdown-trigger col-add-trigger">'
-            f'<span class="col-add-icon full-opacity-on-hover" snc-unfocused-clickable draggable="false" '
-            f'snc-mouse-down="{html.escape(repr(AddColumnClick()))}" '
-            f'data-tooltip="Add a line to the loop">+</span></div>')
+            f'<span class="{icon_classes}" snc-unfocused-clickable draggable="false" '
+            f'snc-mouse-down="{html.escape(repr(AddMenuToggle()))}" '
+            f'data-tooltip="Add or hide columns">+</span>'
+            f'{_render_add_menu(value, model) if menu_open else ""}</div>')
+
+
+def _render_menu_row(text: str, event, checked: Optional[bool] = None, classes: str = '') -> str:
+    """A row of the (+) menu, drawn as a table's: a box when it has one, which
+    only reports `checked` -- the click is the row's."""
+    check = ('<span class="col-compute-nocheck"></span>' if checked is None else
+             f'<input type="checkbox" class="col-tally-check"{" checked" if checked else ""} />')
+    return (f'<div class="col-compute-row col-add-row{classes}{" checked" if checked else ""}">'
+            f'<span class="col-compute-toggle" snc-unfocused-clickable draggable="false" '
+            f'snc-mouse-down="{html.escape(repr(event))}">'
+            f'{check}<span class="col-compute-name">{html.escape(text)}</span></span></div>')
+
+
+def _render_add_menu(value: ForLoopTable, model) -> str:
+    """Add Column, the names the loop binds, then Show all and Hide all over
+    the lines of the body: the pair acts on the section below it, as a
+    table's acts on its fields. A box is ticked while its column is shown."""
+    hidden = set(model.get('hidden_columns') or [])
+    sep = '<div class="col-compute-sep"></div>'
+
+    def check_row(column: ForLoopColumn) -> str:
+        return _render_menu_row(column.label, ColumnToggle(label=column.label), column.label not in hidden)
+
+    bound = [column for column in value.columns if column.span is None]
+    statements = [column for column in value.columns if column.span is not None]
+    rows = [_render_menu_row('Add Column', AddColumnClick(), classes=' col-add-write'), sep,
+            *(check_row(column) for column in bound), sep,
+            _render_menu_row('Show all', ColumnShowAll(), classes=' col-add-all'),
+            _render_menu_row('Hide all', ColumnHideAll(), classes=' col-add-all')]
+    if statements:
+        rows += [sep, *(check_row(column) for column in statements)]
+    return (f'<div class="snc-dropdown-panel left col-compute-panel col-add-panel" snc-dropdown-align="left" '
+            f'snc-dismiss="{html.escape(repr(AddMenuDismiss()))}">{"".join(rows)}</div>')
 
 
 def _render_cell(text) -> str:
@@ -348,7 +424,9 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
             f'<div class="list-table-scroll snc-base-visualizer" style="max-height: {EXPANDED_PANE_MAX_HEIGHT // 2}px;">',
             '<table><thead class="col-header-rows"><tr>',
             '<th class="row-index-header">itr</th>']
-    strs += [_render_header(value, model, col, live_only) for col in range(len(value.columns))]
+    hidden = set(model.get('hidden_columns') or [])
+    shown = [col for col, column in enumerate(value.columns) if column.label not in hidden]
+    strs += [_render_header(value, model, col, live_only) for col in shown]
     # Every column it adds is code, so live-only leaves it out.
     if not live_only and model.get('adding_column'):
         strs.append(_render_box(model))
@@ -358,17 +436,17 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False)
         strs.append(_render_box(model, select_all=True, placeholder='List name',
                                 tooltip=f'Every {subject}, collected into this list'))
     strs.append('</tr></thead><tbody>')
-    if any(column.accumulator and column.subject for column in value.columns):
+    if any(value.columns[col].accumulator and value.columns[col].subject for col in shown):
         strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
-        strs += [_render_init_cell(value, model, col, live_only) for col in range(len(value.columns))]
+        strs += [_render_init_cell(value, model, col, live_only) for col in shown]
         strs.append('</tr>')
     for i, row in enumerate(rows):
         strs.append(f'<tr><td class="row-index">{i}</td>')
-        strs += [_render_cell(text) for text in row]
+        strs += [_render_cell(row[col] if col < len(row) else None) for col in shown]
         strs.append('</tr>')
     strs.append('</tbody></table></div>')
     if not live_only:
-        strs.append(_render_add_bar())
+        strs.append(_render_add_bar(value, model))
     strs.append('</div>')
     if hidden_rows:
         noun = 'iteration' if hidden_rows == 1 else 'iterations'
@@ -389,6 +467,25 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None) 
     model = dict(model or {})
     double_click = event_json.get('detail', 1) >= 2
     match msg:
+        case AddMenuToggle():
+            return ({**model, 'add_menu_open': not model.get('add_menu_open')}, [])
+        case AddMenuDismiss():
+            return ({**model, 'add_menu_open': False}, [])
+        case ColumnToggle(label=label):
+            hidden = list(model.get('hidden_columns') or [])
+            if label in hidden:
+                hidden.remove(label)
+            elif label in (column.label for column in value.columns):
+                hidden.append(label)
+            return ({**model, 'hidden_columns': hidden}, [])
+        case ColumnShowAll():
+            statements = {column.label for column in value.columns if column.span is not None}
+            return ({**model, 'hidden_columns': [h for h in model.get('hidden_columns') or []
+                                                 if h not in statements]}, [])
+        case ColumnHideAll():
+            hidden = list(model.get('hidden_columns') or [])
+            hidden += [column.label for column in value.columns if column.span is not None and column.label not in hidden]
+            return ({**model, 'hidden_columns': hidden}, [])
         case AddColumnClick():
             return (_opened(model, 'adding_column', True, ''), [])
         case ColumnClick(col=col, label=label):

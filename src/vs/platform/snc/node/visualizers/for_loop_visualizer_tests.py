@@ -18,8 +18,9 @@ import re
 import unittest
 
 import visualizer_utils
-from for_loop_visualizer import (AddColumnClick, CollectClick, ColumnClick, ColumnInput, ColumnInputBlur,
-                                 ColumnKeyDown, DeleteColumnClick, InitCellClick, can_visualize, init_model,
+from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, CollectClick, ColumnClick,
+                                 ColumnHideAll, ColumnInput, ColumnInputBlur, ColumnKeyDown, ColumnShowAll,
+                                 ColumnToggle, DeleteColumnClick, InitCellClick, can_visualize, init_model,
                                  update, visualize)
 from visualizer_utils import ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
@@ -188,15 +189,17 @@ class TestVisualize(unittest.TestCase):
         self.assertNotIn('action-button', out)
         self.assertNotIn('AddStep', html.unescape(out))
 
-    def test_the_plus_works_without_the_table_being_focused(self):
+    def test_the_plus_and_its_menu_work_without_the_table_being_focused(self):
         # The table only shows while the cursor is outside the loop, so it is
         # never the focused line: a press must not be spent pinning focus.
-        out = visualize(table(), {}, small=True)
-        buttons = re.findall(r'<span[^>]*snc-mouse-down[^>]*>', out)
-        self.assertTrue(buttons)
-        for button in buttons:
-            self.assertIn('snc-unfocused-clickable', button)
-            self.assertIn('draggable="false"', button)
+        for model in ({}, {'add_menu_open': True}):
+            with self.subTest(model=model):
+                out = visualize(table(), model, small=True)
+                buttons = re.findall(r'<span[^>]*snc-mouse-down[^>]*>', out)
+                self.assertTrue(buttons)
+                for button in buttons:
+                    self.assertIn('snc-unfocused-clickable', button)
+                    self.assertIn('draggable="false"', button)
 
     def test_the_plus_is_a_bar_beside_the_table_drawn_focused_or_not(self):
         # A table's (+), except that a table only draws its own once it is
@@ -205,7 +208,7 @@ class TestVisualize(unittest.TestCase):
             with self.subTest(small=small):
                 out = visualize(table(), {}, small=small)
                 bar = re.search(r'</table></div>(<div class="snc-dropdown-trigger col-add-trigger">.*?</div>)', out)
-                self.assertEqual(events_in(bar.group(1)), [repr(AddColumnClick())])
+                self.assertEqual(events_in(bar.group(1)), [repr(AddMenuToggle())])
                 self.assertIn('<div class="snc-tool-and-visualizer"><div class="list-table-scroll', out)
                 self.assertNotIn('<input', out)
 
@@ -255,8 +258,8 @@ class TestAddColumn(unittest.TestCase):
     def tearDown(self):
         visualizer_utils.set_live_only(False)
 
-    def test_the_plus_opens_an_empty_box(self):
-        model, cmds = update(click(AddColumnClick()), None, {}, table())
+    def test_add_column_in_the_plus_menu_puts_the_menu_away_and_opens_an_empty_box(self):
+        model, cmds = update(click(AddColumnClick()), None, {'add_menu_open': True}, table())
         self.assertEqual((model, cmds), (adding(''), []))
 
     def test_typing_fills_the_box(self):
@@ -309,6 +312,121 @@ class TestAddColumn(unittest.TestCase):
         _, cmds = update(key('Enter'), None, adding('doubled = element * 2'), table())
         self.assertEqual(cmds, [])
 
+
+
+def menu_of(html_text):
+    """The panel the (+) opens, or None while it is shut."""
+    found = re.search(r'<div class="snc-dropdown-panel[^"]*col-add-panel".*?</div>(?=</div></div>)', html_text)
+    return found.group(0) if found else None
+
+
+def menu_rows(html_text):
+    """Each row of the (+) menu as (text, checked), checked being None for a
+    row with no box; a separator is '--'."""
+    rows = []
+    for row in re.findall(r'<div class="col-compute-(?:row[^"]*"><span.*?</span></div>|sep"></div>)',
+                          menu_of(html_text)):
+        if 'col-compute-sep' in row:
+            rows.append('--')
+        elif 'col-tally-check' in row:
+            rows.append((text_of(row), ' checked' in re.search(r'<input[^>]*>', row).group(0)))
+        else:
+            rows.append((text_of(row), None))
+    return rows
+
+
+class TestAddMenu(unittest.TestCase):
+    """The (+) opens the menu a table's does: Add Column, then the names the
+    loop binds, then Show all and Hide all over the lines of its body. A box
+    shows or hides a column of the table; the code is the x's to delete."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_plus_opens_and_shuts_the_menu(self):
+        model, cmds = update(click(AddMenuToggle()), None, {}, table())
+        self.assertEqual((model, cmds), ({'add_menu_open': True}, []))
+        model, cmds = update(click(AddMenuToggle()), None, model, table())
+        self.assertEqual((model, cmds), ({'add_menu_open': False}, []))
+
+    def test_shut_until_the_plus_is_pressed(self):
+        self.assertIsNone(menu_of(visualize(table(), {})))
+
+    def test_add_column_then_the_bound_names_then_show_and_hide_all_over_the_statements(self):
+        t = table(columns=(bound('i'), bound('element'), COUNT, statement('twice = element * 2', 4, 'twice')),
+                  rows=(('0', '1', '1', '2'),), init=(None, None, '0', None))
+        out = visualize(t, {'add_menu_open': True, 'hidden_columns': ['twice = element * 2']})
+        self.assertEqual(menu_rows(out), [
+            ('Add Column', None), '--',
+            ('i', True), ('element', True), '--',
+            ('Show all', None), ('Hide all', None), '--',
+            ('count += 1', True), ('twice = element * 2', False)])
+        self.assertEqual(events_in(menu_of(out)), [
+            repr(AddColumnClick()),
+            repr(ColumnToggle(label='i')), repr(ColumnToggle(label='element')),
+            repr(ColumnShowAll()), repr(ColumnHideAll()),
+            repr(ColumnToggle(label='count += 1')), repr(ColumnToggle(label='twice = element * 2'))])
+
+    def test_a_loop_with_no_statement_of_its_own_has_nothing_under_the_pair(self):
+        t = table(columns=(bound('element'),), rows=(('1',),), init=(None,))
+        self.assertEqual(menu_rows(visualize(t, {'add_menu_open': True})),
+                         [('Add Column', None), '--', ('element', True), '--', ('Show all', None), ('Hide all', None)])
+
+    def test_the_menu_is_put_away_by_a_click_anywhere_else_and_lights_the_plus(self):
+        out = visualize(table(), {'add_menu_open': True})
+        self.assertIn(f'snc-dismiss="{html.escape(repr(AddMenuDismiss()))}"', menu_of(out))
+        self.assertIn('col-add-icon full-opacity-on-hover open', out)
+        model, _ = update({'pythonEventStr': repr(AddMenuDismiss()), 'eventJSON': {}}, None,
+                          {'add_menu_open': True}, table())
+        self.assertFalse(model['add_menu_open'])
+
+    def test_unticking_a_column_hides_it_and_its_init_cell_and_ticking_it_brings_it_back(self):
+        model, cmds = update(click(ColumnToggle(label='count += 1')), None, {'add_menu_open': True}, table())
+        # Left open, as a table's is: ticking several in a row is what a list
+        # of boxes is for.
+        self.assertEqual((model, cmds), ({'add_menu_open': True, 'hidden_columns': ['count += 1']}, []))
+        out = visualize(table(), model)
+        self.assertEqual(header_labels(out), ['itr', 'element'])
+        self.assertEqual(body_rows(out), [['0', '1'], ['1', '2']])
+        model, _ = update(click(ColumnToggle(label='count += 1')), None, model, table())
+        self.assertEqual(model['hidden_columns'], [])
+        self.assertEqual(header_labels(visualize(table(), model)), ['itr', 'element', 'count += 1'])
+
+    def test_a_bound_name_can_be_hidden_too(self):
+        model, _ = update(click(ColumnToggle(label='element')), None, {}, table())
+        out = visualize(table(), model)
+        self.assertEqual(header_labels(out), ['itr', 'count += 1'])
+        self.assertEqual(body_rows(out), [['init', '0'], ['0', '1'], ['1', '2']])
+
+    def test_hide_all_and_show_all_reach_the_statements_and_leave_the_bound_names(self):
+        t = plain(columns=(bound('element'), statement('twice = element * 2', 2, 'twice'),
+                           statement('print(twice)', 3)), rows=(('1', '2', 'None'),), init=(None, None, None))
+        model, _ = update(click(ColumnHideAll()), None, {'add_menu_open': True}, t)
+        self.assertEqual(header_labels(visualize(t, model)), ['itr', 'element'])
+        self.assertTrue(model['add_menu_open'])
+        model, _ = update(click(ColumnToggle(label='element')), None, model, t)
+        model, _ = update(click(ColumnShowAll()), None, model, t)
+        self.assertEqual(header_labels(visualize(t, model)), ['itr', 'twice = element * 2', 'print(twice)'])
+
+    def test_a_hidden_column_is_known_by_its_label_so_an_edited_line_comes_back(self):
+        model = {'hidden_columns': ['count += 1']}
+        t = table(columns=(bound('element'), statement('count += 2', 3, 'count', accumulator=True)))
+        self.assertEqual(header_labels(visualize(t, model)), ['itr', 'element', 'count += 2'])
+
+    def test_events_on_hidden_columns_still_name_the_column_they_were_drawn_for(self):
+        t = plain(columns=(bound('element'), statement('twice = element * 2', 2, 'twice'),
+                           statement('print(twice)', 3)), rows=(('1', '2', 'None'),), init=(None, None, None))
+        out = visualize(t, {'hidden_columns': ['twice = element * 2']})
+        self.assertIn(repr(DeleteColumnClick(col=2, label='print(twice)')), events_in(out))
+
+    def test_no_menu_when_visualizers_are_live_only(self):
+        visualizer_utils.set_live_only(True)
+        out = visualize(table(), {'add_menu_open': True})
+        self.assertIsNone(menu_of(out))
+        self.assertEqual(events_in(out), [])
 
 
 class TestEditColumn(unittest.TestCase):
