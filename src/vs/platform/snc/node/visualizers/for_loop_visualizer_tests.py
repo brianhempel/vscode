@@ -162,7 +162,7 @@ def header_labels(html_text):
 def body_rows(html_text):
     """Each <tr> of the body, as the text of its cells, without a row's ▾."""
     body = re.search(r'<tbody>(.*?)</tbody>', html_text, re.S).group(1)
-    body = re.sub(r'<span class="snc-dropdown-trigger row-menu-trigger">.*?</span></span>', '', body)
+    body = re.sub(r'<span class="snc-dropdown-trigger row-menu-trigger[^"]*">.*?</span></span>', '', body)
     return [[html.unescape(re.sub(r'<[^>]*>', '', c)) for c in re.findall(r'<td[^>]*>.*?</td>', tr)]
             for tr in re.findall(r'<tr[^>]*>.*?</tr>', body)]
 
@@ -815,7 +815,7 @@ def scores():
 def row_classes(html_text):
     """The class of each iteration's row, '' for none."""
     body = re.search(r'<tbody>(.*?)</tbody>', html_text, re.S).group(1)
-    return [cls for cls, first in re.findall(r'<tr(?: class="([^"]*)")?><td class="row-index">(?:<span[^>]*>)?([^<]*)',
+    return [cls for cls, first in re.findall(r'<tr(?: class="([^"]*)")?><td class="row-index">(?:<div[^>]*>)?([^<]*)',
                                              body)
             if first != 'init']
 
@@ -1294,7 +1294,7 @@ class TestRowMenu(unittest.TestCase):
         self.assertEqual(model['row_menu'], 1)
         out = visualize(scores(), model)
         labels = [text_of(x) for x in re.findall(r'<span class="snc-dropdown-option-label"[^>]*>(.*?)</span>',
-                                                 re.search(r'col-row-menu-panel.*?</div><!--/row-menu-->', out).group(0))]
+                                                 re.search(r'row-menu-panel.*?</div><!--/row-menu-->', out).group(0))]
         self.assertEqual(labels, ['Skip Iterations Where score == 9', 'Stop at the First Where score == 9',
                                   'Extract Row Cells'])
 

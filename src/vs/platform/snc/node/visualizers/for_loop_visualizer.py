@@ -946,10 +946,10 @@ def _render_row_menu(value: ForLoopTable, model, i: int) -> str:
                    ('Extract Row Cells', 'extract', bool(_row_literals(value, i, bound_only=False)))]
         rows = ''.join(_render_option(model, text, RowActionClick(row=i, action=action) if enabled else None)
                        for text, action, enabled in options)
-        panel = (f'<div class="snc-dropdown-panel flyout col-row-menu-panel" snc-dropdown-align="flyout" '
+        panel = (f'<div class="snc-dropdown-panel flyout row-menu-panel" snc-dropdown-align="flyout" '
                  f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{rows}</div><!--/row-menu-->')
-    classes = 'row-menu snc-hover-hidden full-opacity-on-hover' + (' open' if is_open else '')
-    return (f'<span class="snc-dropdown-trigger row-menu-trigger"><span class="{classes}" '
+    open_class = ' open' if is_open else ''
+    return (f'<span class="snc-dropdown-trigger row-menu-trigger{open_class}"><span class="row-menu{open_class}" '
             f'data-tooltip="Row actions"{_press(RowMenuToggle(row=i))}>▾</span>{panel}</span>')
 
 
@@ -1724,8 +1724,9 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         if small or live_only:
             strs.append(f'<tr{row_class}><td class="row-index">{i}</td>')
         else:
-            strs.append(f'<tr{row_class}><td class="row-index"><span class="snc-hover-hidden-parent">{i}'
-                        f'{_render_row_menu(value, model, i)}</span></td>')
+            # The number and its ▾ in a wrapper inside the cell, as a table's.
+            strs.append(f'<tr{row_class}><td class="row-index"><div class="row-index-inner">{i}'
+                        f'{_render_row_menu(value, model, i)}</div></td>')
         for col, sub in leaves:
             cell = _render_leaf(value, model, i, col, sub, row[col] if col < len(row) else None, has_values,
                                 get_visualizer, eval_in_scope, small)
