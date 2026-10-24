@@ -39,9 +39,10 @@ of its own, so its header has nothing to edit.
 `arr2.append(x)` shows arr2 after the call, `total += x` shows total. The
 underlined part is the start of the label (see ForLoopColumn.underline).
 
-**The init row is where an accumulator starts.** A column whose statement reads
-the value the iteration before left -- `total += x`, `arr2.append(x)` -- has a
-cell above the first iteration: the value before the loop, or a `set…` when
+**The init row is where an accumulator starts.** It is always drawn, above the
+first iteration, blank under a column that isn't one. A column whose statement
+reads the value the iteration before left -- `total += x`, `arr2.append(x)` --
+has a cell there: the value before the loop, or a `set…` when
 there is none, which is why the loop died. Double-clicking it opens the box on
 that value; Enter writes `name = value` over the line that set it right before
 the loop, or as a new line above the loop when nothing there did. A column
@@ -1703,11 +1704,11 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         strs += [_render_subheader(model, value.columns[col].label, sub) for col, sub in leaves if sub is not None]
         strs.append('</tr>')
     strs.append('</thead><tbody>')
-    if any(value.columns[col].accumulator and value.columns[col].subject for col in shown):
-        strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
-        strs += [_render_init_cell(value, model, col, live_only,
-                                   f' colspan="{spans[col]}"' if spans.get(col, 1) > 1 else '') for col in shown]
-        strs.append('</tr>')
+    # Drawn whatever the columns are, so the table keeps its shape.
+    strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
+    strs += [_render_init_cell(value, model, col, live_only,
+                               f' colspan="{spans[col]}"' if spans.get(col, 1) > 1 else '') for col in shown]
+    strs.append('</tr>')
     has_values = not value.running and len(value.values) == len(rows)
     gap = _hidden_page(len(rows), model)
     matches = None if small or live_only and not model.get('search') else _matches(value, model)

@@ -73,7 +73,7 @@ def table(**overrides):
 
 
 def plain(**overrides):
-    """A loop with no accumulator, so no init row:
+    """A loop with no accumulator, so an init row with nothing in it:
 
         1  for element in [1, 2]:
         2      twice = element * 2
@@ -167,6 +167,13 @@ def body_rows(html_text):
             for tr in re.findall(r'<tr[^>]*>.*?</tr>', body)]
 
 
+def iteration_rows(html_text):
+    """The body's rows after the init row, which is always the first."""
+    rows = body_rows(html_text)
+    assert rows[0][0] == 'init', rows[0]
+    return rows[1:]
+
+
 def text_of(html_text):
     return html.unescape(re.sub(r'<[^>]*>', '', html_text))
 
@@ -204,7 +211,7 @@ class TestVisualize(unittest.TestCase):
     def test_a_row_per_iteration_numbered_from_zero_under_the_column_labels(self):
         out = visualize(plain(), init_model(plain()))
         self.assertEqual(header_labels(out), ['itr', 'element', 'twice = element * 2'])
-        self.assertEqual(body_rows(out), [['0', '1', '2'], ['1', '2', '4']])
+        self.assertEqual(body_rows(out), [['init', '', ''], ['0', '1', '2'], ['1', '2', '4']])
 
     def test_is_drawn_as_a_table_so_it_gets_a_line_of_its_own(self):
         self.assertIn('list-table-scroll', visualize(table(), init_model(table())))
@@ -430,7 +437,7 @@ class TestAddMenu(unittest.TestCase):
         self.assertEqual((model, cmds), ({'add_menu_open': True, 'hidden_columns': ['count += 1']}, []))
         out = visualize(table(), model)
         self.assertEqual(header_labels(out), ['itr', 'element'])
-        self.assertEqual(body_rows(out), [['0', '1'], ['1', '2']])
+        self.assertEqual(body_rows(out), [['init', ''], ['0', '1'], ['1', '2']])
         model, _ = update(click(ColumnToggle(label='count += 1')), None, model, table())
         self.assertEqual(model['hidden_columns'], [])
         self.assertEqual(header_labels(visualize(table(), model)), ['itr', 'element', 'count += 1'])
@@ -495,7 +502,7 @@ class TestChrome(unittest.TestCase):
 
     def test_a_page_of_rows_then_a_row_that_loads_more_then_the_last_few(self):
         out = visualize(many(60), {})
-        rows = body_rows(out)
+        rows = iteration_rows(out)
         self.assertEqual([r[0] for r in rows], [str(i) for i in range(50)] + ['Load 7 more'] + ['57', '58', '59'])
         self.assertIn(f'snc-mouse-down="{html.escape(repr(LoadMoreRows()))}"', out)
 
@@ -506,11 +513,11 @@ class TestChrome(unittest.TestCase):
     def test_load_more_draws_another_page(self):
         model, cmds = update(click(LoadMoreRows()), None, {}, many(200))
         self.assertEqual((model, cmds), ({'shown_rows': 100}, []))
-        rows = body_rows(visualize(many(200), model))
+        rows = iteration_rows(visualize(many(200), model))
         self.assertEqual(len(rows), 100 + 1 + 3)
 
     def test_a_short_loop_draws_every_row(self):
-        self.assertEqual(len(body_rows(visualize(many(52), {}))), 52)
+        self.assertEqual(len(iteration_rows(visualize(many(52), {}))), 52)
 
     def test_load_more_works_unfocused(self):
         out = visualize(many(60), {}, small=True)
@@ -964,7 +971,7 @@ class TestSort(unittest.TestCase):
         t = table(columns=(bound('x'),), rows=(("'b'",), ('2',), ("'a'",)), values=(('b',), (2,), ('a',)),
                   init=(None,))
         out = visualize(t, {'sort': {'label': 'x', 'direction': 'asc'}})
-        self.assertEqual([r[1] for r in body_rows(out)], ["'a'", "'b'", '2'])
+        self.assertEqual([r[1] for r in iteration_rows(out)], ["'a'", "'b'", '2'])
 
     def test_a_running_table_has_no_values_to_sort_by(self):
         t = table(rows=(), values=(), running=True)
@@ -1144,7 +1151,7 @@ class TestSubcolumns(unittest.TestCase):
         out = visualize(people(), model)
         self.assertEqual(header_labels(out), ['itr', 'person', "$['name']", "$['age']"])
         self.assertIn('colspan="2"', header_cells(out)[1])
-        self.assertEqual(body_rows(out), [['0', "'Ann'", '3'], ['1', "'Bo'", '5']])
+        self.assertEqual(body_rows(out), [['init', ''], ['0', "'Ann'", '3'], ['1', "'Bo'", '5']])
 
     def test_show_all_hide_all_and_one_of_your_own(self):
         model, _ = update(click(SubcolShowAll(label='person')), None, {}, people(), cells_of)
@@ -1155,11 +1162,11 @@ class TestSubcolumns(unittest.TestCase):
                            'eventJSON': {'value': "$['age'] * 2"}}, None, {'col_menu': 'person'}, people(), cells_of)
         model, _ = update(key('Enter'), None, model, people(), cells_of)
         self.assertEqual(model['subcols'], {'person': ["$['age'] * 2"]})
-        self.assertEqual([r[1] for r in body_rows(visualize(people(), model))], ['6', '10'])
+        self.assertEqual([r[1] for r in iteration_rows(visualize(people(), model))], ['6', '10'])
 
     def test_a_field_that_does_not_read_shows_its_error(self):
         out = visualize(people(), {'subcols': {'person': ["$['nope']"]}})
-        self.assertIn('KeyError', body_rows(out)[0][1])
+        self.assertIn('KeyError', iteration_rows(out)[0][1])
 
 
 def suggestions(html_text):
@@ -1524,8 +1531,11 @@ class TestInitRow(unittest.TestCase):
     def test_the_init_row_is_above_the_first_iteration_and_only_accumulators_have_one(self):
         self.assertEqual(body_rows(visualize(table(), {})), [['init', '', '0'], ['0', '1', '1'], ['1', '2', '2']])
 
-    def test_a_loop_without_an_accumulator_has_no_init_row(self):
-        self.assertNotIn('init', [row[0] for row in body_rows(visualize(plain(), {}))])
+    def test_a_loop_without_an_accumulator_still_has_an_init_row_with_nothing_in_it(self):
+        self.assertEqual(body_rows(visualize(plain(), {}))[0], ['init', '', ''])
+
+    def test_hiding_every_accumulator_keeps_the_init_row(self):
+        self.assertEqual(body_rows(visualize(table(), {'hidden_columns': ['count += 1']}))[0], ['init', ''])
 
     def test_an_accumulator_with_no_starting_value_asks_for_one(self):
         out = visualize(table(init=(None, None)), {})
