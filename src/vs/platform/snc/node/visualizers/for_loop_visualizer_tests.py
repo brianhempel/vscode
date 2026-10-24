@@ -27,8 +27,8 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
                                  ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect,
                                  FirstMatchToggle, SearchBoxInput, SortToggle, TallyExcludeToggle,
                                  TallyFilterInput, TallyItemToggle, TallySelectAll, TallySelectNone,
-                                 TallySortSelect)
-from visualizer_utils import AddImports, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
+                                 TallySortSelect, SubcolExprInput, SubcolHideAll, SubcolShowAll, SubcolToggle)
+from visualizer_utils import NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
 
 def bound(name):
@@ -590,13 +590,13 @@ class TestColumnMenu(unittest.TestCase):
     def test_a_statements_menu(self):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'count += 1'})), [
             ('Remove', True), ('Insert Left', True), ('Insert Right', True),
-            ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
+            ('Subcolumns', True), ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
             ('Collect into List', True)])
 
     def test_a_bound_name_has_no_line_to_remove_or_put_anything_before(self):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'element'})), [
             ('Remove', False), ('Insert Left', False), ('Insert Right', True),
-            ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
+            ('Subcolumns', True), ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
             ('Collect into List', True)])
 
     def test_a_menu_works_without_the_table_being_focused(self):
@@ -1015,6 +1015,144 @@ class TestTally(unittest.TestCase):
     def test_a_column_of_values_that_cannot_be_counted_says_so(self):
         t = table(columns=(bound('x'),), rows=(('[1]',),), values=(([1],),), init=(None,))
         self.assertIn('not counted', col_menu_of(visualize(t, {'col_menu': 'x'})))
+
+
+class FakeCell:
+    """A cell's visualizer: draws its value and whether it was drawn small,
+    counts the Bump()s it is sent, and has a field per key of a dict."""
+    drawn = []
+
+    @staticmethod
+    def can_visualize(value):
+        return True
+
+    @staticmethod
+    def init_model(value, get_visualizer=None, eval_in_scope=None):
+        return {'bumps': 0}
+
+    @staticmethod
+    def visualize(value, model, get_visualizer=None, eval_in_scope=None, max_width=None, max_height=None,
+                  small=False, var_and_exp=None):
+        FakeCell.drawn.append(value)
+        return f'<b class="fake">{value!r}:{model["bumps"]}:{"small" if small else "big"}</b>'
+
+    @staticmethod
+    def update(event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+        if event['pythonEventStr'] == 'Bump()':
+            return ({**model, 'bumps': model['bumps'] + 1}, [])
+        return (model, [])
+
+    @staticmethod
+    def get_fields(value):
+        return [f'$[{k!r}]' for k in value] if isinstance(value, dict) else None
+
+
+def cells_of(value):
+    return FakeCell
+
+
+def people():
+    """for person in [{'name': 'Ann', 'age': 3}, {'name': 'Bo', 'age': 5}]: ..."""
+    ps = [{'name': 'Ann', 'age': 3}, {'name': 'Bo', 'age': 5}]
+    return table(line=1, end_line=2, columns=(bound('person'),), rows=tuple((repr(p),) for p in ps),
+                 values=tuple((p,) for p in ps), targets=('person',), defined=frozenset({'person'}),
+                 body_lines=(2, 2), init=(None,))
+
+
+def child(key, inner, type_='mousedown'):
+    return {'pythonEventStr': repr(ChildEvent(key, inner)), 'eventJSON': {'type': type_}}
+
+
+class TestCellsAreVisualized(unittest.TestCase):
+    """Each drawn cell is its value's own visualizer, as a table's is: small
+    until a press focuses it, and only on the page of rows being drawn."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+        FakeCell.drawn = []
+
+    def test_a_cell_is_drawn_by_its_values_visualizer_keyed_by_row_and_column(self):
+        out = visualize(table(), {}, cells_of)
+        self.assertEqual(re.findall(r'snc-child-key="([^"]*)"', out),
+                         [html.escape(repr(f'{i}\x00{label}')) for i in (0, 1) for label in ('element', 'count += 1')])
+        self.assertIn('<b class="fake">1:0:small</b>', out)
+
+    def test_a_press_focuses_a_cell_and_later_events_reach_it(self):
+        key = '1\x00count += 1'
+        model, _ = update(child(key, 'Bump()'), None, {}, table(), cells_of)
+        self.assertEqual(model['focused_child'], key)
+        model, _ = update(child(key, 'Bump()', 'keydown'), None, model, table(), cells_of)
+        self.assertEqual(model['children'][key], {'bumps': 1})
+        self.assertIn('<b class="fake">2:1:big</b>', visualize(table(), model, cells_of))
+
+    def test_a_cell_with_no_value_to_keep_is_a_dash_and_a_running_table_its_reprs(self):
+        out = visualize(table(values=((1, NO_VALUE), (2, 2))), {}, cells_of)
+        self.assertEqual(body_rows(out)[1][2], '—')
+        out = visualize(table(rows=(), values=(), running=True), {'last_rows': [{'element': '7', 'count += 1': '8'}]},
+                        cells_of)
+        self.assertEqual(body_rows(out)[1], ['0', '7', '8'])
+
+    def test_a_cell_is_nested_with_nowhere_to_save_and_a_focused_ones_model_is_kept(self):
+        seen = []
+
+        class Nested(FakeCell):
+            @staticmethod
+            def init_model(value, get_visualizer=None, eval_in_scope=None, slots_config=None, config_path=None,
+                           persist=True):
+                seen.append((config_path, persist))
+                return {'bumps': 0}
+
+        model = {'focused_child': '0\x00element'}
+        visualize(table(), model, lambda v: Nested)
+        self.assertEqual(seen[0], (['element'], False))
+        self.assertEqual(list(model['children']), ['0\x00element'])
+
+    def test_only_the_page_drawn_is_visualized(self):
+        t = many(60)
+        visualize(table(**{**{f: getattr(t, f) for f in ('columns', 'rows', 'init', 'defined', 'body_lines',
+                                                          'line', 'end_line')},
+                           'values': tuple((i, 2 * i) for i in range(60))}), {}, cells_of)
+        self.assertEqual(len(FakeCell.drawn), 53 * 2)
+
+
+class TestSubcolumns(unittest.TestCase):
+    """Subcolumns, in a column's menu: a value's fields spread across columns
+    of their own under its header, as a table's are. A view of the values, so
+    nothing is written."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_submenu_offers_the_fields_the_values_have(self):
+        out = visualize(people(), {'col_menu': 'person', 'submenu': 'subcols'}, cells_of)
+        self.assertIn(('Subcolumns', True), menu_options(out))
+        self.assertEqual(submenu_rows(out), [('Show all', False, True), ('Hide all', False, True),
+                                             ("$['name']", False, True), ("$['age']", False, True),
+                                             ('', False, True)])
+
+    def test_ticking_a_field_spreads_it_under_the_columns_header(self):
+        model, cmds = update(click(SubcolToggle(label='person', expr="$['name']")), None, {}, people(), cells_of)
+        self.assertEqual((model['subcols'], cmds), ({'person': ["$['name']"]}, []))
+        model, _ = update(click(SubcolToggle(label='person', expr="$['age']")), None, model, people(), cells_of)
+        out = visualize(people(), model)
+        self.assertEqual(header_labels(out), ['itr', 'person', "$['name']", "$['age']"])
+        self.assertIn('colspan="2"', header_cells(out)[1])
+        self.assertEqual(body_rows(out), [['0', "'Ann'", '3'], ['1', "'Bo'", '5']])
+
+    def test_show_all_hide_all_and_one_of_your_own(self):
+        model, _ = update(click(SubcolShowAll(label='person')), None, {}, people(), cells_of)
+        self.assertEqual(model['subcols'], {'person': ["$['name']", "$['age']"]})
+        model, _ = update(click(SubcolHideAll(label='person')), None, model, people(), cells_of)
+        self.assertEqual(model['subcols'], {'person': []})
+        model, _ = update({'pythonEventStr': f"lambda e: SubcolExprInput(label='person', value=e.get('value', ''))",
+                           'eventJSON': {'value': "$['age'] * 2"}}, None, {'col_menu': 'person'}, people(), cells_of)
+        model, _ = update(key('Enter'), None, model, people(), cells_of)
+        self.assertEqual(model['subcols'], {'person': ["$['age'] * 2"]})
+        self.assertEqual([r[1] for r in body_rows(visualize(people(), model))], ['6', '10'])
+
+    def test_a_field_that_does_not_read_shows_its_error(self):
+        out = visualize(people(), {'subcols': {'person': ["$['nope']"]}})
+        self.assertIn('KeyError', body_rows(out)[0][1])
 
 
 class TestEditColumn(unittest.TestCase):
