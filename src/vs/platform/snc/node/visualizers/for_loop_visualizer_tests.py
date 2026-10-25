@@ -1569,6 +1569,208 @@ class TestIfBranches(unittest.TestCase):
         self.assertEqual(cmds, [InsertLines(((5, '        y = 1'),))])
 
 
+OUTER_IF = (3, 0, 'if x > 4', 4, 6)
+INNER_IF = (4, 0, 'if x % 2 == 0', 5, 5)
+OUTER_ELSE = (3, 1, 'else', 8, 8)
+
+
+def nested(**overrides):
+    """The loop in
+
+        1  total = 0
+        2  for x in [3, 8, 5]:
+        3      if x > 4:
+        4          if x % 2 == 0:
+        5              tag = 'even'
+        6          total += x
+        7      else:
+        8          tag = 'small'
+        9      done = True
+
+    an `if` in an `if`, an accumulator in a branch, and a statement after the
+    chain."""
+    fields = dict(
+        line=2, end_line=9, indent='', body_indent='    ',
+        columns=(bound('x'),
+                 ForLoopColumn('if x > 4', path=(OUTER_IF,), cond=True, indent='    '),
+                 ForLoopColumn('if x % 2 == 0', path=(OUTER_IF, INNER_IF), cond=True, indent='        '),
+                 statement("tag = 'even'", 5, 'tag', path=(OUTER_IF, INNER_IF), indent='            '),
+                 statement('total += x', 6, 'total', accumulator=True, init_span=(1, 1), path=(OUTER_IF,),
+                           indent='        '),
+                 statement("tag = 'small'", 8, 'tag', path=(OUTER_ELSE,), indent='        '),
+                 statement('done = True', 9, 'done', indent='    ')),
+        rows=(('3', 'False', None, None, None, "'small'", 'True'),
+              ('8', 'True', 'True', "'even'", '8', None, 'True'),
+              ('5', 'True', 'False', None, '13', None, 'True')),
+        values=((3, False, NO_VALUE, NO_VALUE, NO_VALUE, 'small', True),
+                (8, True, True, 'even', 8, NO_VALUE, True),
+                (5, True, False, NO_VALUE, 13, NO_VALUE, True)),
+        targets=('x',),
+        defined=frozenset({'tag', 'total', 'x', 'done'}),
+        body_lines=(3, 9),
+        init=(None, None, None, None, '0', None, None),
+    )
+    fields.update(overrides)
+    return ForLoopTable(**fields)
+
+
+def header_grid(html_text):
+    """Each header row, as (text, colspan, rowspan) per cell, without a ▾."""
+    thead = re.search(r'<thead.*?</thead>', html_text).group(0)
+    return [[(text_of(re.sub(r'<span class="snc-dropdown-trigger col-menu-trigger">.*', '', th)),
+              int((re.search(r'^<th[^>]*colspan="(\d+)"', th) or [0, 1])[1]),
+              int((re.search(r'^<th[^>]*rowspan="(\d+)"', th) or [0, 1])[1]))
+             for th in re.findall(r'<th[^>]*>.*?</th>', tr)]
+            for tr in re.findall(r'<tr[^>]*>.*?</tr>', thead)]
+
+
+def cell_grid(html_text):
+    """The iterations' cells after `itr`: their text, or `///` for one whose
+    statement a branch not taken skipped."""
+    body = re.search(r'<tbody>(.*?)</tbody>', html_text, re.S).group(1)
+    return [['///' if 'for-loop-skipped' in cls else html.unescape(re.sub(r'<[^>]*>', '', inner))
+             for cls, inner in re.findall(r'<td class="([^"]*)"[^>]*>(.*?)</td>', tr)[1:]]
+            for tr in re.findall(r'<tr[^>]*>.*?</tr>', body)[1:]]
+
+
+def edges_of(cells_html):
+    """Each cell's chain edges, as the classes that draw them."""
+    return [' '.join(re.findall(r'for-loop-(chain-start|chain-end|branch-start)', cls))
+            for cls in re.findall(r'<t[dh] class="([^"]*)"', cells_html)]
+
+
+def add_menu_rows(html_text):
+    """The (+) menu's rows below Show all and Hide all, as (text, checked,
+    depth) -- checked None for a row with no box."""
+    rows = []
+    for row in re.findall(r'<div class="col-compute-row[^"]*">.*?</div>', menu_of(html_text).split('Hide all')[1]):
+        box = re.search(r'<input[^>]*>', row)
+        depth = re.search(r'--for-loop-depth: (\d+)', row)
+        rows.append((text_of(row), None if box is None else ' checked' in box.group(0),
+                     int(depth.group(1)) if depth else 0))
+    return rows
+
+
+class TestIfColumnGroups(unittest.TestCase):
+    """Design A: each branch of an `if` chain heads a group of the columns in
+    it -- its condition, its statements, the chains in it -- a header row per
+    level of nesting, and what ran in another branch is hatched."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_each_branch_heads_a_group_over_its_columns(self):
+        self.assertEqual(header_grid(visualize(branched(), {})), [
+            [('itr', 1, 2), ('x', 1, 2), ('if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
+            [('cond', 1, 1), ("tag = 'even'", 1, 1), ('cond', 1, 1), ("tag = 'big'", 1, 1),
+             ('total += x', 1, 1)]])
+
+    def test_a_nested_chain_is_another_row_and_columns_outside_any_branch_reach_down(self):
+        self.assertEqual(header_grid(visualize(nested(), {})), [
+            [('itr', 1, 3), ('x', 1, 3), ('if x > 4', 4, 1), ('else', 1, 1), ('done = True', 1, 3)],
+            [('cond', 1, 2), ('if x % 2 == 0', 2, 1), ('total += x', 1, 2), ("tag = 'small'", 1, 2)],
+            [('cond', 1, 1), ("tag = 'even'", 1, 1)]])
+
+    def test_a_conditions_header_is_short_with_the_condition_in_its_tooltip(self):
+        cond = header_cells(visualize(branched(), {}))[7]
+        self.assertEqual(re.findall(r'<span class="col-name[^"]*"[^>]*data-tooltip="([^"]*)"', html.unescape(cond)), ['elif x > 4'])
+
+    def test_a_branchs_header_says_how_many_iterations_took_it(self):
+        group = header_cells(visualize(branched(), {}))[2]
+        self.assertIn('data-tooltip="Taken in 1 of 3 iterations"', group)
+
+    def test_subcolumns_are_one_more_level_under_a_column_in_a_branch(self):
+        out = visualize(branched(), {'subcols': {"tag = 'even'": ['$.upper()']}})
+        self.assertEqual(header_grid(out), [
+            [('itr', 1, 3), ('x', 1, 3), ('if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
+            [('cond', 1, 2), ("tag = 'even'", 1, 1), ('cond', 1, 2), ("tag = 'big'", 1, 2), ('total += x', 1, 2)],
+            [('$.upper()', 1, 1)]])
+        self.assertEqual(cell_grid(out)[1][:3], ['8', 'True', "'EVEN'"])
+
+    def test_a_branch_with_every_column_hidden_has_no_group_and_a_chain_none_takes_no_row(self):
+        out = visualize(branched(), {'hidden_columns': ['elif x > 4', "tag = 'big'"]})
+        self.assertEqual(header_grid(out), [
+            [('itr', 1, 2), ('x', 1, 2), ('if x % 2 == 0', 2, 1), ('else', 1, 1)],
+            [('cond', 1, 1), ("tag = 'even'", 1, 1), ('total += x', 1, 1)]])
+        everything = [column.label for column in branched().columns[1:]]
+        self.assertEqual(header_grid(visualize(branched(), {'hidden_columns': everything})), [[('itr', 1, 1),
+                                                                                               ('x', 1, 1)]])
+
+    def test_a_cell_another_branch_skipped_is_hatched_and_one_never_reached_a_dash(self):
+        t = branched(rows=branched().rows + (('9', None, None, None, None, None),),
+                     values=branched().values + ((9,) + (NO_VALUE,) * 5,))
+        self.assertEqual(cell_grid(visualize(t, {})), [
+            ['3', 'False', '///', 'False', '///', '3'],
+            ['8', 'True', "'even'", '///', '///', '///'],
+            ['5', 'False', '///', 'True', "'big'", '///'],
+            ['9', '—', '—', '—', '—', '—']])
+
+    def test_a_branch_not_taken_hatches_the_chains_inside_it(self):
+        self.assertEqual(cell_grid(visualize(nested(), {})), [
+            ['3', 'False', '///', '///', '///', "'small'", 'True'],
+            ['8', 'True', 'True', "'even'", '8', '///', 'True'],
+            ['5', 'True', 'False', '///', '13', '///', 'True']])
+
+    def test_while_the_loop_runs_the_rows_of_last_time_are_hatched_by_their_reprs(self):
+        t = branched()
+        last = [dict(zip([column.label for column in t.columns], row)) for row in t.rows]
+        out = visualize(branched(rows=(), values=(), running=True), {'last_rows': last})
+        self.assertEqual(cell_grid(out)[0], ['3', 'False', '///', 'False', '///', '3'])
+
+    def test_a_conditions_cells_say_whether_it_held(self):
+        rows = re.findall(r'<tr[^>]*>.*?</tr>', re.search(r'<tbody>(.*?)</tbody>', visualize(branched(), {})).group(1))
+        self.assertEqual([re.findall(r'for-loop-cond-(true|false)', tr) for tr in rows[1:]],
+                         [['false', 'false'], ['true'], ['false', 'true']])
+
+    def test_the_init_row_lines_up_blank_under_conditions_with_a_branchs_accumulator_starting_there(self):
+        out = visualize(nested(), {})
+        self.assertEqual(body_rows(out)[0], ['init', '', '', '', '', '0', '', ''])
+        row = re.search(r'<tr class="for-loop-init-row">.*?</tr>', out).group(0)
+        self.assertEqual(events_in(row), [repr(InitCellClick(col=4, label='total += x'))])
+
+    def test_a_chain_is_edged_where_it_starts_and_ends_and_between_its_branches(self):
+        out = visualize(nested(), {})
+        first = re.search(r'<tbody>.*?</tr>(<tr[^>]*>.*?</tr>)', out).group(1)
+        self.assertEqual(edges_of(first), ['', '', 'chain-start', 'chain-start', 'chain-end', '', 'branch-start chain-end', ''])
+        self.assertEqual(edges_of(''.join(header_cells(out))), [
+            '', '', 'chain-start', 'branch-start chain-end', '',
+            'chain-start', 'chain-start chain-end', '', 'branch-start chain-end', 'chain-start', 'chain-end'])
+
+    def test_the_plus_menu_lists_a_branchs_columns_under_it_as_the_code_reads(self):
+        out = visualize(nested(), {'add_menu_open': True})
+        self.assertEqual(menu_rows(out)[:3], [('Add Column', None), '--', ('x', True)])
+        self.assertEqual(add_menu_rows(out), [
+            ('if x > 4', True, 0), ('if x % 2 == 0', True, 1), ("tag = 'even'", True, 2), ('total += x', True, 1),
+            ('else', None, 0), ("tag = 'small'", True, 1), ('done = True', True, 0)])
+        self.assertIn(repr(ColumnToggle(label='if x > 4')), events_in(menu_of(out)))
+
+    def test_hide_all_hides_conditions_too(self):
+        model, _ = update(click(ColumnHideAll()), None, {}, branched())
+        self.assertEqual(header_grid(visualize(branched(), model)), [[('itr', 1, 1), ('x', 1, 1)]])
+        model, _ = update(click(ColumnShowAll()), None, model, branched())
+        self.assertEqual(model['hidden_columns'], [])
+
+    def test_a_conditions_menu_leaves_out_what_needs_a_statement_or_a_name(self):
+        self.assertEqual(menu_options(visualize(branched(), {'col_menu': 'if x % 2 == 0'})), [
+            ('Insert Right', True), ('Sort', True), ('Compute', True)])
+
+    def test_the_insert_box_beside_a_column_in_a_branch_stays_in_its_group(self):
+        model, _ = update(click(InsertColumnClick(col=2, label="tag = 'even'", after=True)), None, {}, branched())
+        grid = header_grid(visualize(branched(), model))
+        self.assertEqual(grid[0][2], ('if x % 2 == 0', 3, 1))
+        self.assertEqual([text for text, _, _ in grid[1]], ['cond', "tag = 'even'", '', 'cond', "tag = 'big'",
+                                                            'total += x'])
+
+    def test_live_only_draws_the_groups_with_nothing_to_press(self):
+        visualizer_utils.set_live_only(True)
+        out = visualize(nested(), {})
+        self.assertEqual(len(header_grid(out)), 3)
+        self.assertEqual(events_in(out), [])
+
+
 class TestWhileTheLoopRuns(unittest.TestCase):
     """The table logged as the loop starts has no rows yet, and the finished
     one replaces it a moment later. Drawn empty, it would shrink and regrow the

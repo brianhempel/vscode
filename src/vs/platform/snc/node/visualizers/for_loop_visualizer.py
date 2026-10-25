@@ -123,6 +123,22 @@ keyboard as it opens, for the same reason.
 that loads the next fifty -- a table's paging. Columns drag wider by their
 header's right edge, the width kept by label in the model.
 
+**An `if` is a group of columns.** Each branch of a chain heads the columns
+in it -- its condition, its statements, the chains inside it -- a header row
+per level of nesting, and a column in no branch reaches down past them all:
+
+    itr | x |        if x % 2 == 0         | elif x > 4 |    else
+        |   | cond | evens.append(x) | tag | cond | tag  | total += x
+    0   | 3 | False| ///////////////////// | False| //// | 3
+    1   | 8 | True | [8]             | 'even' | ////////////////////
+
+A condition's header just says `cond`, the branch's reading the condition.
+A cell in a branch the iteration didn't take is hatched and empty, which an
+iteration that never got that far (a break, a raise) is not: that is an em
+dash, as anywhere. Lines down the table mark where a chain starts and ends.
+A condition has no line of its own, so its menu keeps only what reads its
+values, and Insert Right, which writes at the top of its branch.
+
 Sorts before `z_object_visualizer` (which claims everything) so that the table
 reaches it rather than being shown as a dataclass's fields.
 """
@@ -132,7 +148,7 @@ import html
 import keyword
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
 from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, COMPUTE_AGGS, CONVERT_TYPES, NO_THING,
@@ -600,6 +616,51 @@ def cell_ran(value: ForLoopTable, i: int, col: int) -> bool:
     return all(branch_ran(value, i, step[0]) == step[1] for step in column.path)
 
 
+def cell_skipped(value: ForLoopTable, i: int, col: int) -> bool:
+    """Whether iteration `i` got to column `col`'s chain and went another way
+    round it: a branch the column is in was not the one taken, or -- for a
+    condition -- one before it held. What didn't run without getting that far
+    (a break or a raise first) is an empty cell instead, as it is anywhere."""
+    column = value.columns[col]
+    for chain, branch, *_ in column.path[:-1] if column.cond else column.path:
+        took = branch_ran(value, i, chain)
+        if took is None:
+            return False
+        if took != branch:
+            return True
+    if not column.cond:
+        return False
+    return not cell_ran(value, i, col) and branch_ran(value, i, column.path[-1][0]) is not None
+
+
+def _of_body(column: ForLoopColumn) -> bool:
+    """Whether a column is a line of the body -- a statement or a condition --
+    rather than a name the loop binds."""
+    return column.span is not None or column.cond
+
+
+def _nesting(path, depth: Optional[int] = None) -> Tuple[set, set]:
+    """The chains and the branches `path` is in, as ids that say where each
+    is nested, down to `depth` levels."""
+    steps = [step[:2] for step in path][:depth]
+    chains = {tuple(steps[:k]) + (steps[k][0],) for k in range(len(steps))}
+    return chains, {tuple(steps[:k + 1]) for k in range(len(steps))}
+
+
+def _edges(before, first, last, after, depth: Optional[int] = None) -> str:
+    """The classes edging cells over the columns at paths `first` to `last`,
+    the paths of the columns drawn either side being `before` and `after`
+    (() at the table's ends): where a chain starts or ends, and where a
+    branch starts inside one. A header `depth` levels down only edges the
+    chains it is under."""
+    chains, branches = _nesting(first, depth)
+    starts = not chains <= _nesting(before)[0]
+    between = not starts and not branches <= _nesting(before)[1]
+    ends = not _nesting(last, depth)[0] <= _nesting(after)[0]
+    return ''.join(f' for-loop-{name}' for name, on in
+                   (('chain-start', starts), ('branch-start', between), ('chain-end', ends)) if on)
+
+
 def _indent(value: ForLoopTable, column: ForLoopColumn) -> str:
     """What a statement written over `column`'s, or beside it, is indented
     by: its own line's, in whatever branch it is in. A condition's beside is
@@ -1061,36 +1122,42 @@ def _render_submenu_row(model, submenu: str, text: str, tooltip: str, panel) -> 
 
 def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=None) -> str:
     """What can be done to a whole column, in a table's order: Remove and
-    Insert, then the rows that ask about its values."""
+    Insert, then the rows that ask about its values. A condition has no line
+    of its own to remove or write left of, nor a name to group by, retype or
+    collect, so it only gets the rows that read its values, and Insert Right,
+    which writes at the top of its branch."""
     column = value.columns[col]
     label = column.label
     statement = column.span is not None
+    # (row, whether a condition gets it too)
     rows = [
-        _render_search_row(model, label),
-        _render_option(model, 'Remove', DeleteColumnClick(col=col, label=label) if statement else None,
-                       '' if statement else 'A name the loop binds has no line to remove'),
-        _render_option(model, 'Insert Left', InsertColumnClick(col=col, label=label, after=False)
-                       if statement else None),
-        _render_option(model, 'Insert Right', InsertColumnClick(col=col, label=label, after=True)),
-        '<div class="col-compute-sep"></div>',
-        _render_submenu_row(model, 'subcols', 'Subcolumns', 'Spread this column across several',
-                            lambda: _render_subcol_panel(value, model, col, get_visualizer)),
-        _render_submenu_row(model, 'sort', 'Sort', 'Draw the iterations in this column\'s order',
-                            lambda: _render_sort_panel(model, label)),
-        _render_option(model, 'Group By', GroupByClick(col=col, label=label) if column.subject else None,
-                       f'Every iteration, grouped by {column.subject}' if column.subject else ''),
-        _render_submenu_row(model, 'convert', 'Change Type', "Read this column's values as another type",
-                            lambda: _render_convert_panel(value, col)),
-        _render_submenu_row(model, 'compute', 'Compute', 'Summarize this column',
-                            lambda: _render_compute_panel(value, model, col)),
-        _render_option(model, 'Collect into List', CollectClick(col=col, label=label)
-                       if _collectable(value, col, label) is not None else None,
-                       f'A list of every {column.subject}, built as the loop runs' if column.subject else ''),
-        '<div class="col-compute-sep"></div>',
-        _render_tally(value, model, col),
+        (_render_search_row(model, label), True),
+        (_render_option(model, 'Remove', DeleteColumnClick(col=col, label=label) if statement else None,
+                       '' if statement else 'A name the loop binds has no line to remove'), False),
+        (_render_option(model, 'Insert Left', InsertColumnClick(col=col, label=label, after=False)
+                        if statement else None), False),
+        (_render_option(model, 'Insert Right', InsertColumnClick(col=col, label=label, after=True)), True),
+        ('<div class="col-compute-sep"></div>', True),
+        (_render_submenu_row(model, 'subcols', 'Subcolumns', 'Spread this column across several',
+                             lambda: _render_subcol_panel(value, model, col, get_visualizer)), False),
+        (_render_submenu_row(model, 'sort', 'Sort', 'Draw the iterations in this column\'s order',
+                             lambda: _render_sort_panel(model, label)), True),
+        (_render_option(model, 'Group By', GroupByClick(col=col, label=label) if column.subject else None,
+                        f'Every iteration, grouped by {column.subject}' if column.subject else ''), False),
+        (_render_submenu_row(model, 'convert', 'Change Type', "Read this column's values as another type",
+                             lambda: _render_convert_panel(value, col)), False),
+        (_render_submenu_row(model, 'compute', 'Compute', 'Summarize this column',
+                             lambda: _render_compute_panel(value, model, col)), True),
+        (_render_option(model, 'Collect into List', CollectClick(col=col, label=label)
+                        if _collectable(value, col, label) is not None else None,
+                        f'A list of every {column.subject}, built as the loop runs' if column.subject else ''),
+         False),
+        ('<div class="col-compute-sep"></div>', True),
+        (_render_tally(value, model, col), True),
     ]
+    shown = ''.join(row for row, for_cond in rows if for_cond or not column.cond)
     return (f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout" '
-            f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{"".join(rows)}</div><!--/col-menu-->')
+            f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{shown}</div><!--/col-menu-->')
 
 
 def _render_chip(model, chip: str, current: str, options, make_event, chip_class: str, tooltip: str = '',
@@ -1387,7 +1454,7 @@ def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
     return _submenu('compute', rows)
 
 
-def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None) -> str:
+def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, edges=None) -> str:
     """The answers kept under the table, a row per level, as a table's: each
     column's answers stacked in the order they were ticked."""
     computes = model.get('computes') or {}
@@ -1400,13 +1467,14 @@ def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None) -
         cells = []
         for col, templates in zip(shown, asked):
             span = f' colspan="{spans[col]}"' if spans and spans.get(col, 1) > 1 else ''
+            edge = (edges or {}).get(col, '')
             if level >= len(templates):
-                cells.append(f'<td class="col-agg-blank"{span}></td>')
+                cells.append(f'<td class="col-agg-blank{edge}"{span}></td>')
                 continue
             template = templates[level]
             answer = _answer(template, _column_values(value, col))
             text = '' if answer is NO_THING else _agg_answer_html(template, answer)
-            cells.append(f'<td class="col-agg-cell"{span}{_col_attrs(model, value.columns[col].label)}>'
+            cells.append(f'<td class="col-agg-cell{edge}"{span}{_col_attrs(model, value.columns[col].label)}>'
                          f'<div class="col-agg"><span class="col-agg-label">{html.escape(_compute_label(template))}'
                          f'</span><div class="col-agg-value">{text}</div></div></td>')
         rows.append(f'<tr class="col-agg-row"><td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
@@ -1490,9 +1558,11 @@ def _col_attrs(model, label: str, clip: bool = True) -> str:
 
 
 def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_attrs: str = '',
-                   get_visualizer=None) -> str:
+                   get_visualizer=None, classes: str = '') -> str:
     """A column's header, marked up as a table's: its label, then the ▾ and
-    the x, then the handle on its right edge that drags it wider."""
+    the x, then the handle on its right edge that drags it wider. A
+    condition's says only `cond`, under its branch's header, which reads the
+    condition; the whole of it is in its tooltip."""
     column = value.columns[col]
     label = column.label
     if not live_only and column.span is not None and model.get('editing_column') == col:
@@ -1500,7 +1570,11 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                            span_attrs=span_attrs)
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
-    if live_only:
+    if column.cond:
+        inner = f'<span class="col-name for-loop-cond-label" data-tooltip="{html.escape(label)}">cond</span>'
+        if not live_only:
+            inner += _render_menu_trigger(value, model, col, get_visualizer)
+    elif live_only:
         inner = _render_label(column)
     elif column.span is None:
         inner = (f'<span class="col-name"{py_exp_attrs(column.subject)}>{_render_label(column)}</span>'
@@ -1513,17 +1587,29 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
     filtered = ' col-filtered' if _column_search(model, label)['text'].strip() else ''
-    return (f'<th class="snc-hover-hidden-parent col-header for-loop-col{filtered}"{span_attrs}'
+    return (f'<th class="snc-hover-hidden-parent col-header for-loop-col{filtered}{classes}"{span_attrs}'
             f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">{inner}{resize}</span></th>')
 
 
-def _render_subheader(model, label: str, sub: str) -> str:
+def _render_subheader(model, label: str, sub: str, span_attrs: str = '', classes: str = '') -> str:
     """The header of a sub-column, in the header row under its column's."""
     leaf = _leaf_label(label, sub)
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=leaf)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
-    return (f'<th class="col-header col-subheader"{_col_attrs(model, leaf, clip=False)}>'
+    return (f'<th class="col-header col-subheader{classes}"{span_attrs}{_col_attrs(model, leaf, clip=False)}>'
             f'<span class="col-header-inner"><span class="col-name">{html.escape(sub)}</span>{resize}</span></th>')
+
+
+def _render_branch_header(value: ForLoopTable, step, span_attrs: str = '', classes: str = '') -> str:
+    """The header over a branch's columns -- its condition, its statements,
+    the chains in it -- reading as the branch does in the code, and saying in
+    its tooltip how many of the iterations drawn took it."""
+    chain, branch, header = step[:3]
+    n = len(value.rows)
+    taken = sum(branch_ran(value, i, chain) == branch for i in range(n))
+    tip = f' data-tooltip="Taken in {taken} of {n} iteration{"" if n == 1 else "s"}"' if n else ''
+    return (f'<th class="col-header for-loop-branch-header{classes}"{span_attrs}{tip}>'
+            f'<span class="col-header-inner"><span class="col-name">{html.escape(header)}</span></span></th>')
 
 
 def _render_menu_trigger(value: ForLoopTable, model, col: int, get_visualizer=None) -> str:
@@ -1552,63 +1638,87 @@ def _render_add_bar(value: ForLoopTable, model) -> str:
             f'{_render_add_menu(value, model) if menu_open else ""}</div>')
 
 
-def _render_menu_row(text: str, event, checked: Optional[bool] = None, classes: str = '') -> str:
+def _render_menu_row(text: str, event, checked: Optional[bool] = None, classes: str = '', depth: int = 0) -> str:
     """A row of the (+) menu, drawn as a table's: a box when it has one, which
-    only reports `checked` -- the click is the row's."""
+    only reports `checked` -- the click is the row's. Indented `depth` levels,
+    as its line is in the body; with no event it only heads the rows under
+    it."""
     check = ('<span class="col-compute-nocheck"></span>' if checked is None else
              f'<input type="checkbox" class="col-tally-check"{" checked" if checked else ""} />')
+    press = '' if event is None else _press(event)
+    indent = f' style="--for-loop-depth: {depth}"' if depth else ''
     return (f'<div class="col-compute-row col-add-row{classes}{" checked" if checked else ""}">'
-            f'<span class="col-compute-toggle" snc-unfocused-clickable draggable="false" '
-            f'snc-mouse-down="{html.escape(repr(event))}">'
+            f'<span class="col-compute-toggle{" for-loop-indented" if depth else ""}"{press}{indent}>'
             f'{check}<span class="col-compute-name">{html.escape(text)}</span></span></div>')
 
 
 def _render_add_menu(value: ForLoopTable, model) -> str:
     """Add Column, the names the loop binds, then Show all and Hide all over
     the lines of the body: the pair acts on the section below it, as a
-    table's acts on its fields. A box is ticked while its column is shown."""
+    table's acts on its fields. A box is ticked while its column is shown.
+
+    The lines of the body read as the code does: a condition's box is its
+    branch's header, the branch's lines indented under it, and an `else`,
+    which has no condition, a header with no box."""
     hidden = set(model.get('hidden_columns') or [])
     sep = '<div class="col-compute-sep"></div>'
 
-    def check_row(column: ForLoopColumn) -> str:
-        return _render_menu_row(column.label, ColumnToggle(label=column.label), column.label not in hidden)
+    def check_row(column: ForLoopColumn, depth: int = 0) -> str:
+        return _render_menu_row(column.label, ColumnToggle(label=column.label), column.label not in hidden,
+                                depth=depth)
 
-    bound = [column for column in value.columns if column.span is None]
-    statements = [column for column in value.columns if column.span is not None]
+    bound = [column for column in value.columns if not _of_body(column)]
+    lines = []
+    above = ()
+    for column in value.columns:
+        if not _of_body(column):
+            continue
+        depth = len(column.path) - 1 if column.cond else len(column.path)
+        lines += [_render_menu_row(step[2], None, classes=' col-add-branch unselectable', depth=k)
+                  for k, step in enumerate(column.path[:depth]) if column.path[:k + 1] != above[:k + 1]]
+        lines.append(check_row(column, depth))
+        above = column.path
     rows = [_render_menu_row('Add Column', AddColumnClick(), classes=' col-add-write'), sep,
             *(check_row(column) for column in bound), sep,
             _render_menu_row('Show all', ColumnShowAll(), classes=' col-add-all'),
             _render_menu_row('Hide all', ColumnHideAll(), classes=' col-add-all')]
-    if statements:
-        rows += [sep, *(check_row(column) for column in statements)]
+    if lines:
+        rows += [sep, *lines]
     return (f'<div class="snc-dropdown-panel left col-compute-panel col-add-panel" snc-dropdown-align="left" '
             f'snc-dismiss="{html.escape(repr(AddMenuDismiss()))}">{"".join(rows)}</div>')
 
 
-def _render_cell(model, label: str, text) -> str:
+def _render_cell(model, label: str, text, classes: str = '') -> str:
     attrs = _col_attrs(model, label)
     if text is None:
-        return f'<td class="list-table-cell"{attrs}>—</td>'
-    return f'<td class="list-table-cell"{attrs}><span class="snc-code">{html.escape(text)}</span></td>'
+        return f'<td class="list-table-cell{classes}"{attrs}>—</td>'
+    return f'<td class="list-table-cell{classes}"{attrs}><span class="snc-code">{html.escape(text)}</span></td>'
 
 
 def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str], text, has_values: bool,
-                 get_visualizer, eval_in_scope, small: bool) -> str:
+                 get_visualizer, eval_in_scope, small: bool, classes: str = '') -> str:
     """One cell: its value drawn by the value's own visualizer, as a table's
     cells are -- small until a press focuses it -- or, with no visualizer to
-    ask or no value kept, its repr."""
-    label = value.columns[col].label
+    ask or no value kept, its repr. A cell another branch skipped is hatched
+    and empty, and a condition's says whether it held."""
+    column = value.columns[col]
+    label = column.label
     leaf = _leaf_label(label, sub)
+    if column.path and cell_skipped(value, i, col):
+        return (f'<td class="list-table-cell for-loop-skipped{classes}"{_col_attrs(model, leaf)} '
+                f'data-tooltip="This iteration took another branch"></td>')
+    if column.cond and text is not None:
+        classes += ' for-loop-cond-true' if _truthy(value, i, col) else ' for-loop-cond-false'
     if not has_values:
-        return _render_cell(model, leaf, text if sub is None else None)
+        return _render_cell(model, leaf, text if sub is None else None, classes)
     try:
         cell = _cell_value(value, i, col, sub, eval_in_scope)
     except Exception as e:
-        return f'<td class="list-table-cell"{_col_attrs(model, leaf)}>{error_html(e)}</td>'
+        return f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>{error_html(e)}</td>'
     if cell is NO_VALUE:
-        return _render_cell(model, leaf, None)
+        return _render_cell(model, leaf, None, classes)
     if get_visualizer is None:
-        return _render_cell(model, leaf, text if sub is None else truncate_repr(cell, 120))
+        return _render_cell(model, leaf, text if sub is None else truncate_repr(cell, 120), classes)
     key = _cell_key(i, label, sub)
     try:
         vis = get_visualizer(cell)
@@ -1627,8 +1737,8 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
                                            eval_in_scope=eval_in_scope, max_width=CELL_MAX_WIDTH, max_height=200,
                                            small=small or model.get('focused_child') != key, var_and_exp=None)
     except Exception as e:
-        return f'<td class="list-table-cell"{_col_attrs(model, leaf)}>{error_html(e)}</td>'
-    return (f'<td class="list-table-cell"{_col_attrs(model, leaf)}>'
+        return f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>{error_html(e)}</td>'
+    return (f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>'
             f'{wrap_child_prefix(key)}{drawn}{wrap_child_suffix}</td>')
 
 
@@ -1651,12 +1761,13 @@ def _render_load_more_row(n_hidden: int, colspan: int, small: bool) -> str:
             f'snc-mouse-down="{html.escape(repr(LoadMoreRows()))}">{label}</td></tr>')
 
 
-def _render_init_cell(value: ForLoopTable, model, col: int, live_only: bool, span_attrs: str = '') -> str:
+def _render_init_cell(value: ForLoopTable, model, col: int, live_only: bool, span_attrs: str = '',
+                      classes: str = '') -> str:
     """Where column `col` starts: blank unless it is an accumulator."""
     column = value.columns[col]
     attrs = span_attrs + _col_attrs(model, column.label)
     if not column.accumulator or not column.subject:
-        return f'<td class="list-table-cell"{attrs}></td>'
+        return f'<td class="list-table-cell{classes}"{attrs}></td>'
     if not live_only and model.get('editing_init') == col:
         return _render_box(model, tag='td', select_all=True, placeholder='Starting value',
                            tooltip=f'Sets {column.subject} before the loop')
@@ -1666,9 +1777,9 @@ def _render_init_cell(value: ForLoopTable, model, col: int, live_only: bool, spa
     else:
         text = f'<span class="snc-code">{html.escape(init)}</span>'
     if live_only:
-        return f'<td class="list-table-cell"{attrs}>{text}</td>'
+        return f'<td class="list-table-cell{classes}"{attrs}>{text}</td>'
     click = repr(InitCellClick(col=col, label=column.label))
-    return (f'<td class="list-table-cell for-loop-init-cell"{attrs}>'
+    return (f'<td class="list-table-cell for-loop-init-cell{classes}"{attrs}>'
             f'<span snc-unfocused-clickable draggable="false" snc-mouse-down="{html.escape(click)}" '
             f'data-tooltip="Double-click to set where it starts">{text}</span></td>')
 
@@ -1706,6 +1817,100 @@ def _open_pending_init(value: ForLoopTable, model) -> None:
         model.pop('pending_init')
 
 
+def _span(attr: str, n: int) -> str:
+    return f' {attr}="{n}"' if n > 1 else ''
+
+
+def _edge_list(paths) -> List[str]:
+    """The chain edges of each of a row of cells, at `paths`."""
+    return [_edges(paths[n - 1] if n else (), path, path, paths[n + 1] if n + 1 < len(paths) else ())
+            for n, path in enumerate(paths)]
+
+
+def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: dict, live_only: bool,
+                        get_visualizer=None) -> List[str]:
+    """The header rows. Every header but the top row's hangs off a group over
+    it -- a branch of an `if` chain over the columns in it, a column over its
+    sub-columns -- one row per level, and a cell with nothing under it reaches
+    down to the bottom: `itr`, and every column in no branch."""
+    def branches(path):
+        # The groups a column in the branches at `path` is under: (what they
+        # are known by, how many chains deep their edges count, what draws them).
+        return [(('branch',) + tuple(s[:2] for s in path[:k + 1]), k + 1, ('branch', step))
+                for k, step in enumerate(path)]
+
+    # Each header with nothing under it: the path of its column, the groups
+    # over it, outermost first, and what draws it.
+    leaves = []
+    # Insert Left / Right put the box beside its column, in its branch;
+    # anywhere else, or once that column is gone, it ends the row.
+    insert_at = model.get('insert_at') if not live_only and model.get('adding_column') else None
+    beside = next((col for col in shown if insert_at and value.columns[col].label == insert_at['label']), None)
+    for col in shown:
+        column = value.columns[col]
+        over = branches(column.path)
+        box = (column.path, over, ('box', {'suggestions': _suggestions(value, model, get_visualizer)}))
+        if col == beside and not insert_at['after']:
+            leaves.append(box)
+        if col in subcols:
+            leaves += [(column.path, over + [(('column', col), None, ('column', col))], ('sub', col, sub))
+                       for sub in subcols[col]]
+        else:
+            leaves.append((column.path, over, ('column', col)))
+        if col == beside and insert_at['after']:
+            leaves.append(box)
+    # Every column it adds is code, so live-only leaves it out.
+    if not live_only and model.get('adding_column') and beside is None:
+        leaves.append(((), [], ('box', {'suggestions': _suggestions(value, model, get_visualizer)})))
+    collecting = model.get('collecting_column')
+    if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
+        subject = value.columns[collecting].subject
+        leaves.append(((), [], ('box', {'select_all': True, 'placeholder': 'List name',
+                                        'tooltip': f'Every {subject}, collected into this list'})))
+    grouping = model.get('grouping_column')
+    if not live_only and grouping is not None and 0 <= grouping < len(value.columns):
+        subject = value.columns[grouping].subject
+        leaves.append(((), [], ('box', {'select_all': True, 'placeholder': 'Dict name',
+                                        'tooltip': f'Every iteration, grouped by {subject}'})))
+
+    def draw(what, span_attrs: str, classes: str) -> str:
+        match what:
+            case ('branch', step):
+                return _render_branch_header(value, step, span_attrs, classes)
+            case ('column', col):
+                return _render_header(value, model, col, live_only, span_attrs, get_visualizer, classes)
+            case ('sub', col, sub):
+                return _render_subheader(model, value.columns[col].label, sub, span_attrs, classes)
+            case ('box', kwargs):
+                return _render_box(model, span_attrs=span_attrs, **kwargs)
+
+    def group_at(n: int, level: int):
+        over = leaves[n][1] if 0 <= n < len(leaves) else []
+        return over[level][0] if level < len(over) else None
+
+    def path_at(n: int):
+        return leaves[n][0] if 0 <= n < len(leaves) else ()
+
+    depth = max((len(over) + 1 for _, over, _ in leaves), default=1)
+    rows = []
+    for level in range(depth):
+        cells = [] if level else [f'<th class="row-index-header"{_span("rowspan", depth)} '
+                                  f'data-tooltip="itr is the iteration, counting from 0">itr</th>']
+        for n, (path, over, what) in enumerate(leaves):
+            if level < len(over) and group_at(n - 1, level) != over[level][0]:
+                key, chains, group = over[level]
+                end = n
+                while group_at(end + 1, level) == key:
+                    end += 1
+                cells.append(draw(group, _span('colspan', end - n + 1),
+                                  _edges(path_at(n - 1), path, path_at(end), path_at(end + 1), chains)))
+            elif level == len(over):
+                cells.append(draw(what, _span('rowspan', depth - level),
+                                  _edges(path_at(n - 1), path, path, path_at(n + 1))))
+        rows.append(f'<tr>{"".join(cells)}</tr>')
+    return rows
+
+
 def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False, eval_in_scope=None):
     if model is None:
         model = {}
@@ -1725,51 +1930,23 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         strs.append(render_tool_toolbar(TOOLS, model.get('tool', 'normal'), lambda tool: repr(ToolSelect(tool=tool))))
     strs += [
             f'<div class="list-table-scroll snc-base-visualizer" style="max-height: {max_height}px;">',
-            '<table><thead class="col-header-rows"><tr>']
+            '<table><thead class="col-header-rows">']
     hidden = set(model.get('hidden_columns') or [])
     shown = [col for col, column in enumerate(value.columns) if column.label not in hidden]
-    # A column spread into sub-columns spans them, and they get a header row
-    # of their own, which everything else in the first reaches down past.
+    # A column spread into sub-columns spans them, a header row down.
     subcols = _subcols(model, value, shown)
-    tall = ' rowspan="2"' if subcols else ''
     spans = {col: len(subs) for col, subs in subcols.items()}
     leaves = [(col, sub) for col in shown for sub in (subcols.get(col) or [None])]
-    strs.append(f'<th class="row-index-header"{tall} data-tooltip="itr is the iteration, counting from 0">itr</th>')
-    # Insert Left / Right put the box beside its column; anywhere else, or
-    # once that column is gone, it ends the row.
-    insert_at = model.get('insert_at') if not live_only and model.get('adding_column') else None
-    beside = next((col for col in shown if insert_at and value.columns[col].label == insert_at['label']), None)
-    for col in shown:
-        if col == beside and not insert_at['after']:
-            strs.append(_render_box(model, span_attrs=tall, suggestions=_suggestions(value, model, get_visualizer)))
-        span = f' colspan="{spans[col]}"' if spans.get(col, 1) > 1 else ('' if col in subcols else tall)
-        strs.append(_render_header(value, model, col, live_only, span, get_visualizer))
-        if col == beside and insert_at['after']:
-            strs.append(_render_box(model, span_attrs=tall, suggestions=_suggestions(value, model, get_visualizer)))
-    # Every column it adds is code, so live-only leaves it out.
-    suggested = _suggestions(value, model, get_visualizer) if not live_only else []
-    if not live_only and model.get('adding_column') and beside is None:
-        strs.append(_render_box(model, span_attrs=tall, suggestions=suggested))
-    collecting = model.get('collecting_column')
-    if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
-        subject = value.columns[collecting].subject
-        strs.append(_render_box(model, select_all=True, placeholder='List name',
-                                tooltip=f'Every {subject}, collected into this list', span_attrs=tall))
-    grouping = model.get('grouping_column')
-    if not live_only and grouping is not None and 0 <= grouping < len(value.columns):
-        subject = value.columns[grouping].subject
-        strs.append(_render_box(model, select_all=True, placeholder='Dict name',
-                                tooltip=f'Every iteration, grouped by {subject}', span_attrs=tall))
-    strs.append('</tr>')
-    if subcols:
-        strs.append('<tr>')
-        strs += [_render_subheader(model, value.columns[col].label, sub) for col, sub in leaves if sub is not None]
-        strs.append('</tr>')
+    # The table as drawn: while the loop runs, the rows of last time, read off
+    # their reprs, are what say which branch each iteration took.
+    drawn_table = value if rows is value.rows else replace(value, rows=rows, values=())
+    strs += _render_header_rows(drawn_table, model, shown, subcols, live_only, get_visualizer)
     strs.append('</thead><tbody>')
     # Drawn whatever the columns are, so the table keeps its shape.
     strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
-    strs += [_render_init_cell(value, model, col, live_only,
-                               f' colspan="{spans[col]}"' if spans.get(col, 1) > 1 else '') for col in shown]
+    col_edges = dict(zip(shown, _edge_list([value.columns[col].path for col in shown])))
+    strs += [_render_init_cell(value, model, col, live_only, _span('colspan', spans.get(col, 1)), col_edges[col])
+             for col in shown]
     strs.append('</tr>')
     has_values = not value.running and len(value.values) == len(rows)
     gap = _hidden_page(len(rows), model)
@@ -1777,6 +1954,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     marked = set(matches) if matches else set()
     order = _draw_order(value, model, len(rows))
     drawn = [p for p in range(len(order)) if gap is None or not gap[0] <= p < gap[1]]
+    leaf_edges = _edge_list([value.columns[col].path for col, _ in leaves])
     for position, i in enumerate(order):
         row = rows[i]
         if gap is not None and gap[0] <= position < gap[1]:
@@ -1790,16 +1968,16 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             # The number and its ▾ in a wrapper inside the cell, as a table's.
             strs.append(f'<tr{row_class}><td class="row-index"><div class="row-index-inner">{i}'
                         f'{_render_row_menu(value, model, i)}</div></td>')
-        for col, sub in leaves:
-            cell = _render_leaf(value, model, i, col, sub, row[col] if col < len(row) else None, has_values,
-                                get_visualizer, eval_in_scope, small)
+        for (col, sub), edges in zip(leaves, leaf_edges):
+            cell = _render_leaf(drawn_table, model, i, col, sub, row[col] if col < len(row) else None, has_values,
+                                get_visualizer, eval_in_scope, small, edges)
             if pick and sub is None:
                 overlay = _render_pick_region(model, value.columns[col].label, drawn.index(position), len(drawn))
                 cell = cell[:-len('</td>')] + overlay + '</td>'
             strs.append(cell)
         strs.append('</tr>')
     strs.append('</tbody>')
-    strs.append(_render_agg_rows(value, model, shown, spans))
+    strs.append(_render_agg_rows(value, model, shown, spans, col_edges))
     strs.append('</table></div>')
     if not live_only:
         strs.append(_render_add_bar(value, model))
@@ -1995,12 +2173,12 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 hidden.append(label)
             return ({**model, 'hidden_columns': hidden}, [])
         case ColumnShowAll():
-            statements = {column.label for column in value.columns if column.span is not None}
+            statements = {column.label for column in value.columns if _of_body(column)}
             return ({**model, 'hidden_columns': [h for h in model.get('hidden_columns') or []
                                                  if h not in statements]}, [])
         case ColumnHideAll():
             hidden = list(model.get('hidden_columns') or [])
-            hidden += [column.label for column in value.columns if column.span is not None and column.label not in hidden]
+            hidden += [column.label for column in value.columns if _of_body(column) and column.label not in hidden]
             return ({**model, 'hidden_columns': hidden}, [])
         case AddColumnClick():
             return (_opened(model, 'adding_column', True, ''), [])

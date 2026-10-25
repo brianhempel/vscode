@@ -2713,6 +2713,64 @@
 	color: var(--vscode-editorWarning-foreground);
 }
 
+/* An `if` chain in a loop: its branches head the columns in them, a header
+   row per level of nesting, tinted so they read as code rather than values. */
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th.for-loop-branch-header {
+	text-align: center;
+	font-family: var(--snc-code-font-family);
+	font-weight: normal;
+	color: var(--snc-accent);
+	background: color-mix(in srgb, var(--snc-accent) 10%, var(--snc-table-header-bg));
+}
+
+/* A condition's header just says `cond`: the branch header over it reads the
+   condition. */
+.for-loop-visualizer .for-loop-cond-label {
+	color: var(--snc-text-muted);
+	font-style: italic;
+}
+
+/* Where a chain starts and ends, down every row; a thinner line between its
+   branches. */
+.for-loop-visualizer .for-loop-chain-start {
+	border-left: 2px solid var(--snc-accent) !important;
+}
+
+.for-loop-visualizer .for-loop-chain-end {
+	border-right: 2px solid var(--snc-accent) !important;
+}
+
+.for-loop-visualizer .for-loop-branch-start {
+	border-left: 1px dashed color-mix(in srgb, var(--snc-accent) 60%, transparent) !important;
+}
+
+/* A statement in a branch this iteration didn't take: hatched and empty, so
+   it can't be mistaken for a cell the iteration never got to (a break, a
+   raise), which is an em dash. */
+.for-loop-visualizer td.for-loop-skipped {
+	background: repeating-linear-gradient(135deg, transparent 0 4px, var(--snc-hover-bg) 4px 6px);
+}
+
+/* Whether a condition held. */
+.for-loop-visualizer td.for-loop-cond-true .snc-code {
+	color: var(--vscode-testing-iconPassed, #388a34);
+}
+
+.for-loop-visualizer td.for-loop-cond-false .snc-code {
+	color: var(--vscode-testing-iconFailed, #c72e0f);
+}
+
+/* The (+) menu reads as the code: a branch's lines indented under its header,
+   which has no box of its own. */
+.col-add-panel .for-loop-indented {
+	padding-left: calc(var(--for-loop-depth, 0) * 14px);
+}
+
+.col-add-panel .col-add-branch .col-compute-name {
+	font-family: var(--snc-code-font-family);
+	color: var(--snc-accent);
+}
+
 /* "12 more iterations" under a for loop's table: what didn't get a row. */
 .for-loop-visualizer > .for-loop-note {
 	color: var(--snc-text-muted);
