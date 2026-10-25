@@ -2771,6 +2771,47 @@
 	color: var(--snc-accent);
 }
 
+/* The ▸/▾ that folds an `if` chain into one column, or unfolds it. */
+.for-loop-visualizer .for-loop-chain-toggle {
+	cursor: pointer;
+	color: var(--snc-accent);
+	padding: 0 2px;
+	border-radius: 3px;
+}
+
+.for-loop-visualizer .for-loop-chain-toggle:hover {
+	background: var(--snc-hover-bg);
+}
+
+.list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th.for-loop-fold-header {
+	font-family: var(--snc-code-font-family);
+	font-weight: normal;
+	background: color-mix(in srgb, var(--snc-accent) 10%, var(--snc-table-header-bg));
+}
+
+/* A folded chain's cell: which branch the iteration took, tinted by kind. */
+.for-loop-visualizer .for-loop-fold-branch {
+	font-family: var(--snc-code-font-family);
+	padding: 0 4px;
+	border-radius: 3px;
+	color: var(--snc-accent);
+	background: color-mix(in srgb, var(--snc-accent) 10%, transparent);
+}
+
+.for-loop-visualizer .for-loop-fold-branch.branch-elif {
+	color: #8a5cc2;
+	background: color-mix(in srgb, #8a5cc2 12%, transparent);
+}
+
+.for-loop-visualizer .for-loop-fold-branch.branch-else {
+	color: #b07514;
+	background: color-mix(in srgb, #b07514 12%, transparent);
+}
+
+.for-loop-visualizer .for-loop-no-branch {
+	color: var(--snc-text-muted);
+}
+
 /* "12 more iterations" under a for loop's table: what didn't get a row. */
 .for-loop-visualizer > .for-loop-note {
 	color: var(--snc-text-muted);

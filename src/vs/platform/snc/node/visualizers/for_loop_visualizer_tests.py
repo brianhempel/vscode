@@ -1651,10 +1651,15 @@ def add_menu_rows(html_text):
     return rows
 
 
+# The model with every chain in nested() unfolded.
+UNFOLDED = {'chains': {'4': True}}
+
+
 class TestIfColumnGroups(unittest.TestCase):
     """Design A: each branch of an `if` chain heads a group of the columns in
     it -- its condition, its statements, the chains in it -- a header row per
-    level of nesting, and what ran in another branch is hatched."""
+    level of nesting, and what ran in another branch is hatched. Drawn with
+    every chain unfolded (see TestCollapsingAnIfChain)."""
 
     def setUp(self):
         visualizer_utils.set_live_only(False)
@@ -1664,14 +1669,14 @@ class TestIfColumnGroups(unittest.TestCase):
 
     def test_each_branch_heads_a_group_over_its_columns(self):
         self.assertEqual(header_grid(visualize(branched(), {})), [
-            [('itr', 1, 2), ('x', 1, 2), ('if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
+            [('itr', 1, 2), ('x', 1, 2), ('▾ if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
             [('cond', 1, 1), ("tag = 'even'", 1, 1), ('cond', 1, 1), ("tag = 'big'", 1, 1),
              ('total += x', 1, 1)]])
 
     def test_a_nested_chain_is_another_row_and_columns_outside_any_branch_reach_down(self):
-        self.assertEqual(header_grid(visualize(nested(), {})), [
-            [('itr', 1, 3), ('x', 1, 3), ('if x > 4', 4, 1), ('else', 1, 1), ('done = True', 1, 3)],
-            [('cond', 1, 2), ('if x % 2 == 0', 2, 1), ('total += x', 1, 2), ("tag = 'small'", 1, 2)],
+        self.assertEqual(header_grid(visualize(nested(), UNFOLDED)), [
+            [('itr', 1, 3), ('x', 1, 3), ('▾ if x > 4', 4, 1), ('else', 1, 1), ('done = True', 1, 3)],
+            [('cond', 1, 2), ('▾ if x % 2 == 0', 2, 1), ('total += x', 1, 2), ("tag = 'small'", 1, 2)],
             [('cond', 1, 1), ("tag = 'even'", 1, 1)]])
 
     def test_a_conditions_header_is_short_with_the_condition_in_its_tooltip(self):
@@ -1685,7 +1690,7 @@ class TestIfColumnGroups(unittest.TestCase):
     def test_subcolumns_are_one_more_level_under_a_column_in_a_branch(self):
         out = visualize(branched(), {'subcols': {"tag = 'even'": ['$.upper()']}})
         self.assertEqual(header_grid(out), [
-            [('itr', 1, 3), ('x', 1, 3), ('if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
+            [('itr', 1, 3), ('x', 1, 3), ('▾ if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
             [('cond', 1, 2), ("tag = 'even'", 1, 1), ('cond', 1, 2), ("tag = 'big'", 1, 2), ('total += x', 1, 2)],
             [('$.upper()', 1, 1)]])
         self.assertEqual(cell_grid(out)[1][:3], ['8', 'True', "'EVEN'"])
@@ -1693,7 +1698,7 @@ class TestIfColumnGroups(unittest.TestCase):
     def test_a_branch_with_every_column_hidden_has_no_group_and_a_chain_none_takes_no_row(self):
         out = visualize(branched(), {'hidden_columns': ['elif x > 4', "tag = 'big'"]})
         self.assertEqual(header_grid(out), [
-            [('itr', 1, 2), ('x', 1, 2), ('if x % 2 == 0', 2, 1), ('else', 1, 1)],
+            [('itr', 1, 2), ('x', 1, 2), ('▾ if x % 2 == 0', 2, 1), ('else', 1, 1)],
             [('cond', 1, 1), ("tag = 'even'", 1, 1), ('total += x', 1, 1)]])
         everything = [column.label for column in branched().columns[1:]]
         self.assertEqual(header_grid(visualize(branched(), {'hidden_columns': everything})), [[('itr', 1, 1),
@@ -1709,7 +1714,7 @@ class TestIfColumnGroups(unittest.TestCase):
             ['9', '—', '—', '—', '—', '—']])
 
     def test_a_branch_not_taken_hatches_the_chains_inside_it(self):
-        self.assertEqual(cell_grid(visualize(nested(), {})), [
+        self.assertEqual(cell_grid(visualize(nested(), UNFOLDED)), [
             ['3', 'False', '///', '///', '///', "'small'", 'True'],
             ['8', 'True', 'True', "'even'", '8', '///', 'True'],
             ['5', 'True', 'False', '///', '13', '///', 'True']])
@@ -1726,13 +1731,13 @@ class TestIfColumnGroups(unittest.TestCase):
                          [['false', 'false'], ['true'], ['false', 'true']])
 
     def test_the_init_row_lines_up_blank_under_conditions_with_a_branchs_accumulator_starting_there(self):
-        out = visualize(nested(), {})
+        out = visualize(nested(), UNFOLDED)
         self.assertEqual(body_rows(out)[0], ['init', '', '', '', '', '0', '', ''])
         row = re.search(r'<tr class="for-loop-init-row">.*?</tr>', out).group(0)
         self.assertEqual(events_in(row), [repr(InitCellClick(col=4, label='total += x'))])
 
     def test_a_chain_is_edged_where_it_starts_and_ends_and_between_its_branches(self):
-        out = visualize(nested(), {})
+        out = visualize(nested(), UNFOLDED)
         first = re.search(r'<tbody>.*?</tr>(<tr[^>]*>.*?</tr>)', out).group(1)
         self.assertEqual(edges_of(first), ['', '', 'chain-start', 'chain-start', 'chain-end', '', 'branch-start chain-end', ''])
         self.assertEqual(edges_of(''.join(header_cells(out))), [
@@ -1740,7 +1745,7 @@ class TestIfColumnGroups(unittest.TestCase):
             'chain-start', 'chain-start chain-end', '', 'branch-start chain-end', 'chain-start', 'chain-end'])
 
     def test_the_plus_menu_lists_a_branchs_columns_under_it_as_the_code_reads(self):
-        out = visualize(nested(), {'add_menu_open': True})
+        out = visualize(nested(), {**UNFOLDED, 'add_menu_open': True})
         self.assertEqual(menu_rows(out)[:3], [('Add Column', None), '--', ('x', True)])
         self.assertEqual(add_menu_rows(out), [
             ('if x > 4', True, 0), ('if x % 2 == 0', True, 1), ("tag = 'even'", True, 2), ('total += x', True, 1),
@@ -1760,15 +1765,91 @@ class TestIfColumnGroups(unittest.TestCase):
     def test_the_insert_box_beside_a_column_in_a_branch_stays_in_its_group(self):
         model, _ = update(click(InsertColumnClick(col=2, label="tag = 'even'", after=True)), None, {}, branched())
         grid = header_grid(visualize(branched(), model))
-        self.assertEqual(grid[0][2], ('if x % 2 == 0', 3, 1))
+        self.assertEqual(grid[0][2], ('▾ if x % 2 == 0', 3, 1))
         self.assertEqual([text for text, _, _ in grid[1]], ['cond', "tag = 'even'", '', 'cond', "tag = 'big'",
                                                             'total += x'])
 
-    def test_live_only_draws_the_groups_with_nothing_to_press(self):
+    def test_live_only_draws_the_groups_with_nothing_to_press_but_their_folds(self):
+        from for_loop_visualizer import ChainToggle
         visualizer_utils.set_live_only(True)
-        out = visualize(nested(), {})
+        out = visualize(nested(), UNFOLDED)
         self.assertEqual(len(header_grid(out)), 3)
-        self.assertEqual(events_in(out), [])
+        self.assertEqual(events_in(out), [repr(ChainToggle(chain=3)), repr(ChainToggle(chain=4))])
+
+
+class TestCollapsingAnIfChain(unittest.TestCase):
+    """Design B: the ▸/▾ on a chain's first branch folds the whole chain -- its
+    branches and every chain in them -- into one column saying which branch
+    each iteration took. A chain directly in the loop starts unfolded, one in
+    a branch folded. A view, so nothing is written."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_toggle_folds_a_chain_and_unfolds_it_and_writes_nothing(self):
+        from for_loop_visualizer import ChainToggle
+        self.assertIn(repr(ChainToggle(chain=3)), events_in(visualize(branched(), {})))
+        model, cmds = update(click(ChainToggle(chain=3)), None, {}, branched())
+        self.assertEqual((model, cmds), ({'chains': {'3': False}}, []))
+        model, _ = update(click(ChainToggle(chain=3)), None, model, branched())
+        self.assertEqual(model, {'chains': {'3': True}})
+
+    def test_a_nested_chain_starts_folded_and_unfolds(self):
+        from for_loop_visualizer import ChainToggle
+        model, _ = update(click(ChainToggle(chain=4)), None, {}, nested())
+        self.assertEqual(model, {'chains': {'4': True}})
+
+    def test_a_toggle_for_a_chain_that_is_gone_does_nothing(self):
+        from for_loop_visualizer import ChainToggle
+        self.assertEqual(update(click(ChainToggle(chain=7)), None, {}, branched()), ({}, []))
+
+    def test_folded_each_iteration_shows_the_branch_it_took(self):
+        out = visualize(branched(), {'chains': {'3': False}})
+        self.assertEqual((header_grid(out), cell_grid(out)), (
+            [[('itr', 1, 1), ('x', 1, 1), ('▸ if x % 2 == 0 … else', 1, 1)]],
+            [['3', 'else'], ['8', 'if'], ['5', 'elif x > 4']]))
+
+    def test_folded_no_branch_taken_is_a_dash_and_never_reached_is_blank(self):
+        t = branched(columns=branched().columns[:5], rows=(('3', 'False', None, 'False', None),
+                                                           ('8', None, None, None, None)),
+                     values=((3, False, NO_VALUE, False, NO_VALUE), (8,) + (NO_VALUE,) * 4),
+                     init=(None,) * 5)
+        out = visualize(t, {'chains': {'3': False}})
+        self.assertEqual((header_grid(out)[0][-1][0], cell_grid(out)),
+                         ('▸ if x % 2 == 0 … elif x > 4', [['3', '—'], ['8', '']]))
+
+    def test_a_nested_chain_starts_folded_inside_its_branch_and_hatched_where_that_didnt_run(self):
+        out = visualize(nested(), {})
+        self.assertEqual((header_grid(out), cell_grid(out)), ([
+            [('itr', 1, 2), ('x', 1, 2), ('▾ if x > 4', 3, 1), ('else', 1, 1), ('done = True', 1, 2)],
+            [('cond', 1, 1), ('▸ if x % 2 == 0', 1, 1), ('total += x', 1, 1), ("tag = 'small'", 1, 1)]], [
+            ['3', 'False', '///', '///', "'small'", 'True'],
+            ['8', 'True', 'if', '8', '///', 'True'],
+            ['5', 'True', '—', '13', '///', 'True'],
+        ]))
+
+    def test_folding_the_outer_chain_folds_the_one_in_it_too(self):
+        out = visualize(nested(), {'chains': {'3': False, '4': True}})
+        self.assertEqual(header_grid(out), [[('itr', 1, 1), ('x', 1, 1), ('▸ if x > 4 … else', 1, 1),
+                                             ('done = True', 1, 1)]])
+
+    def test_a_folded_chain_edges_like_a_chain(self):
+        out = visualize(branched(), {'chains': {'3': False}})
+        row = re.findall(r'<tr[^>]*>.*?</tr>', re.search(r'<tbody>(.*?)</tbody>', out, re.S).group(1))[1]
+        self.assertEqual(edges_of(row), ['', '', 'chain-start chain-end'])
+
+    def test_a_folded_chains_init_cell_is_where_its_accumulators_start(self):
+        out = visualize(branched(), {'chains': {'3': False}})
+        self.assertEqual(body_rows(out)[0], ['init', '', 'total = 0'])
+        self.assertIn(repr(InitCellClick(col=5, label='total += x')), events_in(out))
+
+    def test_live_only_still_folds_chains_since_that_is_a_view(self):
+        from for_loop_visualizer import ChainToggle
+        visualizer_utils.set_live_only(True)
+        self.assertEqual(events_in(visualize(nested(), {})), [repr(ChainToggle(chain=3)), repr(ChainToggle(chain=4))])
 
 
 class TestWhileTheLoopRuns(unittest.TestCase):

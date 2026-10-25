@@ -139,6 +139,15 @@ dash, as anywhere. Lines down the table mark where a chain starts and ends.
 A condition has no line of its own, so its menu keeps only what reads its
 values, and Insert Right, which writes at the top of its branch.
 
+**A chain folds into one column.** The ▾ on a chain's first branch folds the
+whole of it -- every branch, every chain inside -- into a column saying which
+branch each iteration took (`if`, the `elif`'s header, `else`; a dash when
+none did), and its ▸ unfolds it again. A chain directly in the loop's body
+starts unfolded and one inside a branch folded, so nesting costs a header
+row only when asked for. Folding is a view, kept by the chain's line in the
+model, so it works live-only too. A folded chain's init cell is where each
+accumulator in it starts.
+
 Sorts before `z_object_visualizer` (which claims everything) so that the table
 reaches it rather than being shown as a dataclass's fields.
 """
@@ -485,6 +494,13 @@ class ToolSelect:
 
 
 @dataclass(frozen=True)
+class ChainToggle:
+    """The ▸/▾ on an `if` chain's first branch: folds the chain starting on
+    line `chain` into one column, or unfolds it."""
+    chain: int
+
+
+@dataclass(frozen=True)
 class PickToggle:
     """Under the pick tool, a press on the column labeled `label`: pick it,
     or stop."""
@@ -659,6 +675,134 @@ def _edges(before, first, last, after, depth: Optional[int] = None) -> str:
     ends = not _nesting(last, depth)[0] <= _nesting(after)[0]
     return ''.join(f' for-loop-{name}' for name, on in
                    (('chain-start', starts), ('branch-start', between), ('chain-end', ends)) if on)
+
+
+def _chain_depths(value: ForLoopTable) -> dict:
+    """Each `if` chain's first line, to how many chains it is inside."""
+    return {step[0]: k for column in value.columns for k, step in enumerate(column.path)}
+
+
+def _chain_open(value: ForLoopTable, model, chain: int) -> bool:
+    """Whether the chain starting on line `chain` is drawn unfolded: as the
+    user last left it, or, before they touch it, unfolded only directly in the
+    loop's body, so nesting never costs more than a header row on its own."""
+    chosen = (model.get('chains') or {}).get(str(chain))
+    return chosen if chosen is not None else _chain_depths(value).get(chain) == 0
+
+
+def _folds(value: ForLoopTable, model, shown: List[int]) -> Tuple[List[int], dict]:
+    """`shown`, each folded chain's columns given way to its first: and that
+    first column of each, to how many chains its fold is inside. A chain in a
+    folded one is folded with it, whatever it was left as."""
+    kept, folds, placed = [], {}, set()
+    for col in shown:
+        path = value.columns[col].path
+        k = next((k for k, step in enumerate(path) if not _chain_open(value, model, step[0])), None)
+        if k is None:
+            kept.append(col)
+        elif path[k][0] not in placed:
+            placed.add(path[k][0])
+            kept.append(col)
+            folds[col] = k
+    return kept, folds
+
+
+def _fold_path(value: ForLoopTable, col: int, folds: dict):
+    """Where the cells of column `col` sit among the chains: its own path, or,
+    for a folded chain's column, the branches the chain is in and a step of
+    its own, so it is edged as a chain is."""
+    path = value.columns[col].path
+    if col not in folds:
+        return path
+    k = folds[col]
+    return path[:k] + ((path[k][0], -1, '', 0, 0),)
+
+
+def _fold_headers(value: ForLoopTable, chain: int) -> List[str]:
+    """The headers of the chain's branches, in order."""
+    headers = {}
+    for column in value.columns:
+        for step in column.path:
+            if step[0] == chain:
+                headers[step[1]] = step[2]
+    return [headers[b] for b in sorted(headers)]
+
+
+def _fold_label(value: ForLoopTable, chain: int) -> str:
+    """A folded chain's header: its first branch and its last."""
+    headers = _fold_headers(value, chain)
+    return headers[0] if len(headers) == 1 else f'{headers[0]} … {headers[-1]}'
+
+
+def _render_toggle(chain: int, open_: bool) -> str:
+    return (f'<span class="for-loop-chain-toggle" snc-unfocused-clickable draggable="false" '
+            f'data-tooltip="{"Fold this if into one column" if open_ else "Unfold this if"}" '
+            f'snc-mouse-down="{html.escape(repr(ChainToggle(chain=chain)))}">{"▾" if open_ else "▸"}</span>')
+
+
+def _render_fold_header(value: ForLoopTable, model, col: int, folds: dict, span_attrs: str = '',
+                        classes: str = '') -> str:
+    """A folded chain's header: its ▸, and its first and last branch."""
+    chain = value.columns[col].path[folds[col]][0]
+    label = _fold_label(value, chain)
+    resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
+              f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
+    return (f'<th class="col-header for-loop-col for-loop-fold-header{classes}"{span_attrs}'
+            f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">'
+            f'{_render_toggle(chain, False)} <span class="col-name">{html.escape(label)}</span>{resize}</span></th>')
+
+
+def _render_fold_cell(value: ForLoopTable, model, i: int, col: int, folds: dict, classes: str = '') -> str:
+    """A folded chain's cell: which branch iteration `i` took -- `if`, the
+    elif's header, `else` -- a dash when none did, nothing when it never got
+    to the chain, and hatched when a branch the chain is in wasn't taken."""
+    k = folds[col]
+    path = value.columns[col].path
+    chain = path[k][0]
+    label = _fold_label(value, chain)
+    for step in path[:k]:
+        took = branch_ran(value, i, step[0])
+        if took is None:
+            return f'<td class="list-table-cell{classes}"{_col_attrs(model, label)}></td>'
+        if took != step[1]:
+            return (f'<td class="list-table-cell for-loop-skipped{classes}"{_col_attrs(model, label)} '
+                    f'data-tooltip="This iteration took another branch"></td>')
+    took = branch_ran(value, i, chain)
+    if took is None:
+        text = ''
+    elif took == NO_BRANCH:
+        text = '<span class="for-loop-no-branch" data-tooltip="No branch ran">—</span>'
+    else:
+        header = _fold_headers(value, chain)[took]
+        text = (f'<span class="for-loop-fold-branch branch-{header.split()[0]}">'
+                f'{html.escape("if" if took == 0 else header)}</span>')
+    return f'<td class="list-table-cell for-loop-fold-cell{classes}"{_col_attrs(model, label)}>{text}</td>'
+
+
+def _render_fold_init(value: ForLoopTable, model, col: int, folds: dict, live_only: bool, classes: str = '') -> str:
+    """A folded chain's init cell: where each accumulator in it starts, each
+    double-clicked open as its own column's would be."""
+    chain = value.columns[col].path[folds[col]][0]
+    label = _fold_label(value, chain)
+    members = [c for c, column in enumerate(value.columns)
+               if column.accumulator and column.subject and any(step[0] == chain for step in column.path)]
+    if not live_only and model.get('editing_init') in members:
+        member = value.columns[model['editing_init']]
+        return _render_box(model, tag='td', select_all=True, placeholder='Starting value',
+                           tooltip=f'Sets {member.subject} before the loop')
+    chips = []
+    for c in members:
+        column = value.columns[c]
+        init = _init_of(value, c)
+        text = html.escape(f'{column.subject} = {init}' if init is not None else f'set {column.subject}')
+        if live_only:
+            chips.append(f'<span class="snc-code">{text}</span>')
+        else:
+            chips.append(f'<span class="snc-code" snc-unfocused-clickable draggable="false" '
+                         f'snc-mouse-down="{html.escape(repr(InitCellClick(col=c, label=column.label)))}" '
+                         f'data-tooltip="Double-click to set where it starts">{text}</span>')
+    return (f'<td class="list-table-cell for-loop-init-cell{classes}"{_col_attrs(model, label)}>'
+            f'{" ".join(chips)}</td>')
 
 
 def _indent(value: ForLoopTable, column: ForLoopColumn) -> str:
@@ -1603,13 +1747,15 @@ def _render_subheader(model, label: str, sub: str, span_attrs: str = '', classes
 def _render_branch_header(value: ForLoopTable, step, span_attrs: str = '', classes: str = '') -> str:
     """The header over a branch's columns -- its condition, its statements,
     the chains in it -- reading as the branch does in the code, and saying in
-    its tooltip how many of the iterations drawn took it."""
+    its tooltip how many of the iterations drawn took it. The chain's first
+    branch has the ▾ that folds it."""
     chain, branch, header = step[:3]
     n = len(value.rows)
     taken = sum(branch_ran(value, i, chain) == branch for i in range(n))
     tip = f' data-tooltip="Taken in {taken} of {n} iteration{"" if n == 1 else "s"}"' if n else ''
+    toggle = f'{_render_toggle(chain, True)} ' if branch == 0 else ''
     return (f'<th class="col-header for-loop-branch-header{classes}"{span_attrs}{tip}>'
-            f'<span class="col-header-inner"><span class="col-name">{html.escape(header)}</span></span></th>')
+            f'<span class="col-header-inner">{toggle}<span class="col-name">{html.escape(header)}</span></span></th>')
 
 
 def _render_menu_trigger(value: ForLoopTable, model, col: int, get_visualizer=None) -> str:
@@ -1828,11 +1974,13 @@ def _edge_list(paths) -> List[str]:
 
 
 def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: dict, live_only: bool,
-                        get_visualizer=None) -> List[str]:
+                        get_visualizer=None, folds=None) -> List[str]:
     """The header rows. Every header but the top row's hangs off a group over
     it -- a branch of an `if` chain over the columns in it, a column over its
     sub-columns -- one row per level, and a cell with nothing under it reaches
-    down to the bottom: `itr`, and every column in no branch."""
+    down to the bottom: `itr`, every column in no branch, and a folded chain
+    (`folds`, see _folds), which is under only the branches it is in."""
+    folds = folds or {}
     def branches(path):
         # The groups a column in the branches at `path` is under: (what they
         # are known by, how many chains deep their edges count, what draws them).
@@ -1848,6 +1996,9 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
     beside = next((col for col in shown if insert_at and value.columns[col].label == insert_at['label']), None)
     for col in shown:
         column = value.columns[col]
+        if col in folds:
+            leaves.append((_fold_path(value, col, folds), branches(column.path[:folds[col]]), ('fold', col)))
+            continue
         over = branches(column.path)
         box = (column.path, over, ('box', {'suggestions': _suggestions(value, model, get_visualizer)}))
         if col == beside and not insert_at['after']:
@@ -1879,6 +2030,8 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
                 return _render_branch_header(value, step, span_attrs, classes)
             case ('column', col):
                 return _render_header(value, model, col, live_only, span_attrs, get_visualizer, classes)
+            case ('fold', col):
+                return _render_fold_header(value, model, col, folds, span_attrs, classes)
             case ('sub', col, sub):
                 return _render_subheader(model, value.columns[col].label, sub, span_attrs, classes)
             case ('box', kwargs):
@@ -1933,19 +2086,22 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             '<table><thead class="col-header-rows">']
     hidden = set(model.get('hidden_columns') or [])
     shown = [col for col, column in enumerate(value.columns) if column.label not in hidden]
+    # A folded chain is one column, in place of its first.
+    shown, folds = _folds(value, model, shown)
     # A column spread into sub-columns spans them, a header row down.
-    subcols = _subcols(model, value, shown)
+    subcols = _subcols(model, value, [col for col in shown if col not in folds])
     spans = {col: len(subs) for col, subs in subcols.items()}
     leaves = [(col, sub) for col in shown for sub in (subcols.get(col) or [None])]
     # The table as drawn: while the loop runs, the rows of last time, read off
     # their reprs, are what say which branch each iteration took.
     drawn_table = value if rows is value.rows else replace(value, rows=rows, values=())
-    strs += _render_header_rows(drawn_table, model, shown, subcols, live_only, get_visualizer)
+    strs += _render_header_rows(drawn_table, model, shown, subcols, live_only, get_visualizer, folds)
     strs.append('</thead><tbody>')
     # Drawn whatever the columns are, so the table keeps its shape.
     strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
-    col_edges = dict(zip(shown, _edge_list([value.columns[col].path for col in shown])))
-    strs += [_render_init_cell(value, model, col, live_only, _span('colspan', spans.get(col, 1)), col_edges[col])
+    col_edges = dict(zip(shown, _edge_list([_fold_path(value, col, folds) for col in shown])))
+    strs += [_render_fold_init(value, model, col, folds, live_only, col_edges[col]) if col in folds else
+             _render_init_cell(value, model, col, live_only, _span('colspan', spans.get(col, 1)), col_edges[col])
              for col in shown]
     strs.append('</tr>')
     has_values = not value.running and len(value.values) == len(rows)
@@ -1954,7 +2110,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     marked = set(matches) if matches else set()
     order = _draw_order(value, model, len(rows))
     drawn = [p for p in range(len(order)) if gap is None or not gap[0] <= p < gap[1]]
-    leaf_edges = _edge_list([value.columns[col].path for col, _ in leaves])
+    leaf_edges = _edge_list([_fold_path(value, col, folds) for col, _ in leaves])
     for position, i in enumerate(order):
         row = rows[i]
         if gap is not None and gap[0] <= position < gap[1]:
@@ -1969,6 +2125,9 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             strs.append(f'<tr{row_class}><td class="row-index"><div class="row-index-inner">{i}'
                         f'{_render_row_menu(value, model, i)}</div></td>')
         for (col, sub), edges in zip(leaves, leaf_edges):
+            if col in folds:
+                strs.append(_render_fold_cell(drawn_table, model, i, col, folds, edges))
+                continue
             cell = _render_leaf(drawn_table, model, i, col, sub, row[col] if col < len(row) else None, has_values,
                                 get_visualizer, eval_in_scope, small, edges)
             if pick and sub is None:
@@ -1977,7 +2136,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             strs.append(cell)
         strs.append('</tr>')
     strs.append('</tbody>')
-    strs.append(_render_agg_rows(value, model, shown, spans, col_edges))
+    strs.append(_render_agg_rows(value, model, [col for col in shown if col not in folds], spans, col_edges))
     strs.append('</table></div>')
     if not live_only:
         strs.append(_render_add_bar(value, model))
@@ -2233,6 +2392,10 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             code = _row_action_code(value, row, action)
             if code:
                 return (_menus_closed(model), code)
+        case ChainToggle(chain=chain) if chain in _chain_depths(value):
+            # A view, so live-only folds too.
+            return ({**model, 'chains': {**(model.get('chains') or {}),
+                                         str(chain): not _chain_open(value, model, chain)}}, [])
         case ToolSelect(tool=tool) if tool in ('normal', 'pick'):
             return ({**model, 'tool': tool}, [])
         case PickToggle(label=label):
