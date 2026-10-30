@@ -2529,7 +2529,9 @@ class TestForLoopTable(unittest.TestCase):
             "    b = i\n"
         )
         _, tables = self._run(src)
-        self.assertEqual(tables[-1].values, ((1, NO_VALUE, 1), (2, NO_VALUE, NO_VALUE)))
+        # The `if` and its break are columns too: the condition's value, and
+        # the break's none.
+        self.assertEqual(tables[-1].values, ((1, NO_VALUE, False, NO_VALUE, 1), (2, NO_VALUE, True, NO_VALUE, NO_VALUE)))
         # The repr is still there for the one that couldn't be copied.
         self.assertTrue(tables[-1].rows[0][1].startswith('<generator'))
 
@@ -2572,7 +2574,8 @@ class TestForLoopTable(unittest.TestCase):
             "    b = i\n"
         )
         _, tables = self._run(src)
-        self.assertEqual(tables[-1].rows, (('1', '1', '1'), ('2', '2', None)))
+        # a, the condition, the break, then b, which the break kept from running.
+        self.assertEqual(tables[-1].rows, (('1', '1', 'False', None, '1'), ('2', '2', 'True', None, None)))
 
     def test_a_loop_that_raises_still_logs_what_it_did(self):
         msgs, tables = self._run("for i in [1, 2]:\n    x = 10 // (2 - i)\n")
@@ -2754,10 +2757,11 @@ class TestForLoopTable(unittest.TestCase):
             ('y = 2', ((2, 1, 'else'), (6, 0, 'if x < 0'))),
         ])
 
-    def test_a_guard_that_only_skips_or_stops_is_no_column(self):
+    def test_a_guard_is_a_branch_like_any_other(self):
         """What the table writes from an iteration's menu, or its Filter
-        button: `if cond: continue`. It says what happens to rows, not what
-        the loop computes."""
+        button: `if cond: continue`. Drawn as any `if` is, so it can be
+        changed later: its `continue` or `break` a placeholder, there being
+        no value to show -- one on its `if`'s line, too."""
         src = (
             "for x in [1, 2]:\n"
             "    if x == 1: continue\n"
@@ -2766,7 +2770,69 @@ class TestForLoopTable(unittest.TestCase):
             "    y = x\n"
         )
         _, tables = self._run(src)
-        self.assertEqual(self._labels(tables[-1]), ('x', 'y = x'))
+        t = tables[-1]
+        self.assertEqual([(c.label, c.span, c.cond, c.placeholder) for c in t.columns], [
+            ('x', None, False, False),
+            ('if x == 1', None, True, False),
+            ('continue', (2, 2), False, True),
+            ('if x == 5', None, True, False),
+            ('break', (4, 4), False, True),
+            ('y = x', (5, 5), False, False),
+        ])
+        self.assertEqual(t.rows, (('1', 'True', None, None, None, None), ('2', 'False', None, 'False', None, '2')))
+
+    def test_an_empty_if_is_a_branch_with_a_placeholder_for_its_pass(self):
+        """What the table writes for a new `if`, `elif` or `else`: a `pass`,
+        to be written over. Unlike a guard, it is a branch waiting for its
+        lines, so it is drawn: its `pass` a column showing nothing, whose
+        cells stay empty however often the branch runs."""
+        src = (
+            "for x in [1, 2]:\n"
+            "    if x > 1:\n"
+            "        pass\n"
+            "    else:\n"
+            "        pass\n"
+            "    y = x\n"
+        )
+        _, tables = self._run(src)
+        t = tables[-1]
+        if_branch, else_branch = (2, 0, 'if x > 1', 3, 3), (2, 1, 'else', 5, 5)
+        self.assertEqual([(c.label, c.span, c.subject, c.cond, c.placeholder, c.path, c.indent)
+                          for c in t.columns], [
+            ('x', None, 'x', False, False, (), None),
+            ('if x > 1', None, None, True, False, (if_branch,), '    '),
+            ('pass', (3, 3), None, False, True, (if_branch,), '        '),
+            ('pass', (5, 5), None, False, True, (else_branch,), '        '),
+            ('y = x', (6, 6), 'y', False, False, (), '    '),
+        ])
+        self.assertEqual(t.rows, (('1', 'False', None, None, '1'), ('2', 'True', None, None, '2')))
+
+    def test_the_table_carries_the_loops_own_lines(self):
+        """What reordering an `if`'s branches rewrites them from: the loop's
+        source, first line to last."""
+        _, tables = self._run(self.IF_SRC)
+        self.assertEqual(tables[-1].source, tuple(self.IF_SRC.split('\n')[2:12]))
+
+    def test_a_branch_with_no_column_of_its_own_draws_its_first_line(self):
+        """An `else` whose lines are none of them columns -- a print -- still
+        has to be there to be found: its first line stands in for it, as a
+        `pass` does, showing nothing."""
+        src = (
+            "for x in [1, 2]:\n"
+            "    if x > 1:\n"
+            "        y = x\n"
+            "    else:\n"
+            "        print(x)\n"
+            "        print(x)\n"
+        )
+        _, tables = self._run(src)
+        self.assertEqual([(c.label, c.span, c.placeholder, c.path[-1][1] if c.path else None)
+                          for c in tables[-1].columns], [
+            ('x', None, False, None),
+            ('if x > 1', None, False, 0),
+            ('y = x', (3, 3), False, 0),
+            ('print(x)', (5, 5), True, 1),
+        ])
 
     def test_an_accumulator_starts_from_its_value_before_the_loop(self):
         """Taken as the loop starts, so the empty table logged then has it

@@ -407,12 +407,13 @@ class TestAddMenu(unittest.TestCase):
                   rows=(('0', '1', '1', '2'),), init=(None, None, '0', None))
         out = visualize(t, {'add_menu_open': True, 'hidden_columns': ['twice = element * 2']})
         self.assertEqual(menu_rows(out), [
-            ('Add Column', None), '--',
+            ('Add Column', None), ('Add If', None), '--',
             ('i', True), ('element', True), '--',
             ('Show all', None), ('Hide all', None), '--',
             ('count += 1', True), ('twice = element * 2', False)])
+        from for_loop_visualizer import AddIfClick
         self.assertEqual(events_in(menu_of(out)), [
-            repr(AddColumnClick()),
+            repr(AddColumnClick()), repr(AddIfClick()),
             repr(ColumnToggle(label='i')), repr(ColumnToggle(label='element')),
             repr(ColumnShowAll()), repr(ColumnHideAll()),
             repr(ColumnToggle(label='count += 1')), repr(ColumnToggle(label='twice = element * 2'))])
@@ -420,7 +421,8 @@ class TestAddMenu(unittest.TestCase):
     def test_a_loop_with_no_statement_of_its_own_has_nothing_under_the_pair(self):
         t = table(columns=(bound('element'),), rows=(('1',),), init=(None,))
         self.assertEqual(menu_rows(visualize(t, {'add_menu_open': True})),
-                         [('Add Column', None), '--', ('element', True), '--', ('Show all', None), ('Hide all', None)])
+                         [('Add Column', None), ('Add If', None), '--', ('element', True), '--', ('Show all', None),
+                          ('Hide all', None)])
 
     def test_the_menu_is_put_away_by_a_click_anywhere_else_and_lights_the_plus(self):
         out = visualize(table(), {'add_menu_open': True})
@@ -1615,8 +1617,10 @@ def nested(**overrides):
 
 
 def header_grid(html_text):
-    """Each header row, as (text, colspan, rowspan) per cell, without a ▾."""
+    """Each header row, as (text, colspan, rowspan) per cell, without a
+    column's ▾ or an elif's ⣿."""
     thead = re.search(r'<thead.*?</thead>', html_text).group(0)
+    thead = re.sub(r'<span [^>]*class="col-handle col-drag-handle">⣿</span>', '', thead)
     return [[(text_of(re.sub(r'<span class="snc-dropdown-trigger col-menu-trigger">.*', '', th)),
               int((re.search(r'^<th[^>]*colspan="(\d+)"', th) or [0, 1])[1]),
               int((re.search(r'^<th[^>]*rowspan="(\d+)"', th) or [0, 1])[1]))
@@ -1669,14 +1673,14 @@ class TestIfColumnGroups(unittest.TestCase):
 
     def test_each_branch_heads_a_group_over_its_columns(self):
         self.assertEqual(header_grid(visualize(branched(), {})), [
-            [('itr', 1, 2), ('x', 1, 2), ('▾ if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
+            [('itr', 1, 2), ('x', 1, 2), ('if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
             [('cond', 1, 1), ("tag = 'even'", 1, 1), ('cond', 1, 1), ("tag = 'big'", 1, 1),
              ('total += x', 1, 1)]])
 
     def test_a_nested_chain_is_another_row_and_columns_outside_any_branch_reach_down(self):
         self.assertEqual(header_grid(visualize(nested(), UNFOLDED)), [
-            [('itr', 1, 3), ('x', 1, 3), ('▾ if x > 4', 4, 1), ('else', 1, 1), ('done = True', 1, 3)],
-            [('cond', 1, 2), ('▾ if x % 2 == 0', 2, 1), ('total += x', 1, 2), ("tag = 'small'", 1, 2)],
+            [('itr', 1, 3), ('x', 1, 3), ('if x > 4', 4, 1), ('else', 1, 1), ('done = True', 1, 3)],
+            [('cond', 1, 2), ('if x % 2 == 0', 2, 1), ('total += x', 1, 2), ("tag = 'small'", 1, 2)],
             [('cond', 1, 1), ("tag = 'even'", 1, 1)]])
 
     def test_a_conditions_header_is_short_with_the_condition_in_its_tooltip(self):
@@ -1690,7 +1694,7 @@ class TestIfColumnGroups(unittest.TestCase):
     def test_subcolumns_are_one_more_level_under_a_column_in_a_branch(self):
         out = visualize(branched(), {'subcols': {"tag = 'even'": ['$.upper()']}})
         self.assertEqual(header_grid(out), [
-            [('itr', 1, 3), ('x', 1, 3), ('▾ if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
+            [('itr', 1, 3), ('x', 1, 3), ('if x % 2 == 0', 2, 1), ('elif x > 4', 2, 1), ('else', 1, 1)],
             [('cond', 1, 2), ("tag = 'even'", 1, 1), ('cond', 1, 2), ("tag = 'big'", 1, 2), ('total += x', 1, 2)],
             [('$.upper()', 1, 1)]])
         self.assertEqual(cell_grid(out)[1][:3], ['8', 'True', "'EVEN'"])
@@ -1698,7 +1702,7 @@ class TestIfColumnGroups(unittest.TestCase):
     def test_a_branch_with_every_column_hidden_has_no_group_and_a_chain_none_takes_no_row(self):
         out = visualize(branched(), {'hidden_columns': ['elif x > 4', "tag = 'big'"]})
         self.assertEqual(header_grid(out), [
-            [('itr', 1, 2), ('x', 1, 2), ('▾ if x % 2 == 0', 2, 1), ('else', 1, 1)],
+            [('itr', 1, 2), ('x', 1, 2), ('if x % 2 == 0', 2, 1), ('else', 1, 1)],
             [('cond', 1, 1), ("tag = 'even'", 1, 1), ('total += x', 1, 1)]])
         everything = [column.label for column in branched().columns[1:]]
         self.assertEqual(header_grid(visualize(branched(), {'hidden_columns': everything})), [[('itr', 1, 1),
@@ -1746,7 +1750,7 @@ class TestIfColumnGroups(unittest.TestCase):
 
     def test_the_plus_menu_lists_a_branchs_columns_under_it_as_the_code_reads(self):
         out = visualize(nested(), {**UNFOLDED, 'add_menu_open': True})
-        self.assertEqual(menu_rows(out)[:3], [('Add Column', None), '--', ('x', True)])
+        self.assertEqual(menu_rows(out)[:4], [('Add Column', None), ('Add If', None), '--', ('x', True)])
         self.assertEqual(add_menu_rows(out), [
             ('if x > 4', True, 0), ('if x % 2 == 0', True, 1), ("tag = 'even'", True, 2), ('total += x', True, 1),
             ('else', None, 0), ("tag = 'small'", True, 1), ('done = True', True, 0)])
@@ -1765,20 +1769,21 @@ class TestIfColumnGroups(unittest.TestCase):
     def test_the_insert_box_beside_a_column_in_a_branch_stays_in_its_group(self):
         model, _ = update(click(InsertColumnClick(col=2, label="tag = 'even'", after=True)), None, {}, branched())
         grid = header_grid(visualize(branched(), model))
-        self.assertEqual(grid[0][2], ('▾ if x % 2 == 0', 3, 1))
+        self.assertEqual(grid[0][2], ('if x % 2 == 0', 3, 1))
         self.assertEqual([text for text, _, _ in grid[1]], ['cond', "tag = 'even'", '', 'cond', "tag = 'big'",
                                                             'total += x'])
 
-    def test_live_only_draws_the_groups_with_nothing_to_press_but_their_folds(self):
-        from for_loop_visualizer import ChainToggle
+    def test_live_only_draws_the_groups_with_nothing_to_press_but_their_menus(self):
+        from for_loop_visualizer import ChainMenuToggle
         visualizer_utils.set_live_only(True)
         out = visualize(nested(), UNFOLDED)
         self.assertEqual(len(header_grid(out)), 3)
-        self.assertEqual(events_in(out), [repr(ChainToggle(chain=3)), repr(ChainToggle(chain=4))])
+        self.assertEqual(events_in(out), [repr(ChainMenuToggle(chain=3, branch=0)), repr(ChainMenuToggle(chain=3, branch=1)),
+                                          repr(ChainMenuToggle(chain=4, branch=0))])
 
 
 class TestCollapsingAnIfChain(unittest.TestCase):
-    """Design B: the ▸/▾ on a chain's first branch folds the whole chain -- its
+    """Design B: Collapse, in the menu of the ▾ on a chain's first branch, folds the whole chain -- its
     branches and every chain in them -- into one column saying which branch
     each iteration took. A chain directly in the loop starts unfolded, one in
     a branch folded. A view, so nothing is written."""
@@ -1791,7 +1796,7 @@ class TestCollapsingAnIfChain(unittest.TestCase):
 
     def test_the_toggle_folds_a_chain_and_unfolds_it_and_writes_nothing(self):
         from for_loop_visualizer import ChainToggle
-        self.assertIn(repr(ChainToggle(chain=3)), events_in(visualize(branched(), {})))
+        self.assertIn(repr(ChainToggle(chain=3)), events_in(visualize(branched(), {'chain_menu': [3, 0]})))
         model, cmds = update(click(ChainToggle(chain=3)), None, {}, branched())
         self.assertEqual((model, cmds), ({'chains': {'3': False}}, []))
         model, _ = update(click(ChainToggle(chain=3)), None, model, branched())
@@ -1809,7 +1814,7 @@ class TestCollapsingAnIfChain(unittest.TestCase):
     def test_folded_each_iteration_shows_the_branch_it_took(self):
         out = visualize(branched(), {'chains': {'3': False}})
         self.assertEqual((header_grid(out), cell_grid(out)), (
-            [[('itr', 1, 1), ('x', 1, 1), ('▸ if x % 2 == 0 … else', 1, 1)]],
+            [[('itr', 1, 1), ('x', 1, 1), ('if x % 2 == 0 … else', 1, 1)]],
             [['3', 'else'], ['8', 'if'], ['5', 'elif x > 4']]))
 
     def test_folded_no_branch_taken_is_a_dash_and_never_reached_is_blank(self):
@@ -1819,13 +1824,13 @@ class TestCollapsingAnIfChain(unittest.TestCase):
                      init=(None,) * 5)
         out = visualize(t, {'chains': {'3': False}})
         self.assertEqual((header_grid(out)[0][-1][0], cell_grid(out)),
-                         ('▸ if x % 2 == 0 … elif x > 4', [['3', '—'], ['8', '']]))
+                         ('if x % 2 == 0 … elif x > 4', [['3', '—'], ['8', '']]))
 
     def test_a_nested_chain_starts_folded_inside_its_branch_and_hatched_where_that_didnt_run(self):
         out = visualize(nested(), {})
         self.assertEqual((header_grid(out), cell_grid(out)), ([
-            [('itr', 1, 2), ('x', 1, 2), ('▾ if x > 4', 3, 1), ('else', 1, 1), ('done = True', 1, 2)],
-            [('cond', 1, 1), ('▸ if x % 2 == 0', 1, 1), ('total += x', 1, 1), ("tag = 'small'", 1, 1)]], [
+            [('itr', 1, 2), ('x', 1, 2), ('if x > 4', 3, 1), ('else', 1, 1), ('done = True', 1, 2)],
+            [('cond', 1, 1), ('if x % 2 == 0', 1, 1), ('total += x', 1, 1), ("tag = 'small'", 1, 1)]], [
             ['3', 'False', '///', '///', "'small'", 'True'],
             ['8', 'True', 'if', '8', '///', 'True'],
             ['5', 'True', '—', '13', '///', 'True'],
@@ -1833,7 +1838,7 @@ class TestCollapsingAnIfChain(unittest.TestCase):
 
     def test_folding_the_outer_chain_folds_the_one_in_it_too(self):
         out = visualize(nested(), {'chains': {'3': False, '4': True}})
-        self.assertEqual(header_grid(out), [[('itr', 1, 1), ('x', 1, 1), ('▸ if x > 4 … else', 1, 1),
+        self.assertEqual(header_grid(out), [[('itr', 1, 1), ('x', 1, 1), ('if x > 4 … else', 1, 1),
                                              ('done = True', 1, 1)]])
 
     def test_a_folded_chain_edges_like_a_chain(self):
@@ -1849,7 +1854,7 @@ class TestCollapsingAnIfChain(unittest.TestCase):
     def test_live_only_still_folds_chains_since_that_is_a_view(self):
         from for_loop_visualizer import ChainToggle
         visualizer_utils.set_live_only(True)
-        self.assertEqual(events_in(visualize(nested(), {})), [repr(ChainToggle(chain=3)), repr(ChainToggle(chain=4))])
+        self.assertIn(repr(ChainToggle(chain=3)), events_in(visualize(nested(), {'chain_menu': [3, 0]})))
 
 
 class TestWhileTheLoopRuns(unittest.TestCase):
@@ -2153,6 +2158,472 @@ class TestCollect(unittest.TestCase):
     def test_writes_nothing_when_visualizers_are_live_only(self):
         visualizer_utils.set_live_only(True)
         self.assertEqual(update(key('Enter'), None, collecting(0, 'elements'), table())[1], [])
+
+
+def no_else(**overrides):
+    """branched()'s chain without its `else`: lines 1-6 of it."""
+    fields = dict(columns=branched().columns[:5], end_line=6, body_lines=(3, 6),
+                  rows=(('3', 'False', None, 'False', None), ('8', 'True', "'even'", None, None)),
+                  values=((3, False, NO_VALUE, False, NO_VALUE), (8, True, 'even', NO_VALUE, NO_VALUE)),
+                  init=(None,) * 5)
+    fields.update(overrides)
+    return branched(**fields)
+
+
+ELSE_PASS = (3, 1, 'else', 6, 6)
+
+
+def else_pass(**overrides):
+    """A chain whose `else` is only a `pass`, as Add Else writes it:
+
+        2  for x in [3, 8]:
+        3      if x % 2 == 0:
+        4          tag = 'even'
+        5      else:
+        6          pass
+    """
+    fields = dict(columns=(bound('x'),
+                           ForLoopColumn('if x % 2 == 0', path=(IF_BRANCH,), cond=True, indent='    '),
+                           statement("tag = 'even'", 4, 'tag', path=(IF_BRANCH,), indent='        '),
+                           ForLoopColumn('pass', span=(6, 6), path=(ELSE_PASS,), indent='        ',
+                                         placeholder=True)),
+                  end_line=6, body_lines=(3, 6),
+                  rows=(('3', 'False', None, None), ('8', 'True', "'even'", None)),
+                  values=((3, False, NO_VALUE, NO_VALUE), (8, True, 'even', NO_VALUE)),
+                  defined=frozenset({'tag', 'x'}), init=(None,) * 4)
+    fields.update(overrides)
+    return branched(**fields)
+
+
+def chain_menu_of(html_text):
+    """The open `if` menu's rows, as (label, whether it does anything)."""
+    found = re.search(r'<div class="snc-dropdown-panel[^"]*for-loop-chain-menu.*?</div><!--/chain-menu-->',
+                      html_text, re.S)
+    if found is None:
+        return None
+    return [(text_of(label), 'unselectable' not in cls)
+            for cls, label in re.findall(r'<div class="(snc-dropdown-option[^"]*)"[^>]*>(.*?)</div>', found.group(0))]
+
+
+class TestWritingIfBranches(unittest.TestCase):
+    """The (+) menu's Add If writes a new `if` from a box reading `if
+    [condition]`. Every chain's ▾ opens a menu: Collapse (or Expand), Add Elif,
+    whose box sits where the branch will be drawn, and Add Else. A new branch
+    is a `pass`, drawn as a placeholder column, which what is next written
+    into the branch replaces."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_add_menu_offers_add_if(self):
+        from for_loop_visualizer import AddIfClick
+        out = visualize(table(), {'add_menu_open': True})
+        self.assertIn('Add If', text_of(out))
+        self.assertIn(repr(AddIfClick()), events_in(out))
+
+    def test_add_if_puts_the_menu_away_and_opens_a_box_reading_if(self):
+        from for_loop_visualizer import AddIfClick
+        model, cmds = update(click(AddIfClick()), None, {'add_menu_open': True}, table())
+        self.assertEqual((model.get('adding_if'), model.get('add_menu_open'), cmds), (True, None, []))
+        box = header_cells(visualize(table(), model))[-1]
+        self.assertEqual((text_of(box).strip(), re.search(r'placeholder="([^"]*)"', box).group(1)),
+                         ('if', 'Condition'))
+
+    def test_enter_writes_the_if_at_the_end_of_the_body_holding_a_pass(self):
+        model = {'adding_if': True, 'column_input': 'element > 1'}
+        model, cmds = update(key('Enter'), None, model, table())
+        self.assertEqual((model.get('adding_if'), cmds),
+                         (None, [InsertLines(((3, '    if element > 1:\n        pass'),))]))
+
+    def test_a_condition_that_doesnt_parse_stays_open_unwritten(self):
+        model = {'adding_if': True, 'column_input': 'element >'}
+        self.assertEqual(update(key('Enter'), None, model, table()), (model, []))
+
+    def test_escape_closes_the_if_box_unwritten(self):
+        model, cmds = update(key('Escape'), None, {'adding_if': True, 'column_input': 'x'}, table())
+        self.assertEqual((model.get('adding_if'), cmds), (None, []))
+
+    def test_a_chains_menu_has_no_room_for_a_search_row_it_doesnt_have(self):
+        """A column's menu pads its top for the search row laid over it; an
+        if's has none, so it says so and isn't padded."""
+        for branch in (0, 1):
+            out = visualize(branched(), {'chain_menu': [3, branch]})
+            self.assertRegex(out, r'class="snc-dropdown-panel flyout col-menu-panel col-menu-no-search for-loop-chain-menu"')
+
+    def test_a_chains_arrow_opens_its_menu(self):
+        from for_loop_visualizer import ChainMenuToggle
+        self.assertIn(repr(ChainMenuToggle(chain=3, branch=0)), events_in(visualize(no_else(), {})))
+        model, cmds = update(click(ChainMenuToggle(chain=3, branch=0)), None, {}, no_else())
+        self.assertEqual((model.get('chain_menu'), cmds), ([3, 0], []))
+        model, _ = update(click(ChainMenuToggle(chain=3, branch=0)), None, model, no_else())
+        self.assertIsNone(model.get('chain_menu'))
+
+    def test_the_menu_collapses_and_adds_an_elif_or_an_else(self):
+        from for_loop_visualizer import AddElifClick, AddElseClick, ChainToggle
+        out = visualize(no_else(), {'chain_menu': [3, 0]})
+        self.assertEqual(chain_menu_of(out), [('Collapse', True), ('Add Elif', True), ('Add Else', True),
+                                              ('Remove', True)])
+        for msg in (ChainToggle(chain=3), AddElifClick(chain=3), AddElseClick(chain=3)):
+            self.assertIn(repr(msg), events_in(out))
+
+    def test_a_folded_chains_menu_expands_it(self):
+        out = visualize(no_else(), {'chains': {'3': False}, 'chain_menu': [3, 0]})
+        self.assertEqual(chain_menu_of(out)[0], ('Expand', True))
+
+    def test_a_chain_with_an_else_has_no_second_to_add(self):
+        from for_loop_visualizer import AddElseClick
+        out = visualize(branched(), {'chain_menu': [3, 0]})
+        self.assertEqual(chain_menu_of(out)[2], ('Add Else', False))
+        self.assertNotIn(repr(AddElseClick(chain=3)), events_in(out))
+
+    def test_collapse_folds_and_puts_the_menu_away(self):
+        from for_loop_visualizer import ChainToggle
+        self.assertEqual(update(click(ChainToggle(chain=3)), None, {'chain_menu': [3, 0]}, branched()),
+                         ({'chains': {'3': False}}, []))
+
+    def test_add_else_writes_an_else_holding_a_pass_after_the_chain(self):
+        from for_loop_visualizer import AddElseClick
+        model, cmds = update(click(AddElseClick(chain=3)), None, {'chain_menu': [3, 0]}, no_else())
+        self.assertEqual((model.get('chain_menu'), cmds),
+                         (None, [InsertLines(((6, '    else:\n        pass'),))]))
+
+    def test_add_else_on_a_chain_that_has_one_writes_nothing(self):
+        from for_loop_visualizer import AddElseClick
+        self.assertEqual(update(click(AddElseClick(chain=3)), None, {}, branched())[1], [])
+
+    def test_add_elif_unfolds_the_chain_and_opens_a_box_where_the_branch_goes(self):
+        from for_loop_visualizer import AddElifClick
+        model, cmds = update(click(AddElifClick(chain=3)), None,
+                             {'chain_menu': [3, 0], 'chains': {'3': False}}, branched())
+        self.assertEqual((model.get('adding_elif'), model.get('chains'), model.get('chain_menu'), cmds),
+                         (3, {'3': True}, None, []))
+        heads = [text_of(th).strip('⣿▾ ') for th in header_cells(visualize(branched(), model))]
+        # Between the last elif's columns and the else's.
+        self.assertEqual(heads[heads.index('elif'):heads.index('else') + 1], ['elif', 'else'])
+        self.assertLess(heads.index('elif x > 4'), heads.index('elif'))
+
+    def test_enter_writes_the_elif_after_the_last_one_before_the_else(self):
+        model = {'adding_elif': 3, 'column_input': 'x > 6'}
+        model, cmds = update(key('Enter'), None, model, branched())
+        self.assertEqual((model.get('adding_elif'), cmds),
+                         (None, [InsertLines(((6, '    elif x > 6:\n        pass'),))]))
+
+    def test_with_only_an_if_the_elif_follows_it(self):
+        t = no_else(columns=branched().columns[:3], rows=(('3', 'False', None), ('8', 'True', "'even'")),
+                    values=((3, False, NO_VALUE), (8, True, 'even')), init=(None,) * 3, end_line=4)
+        cmds = update(key('Enter'), None, {'adding_elif': 3, 'column_input': 'x > 6'}, t)[1]
+        self.assertEqual(cmds, [InsertLines(((4, '    elif x > 6:\n        pass'),))])
+
+    def test_live_only_a_chains_menu_only_folds(self):
+        visualizer_utils.set_live_only(True)
+        out = visualize(no_else(), {'chain_menu': [3, 0]})
+        self.assertEqual(chain_menu_of(out), [('Collapse', True), ('Add Elif', False), ('Add Else', False),
+                                              ('Remove', False)])
+
+    def test_a_pass_is_drawn_empty_and_hatched_where_its_branch_didnt_run(self):
+        out = visualize(else_pass(), {})
+        self.assertEqual(cell_grid(out), [['3', 'False', '///', ''], ['8', 'True', "'even'", '///']])
+        self.assertIn('for-loop-placeholder', header_cells(out)[-1])
+
+    def test_writing_beside_a_pass_writes_over_it(self):
+        model = {**adding("tag = 'odd'"), 'insert_at': {'label': 'pass', 'after': True}}
+        cmds = update(key('Enter'), None, model, else_pass())[1]
+        self.assertEqual(cmds, [ReplaceLines(6, 6, "        tag = 'odd'")])
+
+    def with_new_if(self):
+        """table() once Enter wrote `if element > 1:` and its pass after
+        line 3, as the next run draws it."""
+        branch = (4, 0, 'if element > 1', 5, 5)
+        return table(columns=(bound('element'), COUNT,
+                              ForLoopColumn('if element > 1', path=(branch,), cond=True, indent='    '),
+                              ForLoopColumn('pass', span=(5, 5), path=(branch,), indent='        ',
+                                            placeholder=True)),
+                     end_line=5, body_lines=(3, 5), rows=(('1', '1', 'False', None), ('2', '2', 'True', None)),
+                     values=((1, 1, False, NO_VALUE), (2, 2, True, NO_VALUE)), init=(None, '0', None, None))
+
+    def test_once_the_if_is_back_its_pass_opens_for_what_it_runs(self):
+        model, _ = update(key('Enter'), None, {'adding_if': True, 'column_input': 'element > 1'}, table())
+        # The run the Enter came in on still draws the loop as it was.
+        visualize(table(), model)
+        self.assertIsNone(model.get('editing_column'))
+        out = visualize(self.with_new_if(), model)
+        self.assertEqual((model.get('editing_column'), model.get('column_input'), 'pending_branch' in model),
+                         (3, '', False))
+        self.assertIn('placeholder="Runs when element &gt; 1"', header_cells(out)[-1])
+
+    def test_what_is_typed_there_writes_over_the_pass(self):
+        model, _ = update(key('Enter'), None, {'adding_if': True, 'column_input': 'element > 1'}, table())
+        visualize(self.with_new_if(), model)
+        model = {**model, 'column_input': 'big = element'}
+        self.assertEqual(update(key('Enter'), None, model, self.with_new_if())[1],
+                         [ReplaceLines(5, 5, '        big = element')])
+
+    def test_a_loop_that_comes_back_without_the_branch_gives_up_on_it(self):
+        model, _ = update(key('Enter'), None, {'adding_if': True, 'column_input': 'element > 1'}, table())
+        visualize(plain(), model)
+        self.assertEqual((model.get('editing_column'), 'pending_branch' in model), (None, False))
+
+    def test_a_new_elif_or_else_opens_its_pass_too(self):
+        from for_loop_visualizer import AddElseClick
+        model, _ = update(key('Enter'), None, {'adding_elif': 3, 'column_input': 'x > 6'}, branched())
+        self.assertEqual(model.get('pending_branch', {}).get('line'), 8)
+        model, _ = update(click(AddElseClick(chain=3)), None, {}, no_else())
+        self.assertEqual(model.get('pending_branch', {}).get('line'), 8)
+        # An else's pass, back on its line, says when it runs.
+        model = {**model, 'pending_branch': {**model['pending_branch'], 'line': 6}}
+        out = visualize(else_pass(), model)
+        self.assertEqual(model.get('editing_column'), 3)
+        self.assertIn('placeholder="Runs when no condition holds"', header_cells(out)[-1])
+
+    def test_a_branchs_arrow_is_drawn_as_a_columns_is(self):
+        """At the header's right end, after its condition, shown on hover, and
+        muted as every other table's ▾ is."""
+        heads = [th for th in header_cells(visualize(branched(), {})) if 'for-loop-branch-header' in th]
+        for th in heads:
+            self.assertIn('snc-hover-hidden-parent', th)
+            trigger = re.search(r'<span class="snc-dropdown-trigger col-menu-trigger"><span [^>]*'
+                                r'class="col-menu snc-hover-hidden full-opacity-on-hover">▾</span>', th)
+            self.assertIsNotNone(trigger)
+            self.assertLess(th.index('class="col-name"'), trigger.start())
+        folded = header_cells(visualize(branched(), {'chains': {'3': False}}))[-1]
+        self.assertLess(folded.index('class="col-name"'), folded.index('col-menu-trigger'))
+
+    def test_every_branch_of_a_chain_has_the_menu(self):
+        from for_loop_visualizer import ChainMenuToggle
+        events = events_in(visualize(branched(), {}))
+        self.assertEqual([e for e in events if e.startswith('ChainMenuToggle')],
+                         [repr(ChainMenuToggle(chain=3, branch=b)) for b in range(3)])
+        heads = header_grid(visualize(branched(), {}))[0]
+        self.assertEqual([text for text, _, _ in heads[2:]], ['if x % 2 == 0', 'elif x > 4', 'else'])
+
+    def test_an_elifs_or_an_elses_menu_only_removes_it(self):
+        from for_loop_visualizer import ChainMenuToggle, RemoveBranchClick
+        for branch in (1, 2):
+            model, _ = update(click(ChainMenuToggle(chain=3, branch=branch)), None, {}, branched())
+            out = visualize(branched(), model)
+            self.assertEqual(chain_menu_of(out), [('Remove', True)])
+            self.assertIn(repr(RemoveBranchClick(chain=3, branch=branch)), events_in(out))
+
+    def test_removing_an_elif_or_an_else_deletes_only_its_lines(self):
+        from for_loop_visualizer import RemoveBranchClick
+        model, cmds = update(click(RemoveBranchClick(chain=3, branch=1)), None, {'chain_menu': [3, 1]}, branched())
+        self.assertEqual((model.get('chain_menu'), cmds), (None, [ReplaceLines(5, 6, None)]))
+        self.assertEqual(update(click(RemoveBranchClick(chain=3, branch=2)), None, {}, branched())[1],
+                         [ReplaceLines(7, 8, None)])
+
+    def test_removing_the_if_removes_the_whole_chain(self):
+        from for_loop_visualizer import RemoveBranchClick
+        self.assertEqual(update(click(RemoveBranchClick(chain=3, branch=0)), None, {}, nested())[1],
+                         [ReplaceLines(3, 8, None)])
+        # One in a branch, with more of the branch after it.
+        self.assertEqual(update(click(RemoveBranchClick(chain=4, branch=0)), None, {}, nested())[1],
+                         [ReplaceLines(4, 5, None)])
+
+    def test_removing_a_chain_that_is_all_of_its_block_leaves_a_pass(self):
+        from for_loop_visualizer import RemoveBranchClick
+        self.assertEqual(update(click(RemoveBranchClick(chain=3, branch=0)), None, {}, branched())[1],
+                         [ReplaceLines(3, 8, '    pass')])
+
+    def test_a_folded_chains_remove_removes_all_of_it(self):
+        from for_loop_visualizer import RemoveBranchClick
+        out = visualize(nested(), {'chains': {'3': False}, 'chain_menu': [3, 0]})
+        self.assertIn(repr(RemoveBranchClick(chain=3, branch=0)), events_in(out))
+
+    def test_removing_a_branch_that_is_gone_writes_nothing(self):
+        from for_loop_visualizer import RemoveBranchClick
+        self.assertEqual(update(click(RemoveBranchClick(chain=3, branch=5)), None, {}, branched())[1], [])
+
+    def test_double_clicking_a_pass_writes_over_it(self):
+        model, _ = update(click(ColumnClick(col=3, label='pass'), detail=2), None, {}, else_pass())
+        model = {**model, 'column_input': "tag = 'odd'"}
+        self.assertEqual(update(key('Enter'), None, model, else_pass())[1],
+                         [ReplaceLines(6, 6, "        tag = 'odd'")])
+
+
+BRANCHED_SOURCE = (
+    "for x in [3, 8, 5]:",
+    "    if x % 2 == 0:",
+    "        tag = 'even'",
+    "    elif x > 4:",
+    "        tag = 'big'",
+    "    else:",
+    "        total += x",
+)
+
+
+def two_elifs(**overrides):
+    """A chain with two elifs to reorder:
+
+        2  for x in xs:
+        3      if a:
+        4          p = 1
+        5      elif b:
+        6          p = 2
+        7      elif c:
+        8          p = 3
+        9      else:
+        10         p = 4
+    """
+    steps = [(3, 0, 'if a', 4, 4), (3, 1, 'elif b', 6, 6), (3, 2, 'elif c', 8, 8), (3, 3, 'else', 10, 10)]
+    columns = [bound('x')]
+    for step in steps:
+        if step[2] != 'else':
+            columns.append(ForLoopColumn(step[2], path=(step,), cond=True, indent='    '))
+        columns.append(statement(f'p = {step[1] + 1}', step[3], 'p', path=(step,), indent='        '))
+    fields = dict(line=2, end_line=10, columns=tuple(columns), rows=(), values=(), targets=('x',),
+                  defined=frozenset({'p', 'x'}), body_lines=(3, 10), init=(None,) * len(columns),
+                  source=('for x in xs:', '    if a:', '        p = 1', '    elif b:', '        p = 2',
+                          '    elif c:', '        p = 3', '    else:', '        p = 4'))
+    fields.update(overrides)
+    return branched(**fields)
+
+
+def moved(msg, buttons=1):
+    """The event the mouse moving over what sends `msg` sends, a button held."""
+    return {'pythonEventStr': repr(msg), 'eventJSON': {'type': 'MouseMove', 'buttons': buttons}}
+
+
+class TestReorderingAnIfsBranches(unittest.TestCase):
+    """An elif's header has a ⣿ to drag it by, as a table's column has: dropped
+    on another conditional branch of its chain -- the `if` or an `elif`, not
+    the `else`, which is always last -- it is tested in that one's place.
+    Whichever branch ends up first is the `if`."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_only_an_elif_has_a_handle(self):
+        from for_loop_visualizer import BranchDragStart
+        starts = [e for e in events_in(visualize(two_elifs(), {})) if e.startswith('BranchDragStart')]
+        self.assertEqual(starts, [repr(BranchDragStart(chain=3, branch=1)), repr(BranchDragStart(chain=3, branch=2))])
+
+    def test_while_dragging_the_conditional_branches_are_where_it_can_go(self):
+        from for_loop_visualizer import BranchDragOver, BranchDragStart
+        model, cmds = update(click(BranchDragStart(chain=3, branch=2)), None, {}, two_elifs())
+        self.assertEqual((model.get('branch_drag'), cmds), ({'chain': 3, 'from': 2, 'over': 2}, []))
+        out = visualize(two_elifs(), model)
+        overs = re.findall(r'snc-mouse-move="([^"]*)"', out)
+        self.assertEqual([html.unescape(e) for e in overs],
+                         [repr(BranchDragOver(chain=3, branch=b)) for b in range(3)])
+
+    def test_dragging_over_a_branch_marks_where_it_lands(self):
+        from for_loop_visualizer import BranchDragOver
+        model = {'branch_drag': {'chain': 3, 'from': 2, 'over': 2}}
+        model, _ = update(moved(BranchDragOver(chain=3, branch=1)), None, model, two_elifs())
+        self.assertEqual(model['branch_drag'], {'chain': 3, 'from': 2, 'over': 1})
+        heads = header_cells(visualize(two_elifs(), model))
+        self.assertIn('col-drag-before', next(th for th in heads if 'elif b' in th))
+        self.assertIn('col-drag-source', next(th for th in heads if 'elif c' in th))
+
+    def test_the_mouse_up_somewhere_else_ends_the_drag(self):
+        from for_loop_visualizer import BranchDragOver
+        model = {'branch_drag': {'chain': 3, 'from': 2, 'over': 1}}
+        model, _ = update(moved(BranchDragOver(chain=3, branch=0), buttons=0), None, model, two_elifs())
+        self.assertIsNone(model.get('branch_drag'))
+
+    def test_dropping_an_elif_earlier_tests_it_first(self):
+        from for_loop_visualizer import BranchDragEnd
+        model = {'branch_drag': {'chain': 3, 'from': 2, 'over': 1}}
+        model, cmds = update(click(BranchDragEnd(chain=3, branch=1)), None, model, two_elifs())
+        self.assertEqual((model.get('branch_drag'), cmds), (None, [ReplaceLines(3, 8, '\n'.join((
+            '    if a:', '        p = 1', '    elif c:', '        p = 3', '    elif b:', '        p = 2')))]))
+
+    def test_dropping_an_elif_later_tests_it_after(self):
+        from for_loop_visualizer import BranchDragEnd
+        cmds = update(click(BranchDragEnd(chain=3, branch=2)), None,
+                      {'branch_drag': {'chain': 3, 'from': 1, 'over': 2}}, two_elifs())[1]
+        self.assertEqual(cmds, [ReplaceLines(3, 8, '\n'.join((
+            '    if a:', '        p = 1', '    elif c:', '        p = 3', '    elif b:', '        p = 2')))])
+
+    def test_dropped_on_the_if_it_becomes_the_if(self):
+        from for_loop_visualizer import BranchDragEnd
+        cmds = update(click(BranchDragEnd(chain=3, branch=0)), None,
+                      {'branch_drag': {'chain': 3, 'from': 1, 'over': 0}}, branched(source=BRANCHED_SOURCE))[1]
+        self.assertEqual(cmds, [ReplaceLines(3, 6, '\n'.join((
+            '    if x > 4:', "        tag = 'big'", '    elif x % 2 == 0:', "        tag = 'even'")))])
+
+    def test_dropped_on_itself_or_the_else_it_stays(self):
+        from for_loop_visualizer import BranchDragEnd
+        for over in (2, 3):
+            model, cmds = update(click(BranchDragEnd(chain=3, branch=over)), None,
+                                 {'branch_drag': {'chain': 3, 'from': 2, 'over': over}}, two_elifs())
+            self.assertEqual((model.get('branch_drag'), cmds), (None, []))
+
+    def test_live_only_has_no_handle(self):
+        visualizer_utils.set_live_only(True)
+        self.assertNotIn('BranchDragStart', visualize(two_elifs(), {}))
+
+
+GUARD = (2, 0, 'if x == 1', 2, 2)
+
+
+def guard(**overrides):
+    """A guard the row menu writes, on one line:
+
+        1  for x in [1, 2]:
+        2      if x == 1: continue
+        3      y = x
+    """
+    fields = dict(line=1, end_line=3, indent='', body_indent='    ',
+                  columns=(bound('x'),
+                           ForLoopColumn('if x == 1', path=(GUARD,), cond=True, indent='    '),
+                           ForLoopColumn('continue', span=(2, 2), path=(GUARD,), indent='    ', placeholder=True),
+                           statement('y = x', 3, 'y', indent='    ')),
+                  rows=(('1', 'True', None, None), ('2', 'False', None, '2')),
+                  values=((1, True, NO_VALUE, NO_VALUE), (2, False, NO_VALUE, 2)),
+                  targets=('x',), defined=frozenset({'x', 'y'}), body_lines=(2, 3), init=(None,) * 4,
+                  source=('for x in [1, 2]:', '    if x == 1: continue', '    y = x'))
+    fields.update(overrides)
+    return ForLoopTable(**fields)
+
+
+class TestGuards(unittest.TestCase):
+    """A guard -- `if cond: continue` or `break` -- is drawn as any `if` is, so
+    it can be changed: its continue says which iterations it skipped. Written
+    on one line, as the row menu writes it, it opens out into a block before
+    anything is written into it, so the `if` sharing its line survives."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_its_continue_marks_the_iterations_it_skipped(self):
+        self.assertEqual(cell_grid(visualize(guard(), {})), [['1', 'True', 'continue', '—'],
+                                                             ['2', 'False', '///', '2']])
+
+    def test_writing_over_its_continue_opens_it_out(self):
+        model = editing(2, 'skipped += 1')
+        self.assertEqual(update(key('Enter'), None, model, guard())[1],
+                         [ReplaceLines(2, 2, '    if x == 1:\n        skipped += 1')])
+
+    def test_inserting_beside_its_continue_opens_it_out(self):
+        before = {**adding('skipped += 1'), 'insert_at': {'label': 'continue', 'after': False}}
+        self.assertEqual(update(key('Enter'), None, before, guard())[1],
+                         [ReplaceLines(2, 2, '    if x == 1:\n        skipped += 1\n        continue')])
+        after = {**adding('print(x)'), 'insert_at': {'label': 'continue', 'after': True}}
+        self.assertEqual(update(key('Enter'), None, after, guard())[1],
+                         [ReplaceLines(2, 2, '    if x == 1:\n        continue\n        print(x)')])
+
+    def test_inserting_right_of_its_condition_writes_at_the_top_of_the_branch(self):
+        model = {**adding('skipped += 1'), 'insert_at': {'label': 'if x == 1', 'after': True}}
+        self.assertEqual(update(key('Enter'), None, model, guard())[1],
+                         [ReplaceLines(2, 2, '    if x == 1:\n        skipped += 1\n        continue')])
+
+    def test_removing_its_continue_leaves_a_pass_on_the_line(self):
+        cmds = update(click(DeleteColumnClick(col=2, label='continue')), None, {}, guard())[1]
+        self.assertEqual(cmds, [ReplaceLines(2, 2, '    if x == 1: pass')])
+
+    def test_its_menu_is_an_ifs(self):
+        out = visualize(guard(), {'chain_menu': [2, 0]})
+        self.assertEqual([label for label, _ in chain_menu_of(out)], ['Collapse', 'Add Elif', 'Add Else', 'Remove'])
 
 
 if __name__ == '__main__':

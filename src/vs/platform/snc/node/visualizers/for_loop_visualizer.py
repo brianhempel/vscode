@@ -139,14 +139,40 @@ dash, as anywhere. Lines down the table mark where a chain starts and ends.
 A condition has no line of its own, so its menu keeps only what reads its
 values, and Insert Right, which writes at the top of its branch.
 
-**A chain folds into one column.** The ▾ on a chain's first branch folds the
+**A chain's ▾ opens its menu.** The ▾ on its `if` -- or on the chain,
+folded -- opens Collapse (or Expand), Add Elif, Add Else and Remove, which
+takes out the whole chain (leaving a `pass` when nothing else would be left
+in its block). The ▾ on an `elif` or `else` only has Remove, taking out that
+branch and its lines. An `elif` drags by its ⣿, as a table's column does,
+onto another conditional branch of its chain -- never the `else`, which is
+always last -- to be tested in that one's place, before it when coming from
+later and after it from earlier. The branches are rewritten from the loop's
+own lines, which the table carries, whichever ends up first becoming the
+`if`. Collapse folds the
 whole of it -- every branch, every chain inside -- into a column saying which
 branch each iteration took (`if`, the `elif`'s header, `else`; a dash when
-none did), and its ▸ unfolds it again. A chain directly in the loop's body
+none did), and Expand unfolds it again. A chain directly in the loop's body
 starts unfolded and one inside a branch folded, so nesting costs a header
 row only when asked for. Folding is a view, kept by the chain's line in the
 model, so it works live-only too. A folded chain's init cell is where each
 accumulator in it starts.
+
+**Branches are written from the table.** Add If, in the (+) menu, opens a box
+reading `if [condition]` at the end of the header row; Enter writes the `if`
+at the end of the body. Add Elif opens an `elif [condition]` box where the
+branch will be drawn -- after the chain's last but its `else` -- unfolding the
+chain to show it; Enter writes it there. Add Else, offered while the chain has
+none, writes one at its end. A condition that doesn't parse leaves its box
+open. Each new branch holds a `pass`, which the runner draws as a muted
+column showing nothing (a branch with no column of its own gets its first
+line so, and is drawn all the same). So is a guard -- `if cond: continue`,
+as an iteration's menu writes it -- whose continue (or break) is marked in the
+iterations it ended, and which can be changed as any branch can; written on
+one line, it opens out into a block before anything is written into it, so
+the `if` sharing the line survives. Once the loop comes back with the new
+branch, its pass opens in the box by itself, saying when the branch runs, so
+what it runs is the next thing typed; double-clicking a pass, or inserting
+beside it, writes over it too.
 
 Sorts before `z_object_visualizer` (which claims everything) so that the table
 reaches it rather than being shown as a dataclass's fields.
@@ -495,8 +521,68 @@ class ToolSelect:
 
 @dataclass(frozen=True)
 class ChainToggle:
-    """The ▸/▾ on an `if` chain's first branch: folds the chain starting on
-    line `chain` into one column, or unfolds it."""
+    """Collapse (or Expand), in an `if` chain's menu: folds the chain
+    starting on line `chain` into one column, or unfolds it."""
+    chain: int
+
+
+@dataclass(frozen=True)
+class ChainMenuToggle:
+    """The ▾ on branch `branch` of the `if` chain starting on line `chain`:
+    open its menu, or put it away."""
+    chain: int
+    branch: int = 0
+
+
+@dataclass(frozen=True)
+class RemoveBranchClick:
+    """Remove, in the menu of branch `branch` of the chain starting on line
+    `chain`: delete an `elif` or `else` with its lines, or -- the `if` -- the
+    whole chain."""
+    chain: int
+    branch: int
+
+
+@dataclass(frozen=True)
+class BranchDragStart:
+    """A press on the ⣿ of an `elif` -- branch `branch` of the chain starting
+    on line `chain` -- to drag it to where it is tested."""
+    chain: int
+    branch: int
+
+
+@dataclass(frozen=True)
+class BranchDragOver:
+    """The mouse over a conditional branch's header while an `elif` is
+    dragged: where it would land."""
+    chain: int
+    branch: int
+
+
+@dataclass(frozen=True)
+class BranchDragEnd:
+    """The mouse let go over a branch's header: the dragged `elif` is tested
+    in its place."""
+    chain: int
+    branch: int
+
+
+@dataclass(frozen=True)
+class AddIfClick:
+    """Add If, in the (+) menu: open the box an `if`'s condition is written in."""
+
+
+@dataclass(frozen=True)
+class AddElifClick:
+    """Add Elif, in the menu of the chain starting on line `chain`: open the
+    box the new branch's condition is written in."""
+    chain: int
+
+
+@dataclass(frozen=True)
+class AddElseClick:
+    """Add Else, in the menu of the chain starting on line `chain`: write an
+    `else` at its end."""
     chain: int
 
 
@@ -734,22 +820,174 @@ def _fold_label(value: ForLoopTable, chain: int) -> str:
     return headers[0] if len(headers) == 1 else f'{headers[0]} … {headers[-1]}'
 
 
-def _render_toggle(chain: int, open_: bool) -> str:
-    return (f'<span class="for-loop-chain-toggle" snc-unfocused-clickable draggable="false" '
-            f'data-tooltip="{"Fold this if into one column" if open_ else "Unfold this if"}" '
-            f'snc-mouse-down="{html.escape(repr(ChainToggle(chain=chain)))}">{"▾" if open_ else "▸"}</span>')
+def _chain_branches(value: ForLoopTable, chain: int) -> dict:
+    """The steps of the chain starting on line `chain`, by branch index:
+    each branch's header, and its body's first and last lines."""
+    return {step[1]: step for column in value.columns for step in column.path if step[0] == chain}
+
+
+def _chain_else(value: ForLoopTable, chain: int) -> Optional[int]:
+    """The index of the chain's `else`, or None while it has none. Every
+    branch has a column -- an empty one its `pass` -- so one isn't missed."""
+    return next((b for b, step in _chain_branches(value, chain).items() if step[2] == 'else'), None)
+
+
+def _conditional(value: ForLoopTable, chain: int) -> List[int]:
+    """The chain's branches that test a condition -- its `if` and `elif`s, in
+    the order they are tested -- which is what reordering moves among."""
+    otherwise = _chain_else(value, chain)
+    return sorted(b for b in _chain_branches(value, chain) if b != otherwise)
+
+
+def _branches_reordered(value: ForLoopTable, chain: int, moving: int, onto: int) -> Optional[ReplaceLines]:
+    """The chain's conditional branches rewritten with `moving`, an elif,
+    tested in `onto`'s place -- before it, coming from later, after it, from
+    earlier -- each with its own lines, and whichever ends up first the `if`.
+    None when nothing moves, or the loop's lines aren't to hand."""
+    branches, conditional = _chain_branches(value, chain), _conditional(value, chain)
+    if moving == onto or moving == 0 or moving not in conditional or onto not in conditional:
+        return None
+    # A branch runs from the line after the one before it ends: its header,
+    # and whatever precedes that, go with it.
+    starts = {b: chain if b == 0 else branches[b - 1][4] + 1 for b in conditional}
+    pieces = {}
+    for b in conditional:
+        lo, hi = starts[b] - value.line, branches[b][4] - value.line + 1
+        if lo < 0 or hi > len(value.source):
+            return None
+        pieces[b] = list(value.source[lo:hi])
+    order = [b for b in conditional if b != moving]
+    order.insert(conditional.index(onto), moving)
+    lines = []
+    for n, b in enumerate(order):
+        piece = pieces[b]
+        at = next((k for k, text in enumerate(piece) if re.match(r'\s*(?:if|elif)\b', text)), None)
+        if at is None:
+            return None
+        keyword = 'if' if n == 0 else 'elif'
+        piece[at] = re.sub(r'^(\s*)(?:if|elif)\b', lambda m: m.group(1) + keyword, piece[at], count=1)
+        lines += piece
+    return ReplaceLines(starts[conditional[0]], branches[conditional[-1]][4], '\n'.join(lines))
+
+
+def _chain_indent(value: ForLoopTable, chain: int) -> str:
+    """The indentation of the chain's `if` line, which its `elif`s and its
+    `else` line up with: its first condition's."""
+    return next((column.indent for column in value.columns
+                 if column.cond and column.path[-1][:2] == (chain, 0) and column.indent is not None),
+                value.body_indent)
+
+
+def _one_liner(value: ForLoopTable, column: ForLoopColumn) -> Optional[Tuple[int, str, str, str]]:
+    """When the branch `column` is in is written on one line -- `if x == 1:
+    continue`, as the row menu writes it -- that line, its indentation, its
+    header and its body as written; None for a branch written as a block.
+    Writing into its body has to open it out first, or the `if` sharing the
+    line goes with what is written over it."""
+    if not column.path:
+        return None
+    chain, branch, _, first, last = column.path[-1]
+    branches = _chain_branches(value, chain)
+    header_line = chain if branch == 0 else branches[branch - 1][4] + 1
+    at = header_line - value.line
+    if header_line != first or first != last or not 0 <= at < len(value.source):
+        return None
+    text = value.source[at]
+    parts = _split_one_liner(text.strip())
+    if parts is None:
+        return None
+    return (header_line, text[:len(text) - len(text.lstrip())], *parts)
+
+
+def _split_one_liner(text: str) -> Optional[Tuple[str, str]]:
+    """`if x == 1: continue` as ('if x == 1', 'continue'), by where Python
+    reads the body to start -- a colon in the condition (a slice, a lambda)
+    isn't the one ending the header. An `elif` reads as an `if`, and an
+    `else` has no condition to read past."""
+    otherwise = re.match(r'else\s*:\s*(.+)$', text)
+    if otherwise:
+        return ('else', otherwise.group(1))
+    probe = text[2:] if text.startswith('elif') else text
+    try:
+        node = ast.parse(probe).body[0]
+    except (SyntaxError, IndexError):
+        return None
+    if not isinstance(node, ast.If) or not node.body or node.body[0].lineno != 1:
+        return None
+    # Offsets are in UTF-8 bytes.
+    encoded = probe.encode()
+    head = encoded[:node.body[0].col_offset].decode().rstrip().removesuffix(':').rstrip()
+    return (('el' if probe is not text else '') + head, encoded[node.body[0].col_offset:].decode())
+
+
+def _opened_out(value: ForLoopTable, one: Tuple[int, str, str, str], lines: List[str]) -> ReplaceLines:
+    """A one-line branch written as a block of `lines` under its header."""
+    line, indent, head, _ = one
+    inner = indent + value.body_indent[len(value.indent):]
+    return ReplaceLines(line, line, f'{indent}{head}:' + ''.join(f'\n{inner}{text}' for text in lines))
+
+
+def _new_branch(value: ForLoopTable, indent: str, header: str) -> str:
+    """A branch's lines as written new: its header, and a `pass` to be
+    written over, a level in."""
+    return f'{indent}{header}:\n{indent}{value.body_indent[len(value.indent):]}pass'
+
+
+def _render_chain_trigger(value: ForLoopTable, model, chain: int, branch: int = 0) -> str:
+    """The ▾ on a branch of a chain -- or on the chain, folded -- and the menu
+    it opens, drawn as a column's is: at the header's right end, shown on
+    hover, and lit while open."""
+    menu_open = model.get('chain_menu') == [chain, branch]
+    classes = 'col-menu snc-hover-hidden full-opacity-on-hover' + (' open' if menu_open else '')
+    toggle = ChainMenuToggle(chain=chain, branch=branch)
+    return (f'<span class="snc-dropdown-trigger col-menu-trigger">'
+            f'<span snc-mouse-down="{html.escape(repr(toggle))}" snc-unfocused-clickable '
+            f'draggable="false" data-tooltip="If actions" class="{classes}">▾</span>'
+            f'{_render_chain_menu(value, model, chain, branch) if menu_open else ""}</span>')
+
+
+def _render_chain_menu(value: ForLoopTable, model, chain: int, branch: int = 0) -> str:
+    """The `if`'s menu, which is the chain's: Collapse or Expand, a view,
+    then what writes a branch into it -- an `elif` after its last, and an
+    `else` while it has none -- and Remove, which takes out the whole chain.
+    An `elif`'s or `else`'s only has Remove, for itself. Live-only, only the
+    view."""
+    writes = not is_live_only()
+    has_else = _chain_else(value, chain) is not None
+    if branch != 0:
+        # The chain is its `if`'s to fold and add to; an elif or else only
+        # takes itself out.
+        kind = 'else' if branch == _chain_else(value, chain) else 'elif'
+        remove = _render_option(model, 'Remove', RemoveBranchClick(chain=chain, branch=branch) if writes else None,
+                                f'Remove this {kind} and its lines')
+        return (f'<div class="snc-dropdown-panel flyout col-menu-panel col-menu-no-search for-loop-chain-menu" snc-dropdown-align="flyout" '
+                f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{remove}</div><!--/chain-menu-->')
+    rows = [
+        _render_option(model, 'Collapse' if _chain_open(value, model, chain) else 'Expand', ChainToggle(chain=chain),
+                       'Fold this if into one column' if _chain_open(value, model, chain) else 'Unfold this if'),
+        _render_option(model, 'Add Elif', AddElifClick(chain=chain) if writes else None,
+                       'A branch tested after the last one'),
+        _render_option(model, 'Add Else', AddElseClick(chain=chain) if writes and not has_else else None,
+                       'This if already has an else' if has_else else 'What runs when no condition holds'),
+        '<div class="col-compute-sep"></div>',
+        _render_option(model, 'Remove', RemoveBranchClick(chain=chain, branch=0) if writes else None,
+                       'Remove this if, with its elifs, its else and every line in them'),
+    ]
+    return (f'<div class="snc-dropdown-panel flyout col-menu-panel col-menu-no-search for-loop-chain-menu" snc-dropdown-align="flyout" '
+            f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{"".join(rows)}</div><!--/chain-menu-->')
 
 
 def _render_fold_header(value: ForLoopTable, model, col: int, folds: dict, span_attrs: str = '',
                         classes: str = '') -> str:
-    """A folded chain's header: its ▸, and its first and last branch."""
+    """A folded chain's header: its first and last branch, and its ▾."""
     chain = value.columns[col].path[folds[col]][0]
     label = _fold_label(value, chain)
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
-    return (f'<th class="col-header for-loop-col for-loop-fold-header{classes}"{span_attrs}'
+    return (f'<th class="snc-hover-hidden-parent col-header for-loop-col for-loop-fold-header{classes}"{span_attrs}'
             f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">'
-            f'{_render_toggle(chain, False)} <span class="col-name">{html.escape(label)}</span>{resize}</span></th>')
+            f'<span class="col-name">{html.escape(label)}</span>{_render_chain_trigger(value, model, chain)}'
+            f'{resize}</span></th>')
 
 
 def _render_fold_cell(value: ForLoopTable, model, i: int, col: int, folds: dict, classes: str = '') -> str:
@@ -841,11 +1079,16 @@ def _list_name(value: ForLoopTable, subject: str) -> str:
     return name
 
 
-BOX_KEYS = ('adding_column', 'editing_column', 'editing_init', 'collecting_column', 'grouping_column')
+BOX_KEYS = ('adding_column', 'editing_column', 'editing_init', 'collecting_column', 'grouping_column',
+            'adding_if', 'adding_elif')
+
+# The boxes a new branch's condition is typed in, which nothing else closes
+# by name: they are only ever in the model while open.
+BRANCH_BOX_KEYS = ('adding_if', 'adding_elif')
 
 # What a box opening puts away: the menus it was opened from, and where an
 # earlier Insert would have put the line.
-MENU_KEYS = ('add_menu_open', 'col_menu', 'submenu', 'insert_at', 'row_menu')
+MENU_KEYS = ('add_menu_open', 'col_menu', 'submenu', 'insert_at', 'row_menu', 'chain_menu')
 
 
 def _box_open(model) -> bool:
@@ -855,19 +1098,22 @@ def _box_open(model) -> bool:
 def _opened(model, key: str, col, text: str):
     """The model with one box open -- `key`, on column `col` -- holding
     `text`, and the (+) menu put away."""
-    model = {k: v for k, v in model.items() if k not in MENU_KEYS}
+    model = {k: v for k, v in model.items() if k not in MENU_KEYS + BRANCH_BOX_KEYS}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
             'collecting_column': None, 'grouping_column': None, key: col, 'column_input': text}
 
 
 def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: str = 'Line of code',
-                tooltip: str = 'Written at the end of the loop', span_attrs: str = '', suggestions=()) -> str:
+                tooltip: str = 'Written at the end of the loop', span_attrs: str = '', suggestions=(),
+                keyword: str = '') -> str:
     """The box code is typed in: a new column's, one being edited, a starting
-    value, or the name of a list a column is collected into."""
+    value, the name of a list a column is collected into, or -- after its
+    `keyword`, `if` or `elif` -- a new branch's condition."""
     input_event = "lambda e: ColumnInput(value=e.get('value', ''))"
     select = ' snc-select-all' if select_all else ''
-    return (f'<{tag}{span_attrs}><span class="snc-dropdown-trigger">'
-            f'<input type="text" class="col-input" autofocus{select} snc-unfocused-clickable spellcheck="false" '
+    lead = f'<span class="for-loop-box-keyword">{html.escape(keyword)}</span>' if keyword else ''
+    return (f'<{tag}{span_attrs}><span class="snc-dropdown-trigger{" for-loop-branch-box" if keyword else ""}">'
+            f'{lead}<input type="text" class="col-input" autofocus{select} snc-unfocused-clickable spellcheck="false" '
             f'snc-input="{html.escape(input_event)}" '
             f'snc-blur="{html.escape(repr(ColumnInputBlur()))}" '
             f'value="{html.escape(model.get("column_input", ""))}" '
@@ -1276,8 +1522,9 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
     # (row, whether a condition gets it too)
     rows = [
         (_render_search_row(model, label), True),
-        (_render_option(model, 'Remove', DeleteColumnClick(col=col, label=label) if statement else None,
-                       '' if statement else 'A name the loop binds has no line to remove'), False),
+        (_render_option(model, 'Remove', DeleteColumnClick(col=col, label=label)
+                        if statement and not (column.placeholder and label == 'pass') else None,
+                        '' if statement else 'A name the loop binds has no line to remove'), False),
         (_render_option(model, 'Insert Left', InsertColumnClick(col=col, label=label, after=False)
                         if statement else None), False),
         (_render_option(model, 'Insert Right', InsertColumnClick(col=col, label=label, after=True)), True),
@@ -1299,6 +1546,9 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
         ('<div class="col-compute-sep"></div>', True),
         (_render_tally(value, model, col), True),
     ]
+    if column.placeholder:
+        # A line with no value: only what writes beside it, or takes it out.
+        rows = rows[1:4]
     shown = ''.join(row for row, for_cond in rows if for_cond or not column.cond)
     return (f'<div class="snc-dropdown-panel flyout col-menu-panel" snc-dropdown-align="flyout" '
             f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{shown}</div><!--/col-menu-->')
@@ -1710,6 +1960,9 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
     column = value.columns[col]
     label = column.label
     if not live_only and column.span is not None and model.get('editing_column') == col:
+        if column.placeholder and label == 'pass':
+            return _render_box(model, placeholder=_runs_when(column), tooltip="Written over this branch's pass",
+                               span_attrs=span_attrs)
         return _render_box(model, select_all=True, tooltip='Written over this line of the loop',
                            span_attrs=span_attrs)
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
@@ -1725,8 +1978,12 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
     else:
         edit = repr(ColumnClick(col=col, label=label))
+        tip = ("Double-click to write this branch's first line" if column.placeholder and label == 'pass'
+               else 'Double-click to edit')
+        if column.placeholder:
+            classes += ' for-loop-placeholder'
         inner = (f'<span class="col-name for-loop-col-label" snc-unfocused-clickable '
-                 f'snc-mouse-down="{html.escape(edit)}" data-tooltip="Double-click to edit"'
+                 f'snc-mouse-down="{html.escape(edit)}" data-tooltip="{tip}"'
                  f'{py_exp_attrs(column.subject) or ' draggable="false"'}>'
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
@@ -1744,18 +2001,34 @@ def _render_subheader(model, label: str, sub: str, span_attrs: str = '', classes
             f'<span class="col-header-inner"><span class="col-name">{html.escape(sub)}</span>{resize}</span></th>')
 
 
-def _render_branch_header(value: ForLoopTable, step, span_attrs: str = '', classes: str = '') -> str:
+def _render_branch_header(value: ForLoopTable, model, step, span_attrs: str = '', classes: str = '') -> str:
     """The header over a branch's columns -- its condition, its statements,
     the chains in it -- reading as the branch does in the code, and saying in
-    its tooltip how many of the iterations drawn took it. The chain's first
-    branch has the ▾ that folds it."""
+    its tooltip how many of the iterations drawn took it, and ending, as a
+    column's header does, with the ▾ that opens its menu."""
     chain, branch, header = step[:3]
     n = len(value.rows)
     taken = sum(branch_ran(value, i, chain) == branch for i in range(n))
     tip = f' data-tooltip="Taken in {taken} of {n} iteration{"" if n == 1 else "s"}"' if n else ''
-    toggle = f'{_render_toggle(chain, True)} ' if branch == 0 else ''
-    return (f'<th class="col-header for-loop-branch-header{classes}"{span_attrs}{tip}>'
-            f'<span class="col-header-inner">{toggle}<span class="col-name">{html.escape(header)}</span></span></th>')
+    conditional = _conditional(value, chain)
+    handle, drag_attrs = '', ''
+    if not is_live_only() and branch in conditional:
+        if branch != 0:
+            handle = (f'<span snc-mouse-down="{html.escape(repr(BranchDragStart(chain=chain, branch=branch)))}" '
+                      f'snc-unfocused-clickable draggable="false" data-tooltip="Drag to test it earlier or later" '
+                      f'class="col-handle col-drag-handle">⣿</span>')
+        drag = model.get('branch_drag') or {}
+        if drag.get('chain') == chain:
+            # Only mid-drag: each move over a header is a run of the program.
+            drag_attrs = (f' snc-mouse-move="{html.escape(repr(BranchDragOver(chain=chain, branch=branch)))}"'
+                          f' snc-mouse-up="{html.escape(repr(BranchDragEnd(chain=chain, branch=branch)))}"')
+            if drag.get('from') == branch:
+                classes += ' col-drag-source'
+            elif drag.get('over') == branch:
+                classes += ' col-drag-before' if drag['from'] > branch else ' col-drag-after'
+    return (f'<th class="snc-hover-hidden-parent col-header for-loop-branch-header{classes}"{span_attrs}{tip}'
+            f'{drag_attrs}><span class="col-header-inner">{handle}<span class="col-name">{html.escape(header)}</span>'
+            f'{_render_chain_trigger(value, model, chain, branch)}</span></th>')
 
 
 def _render_menu_trigger(value: ForLoopTable, model, col: int, get_visualizer=None) -> str:
@@ -1824,7 +2097,8 @@ def _render_add_menu(value: ForLoopTable, model) -> str:
                   for k, step in enumerate(column.path[:depth]) if column.path[:k + 1] != above[:k + 1]]
         lines.append(check_row(column, depth))
         above = column.path
-    rows = [_render_menu_row('Add Column', AddColumnClick(), classes=' col-add-write'), sep,
+    rows = [_render_menu_row('Add Column', AddColumnClick(), classes=' col-add-write'),
+            _render_menu_row('Add If', AddIfClick(), classes=' col-add-write'), sep,
             *(check_row(column) for column in bound), sep,
             _render_menu_row('Show all', ColumnShowAll(), classes=' col-add-all'),
             _render_menu_row('Hide all', ColumnHideAll(), classes=' col-add-all')]
@@ -1853,6 +2127,11 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
     if column.path and cell_skipped(value, i, col):
         return (f'<td class="list-table-cell for-loop-skipped{classes}"{_col_attrs(model, leaf)} '
                 f'data-tooltip="This iteration took another branch"></td>')
+    if column.placeholder:
+        # No value; a continue or break says it is where the iteration ended.
+        said = (f'<span class="for-loop-placeholder-cell">{html.escape(label)}</span>'
+                if label in ('continue', 'break') else '')
+        return f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>{said}</td>'
     if column.cond and text is not None:
         classes += ' for-loop-cond-true' if _truthy(value, i, col) else ' for-loop-cond-false'
     if not has_values:
@@ -1963,6 +2242,36 @@ def _open_pending_init(value: ForLoopTable, model) -> None:
         model.pop('pending_init')
 
 
+def _open_pending_branch(value: ForLoopTable, model) -> None:
+    """Open the box over a branch just written, on its pass, once the loop
+    comes back with it: what the branch runs is the next thing to type. The
+    run the Enter came in on still draws the loop as it was, so its columns
+    have to have changed; a finished table that changed without the branch
+    gives up on it."""
+    pending = model.get('pending_branch')
+    if not pending:
+        return
+    labels = [column.label for column in value.columns]
+    if labels == pending['labels']:
+        return
+    col = next((c for c, column in enumerate(value.columns)
+                if column.placeholder and column.span == (pending['line'], pending['line'])), None)
+    if col is not None:
+        model.pop('pending_branch')
+        if not _box_open(model):
+            model.update(_opened(model, 'editing_column', col, ''))
+    elif not value.running:
+        model.pop('pending_branch')
+
+
+def _runs_when(column: ForLoopColumn) -> str:
+    """When the branch a placeholder holds the place of runs, in words."""
+    header = column.path[-1][2] if column.path else ''
+    if header == 'else':
+        return 'Runs when no condition holds'
+    return f'Runs when {header.split(" ", 1)[-1]}'
+
+
 def _span(attr: str, n: int) -> str:
     return f' {attr}="{n}"' if n > 1 else ''
 
@@ -2013,6 +2322,26 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
     # Every column it adds is code, so live-only leaves it out.
     if not live_only and model.get('adding_column') and beside is None:
         leaves.append(((), [], ('box', {'suggestions': _suggestions(value, model, get_visualizer)})))
+    if not live_only and model.get('adding_if'):
+        leaves.append(((), [], ('box', {'keyword': 'if', 'placeholder': 'Condition',
+                                        'tooltip': 'An if written at the end of the loop',
+                                        'suggestions': _suggestions(value, model, get_visualizer)})))
+    elif_chain = model.get('adding_elif')
+    depth_of = _chain_depths(value).get(elif_chain) if not live_only else None
+    if depth_of is not None:
+        # Where the branch will be drawn: after the chain's last columns but
+        # its else's, in the branches the chain is in.
+        k, otherwise = depth_of, _chain_else(value, elif_chain)
+        parent = next(column.path[:k] for column in value.columns
+                      if len(column.path) > k and column.path[k][0] == elif_chain)
+        last = max((n for n, (path, _, _) in enumerate(leaves)
+                    if len(path) > k and path[k][0] == elif_chain and path[k][1] != otherwise), default=None)
+        if last is not None:
+            # A branch index no branch has, so it edges as a branch of its own.
+            path = parent + ((elif_chain, -2, 'elif', 0, 0),)
+            leaves.insert(last + 1, (path, branches(parent), ('box', {
+                'keyword': 'elif', 'placeholder': 'Condition', 'tooltip': 'Tested after the branches before it',
+                'suggestions': _suggestions(value, model, get_visualizer)})))
     collecting = model.get('collecting_column')
     if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
         subject = value.columns[collecting].subject
@@ -2027,7 +2356,7 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
     def draw(what, span_attrs: str, classes: str) -> str:
         match what:
             case ('branch', step):
-                return _render_branch_header(value, step, span_attrs, classes)
+                return _render_branch_header(value, model, step, span_attrs, classes)
             case ('column', col):
                 return _render_header(value, model, col, live_only, span_attrs, get_visualizer, classes)
             case ('fold', col):
@@ -2071,6 +2400,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     rows, hidden_rows = _rows_to_draw(value, model)
     if not live_only:
         _open_pending_init(value, model)
+        _open_pending_branch(value, model)
     key_handler = '' if live_only else f' snc-key-down="{html.escape(repr(ColumnKeyDown()))}"'
     small_class = ' small' if small else ''
     max_height = SMALL_MAX_HEIGHT if small else EXPANDED_PANE_MAX_HEIGHT
@@ -2359,6 +2689,10 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 column = value.columns[col]
                 alone = span == value.body_lines or bool(column.path) and span == column.path[-1][3:5]
                 text = f'{_indent(value, column)}pass' if alone else None
+                one = _one_liner(value, column)
+                if one is not None and alone:
+                    # It shares its line with its `if`, which stays.
+                    text = f'{one[1]}{one[2]}: pass'
                 return (_menus_closed(model), [ReplaceLines(span[0], span[1], text)])
         case ColumnInput(value=typed) if _box_open(model):
             others = {k: v for k, v in model.items() if k != 'selected_suggestion'}
@@ -2394,8 +2728,44 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 return (_menus_closed(model), code)
         case ChainToggle(chain=chain) if chain in _chain_depths(value):
             # A view, so live-only folds too.
-            return ({**model, 'chains': {**(model.get('chains') or {}),
-                                         str(chain): not _chain_open(value, model, chain)}}, [])
+            others = {k: v for k, v in model.items() if k != 'chain_menu'}
+            return ({**others, 'chains': {**(model.get('chains') or {}),
+                                          str(chain): not _chain_open(value, model, chain)}}, [])
+        case ChainMenuToggle(chain=chain, branch=branch) if branch in _chain_branches(value, chain):
+            opening = model.get('chain_menu') != [chain, branch]
+            return ({**_menus_closed(model), 'add_menu_open': False,
+                     'chain_menu': [chain, branch] if opening else None}, [])
+        case BranchDragStart(chain=chain, branch=branch) if branch != 0 \
+                and branch in _conditional(value, chain) and not is_live_only():
+            return ({**_menus_closed(model), 'branch_drag': {'chain': chain, 'from': branch, 'over': branch}}, [])
+        case BranchDragOver(chain=chain, branch=branch) if model.get('branch_drag'):
+            if event_json.get('buttons', 0) == 0:
+                # Let go somewhere that isn't a header: the drag is over.
+                return ({**model, 'branch_drag': None}, [])
+            drag = model['branch_drag']
+            if drag['chain'] == chain and branch in _conditional(value, chain):
+                return ({**model, 'branch_drag': {**drag, 'over': branch}}, [])
+        case BranchDragEnd(chain=chain, branch=branch) if model.get('branch_drag'):
+            drag = model['branch_drag']
+            moved = (_branches_reordered(value, chain, drag['from'], branch)
+                     if drag['chain'] == chain and not is_live_only() else None)
+            return ({**model, 'branch_drag': None}, [moved] if moved else [])
+        case RemoveBranchClick(chain=chain, branch=branch) if branch in _chain_branches(value, chain) \
+                and not is_live_only():
+            others = {k: v for k, v in model.items() if k != 'chain_menu'}
+            return (others, [_branch_removed(value, chain, branch)])
+        case AddIfClick() if not is_live_only():
+            return (_opened(model, 'adding_if', True, ''), [])
+        case AddElifClick(chain=chain) if chain in _chain_depths(value) and not is_live_only():
+            # Unfolded, so the box can sit where the branch will be drawn.
+            opened = _opened(model, 'adding_elif', chain, '')
+            return ({**opened, 'chains': {**(model.get('chains') or {}), str(chain): True}}, [])
+        case AddElseClick(chain=chain) if chain in _chain_depths(value) and _chain_else(value, chain) is None \
+                and not is_live_only():
+            end = max(step[4] for step in _chain_branches(value, chain).values())
+            others = {k: v for k, v in model.items() if k != 'chain_menu'}
+            return ({**others, 'pending_branch': _pending_branch(value, end)},
+                    [InsertLines(((end, _new_branch(value, _chain_indent(value, chain), 'else')),))])
         case ToolSelect(tool=tool) if tool in ('normal', 'pick'):
             return ({**model, 'tool': tool}, [])
         case PickToggle(label=label):
@@ -2417,13 +2787,15 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
 
 
 def _closed(model):
-    model = {k: v for k, v in model.items() if k != 'insert_at'}
+    model = {k: v for k, v in model.items() if k not in ('insert_at',) + BRANCH_BOX_KEYS}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
             'collecting_column': None, 'grouping_column': None, 'column_input': ''}
 
 
 def _menus_closed(model):
-    """The model with the column menu put away, as anything it did does."""
+    """The model with the column menu put away, as anything it did does, and
+    an `if` chain's with it."""
+    model = {k: v for k, v in model.items() if k != 'chain_menu'}
     return {**model, 'col_menu': None, 'submenu': None, 'row_menu': None}
 
 
@@ -2464,6 +2836,8 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
         return _write_collect(model, value)
     if model.get('grouping_column') is not None:
         return _write_group_by(model, value)
+    if model.get('adding_if') or model.get('adding_elif') is not None:
+        return _write_branch(model, value)
     statement = model.get('column_input', '').strip()
     if statement and not _parses(statement):
         # Left open, as typed: written, it would break the whole file.
@@ -2479,14 +2853,76 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
             after, indent = _beside(value, column, insert_at['after']), _indent(value, column)
         # If it comes back an accumulator with nothing to start from, its
         # starting value is the next thing to type.
-        pending = {'label': ' '.join(statement.split()), 'labels': [column.label for column in value.columns]}
+        pending = {'label': ' '.join(statement.split()), 'labels': [c.label for c in value.columns]}
+        one = _one_liner(value, column) if column is not None else None
+        if one is not None:
+            # Beside a statement on its `if`'s line, or right of the condition
+            # -- the top of the branch -- the branch opens out to take it.
+            if column.placeholder and column.label == 'pass':
+                lines = [statement]
+            elif column.cond or not insert_at['after']:
+                lines = [statement, one[3]]
+            else:
+                lines = [one[3], statement]
+            return ({**_closed(model), 'pending_init': pending}, [_opened_out(value, one, lines)])
+        if column is not None and column.placeholder and column.label == 'pass':
+            # A new branch's pass was only holding its place.
+            return ({**_closed(model), 'pending_init': pending},
+                    [ReplaceLines(column.span[0], column.span[1], f'{indent}{statement}')])
         return ({**_closed(model), 'pending_init': pending},
                 [InsertLines(((after, f'{indent}{statement}'),))])
     label = value.columns[col].label if 0 <= col < len(value.columns) else ''
     span = _statement_span(value, col, label)
     if span is None or statement == label:
         return (_closed(model), [])
+    one = _one_liner(value, value.columns[col])
+    if one is not None:
+        return (_closed(model), [_opened_out(value, one, [statement])])
     return (_closed(model), [ReplaceLines(span[0], span[1], f'{_indent(value, value.columns[col])}{statement}')])
+
+
+def _write_branch(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
+    """Enter in a new branch's box: `if condition:` at the end of the body,
+    or `elif condition:` after its chain's last branch but its else -- each
+    holding a `pass` to be written over. A condition that doesn't parse stays
+    open, as typed."""
+    condition = ' '.join(model.get('column_input', '').split())
+    if condition and not _is_value(condition):
+        return (model, [])
+    chain = model.get('adding_elif')
+    if not condition or is_live_only() or (chain is not None and chain not in _chain_depths(value)):
+        return (_closed(model), [])
+    if chain is None:
+        after, indent, header = _body_end(value), value.body_indent, f'if {condition}'
+    else:
+        branches = _chain_branches(value, chain)
+        otherwise = _chain_else(value, chain)
+        after = branches[max(b for b in branches if b != otherwise)][4]
+        indent, header = _chain_indent(value, chain), f'elif {condition}'
+    return ({**_closed(model), 'pending_branch': _pending_branch(value, after)},
+            [InsertLines(((after, _new_branch(value, indent, header)),))])
+
+
+def _branch_removed(value: ForLoopTable, chain: int, branch: int) -> ReplaceLines:
+    """What deletes branch `branch` of the chain: an `elif` or `else` from
+    the line after the branch before it ends to its own end, or -- the `if`,
+    which the rest can't stand without -- the whole chain, leaving a `pass`
+    when nothing else would be left in the block it is in."""
+    branches = _chain_branches(value, chain)
+    if branch > 0:
+        return ReplaceLines(branches[branch - 1][4] + 1, branches[branch][4], None)
+    first, last = chain, max(step[4] for step in branches.values())
+    k = _chain_depths(value)[chain]
+    parent = next(column.path[k - 1] for column in value.columns
+                  if len(column.path) > k and column.path[k][0] == chain) if k else None
+    block = (value.body_lines[0], _body_end(value)) if parent is None else parent[3:5]
+    return ReplaceLines(first, last, f'{_chain_indent(value, chain)}pass' if tuple(block) == (first, last) else None)
+
+
+def _pending_branch(value: ForLoopTable, after: int) -> dict:
+    """What a branch written after line `after` is waited for by: the line
+    its pass lands on, under its header, and the columns there were before."""
+    return {'line': after + 2, 'labels': [column.label for column in value.columns]}
 
 
 def _write_init(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:

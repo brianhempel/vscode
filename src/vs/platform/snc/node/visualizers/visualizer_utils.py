@@ -1183,6 +1183,10 @@ class ForLoopColumn:
     # Its line's indentation, what rewriting its statement keeps; None for a
     # name the loop binds.
     indent: Optional[str] = None
+    # A line standing in for a branch with no column of its own -- a `pass`
+    # waiting to be written over, a print -- so the branch is drawn and can be
+    # found. It has no value to show.
+    placeholder: bool = False
 
 
 class _NoValue:
@@ -1237,6 +1241,10 @@ class ForLoopTable:
     # Per column, an accumulator's value as the loop started, as a repr; None
     # for one with no value yet, and for every other column.
     init: Tuple[Optional[str], ...] = ()
+    # The loop's own lines, `line` through `end_line`, as the run read them:
+    # what rewriting a stretch of its body -- reordering an `if`'s branches --
+    # rebuilds it from.
+    source: Tuple[str, ...] = dataclasses.field(default=(), compare=False, repr=False)
     # The values themselves, parallel to `rows` and `init`: each copied when
     # its statement ran (NO_VALUE where there is none to keep), for what has
     # to read a value rather than its repr -- searching, sorting, a cell's own

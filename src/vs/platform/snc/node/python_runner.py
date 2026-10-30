@@ -837,7 +837,7 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
 
     A `for` also passes the static half of its ForLoopTable (see
     CodeTransformer.visit_For): `(end_line, site, indent, body_indent,
-    columns, targets, defined, body_lines)`, where `columns` is the (line,
+    columns, targets, defined, body_lines, source)`, where `columns` is the (line,
     site, fields) of each log site whose value is a column, `fields` its
     ForLoopColumn's, and `body_lines` the body's first and last. Rows are
     recorded only for a loop running under a path the editor is looking at;
@@ -855,7 +855,7 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
     prev = _ctx_counts.get(_count_key(id_line), {}).get(id_line, 0)
     frame = [id_line, prev - 1]
     if table is not None and _path_selected(_current_path()):
-        end_line, site, indent, body_indent, columns, targets, defined, body_lines = table
+        end_line, site, indent, body_indent, columns, targets, defined, body_lines, source = table
         for_columns = tuple(ForLoopColumn(*fields) for _, _, fields in columns)
         _for_tables[id(frame)] = {
             "frame": frame,
@@ -869,7 +869,7 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
                 line=id_line, end_line=end_line, indent=indent, body_indent=body_indent,
                 columns=for_columns, rows=(),
                 targets=tuple(targets), defined=frozenset(defined),
-                body_lines=body_lines, running=True,
+                body_lines=body_lines, source=tuple(source), running=True,
                 **_initial_values(for_columns, sys._getframe(1))),
         }
         log_value(end_line, _for_tables[id(frame)]["table"], site)
@@ -1299,14 +1299,6 @@ def _stored_names(target: ast.AST) -> List[str]:
     """Names an assignment target binds, in source order."""
     return [n.id for n in ast.walk(target)
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
-
-
-def _is_guard(node: ast.If) -> bool:
-    """An `if` that only skips the rest of the iteration or stops the loop --
-    what the loop table writes from an iteration's menu or its Filter button.
-    It says what happens to rows, not what the loop computes, so it gets no
-    columns."""
-    return not node.orelse and all(isinstance(s, (ast.Continue, ast.Break, ast.Pass)) for s in node.body)
 
 
 def _annotate_for_scopes(statements: List[ast.stmt], defined: FrozenSet[str] = frozenset()) -> Set[str]:
@@ -1932,7 +1924,8 @@ class CodeTransformer(ast.NodeTransformer):
                      self._line_indent(node.lineno), self._line_indent(node.body[0].lineno),
                      tuple(columns), tuple(target_names),
                      tuple(sorted(getattr(node, '_snc_defined', ()))),
-                     (node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno))
+                     (node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno),
+                     tuple(self.source_code.split('\n')[node.lineno - 1:end_line]) if self.source_code else ())
             return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node,
                                       enter_kwargs={'table': ast.Constant(value=table, **self._loc(node))})
 
@@ -1943,10 +1936,17 @@ class CodeTransformer(ast.NodeTransformer):
         """`statements` of a `for` body, or of an `if` branch in one at
         `path`, transformed, appending to `columns` the (line, site, fields)
         of each that is a column. `assigned` is what this iteration has set
-        by the time they run, and grows as they do."""
+        by the time they run, and grows as they do.
+
+        A branch none of whose lines is a column gets its first as a
+        placeholder, so it is drawn all the same: a new branch's `pass`, an
+        `else` that only prints."""
         new_body: List[ast.stmt] = []
+        had = len(columns)
         for stmt in statements:
-            if isinstance(stmt, ast.If) and not _is_guard(stmt):
+            # Every `if` is a chain of branches -- a guard that only
+            # continues or breaks too, so it can be changed from the table.
+            if isinstance(stmt, ast.If):
                 new_body.extend(self._for_if(stmt, assigned, initializers, columns, path, stmt.lineno, 0))
                 continue
             column = self._for_column(stmt, assigned, initializers)
@@ -1972,6 +1972,12 @@ class CodeTransformer(ast.NodeTransformer):
                 site = self.site_counter[stmt.lineno] - 1
             # Plain tuples, to be a constant in the code; loop_enter rebuilds it.
             columns.append((stmt.lineno, site, dataclasses.astuple(column)))
+        if path and statements and len(columns) == had:
+            first = statements[0]
+            # No site: nothing logged on its line is its value.
+            columns.append((first.lineno, None, dataclasses.astuple(ForLoopColumn(
+                ' '.join(self._source_segment(first).split()), (first.lineno, first.end_lineno or first.lineno),
+                path=path, indent=self._line_indent(first.lineno), placeholder=True))))
         return new_body
 
     def _for_if(self, node: ast.If, assigned: Set[str], initializers: Dict[str, Tuple[int, int]],

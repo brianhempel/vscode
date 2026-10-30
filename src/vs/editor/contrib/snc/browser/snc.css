@@ -2723,9 +2723,9 @@
 	background: color-mix(in srgb, var(--snc-accent) 10%, var(--snc-table-header-bg));
 }
 
-/* A branch's header reads as its line does: the fold toggle, then the
-   condition, from the left -- not a toggle pinned left and the condition
-   floating mid-span, which a wide branch pulls apart. */
+/* A branch's header reads as its line does: the condition from the left,
+   not floating mid-span, which a wide branch pulls apart; its ▾ is pinned
+   to the right end, as a column's is. */
 .list-visualizer th:is(.for-loop-branch-header, .for-loop-fold-header) > .col-header-inner {
 	gap: 4px;
 }
@@ -2788,26 +2788,42 @@
 	color: var(--snc-accent);
 }
 
-/* The ▸/▾ that folds an `if` chain into one column, or unfolds it: a fixed
-   box, the size of a column's ▾, so the label beside it doesn't shift as it
-   flips and there's something to hit. */
-.for-loop-visualizer .for-loop-chain-toggle {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	flex: none;
-	width: 18px;
-	height: 18px;
-	font-size: 16px;
-	line-height: 1;
-	cursor: pointer;
-	user-select: none;
-	color: var(--snc-accent);
-	border-radius: 3px;
+/* An elif's ⣿, to drag it to where it is tested, leads its header right
+   beside its condition rather than pushing it away, as a column's does. */
+.for-loop-visualizer th.for-loop-branch-header .col-drag-handle {
+	margin-right: 0;
 }
 
-.for-loop-visualizer .for-loop-chain-toggle:hover {
-	background: var(--snc-hover-bg);
+/* A new branch's box reads as its line will: the keyword, then the
+   condition being typed. */
+.for-loop-visualizer .for-loop-branch-box {
+	align-items: center;
+	gap: 4px;
+}
+
+.for-loop-visualizer .for-loop-box-keyword {
+	font-family: var(--snc-code-font-family);
+	color: var(--snc-accent);
+	flex: none;
+}
+
+.for-loop-visualizer .for-loop-branch-box > .col-input {
+	min-width: 120px;
+}
+
+/* A line holding a branch's place -- a new branch's `pass` -- is no value:
+   muted, so it reads as a slot to write into. */
+.for-loop-visualizer th.for-loop-placeholder .col-name {
+	color: var(--snc-text-muted);
+	font-style: italic;
+}
+
+/* A guard's continue or break, where it ended the iteration: a keyword, not
+   a value, so it reads as the placeholder's header does. */
+.for-loop-visualizer .for-loop-placeholder-cell {
+	font-family: var(--snc-code-font-family);
+	color: var(--snc-text-muted);
+	font-style: italic;
 }
 
 .list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th.for-loop-fold-header {
