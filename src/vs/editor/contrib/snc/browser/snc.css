@@ -2716,11 +2716,29 @@
 /* An `if` chain in a loop: its branches head the columns in them, a header
    row per level of nesting, tinted so they read as code rather than values. */
 .list-visualizer > .snc-tool-and-visualizer > .list-table-scroll > table > thead.col-header-rows > tr > th.for-loop-branch-header {
-	text-align: center;
+	text-align: left;
 	font-family: var(--snc-code-font-family);
 	font-weight: normal;
 	color: var(--snc-accent);
 	background: color-mix(in srgb, var(--snc-accent) 10%, var(--snc-table-header-bg));
+}
+
+/* A branch's header reads as its line does: the fold toggle, then the
+   condition, from the left -- not a toggle pinned left and the condition
+   floating mid-span, which a wide branch pulls apart. */
+.list-visualizer th:is(.for-loop-branch-header, .for-loop-fold-header) > .col-header-inner {
+	gap: 4px;
+}
+
+.list-visualizer th:is(.for-loop-branch-header, .for-loop-fold-header) .col-name {
+	flex-grow: 0;
+	text-align: left;
+}
+
+/* Grouped headers stack, so a column's name sits on the bottom header row,
+   right over its values, however many branch rows are above it. */
+.for-loop-visualizer thead.col-header-rows > tr > th {
+	vertical-align: bottom;
 }
 
 /* A condition's header just says `cond`: the branch header over it reads the
@@ -2751,13 +2769,12 @@
 	background: repeating-linear-gradient(135deg, transparent 0 4px, var(--snc-hover-bg) 4px 6px);
 }
 
-/* Whether a condition held. */
-.for-loop-visualizer td.for-loop-cond-true .snc-code {
-	color: var(--vscode-testing-iconPassed, #388a34);
-}
-
-.for-loop-visualizer td.for-loop-cond-false .snc-code {
-	color: var(--vscode-testing-iconFailed, #c72e0f);
+/* A condition that held is in the branch accent, so the way each iteration
+   went reads down the column; one that didn't is left as any value is. Not
+   pass/fail red and green -- a false condition isn't an error. The value is
+   whichever its visualizer drew, a repr or the generic one. */
+.for-loop-visualizer td.for-loop-cond-true :is(.snc-code, .snc-generic-visualizer) {
+	color: var(--snc-accent);
 }
 
 /* The (+) menu reads as the code: a branch's lines indented under its header,
@@ -2771,11 +2788,21 @@
 	color: var(--snc-accent);
 }
 
-/* The ▸/▾ that folds an `if` chain into one column, or unfolds it. */
+/* The ▸/▾ that folds an `if` chain into one column, or unfolds it: a fixed
+   box, the size of a column's ▾, so the label beside it doesn't shift as it
+   flips and there's something to hit. */
 .for-loop-visualizer .for-loop-chain-toggle {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 18px;
+	height: 18px;
+	font-size: 16px;
+	line-height: 1;
 	cursor: pointer;
+	user-select: none;
 	color: var(--snc-accent);
-	padding: 0 2px;
 	border-radius: 3px;
 }
 
