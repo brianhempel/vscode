@@ -28,7 +28,9 @@ visualizer sits on, so it goes out as InsertLines rather than a NewCode tuple.
 Leaving the box closes it unwritten: a table's column box writes on blur, but
 that is a view, and this is code. The (+) is a bar beside the table, as a
 table's is, except that a table only draws its own once it is focused, and this
-one draws it either way.
+one draws it either way. A body that is only a `pass` -- a loop as written new,
+or one whose last column was removed -- has nothing in it yet, so the first
+line written into it, by the box or anything else, goes over the pass.
 
 **A column is edited through its header.** Double-clicking a statement's
 header opens the same box over it, holding the statement; Enter writes what it
@@ -2434,6 +2436,64 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
 
 def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
            eval_in_scope=None) -> Tuple[Any, List[Any]]:
+    model, commands = _update(event, var_and_exp, model, value, get_visualizer, eval_in_scope)
+    return _over_lone_pass(value, model, commands)
+
+
+def _lone_pass(value: ForLoopTable) -> Optional[int]:
+    """The line of the `pass` that is all of the loop's body, on a line of
+    its own; None when the body has anything else in it."""
+    first, last = value.body_lines
+    at = first - value.line
+    if first != last or at <= 0 or at >= len(value.source):
+        return None
+    try:
+        body = ast.parse(value.source[at].strip()).body
+    except SyntaxError:
+        return None
+    return first if len(body) == 1 and isinstance(body[0], ast.Pass) else None
+
+
+def _over_lone_pass(value: ForLoopTable, model, commands: List[Any]) -> Tuple[Any, List[Any]]:
+    """What an update wrote, with the lines it put into a body that is only a
+    `pass` written over the pass instead -- it was only holding the body's
+    place. Those are the lines going in just before or after the pass at the
+    body's indent; a line after the loop lands there too, at the loop's.
+
+    The rewrite goes first: the editor applies each command to the file as
+    the one before left it, and a line going in above the loop would move the
+    pass. Whatever was waited for below the pass is a line higher for it."""
+    line = _lone_pass(value)
+    if line is None or len(value.body_indent) <= len(value.indent):
+        return (model, commands)
+    before, after, rest = [], [], []
+    for command in commands:
+        if not isinstance(command, InsertLines):
+            rest.append(command)
+            continue
+        kept = []
+        for at, text in command.lines:
+            if at in (line - 1, line) and text.startswith(value.body_indent):
+                (before if at < line else after).append(text)
+            else:
+                kept.append((at, text))
+        if kept:
+            rest.append(InsertLines(tuple(kept)))
+    if not before and not after:
+        return (model, commands)
+    text = '\n'.join(before + after)
+    # The pass's one line became the text's: what goes in below it moves down.
+    grown = text.count('\n')
+    rest = [InsertLines(tuple((at + grown if at >= line else at, t) for at, t in command.lines))
+            if isinstance(command, InsertLines) and grown else command for command in rest]
+    pending = model.get('pending_branch')
+    if pending and pending['line'] > line:
+        model = {**model, 'pending_branch': {**pending, 'line': pending['line'] - 1}}
+    return (model, [ReplaceLines(line, line, text), *rest])
+
+
+def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
+            eval_in_scope=None) -> Tuple[Any, List[Any]]:
     if not isinstance(event, dict) or not event.get('pythonEventStr'):
         return (model, [])
     event_json = event.get('eventJSON') or {}
