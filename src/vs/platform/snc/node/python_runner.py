@@ -77,6 +77,11 @@ _loop_selections: Dict[int, int] = {}
 # run (inside a loop) replays its pending events on the first logging and
 # carries the resulting model through the rest.
 _run_models: Dict[Tuple[int, int], Tuple[str, Any]] = {}
+# Events for a loop table's cells, by (line, site), held off the table logged
+# as the loop starts -- which has no values to send them with -- for the
+# finished one the same run logs at the end. A loop the run never finishes
+# leaves them unanswered, and the editor sends them again.
+_held_cell_events: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
 # id(frame) -> the table a running `for` loop is filling in, one row per
 # iteration (see loop_enter). Recorded before the pinned-iteration filter, so
 # the editor's table shows every iteration whichever one is inline.
@@ -655,11 +660,18 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         )
 
         carried = _run_models.get((line, site))
+        # The events this item answers: the editor's queue, when the model
+        # they were made against is the one in hand.
+        replay: List[Dict[str, Any]] = []
         if carried is not None and carried[0] == fingerprint:
             # Logged already this run (an earlier iteration): its events were
-            # replayed then, and the model they produced carries forward.
+            # replayed then, and the model they produced carries forward --
+            # all but a loop's cells', which the table logged as it started
+            # had no values to send them with (see _running_loop_table).
             model = carried[1]
             fingerprint_matches = False
+            if not _running_loop_table(value):
+                replay = _held_cell_events.pop((line, site), [])
         elif fingerprint_matches:
             model = cached_model
             if isinstance(model, dict):
@@ -676,7 +688,12 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         # Only replay events when the cached model was reused; if the type
         # changed the old events belong to a different visualizer.
         if fingerprint_matches and 'events' in item_model_and_events:
-            for ev in item_model_and_events['events']:
+            replay = item_model_and_events['events']
+            if _running_loop_table(value):
+                _held_cell_events[(line, site)] = [ev for ev in replay if _is_cell_event(ev)]
+                replay = [ev for ev in replay if not _is_cell_event(ev)]
+        if replay:
+            for ev in replay:
                 # Snapshotted before the call: `update` may mutate in place.
                 entry: Dict[str, Any] = {'event': ev, 'modelBefore': _model_snapshot(model)}
                 updates.append(entry)
@@ -776,6 +793,11 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     # cursor is outside it, so it has to know which loop the table is for.
     if isinstance(value, ForLoopTable):
         item["forLoopLine"] = value.line
+        # The one logged as the loop starts, which the finished one replaces
+        # a moment later: the editor holds off drawing it (see
+        # IVisualizationItem.forLoopRunning).
+        if value.running:
+            item["forLoopRunning"] = True
     # ...and it keeps the error that ended the run showing under the line that
     # raised it, even inside a loop shown as its table.
     if isinstance(value, UncaughtError):
@@ -783,6 +805,18 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
 
     # Stream this item immediately to stdout (bypassing redirected stdout)
     _emit({"type": "item", "item": item})
+
+def _running_loop_table(value: Any) -> bool:
+    """Whether `value` is the table a `for` logs as it starts (see
+    loop_enter), whose cells have no values yet."""
+    return isinstance(value, ForLoopTable) and value.running
+
+
+def _is_cell_event(event: Dict[str, Any]) -> bool:
+    """Whether an event is for a visualizer drawn in one of a widget's
+    cells rather than for the widget itself."""
+    return str(event.get('pythonEventStr', '')).startswith('ChildEvent(')
+
 
 def log_and_return(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_exp=None) -> Any:
     """
@@ -1040,11 +1074,12 @@ def runtime_globals() -> Dict[str, Any]:
 
 
 def _reset_run_state(loop_selections: Optional[Dict[str, int]] = None) -> None:
-    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models, _for_tables
+    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models, _for_tables, _held_cell_events
     execution_step = 0
     _ctx_stack = []
     _ctx_counts = {}
     _run_models = {}
+    _held_cell_events = {}
     _for_tables = {}
     _loop_selections = {}
     for k, v in (loop_selections or {}).items():

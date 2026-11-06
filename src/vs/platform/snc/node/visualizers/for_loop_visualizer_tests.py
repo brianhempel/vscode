@@ -17,6 +17,7 @@ import html
 import json
 import re
 import unittest
+from dataclasses import replace
 
 import visualizer_utils
 from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, CollectClick, ColumnClick,
@@ -31,7 +32,10 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
                                  TallySortSelect, SubcolExprInput, SubcolHideAll, SubcolShowAll, SubcolToggle,
                                  ActionButtonClick, PickToggle, RowActionClick, RowMenuToggle,
                                  ToolSelect)
-from visualizer_utils import NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
+from visualizer_utils import (CHILD_SOURCE_BINDER, NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable,
+                              InsertLines, Phantom, ReplaceLines)
+from string_visualizer import CopyToClipboard
+from table_visualizer import DeselectChildren
 
 
 def bound(name):
@@ -359,6 +363,47 @@ class TestAddColumn(unittest.TestCase):
         _, cmds = update(key('Enter'), None, adding('doubled = element * 2'), table())
         self.assertEqual(cmds, [])
 
+
+
+def words():
+    """`table()` over strings: `for element in ['a', 'b']`."""
+    return table(rows=(("'a'", '1'), ("'b'", '2')), values=(('a', 1), ('b', 2)))
+
+
+class TestAnExpressionAloneIsNamed(unittest.TestCase):
+    """A column shows the value a line leaves in a name, and an expression
+    alone leaves it nowhere: Enter writes it assigned to a fresh name."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_an_expression_is_written_assigned_to_result(self):
+        model, cmds = update(key('Enter'), None, adding(' element * 2 '), table())
+        self.assertEqual((cmds, model['pending_init']['label']),
+                         ([InsertLines(((3, '    result = element * 2'),))], 'result = element * 2'))
+
+    def test_the_name_steps_past_one_the_loop_already_has(self):
+        t = table(defined=frozenset({'count', 'element', 'result', 'result2'}))
+        _, cmds = update(key('Enter'), None, adding('len(str(element))'), t)
+        self.assertEqual(cmds, [InsertLines(((3, '    result3 = len(str(element))'),))])
+
+    def test_a_method_called_on_a_name_holding_a_string_is_named(self):
+        # A string can't change, so the name after the call is the name before it.
+        _, cmds = update(key('Enter'), None, adding('element.upper()'), words())
+        self.assertEqual(cmds, [InsertLines(((3, '    result = element.upper()'),))])
+
+    def test_what_is_left_as_written(self):
+        # A method called on a name that can change is a column already --
+        # the name after the call -- and a print is there for what it prints.
+        t = table(values=(([1], 1), ([2], 2)))
+        for line in ('element.append(1)', 'arr2.append(element)', 'print(element)', 'total = element', '...'):
+            with self.subTest(line=line):
+                _, cmds = update(key('Enter'), None, adding(line), t)
+                self.assertEqual(cmds, [InsertLines(((3, f'    {line}'),))])
+
+    def test_editing_a_column_into_an_expression_names_it(self):
+        _, cmds = update(key('Enter'), None, editing(1, 'count * 2'), table())
+        self.assertEqual(cmds, [ReplaceLines(3, 3, '    result = count * 2')])
 
 
 def menu_of(html_text):
@@ -1123,12 +1168,127 @@ class TestCellsAreVisualized(unittest.TestCase):
         self.assertEqual(seen[0], (['element'], False))
         self.assertEqual(list(model['children']), ['0\x00element'])
 
+    def test_an_event_for_a_cell_the_table_lacks_goes_nowhere(self):
+        # A row that didn't run, a column since taken away, or a table that
+        # has no values yet (the runner holds those events for the finished
+        # one): nothing to send it to.
+        model = {}
+        for t, key in ((table(), '7\x00count += 1'), (table(), '0\x00gone'),
+                       (table(rows=(), values=(), running=True), '0\x00element')):
+            for type_ in ('mousedown', 'keydown'):
+                model, cmds = update(child(key, 'Bump()', type_), None, model, t, cells_of)
+                self.assertEqual(cmds, [])
+        self.assertEqual(model.get('children') or {}, {})
+
+
     def test_only_the_page_drawn_is_visualized(self):
         t = many(60)
         visualize(table(**{**{f: getattr(t, f) for f in ('columns', 'rows', 'init', 'defined', 'body_lines',
                                                           'line', 'end_line')},
                            'values': tuple((i, 2 * i) for i in range(60))}), {}, cells_of)
         self.assertEqual(len(FakeCell.drawn), 53 * 2)
+
+
+class TestCellCode(unittest.TestCase):
+    """A cell's value is handed to its visualizer bound to a name, as a
+    table's is; what one of its action buttons writes becomes a line in the
+    loop's body, beside the statement that made the value, reading the name
+    the column shows."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def wrote(self, key, inner, answer, t=None):
+        """(what the cell was told its value is called, the commands the
+        loop sent), for a cell answering the event `inner` with `answer`."""
+        told = []
+
+        class Acting(FakeCell):
+            @staticmethod
+            def update(event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                told.append(var_and_exp)
+                return (model, answer)
+
+        t = t or table()
+        model, _ = update(child(key, 'PinFocus()'), None, {}, t, lambda v: Acting)
+        _, cmds = update(child(key, inner, 'mousedown'), None, model, t, lambda v: Acting)
+        return told, cmds
+
+    FINDALL = ('_snc_cell__strings', "re.findall(r'a', _snc_cell_)", ('import re',))
+    PRESS = "ActionButtonClick(action='match_strings', copy=False)"
+
+    def test_a_button_writes_its_code_beside_the_column_against_the_name_it_shows(self):
+        self.assertEqual(
+            [self.wrote(key, self.PRESS, [Phantom(self.FINDALL)]) for key in ('1\x00count += 1', '0\x00element')],
+            [([(None, CHILD_SOURCE_BINDER)],
+              [AddImports(('import re',)), InsertLines(((3, "    count_strings = re.findall(r'a', count)"),))]),
+             ([(None, CHILD_SOURCE_BINDER)],
+              [AddImports(('import re',)), InsertLines(((2, "    element_strings = re.findall(r'a', element)"),))])])
+
+    def test_the_name_written_steps_past_one_the_loop_has_and_a_binder_capturing_the_column_is_renamed(self):
+        t = table(defined=frozenset({'count', 'element', 'count_strings'}))
+        code = ('_snc_cell__indices', '[element.start() for element in re.finditer(r"a", _snc_cell_)]')
+        _, cmds = self.wrote('0\x00element', self.PRESS, [code], t)
+        self.assertEqual(len(cmds), 1)
+        name, _, written = cmds[0].lines[0][1].strip().partition(' = ')
+        self.assertEqual((name, written.endswith('re.finditer(r"a", element)]'), 'for element in' in written),
+                         ('element_indices', True, False))
+        _, cmds = self.wrote('1\x00count += 1', self.PRESS, [Phantom(self.FINDALL)], t)
+        self.assertEqual(cmds[1].lines[0][1].split(' = ')[0].strip(), 'count_strings2')
+
+    def test_a_preview_from_anything_but_a_button_writes_nothing(self):
+        # A drag over the string previews what it would write, which a table
+        # draws as a column to commit; a loop has no such column to draw.
+        self.assertEqual(self.wrote('1\x00count += 1', 'MouseUp(2)', [Phantom(self.FINDALL)])[1], [])
+
+    def test_real_string_buttons_write_expressions_and_loop_blocks(self):
+        import string_visualizer
+        t = table(values=(('apple', 1), ('pear', 2)))
+        key = '0\x00element'
+        for action in ('match_strings', 'loop', 'loop_match_strings'):
+            with self.subTest(action=action):
+                model = {'focused_child': key}
+                model, _ = update(child(key, "SearchBoxInput(value=\"r'a'\")", 'input'),
+                                  None, model, t, lambda v: string_visualizer)
+                _, commands = update(child(key, f"ActionButtonClick(action={action!r}, copy=False)", 'mousedown'),
+                                     None, model, t, lambda v: string_visualizer)
+                lines = [text for c in commands if isinstance(c, InsertLines) for _, text in c.lines]
+                self.assertTrue(lines)
+                source = 'for element in ["apple"]:\n    pass\n' + '\n'.join(lines)
+                compile(source, '<test>', 'exec')
+
+    def test_array_inside_loop_cell_can_write_another_loop(self):
+        import table_visualizer
+        t = table(values=((['apple', 'pear'], 1), (['peach'], 2)))
+        key = '0\x00element'
+        for action in ('loop_no_idx', 'loop_orig_idx', 'loop_new_idx'):
+            with self.subTest(action=action):
+                model = {'focused_child': key}
+                _, commands = update(child(key, f"ActionButtonClick(action={action!r}, copy=False)", 'mousedown'),
+                                     None, model, t, lambda v: table_visualizer)
+                lines = [text for c in commands if isinstance(c, InsertLines) for _, text in c.lines]
+                self.assertTrue(lines)
+                self.assertIn('element', lines[0])
+                compile('for element in [["apple"]]:\n    pass\n' + '\n'.join(lines), '<test>', 'exec')
+
+    def test_a_copy_names_the_column(self):
+        self.assertEqual(self.wrote('1\x00count += 1', self.PRESS,
+                                    [CopyToClipboard(text="re.findall(r'a', _snc_cell_)")])[1],
+                         [CopyToClipboard(text="re.findall(r'a', count)")])
+
+    def test_a_cell_with_no_name_to_read_is_told_none_and_writes_nothing(self):
+        # A condition's cell is its truth, not a name the body can read.
+        t = table(columns=(bound('element'), statement('x > 1', 3, cond=True, path=((3, 0, 'if x > 1', 3, 4),))),
+                  rows=(('1', 'False'), ('2', 'True')), values=((1, False), (2, True)))
+        self.assertEqual(self.wrote('1\x00x > 1', self.PRESS, [Phantom(self.FINDALL)], t), ([None], []))
+
+    def test_a_press_off_the_cells_puts_the_focused_one_away(self):
+        container = r'<div class="visualizer-container[^>]*>'
+        held = [html.escape(repr(DeselectChildren())) in re.search(container, visualize(table(), m, cells_of)).group(0)
+                for m in ({}, {'focused_child': '0\x00element'})]
+        self.assertEqual(held, [False, True])
+        model, _ = update(click(DeselectChildren()), None, {'focused_child': '0\x00element'}, table(), cells_of)
+        self.assertIsNone(model['focused_child'])
 
 
 class TestSubcolumns(unittest.TestCase):
@@ -1165,6 +1325,20 @@ class TestSubcolumns(unittest.TestCase):
         model, _ = update(key('Enter'), None, model, people(), cells_of)
         self.assertEqual(model['subcols'], {'person': ["$['age'] * 2"]})
         self.assertEqual([r[1] for r in iteration_rows(visualize(people(), model))], ['6', '10'])
+
+    def test_show_all_and_hide_all_on_the_running_table_wait_for_its_values(self):
+        # The runner answers events with the table logged as the loop starts,
+        # which has no values to find the fields in yet.
+        running = replace(people(), rows=(), values=(), running=True)
+        model, _ = update(click(SubcolShowAll(label='person')), None, {'subcols': {'person': ['$.mine']}},
+                          running, cells_of)
+        visualize(running, model, cells_of)
+        visualize(people(), model, cells_of)
+        shown = model['subcols']
+        model, _ = update(click(SubcolHideAll(label='person')), None, model, running, cells_of)
+        visualize(people(), model, cells_of)
+        self.assertEqual((shown, model['subcols']),
+                         ({'person': ['$.mine', "$['name']", "$['age']"]}, {'person': ['$.mine']}))
 
     def test_a_field_that_does_not_read_shows_its_error(self):
         out = visualize(people(), {'subcols': {'person': ["$['nope']"]}})

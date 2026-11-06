@@ -2422,6 +2422,13 @@ class TestForLoopTable(unittest.TestCase):
         self.assertEqual([(it['line'], it['path']) for it in items][-2:], [(6, []), (8, [])])
         self.assertIn('for-loop-visualizer', items[-2]['html'])
 
+    def test_the_table_logged_as_the_loop_starts_says_it_is_still_running(self):
+        # So the editor can keep showing the finished one it has, rather than
+        # flash the empty one up on every run.
+        msgs, _ = self._run(self.SRC)
+        self.assertEqual([m['item'].get('forLoopRunning') for m in msgs.all()
+                          if m.get('type') == 'item' and 'forLoopLine' in m['item']], [True, None])
+
     def test_the_example_records_a_row_per_iteration(self):
         from visualizer_utils import ForLoopColumn, ForLoopTable
         _, tables = self._run(self.SRC)
@@ -2485,6 +2492,68 @@ class TestForLoopTable(unittest.TestCase):
         tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
         self.assertEqual([(t['handledEventIds'], len(t.get('commands', []))) for t in tables],
                          [([1], 1), ([], 0)])
+
+    def test_an_event_on_a_cell_waits_for_the_finished_table(self):
+        # The table logged as the loop starts has no values for a cell's
+        # visualizer to be handed; the one at the end does, and answers it --
+        # with what it writes riding on that item.
+        from visualizer_utils import ChildEvent, ForLoopTable
+        model = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                 '_source_expr_sig': None}
+        cell = "4\x00count += 1"
+        m_and_e = json.dumps([{'line': 6, 'visIndex': 1, 'model': model, 'events': [
+            {'id': 1, 'pythonEventStr': repr(ChildEvent(cell, 'PinFocus()')), 'eventJSON': {'type': 'mousedown'}},
+            {'id': 2, 'pythonEventStr': 'ColumnKeyDown()', 'eventJSON': {'key': 'Escape'}}]}])
+        import_code, body_code = split_leading_imports(self.SRC)
+        with capture_stream_messages() as msgs:
+            python_runner._execute_run(body_code, m_and_e, 'run-1', import_code=import_code)
+        tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        self.assertEqual([(t['handledEventIds'], t['model'].get('focused_child'), 'during visualization' in t['html'])
+                          for t in tables], [([2], None, False), ([1], cell, False)])
+
+    def test_string_cell_action_commands_reach_the_finished_item(self):
+        from visualizer_utils import ChildEvent, ForLoopTable
+        source = 'for word in ["apple"]:\n    rest = word\n'
+        model = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                 '_source_expr_sig': None}
+        key = '0\x00rest = word'
+        events = ["PinFocus()", "SearchBoxInput(value=\"r'a'\")",
+                  "ActionButtonClick(action='match_strings', copy=False)"]
+        payload = json.dumps([{'line': 2, 'visIndex': 1, 'model': model, 'events': [
+            {'id': i, 'pythonEventStr': repr(ChildEvent(key, event)), 'eventJSON': {'type': 'mousedown'}}
+            for i, event in enumerate(events)]}])
+        import_code, body_code = split_leading_imports(source)
+        with capture_stream_messages() as msgs:
+            python_runner._execute_run(body_code, payload, 'run-1', import_code=import_code)
+        tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1, 2]])
+        commands = tables[-1].get('commands', [])
+        self.assertTrue(any('re.findall' in edit.get('text', '') and 'rest' in edit['text']
+                            for c in commands for edit in c.get('edits', [])))
+        python_runner._held_cell_events[(2, 0)] = [{'id': 99}]
+        python_runner._reset_run_state()
+        self.assertEqual(python_runner._held_cell_events, {})
+
+    def test_array_cell_loop_reaches_the_editor_as_an_insert(self):
+        from visualizer_utils import ChildEvent, ForLoopTable
+        source = 'for word in ["apple"]:\n    rest_strings = list(word)\n'
+        model = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                 '_source_expr_sig': None}
+        key = '0\x00rest_strings = list(word)'
+        events = ['PinFocus()', "ActionButtonClick(action='loop_no_idx', copy=False)"]
+        payload = json.dumps([{'line': 2, 'visIndex': 1, 'model': model, 'events': [
+            {'id': i, 'pythonEventStr': repr(ChildEvent(key, event)), 'eventJSON': {'type': 'mousedown'}}
+            for i, event in enumerate(events)]}])
+        imports, body = split_leading_imports(source)
+        with capture_stream_messages() as msgs:
+            python_runner._execute_run(body, payload, 'run-1', import_code=imports)
+        tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1]])
+        edits = [e for c in tables[-1].get('commands', []) for e in c.get('edits', [])]
+        self.assertTrue(edits)
+        self.assertEqual(edits[0]['afterLine'], 2)
+        self.assertIn('rest_strings', edits[0]['text'])
+        compile(source + edits[0]['text'] + '\n', '<test>', 'exec')
 
     def test_the_rows_ignore_the_pinned_iteration(self):
         msgs, tables = self._run(self.SRC, {'5': 2})

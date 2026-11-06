@@ -48,6 +48,13 @@ export interface IVisualizationItem {
 	 */
 	forLoopLine?: number;
 	/**
+	 * Set on the loop table logged as the loop starts, which has no values
+	 * yet: the finished one replaces it a moment later. Drawn, it would flash
+	 * every focused cell back to its repr on each run, so the editor keeps
+	 * showing the table it had unless the loop takes a while to finish.
+	 */
+	forLoopRunning?: boolean;
+	/**
 	 * Set on the error that ended the run. It stays under the line that raised
 	 * it even while that line's loop shows as its table: the table says where
 	 * the loop got to, this says why it stopped there.

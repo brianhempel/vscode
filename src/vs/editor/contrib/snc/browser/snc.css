@@ -555,6 +555,9 @@
 
 	top: 100%;
 	background: var(--snc-bg);
+	/* Light like .snc-base-visualizer, and hoisted out of the widget when open,
+	   so it can't count on inheriting dark text from anything. */
+	color: var(--snc-text-color);
 	border: 1px solid var(--snc-border-color);
 	border-radius: 4px;
 	z-index: 100;
@@ -613,9 +616,12 @@
   }
 }
 
+/* The base surface is light whatever the editor's theme, so it brings its own
+   ink: inheriting the editor's would put a dark theme's pale grey on cream. */
 .snc-base-visualizer {
 	border: 1px solid var(--snc-border-color);
 	background: var(--snc-data-bg);
+	color: var(--snc-text-color);
   border-radius: 4px;
   width: fit-content;
 }
@@ -1334,9 +1340,11 @@
 	vertical-align: top;
 }
 
-.list-table-cell{
-	overflow: hidden;
-
+/* No overflow clip: a focused cell's visualizer draws past the cell -- a
+   string's tool toolbar to its left, its selection handles and segment labels
+   above and below the characters. A column dragged to a width still clips,
+   inline (_width_style in for_loop_visualizer.py), as a table's does. */
+.list-table-cell {
 	& > span {
 		display: flex;
 		width: fit-content;

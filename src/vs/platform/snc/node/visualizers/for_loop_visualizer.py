@@ -25,6 +25,10 @@ body rather than a table's view of its rows, so what is typed is a statement --
 `doubled = element * 2` -- and Enter writes it at the end of the body, where the
 next run draws it as the last column. That code lands away from the line this
 visualizer sits on, so it goes out as InsertLines rather than a NewCode tuple.
+An expression alone -- `element * 2`, `word.upper()` -- leaves its value in no
+name for a column to show, so Enter writes it as `result = ...` (`result2`, ...
+when the loop has one); a method called on a name that can change
+(`arr2.append(x)`) and a `print` are written as typed.
 Leaving the box closes it unwritten: a table's column box writes on blur, but
 that is a view, and this is code. The (+) is a bar beside the table, as a
 table's is, except that a table only draws its own once it is focused, and this
@@ -188,17 +192,19 @@ from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
 from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, COMPUTE_AGGS, CONVERT_TYPES, NO_THING,
+                               DeselectChildren,
                                TALLY_COUNT_EXTREME_OPS, TALLY_COUNT_OPS, TALLY_SORTS, _TALLY_NOTES,
                                _TOOL_TOOLBAR_TOOLS, _agg_answer_html,
                                _agg_value, _column_search_value_label, _get_all_possible_columns, _in_tally_order,
                                _tally, _tally_count_op,
                                _tally_count_op_label, _tally_extreme, _tally_lists, _tally_rows, _tally_selection,
                                _tally_literal, _tally_shown, _tally_sort, _tally_sort_label)
-from visualizer_utils import (EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, AddImports, ChildEvent, ForLoopColumn,
-                              ForLoopTable, InsertLines, ReplaceLines, aggregate_handled_keys,
+from visualizer_utils import (CHILD_SOURCE_BINDER, EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, AddImports, ChildEvent,
+                              ForLoopColumn, ForLoopTable, InsertLines, Phantom, ReplaceLines, aggregate_handled_keys,
                               call_with_supported_kwargs, child_nesting_kwargs, error_html, eval_dollar_expr,
-                              is_live_only, py_exp_attrs, render_tool_toolbar,
-                              route_child_event, truncate_repr, wrap_child_prefix, wrap_child_suffix)
+                              is_live_only, is_new_code, nest_generated_expr, py_exp_attrs,
+                              render_tool_toolbar, route_child_event, truncate_repr, with_pass_body, opens_block, wrap_child_prefix,
+                              wrap_child_suffix)
 
 
 @dataclass(frozen=True)
@@ -1269,6 +1275,111 @@ def _child_value(value: ForLoopTable, key: str, eval_in_scope=None):
     return _cell_value(value, int(i), col, sub or None, eval_in_scope)
 
 
+def _has_cell(value: ForLoopTable, key: str) -> bool:
+    """Whether the table has a value under a cell's child key: a row that
+    ran, of a column it still has, that the iteration left a value in."""
+    i, leaf = key.split(CELL_KEY_SEP, 1)
+    label = leaf.partition(SUBCOL_SEP)[0]
+    col = next((n for n, column in enumerate(value.columns) if column.label == label), None)
+    row = value.values[int(i)] if i.isdigit() and int(i) < len(value.values) else ()
+    return col is not None and col < len(row) and row[col] is not NO_VALUE
+
+
+def _cell_name(value: ForLoopTable, key: str) -> Optional[str]:
+    """The name a cell's value goes by in the loop's body: its column's
+    subject, which the body can read after the statement that set it. None
+    for a condition, whose cell is its truth, and for a sub-column's field."""
+    label, _, sub = key.split(CELL_KEY_SEP, 1)[1].partition(SUBCOL_SEP)
+    column = next((c for c in value.columns if c.label == label), None)
+    if column is None or sub or column.cond or column.placeholder or not column.subject:
+        return None
+    return column.subject
+
+
+# What a press on one of a cell's action buttons is called, however deep the
+# cell's own visualizer nests it.
+ACTION_PRESS = 'ActionButtonClick('
+
+
+def _cell_commands(value: ForLoopTable, msg: ChildEvent, name: Optional[str], commands: List[Any]) -> List[Any]:
+    """What a cell's visualizer asked for, as the loop writes it. Code is a
+    line beside the statement that made the value, reading the column's name
+    -- as the line box writes one beside a column -- with its imports. A
+    preview (Phantom), which a table draws as a column to commit, is only
+    written when a button made it: a drag previews on every move, and the loop
+    has no column to draw one in. A cell with no name writes nothing."""
+    inner = msg.py_ev_str
+    while inner.startswith('ChildEvent('):
+        inner = eval(inner).py_ev_str
+    pressed = inner.startswith(ACTION_PRESS)
+    out: List[Any] = []
+    for command in commands:
+        if isinstance(command, Phantom):
+            if not pressed:
+                continue
+            command = command.new_code
+        if not is_new_code(command):
+            # Text for the clipboard: pasted into the body, it reads the name.
+            text = getattr(command, 'text', None)
+            if name and isinstance(text, str) and CHILD_SOURCE_BINDER in text:
+                command = replace(command, text=_against(text, name))
+            out.append(command)
+            continue
+        if name is None:
+            continue
+        suggested, code, imports = command[0], command[1], command[2] if len(command) > 2 else ()
+        code = _against(code, name)
+        base = (suggested or '').replace(CHILD_SOURCE_BINDER, name.rpartition('.')[2])
+        statement = with_pass_body(code) if opens_block(code) else f'{_unique_name(value, base if base.isidentifier() else "result")} = {code}'
+        if imports:
+            out.append(AddImports(tuple(imports)))
+        out.append(_written_beside(value, _column_named(value, msg.child_key), statement))
+    return out
+
+
+def _against(code: str, name: str) -> str:
+    """A cell's code, bound to a name for it, written against the column's
+    name instead -- without the parentheses the binder is swapped for, which
+    are for an expression and which a name needs none of."""
+    return nest_generated_expr(code, name).replace(f'({name})', name)
+
+
+def _column_named(value: ForLoopTable, key: str) -> ForLoopColumn:
+    label = key.split(CELL_KEY_SEP, 1)[1].partition(SUBCOL_SEP)[0]
+    return next(c for c in value.columns if c.label == label)
+
+
+def _written_beside(value: ForLoopTable, column: ForLoopColumn, statement: str):
+    """`statement` written just after `column`'s, in its branch -- one written
+    on its `if`'s line opens out to take it, as the line box's does."""
+    one = _one_liner(value, column)
+    if one is not None:
+        return _opened_out(value, one, [one[3], *statement.split("\n")])
+    return InsertLines(((_beside(value, column, True), '\n'.join(_indent(value, column) + line for line in statement.split('\n'))),))
+
+
+def _show_or_hide_all(model, value: ForLoopTable, label: str, show: bool, get_visualizer):
+    """The model with every field the column labeled `label`'s values have
+    spread into sub-columns (`show`) or none of them, the user's own kept."""
+    col = next((i for i, c in enumerate(value.columns) if c.label == label), None)
+    if col is None:
+        return model
+    subs = dict(model.get('subcols') or {})
+    candidates = _subcol_candidates(value, col, get_visualizer)
+    kept = [expr for expr in subs.get(label) or [] if expr not in candidates]
+    subs[label] = (kept + candidates) if show else kept
+    return {**model, 'subcols': subs}
+
+
+def _answer_held_subcol_all(value: ForLoopTable, model, get_visualizer) -> None:
+    """Apply the Show all and Hide all the running table kept (see _update),
+    now that there are values to find the fields in."""
+    if value.running:
+        return
+    for label, show in model.pop('held_subcol_all', None) or []:
+        model['subcols'] = _show_or_hide_all(model, value, label, show, get_visualizer).get('subcols')
+
+
 def _subcol_candidates(value: ForLoopTable, col: int, get_visualizer) -> List[str]:
     """The fields a column's values have, as a table's Subcolumns finds them."""
     values = _column_values(value, col)
@@ -1864,6 +1975,40 @@ def _unique_name(value: ForLoopTable, base: str) -> str:
     return name
 
 
+# What a value of can't be changed by a method called on it.
+IMMUTABLE_TYPES = (str, bytes, int, float, complex, bool, tuple, frozenset, range, type(None))
+
+
+def _named(value: ForLoopTable, statement: str) -> str:
+    """`statement`, or `result = statement` when it is an expression alone: a
+    column shows the value a line leaves in a name, and an expression alone
+    leaves it nowhere. A method called on a name is a column already -- the
+    name after the call -- unless what the name holds can't change, as a
+    string can't; and a print is there for what it prints."""
+    body = ast.parse(statement).body
+    if len(body) != 1 or not isinstance(body[0], ast.Expr):
+        return statement
+    node = body[0].value
+    if isinstance(node, ast.Constant) and node.value is Ellipsis:
+        return statement
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == 'print':
+            return statement
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+                and not _holds_immutable(value, func.value.id):
+            return statement
+    return f'{_unique_name(value, "result")} = {statement}'
+
+
+def _holds_immutable(value: ForLoopTable, name: str) -> bool:
+    """Whether every value the loop saw in `name` can't be changed in place
+    -- False when it saw none, as for a name set outside it."""
+    cols = [i for i, column in enumerate(value.columns) if column.subject == name]
+    seen = [row[i] for row in value.values for i in cols if i < len(row) and row[i] is not NO_VALUE]
+    return bool(seen) and all(isinstance(cell, IMMUTABLE_TYPES) for cell in seen)
+
+
 def _beside(value: ForLoopTable, column: ForLoopColumn, after: bool) -> int:
     """The line a new statement goes after to be drawn beside `column`: a
     bound name's right is the top of the body, and a condition's the top of
@@ -2352,7 +2497,12 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     if not live_only:
         _open_pending_init(value, model)
         _open_pending_branch(value, model)
+    _answer_held_subcol_all(value, model, get_visualizer)
     key_handler = '' if live_only else f' snc-key-down="{html.escape(repr(ColumnKeyDown()))}"'
+    if model.get('focused_child') and not live_only:
+        # A press anywhere a cell's visualizer, a header or a menu doesn't
+        # take puts the focused cell away, as a table's does.
+        key_handler += f' snc-mouse-down="{html.escape(repr(DeselectChildren()))}"'
     small_class = ' small' if small else ''
     max_height = SMALL_MAX_HEIGHT if small else EXPANDED_PANE_MAX_HEIGHT
     pick = model.get('tool') == 'pick' and not small and not live_only
@@ -2504,11 +2654,39 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         return (model, [])
     model = dict(model or {})
     if isinstance(msg, ChildEvent):
+        # The runner holds a cell's events off the table logged as the loop
+        # starts, which has no values, for the finished one; a cell this table
+        # doesn't have -- the loop changed under the event -- is no one's.
+        if not _has_cell(value, msg.child_key):
+            return (model, [])
         # A cell's own visualizer: the first press focuses it, as a table's.
-        return route_child_event(event, model, value, lambda key: _child_value(value, key, eval_in_scope),
-                                 get_visualizer, None, eval_in_scope)
+        # Its value is bound to a name for it, as a table's cells are, so the
+        # code it makes comes back to be written against the column's.
+        name = _cell_name(value, msg.child_key)
+        # Block actions cannot be preview columns. Give the child a named
+        # source for that press so it emits the block, which we place in the
+        # loop body ourselves, then discard its link to that generated line.
+        inner = msg.py_ev_str
+        block_press = any(inner.startswith(f"ActionButtonClick(action={action!r},")
+                          for action in ('loop', 'loop_match_strings', 'loop_no_idx',
+                                         'loop_orig_idx', 'loop_new_idx', 'if_any', 'if_all'))
+        source = name if block_press else CHILD_SOURCE_BINDER
+        if block_press:
+            child_model = (model.get('children') or {}).get(msg.child_key)
+            if isinstance(child_model, dict):
+                child_model['linked_action'] = None
+        model, commands = route_child_event(event, model, value, lambda key: _child_value(value, key, eval_in_scope),
+                                            get_visualizer, (None, source) if name else None,
+                                            eval_in_scope)
+        if block_press:
+            child_model = (model.get('children') or {}).get(msg.child_key)
+            if isinstance(child_model, dict):
+                child_model['linked_action'] = None
+        return (model, _cell_commands(value, msg, name, commands))
     double_click = event_json.get('detail', 1) >= 2
     match msg:
+        case DeselectChildren():
+            return ({**model, 'focused_child': None}, [])
         case LoadMoreRows():
             return ({**model, 'shown_rows': model.get('shown_rows', ROWS_PER_PAGE) + ROWS_PER_PAGE}, [])
         case ColumnResize(width=width, label=label):
@@ -2567,13 +2745,12 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             subs[label] = kept
             return ({**model, 'subcols': subs}, [])
         case SubcolShowAll(label=label) | SubcolHideAll(label=label):
-            col = next((i for i, c in enumerate(value.columns) if c.label == label), None)
-            if col is not None:
-                subs = dict(model.get('subcols') or {})
-                candidates = _subcol_candidates(value, col, get_visualizer)
-                kept = [expr for expr in subs.get(label) or [] if expr not in candidates]
-                subs[label] = (kept + candidates) if isinstance(msg, SubcolShowAll) else kept
-                return ({**model, 'subcols': subs}, [])
+            show = isinstance(msg, SubcolShowAll)
+            if value.running:
+                # The fields are found in the values, which the table logged
+                # as the loop starts hasn't got: kept for the finished one.
+                return ({**model, 'held_subcol_all': [*(model.get('held_subcol_all') or []), [label, show]]}, [])
+            return (_show_or_hide_all(model, value, label, show, get_visualizer), [])
         case SubcolExprInput(label=label, value=text):
             return ({**model, 'subcol_free': {'label': label, 'text': text}}, [])
         case ColumnKeyDown() if not _box_open(model) and (model.get('subcol_free') or {}).get('text'):
@@ -2835,6 +3012,7 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     col = model.get('editing_column')
     if not statement or is_live_only():
         return (_closed(model), [])
+    statement = _named(value, statement)
     if col is None:
         after, indent = _body_end(value), value.body_indent
         insert_at = model.get('insert_at')

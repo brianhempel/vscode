@@ -1,5 +1,6 @@
 import { registerEditorContribution, EditorContributionInstantiation, EditorAction, registerEditorAction, ServicesAccessor } from '../../../browser/editorExtensions.js';
-import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+import { disposableTimeout } from '../../../../base/common/async.js';
 import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js';
 import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference, IEditorMouseEvent, MouseTargetType } from '../../../browser/editorBrowser.js';
 import { Codicon } from '../../../../base/common/codicons.js';
@@ -3777,6 +3778,14 @@ function stripConfigComment(lineContent: string): string {
 	return startCol ? lineContent.slice(0, startCol - 1).trimEnd() : lineContent;
 }
 
+/**
+ * How long a loop's running table waits for the finished one before it is
+ * drawn anyway (see SNCController.htmlToShow). A run of a loop the user is
+ * working with takes milliseconds; one that takes longer than this is worth
+ * seeing as it stands.
+ */
+const RUNNING_LOOP_TABLE_DELAY_MS = 300;
+
 /** Identifies a widget within a run: its line and its site on that line. */
 function widgetKey(line: number, visIndex: number): string {
 	return `${line}:${visIndex}`;
@@ -4360,6 +4369,12 @@ export class SNCController extends Disposable implements IEditorContribution {
 	private syntaxErrorActive = false;
 	private streamSubscription: { dispose(): void } | null = null;
 	private streamUpdateTimer: any = null;
+	/**
+	 * A loop's running table held back from its widget while the finished table
+	 * it would replace is still showing (see htmlToShow): the timeout that
+	 * draws it anyway, keyed by widget.
+	 */
+	private readonly heldRunningLoopTables = this._register(new DisposableMap<string, IDisposable>());
 	private cursorUpdateTimer: any = null;
 
 	// Focus state for small-mode handling. Default focused line is the cursor
@@ -4778,6 +4793,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// checkpoint-2-served run, which is what an edit costs anyway.
 		this.lastInteractedWidget = null;
 
+		// A loop pinned as its table stays pinned through an edit that grows or
+		// shrinks it -- above all the line its own table just wrote.
+		this.adjustFocusedLoopForContentChange(e);
+
 		// Immediately adjust visualization items for line changes (deletions/insertions)
 		// so stale visualizers don't linger on deleted or shifted lines.
 		this.adjustVisualizationItemsForContentChange(e);
@@ -5111,6 +5130,77 @@ export class SNCController extends Disposable implements IEditorContribution {
 		if (this.isPythonModel()) {
 			this.runProgram(this.getProgram(), undefined, 'expand');
 		}
+	}
+
+	/**
+	 * Carry a pinned loop table through an edit. Its table is logged on the
+	 * loop's last line, so a line written at the end of its body -- what the
+	 * table's own (+) and line box do -- moves the table down a line while the
+	 * pin stays where it was: inside the loop, which opens it into its body and
+	 * the table vanishes. So the header follows lines added or removed above
+	 * it, and the pin moves to wherever the loop now ends. A header the edit
+	 * took away, or turned into something other than a loop, drops the pin.
+	 */
+	private adjustFocusedLoopForContentChange(e: IModelContentChangedEvent): void {
+		const model = this.editor.getModel();
+		if (this.explicitFocusedLoop === null || !model) {
+			return;
+		}
+		let header: number | null = this.explicitFocusedLoop;
+		// Bottom-up, as adjustVisualizationItemsForContentChange does: each
+		// change's range is in the line numbers from before the ones above it.
+		for (const change of [...e.changes].sort((a, b) => b.range.startLineNumber - a.range.startLineNumber)) {
+			const { startLineNumber, endLineNumber, startColumn, endColumn } = change.range;
+			const lineDelta = (change.text.match(/\n/g) || []).length - (endLineNumber - startLineNumber);
+			if (header === null || lineDelta === 0) {
+				continue;
+			}
+			const insertedAtStartOfHeader = startLineNumber === header && endLineNumber === header
+				&& startColumn === 1 && endColumn === 1;
+			if (endLineNumber < header || insertedAtStartOfHeader) {
+				header += lineDelta;
+			} else if (startLineNumber < header) {
+				header = null; // the header was inside what the change replaced
+			}
+		}
+		if (header === null || header < 1 || header > model.getLineCount()
+			|| !/^(async\s+)?for\b/.test(model.getLineContent(header).trimStart())) {
+			this.explicitFocusedLine = null;
+			this.explicitFocusedLoop = null;
+			return;
+		}
+		this.explicitFocusedLoop = header;
+		this.explicitFocusedLine = this.loopEndLine(header);
+	}
+
+	/**
+	 * The line a loop's table is logged on: the last statement of the loop
+	 * whose header is on `header`, as Python's `end_lineno` reads it -- an
+	 * `else:` clause included, comments and blank lines after it not.
+	 */
+	private loopEndLine(header: number): number {
+		const model = this.editor.getModel();
+		if (!model) {
+			return header;
+		}
+		const headerIndent = model.getLineFirstNonWhitespaceColumn(header) - 1;
+		let last = header;
+		for (let l = header + 1; l <= model.getLineCount(); l++) {
+			const firstNonWhitespace = model.getLineFirstNonWhitespaceColumn(l);
+			if (firstNonWhitespace === 0) {
+				continue; // blank
+			}
+			const text = model.getLineContent(l).slice(firstNonWhitespace - 1);
+			if (text.startsWith('#')) {
+				continue; // a comment, at whatever depth, is no statement
+			}
+			const indent = firstNonWhitespace - 1;
+			if (indent < headerIndent || (indent === headerIndent && !/^else\s*:/.test(text))) {
+				break;
+			}
+			last = l;
+		}
+		return last;
 	}
 
 	/** Find the link tracked for a specific visualizer, if any. */
@@ -5775,6 +5865,38 @@ export class SNCController extends Disposable implements IEditorContribution {
 	 * knows the layout it is rendering from is not the one the user saw, and
 	 * settles the scroll itself.
 	 */
+	/**
+	 * The html to show for `item`, replacing `shown` on the same widget: its
+	 * own -- except for the table a loop logs as it starts. That one has no
+	 * values yet, so a focused cell in it is only its repr, and the finished
+	 * table replaces it a few milliseconds later. Drawn, it would flash every
+	 * focused cell -- a string being selected in, its search box -- back to text
+	 * and out again on each run, and every mouse move is a run. So while a
+	 * finished table is showing, it stays, and the running one is drawn only if
+	 * no finished one has come by RUNNING_LOOP_TABLE_DELAY_MS: a loop that is
+	 * slow, stuck, or was killed partway. Each running table restarts the wait,
+	 * so runs cancelled one after another never flash it up either.
+	 */
+	private htmlToShow(shown: IVisualizationItem, item: IVisualizationItem): string {
+		const key = widgetKey(item.line, item.visIndex);
+		const holding = this.heldRunningLoopTables.has(key);
+		this.heldRunningLoopTables.deleteAndDispose(key);
+		const finishedShowing = holding || (!shown.forLoopRunning && shown.forLoopLine === item.forLoopLine);
+		if (!item.forLoopRunning || !finishedShowing) {
+			return item.html;
+		}
+		const isThisItem = (v: IVisualizationItem) => v.line === item.line && v.visIndex === item.visIndex;
+		this.heldRunningLoopTables.set(key, disposableTimeout(() => {
+			this.heldRunningLoopTables.deleteAndDispose(key);
+			if (this.visualizationItems.some(v => isThisItem(v) && v.forLoopRunning)) {
+				this.visualizationItems = this.visualizationItems.map(v =>
+					isThisItem(v) && v.forLoopRunning ? { ...v, html: item.html } : v);
+				this.updateVisualizationWidgets(this.visualizationItems);
+			}
+		}, RUNNING_LOOP_TABLE_DELAY_MS));
+		return shown.html;
+	}
+
 	private updateVisualizationWidgets(visualizationData: IVisualizationItem[], stabilizeScroll = true): void {
 		if (!this.widgetsVisible) {
 			// Nothing to draw into; the items are kept for when the widgets are
@@ -7430,7 +7552,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 			.filter(item => item.forLoopLine !== undefined)
 			.map((item): [number, number] => [item.forLoopLine!, item.line])
 			.filter(([start, end]) => focusedLine === null || focusedLine < start || focusedLine > end
-				|| (start === this.explicitFocusedLoop && end === this.explicitFocusedLine))
+				|| start === this.explicitFocusedLoop)
 			.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
 		const collapsed: [number, number][] = [];
 		for (const [start, end] of loops) {
@@ -7698,6 +7820,7 @@ export class SNCController extends Disposable implements IEditorContribution {
 							const handled = new Set(item.handledEventIds ?? []);
 							return {
 								...item,
+								html: this.htmlToShow(visItem, item),
 								unhandledEvents: (visItem.unhandledEvents || []).filter(ev => !handled.has(ev.id))
 							};
 						}
