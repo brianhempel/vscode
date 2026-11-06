@@ -29,7 +29,7 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
                                  FirstMatchToggle, SearchBoxInput, SortToggle, TallyExcludeToggle,
                                  TallyFilterInput, TallyItemToggle, TallySelectAll, TallySelectNone,
                                  TallySortSelect, SubcolExprInput, SubcolHideAll, SubcolShowAll, SubcolToggle,
-                                 ActionButtonClick, ColumnSelect, PickToggle, RowActionClick, RowMenuToggle,
+                                 ActionButtonClick, PickToggle, RowActionClick, RowMenuToggle,
                                  ToolSelect)
 from visualizer_utils import NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable, InsertLines, ReplaceLines
 
@@ -1169,44 +1169,6 @@ class TestSubcolumns(unittest.TestCase):
     def test_a_field_that_does_not_read_shows_its_error(self):
         out = visualize(people(), {'subcols': {'person': ["$['nope']"]}})
         self.assertIn('KeyError', iteration_rows(out)[0][1])
-
-
-def suggestions(html_text):
-    return [text_of(x) for x in re.findall(r'<div class="snc-dropdown-option col-suggestion[^"]*"[^>]*>(.*?)</div>',
-                                           html_text)]
-
-
-class TestAutocomplete(unittest.TestCase):
-    """The box a line is written in suggests how to finish the name being
-    typed, as a table's suggests columns: the loop's names, and the fields of
-    the values it binds."""
-
-    def setUp(self):
-        visualizer_utils.set_live_only(False)
-
-    def test_it_suggests_names_and_fields_that_finish_what_is_typed(self):
-        self.assertEqual(suggestions(visualize(people(), adding('x = per'), cells_of)),
-                         ['person', "person['name']", "person['age']"])
-        self.assertEqual(suggestions(visualize(people(), adding("x = person['n"), cells_of)), ["person['name']"])
-
-    def test_nothing_to_suggest_before_anything_is_typed_or_once_it_is_whole(self):
-        self.assertEqual(suggestions(visualize(people(), adding(''), cells_of)), [])
-        self.assertEqual(suggestions(visualize(people(), adding('x = person'), cells_of)),
-                         ["person['name']", "person['age']"])
-
-    def test_picking_one_finishes_the_name_and_the_box_stays_open(self):
-        model, cmds = update(click(ColumnSelect(text="person['age']")), None, adding('x = per'), people(), cells_of)
-        self.assertEqual((model, cmds), (adding("x = person['age']"), []))
-
-    def test_arrows_move_through_them_and_enter_picks_the_one_selected(self):
-        model, _ = update(key('ArrowDown'), None, adding('x = per'), people(), cells_of)
-        model, _ = update(key('ArrowDown'), None, model, people(), cells_of)
-        self.assertEqual(model['selected_suggestion'], 1)
-        self.assertIn('col-suggestion selected', visualize(people(), model, cells_of))
-        model, cmds = update(key('Enter'), None, model, people(), cells_of)
-        self.assertEqual((model['column_input'], cmds), ("x = person['name']", []))
-        model, _ = update(key('ArrowUp'), None, {**adding('x = per'), 'selected_suggestion': 0}, people(), cells_of)
-        self.assertIsNone(model['selected_suggestion'])
 
 
 class TestDragOut(unittest.TestCase):
@@ -2624,6 +2586,64 @@ class TestGuards(unittest.TestCase):
     def test_its_menu_is_an_ifs(self):
         out = visualize(guard(), {'chain_menu': [2, 0]})
         self.assertEqual([label for label, _ in chain_menu_of(out)], ['Collapse', 'Add Elif', 'Add Else', 'Remove'])
+
+
+def only_pass(**overrides):
+    """A loop as written new, its body only the `pass` holding its place:
+
+        1  count = 0
+        2  for element in [1, 2]:
+        3      pass
+    """
+    fields = dict(columns=(bound('element'),), rows=(('1',), ('2',)), values=((1,), (2,)),
+                  defined=frozenset({'count', 'element'}), init=(None,),
+                  source=('for element in [1, 2]:', '    pass'))
+    fields.update(overrides)
+    return table(**fields)
+
+
+class TestAPassOnlyHoldsTheBodysPlace(unittest.TestCase):
+    """A body that is only a `pass` has nothing in it yet: the first line
+    written into it goes over the pass rather than beside it."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_first_column_writes_over_the_pass(self):
+        _, cmds = update(key('Enter'), None, adding('twice = element * 2'), only_pass())
+        self.assertEqual(cmds, [ReplaceLines(3, 3, '    twice = element * 2')])
+
+    def test_so_does_one_inserted_right_of_a_bound_name(self):
+        model = {**adding('twice = element * 2'), 'insert_at': {'label': 'element', 'after': True}}
+        self.assertEqual(update(key('Enter'), None, model, only_pass())[1],
+                         [ReplaceLines(3, 3, '    twice = element * 2')])
+
+    def test_a_new_if_writes_over_it_and_its_own_pass_is_waited_for_a_line_up(self):
+        model, cmds = update(key('Enter'), None, {'adding_if': True, 'column_input': 'element > 1'}, only_pass())
+        self.assertEqual((cmds, model['pending_branch']['line']),
+                         ([ReplaceLines(3, 3, '    if element > 1:\n        pass')], 4))
+
+    def test_what_goes_above_the_loop_still_does_once_the_pass_is_written_over(self):
+        """The pass first: the line going in above the loop would move it."""
+        _, cmds = update(click(ActionButtonClick(action='count')), None, {}, only_pass())
+        self.assertEqual(cmds, [ReplaceLines(3, 3, '    n_iterations += 1'), InsertLines(((1, 'n_iterations = 0'),))])
+
+    def test_a_line_after_the_loop_leaves_the_pass_alone(self):
+        _, cmds = update(click(RowActionClick(row=1, action='extract')), None, {}, only_pass())
+        self.assertEqual(cmds, [InsertLines(((3, "row_1 = {'element': 2}"),))])
+
+    def test_a_pass_on_the_loops_own_line_is_left_alone(self):
+        t = only_pass(line=3, body_lines=(3, 3), source=('for element in [1, 2]: pass',))
+        self.assertEqual(update(key('Enter'), None, adding('twice = element * 2'), t)[1],
+                         [InsertLines(((3, '    twice = element * 2'),))])
+
+    def test_a_body_with_more_than_a_pass_is_written_beside(self):
+        t = only_pass(end_line=4, body_lines=(3, 4), source=('for element in [1, 2]:', '    pass', '    print(element)'))
+        self.assertEqual(update(key('Enter'), None, adding('twice = element * 2'), t)[1],
+                         [InsertLines(((4, '    twice = element * 2'),))])
 
 
 if __name__ == '__main__':

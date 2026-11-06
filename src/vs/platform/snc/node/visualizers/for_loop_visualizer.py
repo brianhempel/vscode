@@ -98,10 +98,9 @@ a name set above the loop and a line at the end of its body building it up
 (Filter: a `continue` at the top); under the pick tool, Extract collects the
 picked columns. An iteration's ▾ writes `if score == 9: continue` or `break`
 at the top of the body, or its cells as a dict after the loop. A header hands
-over the name its column shows, and the line box suggests how to finish the
-name being typed -- the loop's names, and the fields of what it binds. Not
-the table's chain link: what a loop's buttons write lands in two places, and
-a link is one line under the visualizer's own.
+over the name its column shows. Not the table's chain link: what a loop's
+buttons write lands in two places, and a link is one line under the
+visualizer's own.
 
 **While the loop runs, the rows of last time.** The table logged as the loop
 starts has none of its own yet, and the finished one replaces it a moment
@@ -484,12 +483,6 @@ class SubcolExprInput:
     holds `value`: an expression in `$`, the column's value."""
     label: str
     value: str
-
-
-@dataclass(frozen=True)
-class ColumnSelect:
-    """A suggestion under the line box: it finishes the name being typed."""
-    text: str
 
 
 @dataclass(frozen=True)
@@ -1104,7 +1097,7 @@ def _opened(model, key: str, col, text: str):
 
 
 def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: str = 'Line of code',
-                tooltip: str = 'Written at the end of the loop', span_attrs: str = '', suggestions=(),
+                tooltip: str = 'Written at the end of the loop', span_attrs: str = '',
                 keyword: str = '') -> str:
     """The box code is typed in: a new column's, one being edited, a starting
     value, the name of a list a column is collected into, or -- after its
@@ -1118,19 +1111,7 @@ def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: s
             f'snc-blur="{html.escape(repr(ColumnInputBlur()))}" '
             f'value="{html.escape(model.get("column_input", ""))}" '
             f'placeholder="{html.escape(placeholder)}" '
-            f'data-tooltip="{html.escape(tooltip)}" />'
-            f'{_render_suggestions(model, suggestions)}</span></{tag}>')
-
-
-def _render_suggestions(model, suggestions) -> str:
-    """What could finish the name being typed, under the box as a table's."""
-    if not suggestions:
-        return ''
-    selected = model.get('selected_suggestion')
-    items = ''.join(f'<div class="snc-dropdown-option col-suggestion{" selected" if n == selected else ""}"'
-                    f'{_press(ColumnSelect(text=text))}>{html.escape(text)}</div>'
-                    for n, text in enumerate(suggestions))
-    return f'<div class="snc-dropdown-panel left col-suggest-panel" snc-dropdown-align="left">{items}</div>'
+            f'data-tooltip="{html.escape(tooltip)}" /></span></{tag}>')
 
 
 def _render_label(column: ForLoopColumn) -> str:
@@ -1296,36 +1277,6 @@ def _subcol_candidates(value: ForLoopTable, col: int, get_visualizer) -> List[st
 
 # The tools of the corner's toolbar: a table's Normal and Pick.
 TOOLS = _TOOL_TOOLBAR_TOOLS
-
-# The trailing name a suggestion would finish: a name, and what reads through it.
-_TYPED_NAME_RE = re.compile(r"[A-Za-z_][\w\[\]'\".]*$")
-
-
-def _suggestions(value: ForLoopTable, model, get_visualizer) -> List[str]:
-    """What could finish the name at the end of the line box: the loop's names,
-    and the fields of the values it binds (`person['name']`), as a table's
-    box suggests columns. Nothing before a name is started, and nothing it
-    already is."""
-    if not (model.get('adding_column') or model.get('editing_column') is not None):
-        return []
-    typed = _TYPED_NAME_RE.search(model.get('column_input', ''))
-    if typed is None:
-        return []
-    names = list(value.targets) + sorted(value.defined - set(value.targets))
-    for col, column in enumerate(value.columns):
-        if column.span is None and column.subject:
-            names += [field.replace('$', column.subject, 1)
-                      for field in _subcol_candidates(value, col, get_visualizer) if field.startswith('$')]
-    prefix = typed.group(0)
-    return [name for name in dict.fromkeys(names) if name.startswith(prefix) and name != prefix][:10]
-
-
-def _finished(model, text: str) -> str:
-    """The line box with the name at its end finished as `text`."""
-    typed = model.get('column_input', '')
-    found = _TYPED_NAME_RE.search(typed)
-    return (typed[:found.start()] if found else typed) + text
-
 
 def _condition(value: ForLoopTable, model) -> Optional[str]:
     """The search, as the condition loop code would test: the footer's, and
@@ -2309,7 +2260,7 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
             leaves.append((_fold_path(value, col, folds), branches(column.path[:folds[col]]), ('fold', col)))
             continue
         over = branches(column.path)
-        box = (column.path, over, ('box', {'suggestions': _suggestions(value, model, get_visualizer)}))
+        box = (column.path, over, ('box', {}))
         if col == beside and not insert_at['after']:
             leaves.append(box)
         if col in subcols:
@@ -2321,11 +2272,10 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
             leaves.append(box)
     # Every column it adds is code, so live-only leaves it out.
     if not live_only and model.get('adding_column') and beside is None:
-        leaves.append(((), [], ('box', {'suggestions': _suggestions(value, model, get_visualizer)})))
+        leaves.append(((), [], ('box', {})))
     if not live_only and model.get('adding_if'):
         leaves.append(((), [], ('box', {'keyword': 'if', 'placeholder': 'Condition',
-                                        'tooltip': 'An if written at the end of the loop',
-                                        'suggestions': _suggestions(value, model, get_visualizer)})))
+                                        'tooltip': 'An if written at the end of the loop'})))
     elif_chain = model.get('adding_elif')
     depth_of = _chain_depths(value).get(elif_chain) if not live_only else None
     if depth_of is not None:
@@ -2340,8 +2290,7 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
             # A branch index no branch has, so it edges as a branch of its own.
             path = parent + ((elif_chain, -2, 'elif', 0, 0),)
             leaves.insert(last + 1, (path, branches(parent), ('box', {
-                'keyword': 'elif', 'placeholder': 'Condition', 'tooltip': 'Tested after the branches before it',
-                'suggestions': _suggestions(value, model, get_visualizer)})))
+                'keyword': 'elif', 'placeholder': 'Condition', 'tooltip': 'Tested after the branches before it'})))
     collecting = model.get('collecting_column')
     if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
         subject = value.columns[collecting].subject
@@ -2695,26 +2644,7 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                     text = f'{one[1]}{one[2]}: pass'
                 return (_menus_closed(model), [ReplaceLines(span[0], span[1], text)])
         case ColumnInput(value=typed) if _box_open(model):
-            others = {k: v for k, v in model.items() if k != 'selected_suggestion'}
-            return ({**others, 'column_input': typed}, [])
-        case ColumnSelect(text=text) if _box_open(model):
-            others = {k: v for k, v in model.items() if k != 'selected_suggestion'}
-            return ({**others, 'column_input': _finished(model, text)}, [])
-        case ColumnKeyDown() if _box_open(model) and event_json.get('key') in ('ArrowDown', 'ArrowUp'):
-            offered = _suggestions(value, model, get_visualizer)
-            if offered:
-                at = model.get('selected_suggestion')
-                if event_json['key'] == 'ArrowDown':
-                    at = 0 if at is None else min(at + 1, len(offered) - 1)
-                else:
-                    at = None if not at else at - 1
-                return ({**model, 'selected_suggestion': at}, [])
-        case ColumnKeyDown() if _box_open(model) and event_json.get('key') == 'Enter' \
-                and model.get('selected_suggestion') is not None:
-            offered = _suggestions(value, model, get_visualizer)
-            at = model['selected_suggestion']
-            if at < len(offered):
-                return ({**model, 'column_input': _finished(model, offered[at]), 'selected_suggestion': None}, [])
+            return ({**model, 'column_input': typed}, [])
         case ActionButtonClick(action=action) if not is_live_only():
             code = _action_code(value, model, action)
             if code:
