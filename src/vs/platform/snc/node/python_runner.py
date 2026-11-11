@@ -1065,6 +1065,7 @@ def _runtime_hooks() -> Dict[str, Any]:
         '_snc_call_exit': call_exit,
         '_snc_ctx_error': ctx_error,
         '_snc_record_cell': record_cell,
+        '_snc_slice': slice,
     }
 
 
@@ -1780,6 +1781,9 @@ class CodeTransformer(ast.NodeTransformer):
         node = cast(ast.AugAssign, self.generic_visit(node))
         assert isinstance(node, ast.AugAssign)
 
+        if isinstance(node.target, (ast.Subscript, ast.Attribute)):
+            return self._transform_augmented_target(node)
+
         # Create a temporary variable to store the result
         temp_var = self._get_temp_var()
 
@@ -1791,7 +1795,7 @@ class CodeTransformer(ast.NodeTransformer):
         # For x += 5, this creates: x + 5
         binary_op = ast.BinOp(
             left=ast.Name(
-                id=node.target.id if isinstance(node.target, ast.Name) else 'target',
+                id=cast(ast.Name, node.target).id,
                 ctx=ast.Load(),
                 lineno=node.lineno,
                 col_offset=node.col_offset,
@@ -1834,6 +1838,47 @@ class CodeTransformer(ast.NodeTransformer):
 
         # Return all three statements as a list
         return [temp_assign, original_assign, log_call]
+
+    def _transform_augmented_target(self, node: ast.AugAssign) -> List[ast.stmt]:
+        """Cache the target before the RHS, then use native in-place semantics.
+
+        For d[key()] += rhs(): container = d; key = key(); result = container[key];
+        result += rhs(); container[key] = result; _log_value(line, result).
+        Neither logging nor the store may evaluate the original target again.
+        """
+        statements: List[ast.stmt] = []
+
+        def capture(value: ast.expr) -> ast.Name:
+            name = self._get_temp_var()
+            statements.append(self._create_assignment(name, value, node.lineno, 1000))
+            return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+
+        def slice_expression(key: ast.expr) -> ast.expr:
+            # Slice nodes are only legal inside a subscript, not as an
+            # assignment's RHS. Use the runtime builtin even if `slice` is shadowed.
+            if isinstance(key, ast.Slice):
+                return ast.copy_location(ast.Call(
+                    func=ast.Name(id='_snc_slice', ctx=ast.Load()),
+                    args=[part if part is not None else ast.Constant(value=None)
+                          for part in (key.lower, key.upper, key.step)], keywords=[]), key)
+            if isinstance(key, ast.Tuple):
+                return ast.copy_location(ast.Tuple(
+                    elts=[slice_expression(part) for part in key.elts], ctx=ast.Load()), key)
+            return key
+
+        target = copy.deepcopy(node.target)
+        target.value = capture(target.value)
+        if isinstance(target, ast.Subscript):
+            target.slice = capture(slice_expression(target.slice))
+        loaded_target = copy.deepcopy(target)
+        loaded_target.ctx = ast.Load()
+        result = capture(loaded_target)
+        statements.append(ast.copy_location(ast.AugAssign(
+            target=ast.Name(id=result.id, ctx=ast.Store()), op=node.op, value=node.value), node))
+        statements.append(ast.copy_location(ast.Assign(targets=[target], value=result), node))
+        statements.append(self._create_log_call(
+            '_log_value', node.lineno, result.id, node.lineno, 2000))
+        return statements
 
     def visit_If(self, node: ast.If) -> List[ast.stmt]:
         """Transform if statements to log condition results."""

@@ -2189,6 +2189,76 @@ class TestLoopIterations(unittest.TestCase):
         return [(m['loop']['line'], m['loop']['path'], m['loop']['count'])
                 for m in msgs if m.get('type') == 'loop']
 
+    def test_augmented_targets_log_the_result(self):
+        cases = [
+            ("d = {1: 0}", "d[1] += 1", '1'),
+            ("obj = type('Box', (), {'n': 4})()", "obj.n += 1", '5'),
+            ("a = [[7]]", "a[0][0] -= 2", '5'),
+            ("self = type('Box', (), {})(); self.x = type('Box', (), {'y': 4})()",
+             "self.x.y *= 3", '12'),
+            ("x = 4", "x += 1", '5'),
+        ]
+        for setup, statement, result in cases:
+            with self.subTest(statement=statement):
+                items = self._items(self._run(setup + '\n' + statement + '\n'))
+                self.assertEqual(items[-1], (2, 0, [], result))
+
+    def test_augmented_targets_preserve_python_evaluation_order(self):
+        # Fixtures run without instrumentation so the event trace measures only
+        # the target's get, in-place operation, and store (including slices).
+        fixture = """
+events = []
+class Value:
+    def __iadd__(self, other):
+        events.append(('iadd', other))
+        return 42
+    def __add__(self, other):
+        raise AssertionError('must use __iadd__')
+class Target:
+    def __getitem__(self, key):
+        events.append(('get', key))
+        self.key = key
+        return Value()
+    def __setitem__(self, key, value):
+        assert key == self.key
+        events.append(('set', key, value))
+    @property
+    def n(self):
+        events.append('getattr')
+        return Value()
+    @n.setter
+    def n(self, value):
+        events.append(('setattr', value))
+obj = Target()
+def container():
+    events.append('container')
+    return obj
+def next_key():
+    events.append('key')
+    return 1
+def rhs():
+    events.append('rhs')
+    return 3
+"""
+        for statement in ('container()[next_key()] += rhs()',
+                          'container().n += rhs()',
+                          'container()[next_key():next_key()] += rhs()',
+                          'container()[next_key(), next_key():] += rhs()'):
+            with self.subTest(statement=statement):
+                expected, actual, logged = {}, {}, []
+                exec(fixture, expected)
+                exec(statement, expected)
+                exec(fixture, actual)
+                actual.update(python_runner._runtime_hooks())
+                actual['_log_value'] = lambda line, value, *a, **kw: logged.append((line, value))
+                exec(compile(transform_code_to_ast(statement), '<test>', 'exec'), actual)
+                self.assertEqual(actual['events'], expected['events'])
+                self.assertEqual(logged, [(1, 42)])
+
+    def test_subscript_augassign_mutates_the_original_value(self):
+        source = "d = {1: [0]}\nalias = d[1]\nd[1] += [2]\nassert alias is d[1]\nassert alias == [0, 2]\n99\n"
+        self.assertEqual(self._items(self._run(source))[-1], (6, 0, [], '99'))
+
     def test_a_recursive_function_numbers_its_activations_in_entry_order(self):
         src = (
             "def fact(n):\n"
@@ -2428,6 +2498,22 @@ class TestForLoopTable(unittest.TestCase):
         msgs, _ = self._run(self.SRC)
         self.assertEqual([m['item'].get('forLoopRunning') for m in msgs.all()
                           if m.get('type') == 'item' and 'forLoopLine' in m['item']], [True, None])
+
+    def test_subscript_augassign_does_not_interrupt_the_table(self):
+        source = (
+            "counts = {1: 0, 2: 0}; obj = type('Box', (), {'n': 0})()\n"
+            "for k in [1, 2, 1]:\n"
+            "    counts[k] += 1\n"
+            "    obj.n += 1\n"
+            "    total = sum(counts.values())\n"
+            "assert counts == {1: 2, 2: 1} and obj.n == 3\n"
+        )
+        msgs, tables = self._run(source)
+        self.assertEqual(tables[-1].rows, (('1', '1'), ('2', '2'), ('1', '3')))
+        self.assertFalse(tables[-1].running)
+        items = TestLoopIterations._items(msgs.all())
+        self.assertEqual([(line, path, value) for line, _, path, value in items if line == 3],
+                         [(3, [[2, 0]], '1'), (3, [[2, 1]], '1'), (3, [[2, 2]], '2')])
 
     def test_the_example_records_a_row_per_iteration(self):
         from visualizer_utils import ForLoopColumn, ForLoopTable
