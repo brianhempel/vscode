@@ -2585,7 +2585,7 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 				const autoFocusIsNew = !!autoFocusEl && !hadAutoFocusEl;
 				if (autoFocusEl && autoFocusIsNew) {
 					autoFocusEl.focus({ preventScroll: true });
-					if (autoFocusEl instanceof HTMLInputElement) {
+					if (autoFocusEl instanceof HTMLInputElement || autoFocusEl instanceof HTMLTextAreaElement) {
 						// Select all text if requested (e.g. editing an existing field)
 						if (autoFocusEl.hasAttribute('snc-select-all')) {
 							autoFocusEl.select();

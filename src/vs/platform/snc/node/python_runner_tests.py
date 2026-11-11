@@ -2592,6 +2592,17 @@ class TestForLoopTable(unittest.TestCase):
             python_runner._execute_run(body, payload, 'run-1', import_code=imports)
         return [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
 
+    def test_condition_edits_are_answered_at_loop_entry(self):
+        tables = self._replay_table_events('for word in ["apple"]:\n    if word: continue\n', [
+            ("ColumnClick(col=1, label='if word')", {'detail': 2}),
+            ("ColumnInput(value='word.isalpha()')", {}),
+            ('ColumnKeyDown()', {'key': 'Enter'})])
+        self.assertEqual(tables[0]['handledEventIds'], [0, 1, 2])
+        self.assertEqual(tables[0]['commands'][0],
+                         {'type': 'ReplaceLines', 'first': 2, 'last': 2,
+                          'text': '    if word.isalpha(): continue', 'triggerLine': 2, 'triggerVisIndex': 1})
+        self.assertFalse(tables[1].get('commands'))
+
     def test_row_actions_use_the_finished_iterations(self):
         for action, after, text in (
                 ('skip', 1, '    if score == 9: continue'),

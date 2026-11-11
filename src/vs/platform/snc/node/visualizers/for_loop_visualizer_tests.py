@@ -1952,6 +1952,108 @@ class TestIfBranches(unittest.TestCase):
             with self.subTest(msg=msg):
                 self.assertEqual(update(msg, None, {}, branched()), ({}, []))
 
+    def condition_table(self):
+        return branched(source=("for x in [3, 8, 5]:",
+                                "    if x % 2 == 0:  # even",
+                                "        tag = 'even'",
+                                "    elif x > 4:  # big",
+                                "        tag = 'big'",
+                                "    else:",
+                                "        total += x"))
+
+    def test_branch_headers_offer_the_existing_edit_event(self):
+        out = visualize(self.condition_table(), {})
+        heads = [h for h in header_cells(out) if 'for-loop-branch-header' in h]
+        for head, col in zip(heads, (1, 3)):
+            self.assertIn(repr(ColumnClick(col, self.condition_table().columns[col].label)), events_in(head))
+            self.assertIn('snc-unfocused-clickable', head)
+            self.assertIn('Double-click to edit', head)
+        self.assertNotIn('ColumnClick(', heads[-1])
+
+    def test_double_click_prefills_a_condition_and_draws_the_keyword_box(self):
+        t = self.condition_table()
+        for col, condition, keyword in ((1, 'x % 2 == 0', 'if'), (3, 'x > 4', 'elif')):
+            with self.subTest(col=col):
+                model, cmds = update(click(ColumnClick(col, t.columns[col].label), detail=2), None, {}, t)
+                self.assertEqual(model.get('editing_column'), col)
+                self.assertEqual(model.get('column_input'), condition)
+                self.assertEqual(cmds, [])
+                out = visualize(t, model)
+                self.assertIn('for-loop-box-keyword">' + keyword, out)
+                self.assertIn('value="' + condition.replace('>', '&gt;') + '"', out)
+                self.assertEqual(update(click(ColumnClick(col, t.columns[col].label)), None, {}, t), ({}, []))
+
+    def test_condition_edit_preserves_header_spacing_comment_and_keyword(self):
+        t = self.condition_table()
+        for col, line, expected in ((1, 3, '    if x == 8:  # even'),
+                                    (3, 5, '    elif x == 8:  # big')):
+            with self.subTest(col=col):
+                model, cmds = update(key('Enter'), None, editing(col, 'x == 8'), t)
+                self.assertEqual(cmds, [ReplaceLines(line, line, expected)])
+                self.assertIsNone(model['editing_column'])
+
+    def test_exact_source_survives_strings_parentheses_and_multiple_lines(self):
+        source = ("for x in [3]:", "    if (", "        x == 'a  b'  # keep spacing",
+                  "        or x == 'é: c'", "    ): continue  # keep body")
+        path = ((3, 0, "if ( x == 'a b' or x == 'é: c' )", 6, 6),)
+        label = path[0][2]
+        t = branched(columns=(bound('x'), ForLoopColumn(label, cond=True, path=path)),
+                     source=source, end_line=6, body_lines=(3, 6), rows=(), values=())
+        model, _ = update(click(ColumnClick(1, label), detail=2), None, {}, t)
+        self.assertEqual(model.get('column_input'), "(\n        x == 'a  b'  # keep spacing\n        or x == 'é: c'\n    )")
+        self.assertEqual(update(key('Enter'), None, model, t)[1], [])
+        out = visualize(t, model)
+        self.assertIn('<textarea', out)
+        self.assertIn(html.escape(model['column_input']), out)
+        changed = model['column_input'].replace("é: c", "é: d")
+        self.assertEqual(update(key('Enter'), None, {**model, 'column_input': changed}, t)[1],
+                         [ReplaceLines(3, 6, "    if " + changed + ": continue  # keep body")])
+        self.assertEqual(update(key('Enter'), None, editing(1, "x == 'a  b'"), t)[1],
+                         [ReplaceLines(3, 6, "    if x == 'a  b': continue  # keep body")])
+
+    def test_one_line_condition_keeps_its_body_and_colons_in_the_expression(self):
+        for condition in ("x[1:]", "(lambda: x)()", "x == 'é:  b'"):
+            with self.subTest(condition=condition):
+                path = ((3, 0, 'if ' + condition, 3, 3),)
+                t = branched(columns=(bound('x'), ForLoopColumn('if ' + condition, cond=True, path=path)),
+                             source=('for x in [3]:', '    if  ' + condition + '  : continue # body'),
+                             rows=(), values=(), end_line=3, body_lines=(3, 3))
+                self.assertEqual(update(key('Enter'), None, editing(1, 'x > 0'), t)[1],
+                                 [ReplaceLines(3, 3, '    if  x > 0  : continue # body')])
+
+    def test_bad_condition_stays_open_and_escape_or_blur_cancel(self):
+        t = self.condition_table()
+        model = editing(1, 'x >')
+        self.assertEqual(update(key('Enter'), None, model, t), (model, []))
+        for event in (key('Escape'), {'pythonEventStr': repr(ColumnInputBlur()), 'eventJSON': {}}):
+            closed, cmds = update(event, None, editing(1, 'x > 0'), t)
+            self.assertIsNone(closed['editing_column'])
+            self.assertEqual(cmds, [])
+
+    def test_nested_condition_uses_its_own_source_and_keeps_its_indent(self):
+        t = nested(source=("for x in [3, 8, 5]:", "    if x > 4:",
+                           "        if x % 2 == 0:", "            tag = 'even'",
+                           "        total += x", "    else:", "        tag = 'small'",
+                           "    done = True"))
+        for model in ({}, UNFOLDED):
+            opened, _ = update(click(ColumnClick(2, 'if x % 2 == 0'), detail=2), None, model, t)
+            self.assertEqual(opened.get('column_input'), 'x % 2 == 0')
+            self.assertIn('for-loop-box-keyword">if', visualize(t, opened))
+            self.assertEqual(update(key('Enter'), None, {**opened, 'column_input': 'x > 6'}, t)[1],
+                             [ReplaceLines(4, 4, '        if x > 6:')])
+
+    def test_folded_headers_edit_only_a_single_branch(self):
+        t = self.condition_table()
+        self.assertNotIn('ColumnClick(', header_cells(visualize(t, {'chains': {'3': False}}))[-1])
+        single = replace(t, columns=t.columns[:3] + t.columns[-1:], rows=(), values=())
+        self.assertIn(repr(ColumnClick(1, t.columns[1].label)),
+                      events_in(visualize(single, {'chains': {'3': False}})))
+        t = replace(t, columns=t.columns[:3], rows=(), values=())
+        out = visualize(t, {'chains': {'3': False}})
+        self.assertIn(repr(ColumnClick(1, t.columns[1].label)), events_in(out))
+        out = visualize(t, {**editing(1, 'x > 0'), 'chains': {'3': False}})
+        self.assertIn('for-loop-box-keyword">if', out)
+
     def test_inserting_beside_a_statement_in_a_branch_writes_into_that_branch(self):
         t = branched()
         model, _ = update(click(InsertColumnClick(col=2, label="tag = 'even'", after=True)), None, {}, t)

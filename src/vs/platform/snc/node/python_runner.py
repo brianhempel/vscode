@@ -695,7 +695,7 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         if replay:
             hold_tail = False
             for ev in replay:
-                if _running_loop_table(value) and (hold_tail or vis.needs_values(ev, model)):
+                if _running_loop_table(value) and (hold_tail or vis.needs_values(ev, model, value)):
                     _held_loop_events.setdefault((line, site), []).append(ev)
                     # Keep subsequent controls in order after a table action:
                     # e.g. typing after Enter must not change what Enter writes.

@@ -39,7 +39,10 @@ line written into it, by the box or anything else, goes over the pass.
 **A column is edited through its header.** Double-clicking a statement's
 header opens the same box over it, holding the statement; Enter writes what it
 then holds over the statement's lines. A name the loop binds has no statement
-of its own, so its header has nothing to edit.
+of its own, so its header has nothing to edit. A branch's header opens the
+same box with its keyword beside the condition as written in the source;
+Enter replaces only that condition, keeping its colon, comment and any body
+on the same line. An else has no condition to edit.
 
 **A header underlines what its column shows.** A statement is not a value:
 `arr2.append(x)` shows arr2 after the call, `total += x` shows total. The
@@ -180,7 +183,9 @@ whole of it -- every branch, every chain inside -- into a column saying which
 branch each iteration took (`if`, the `elif`'s header, `else`; a dash when
 none did), and Expand unfolds it again. A chain directly in the loop's body
 starts unfolded and one inside a branch folded, so nesting costs a header
-row only when asked for. Folding is a view, kept by the chain's line in the
+row only when asked for. A folded header can edit its condition when the
+chain has just one conditional branch; several conditions have no one to edit.
+Folding is a view, kept by the chain's line in the
 model, so it works live-only too. A folded chain's init cell is where each
 accumulator in it starts.
 
@@ -207,9 +212,11 @@ reaches it rather than being shown as a dataclass's fields.
 
 import ast
 import html
+import io
 import keyword
 import math
 import re
+import tokenize
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
@@ -936,6 +943,66 @@ def _branches_reordered(value: ForLoopTable, chain: int, moving: int, onto: int)
     return ReplaceLines(starts[conditional[0]], branches[conditional[-1]][4], '\n'.join(lines))
 
 
+def _condition_source(value: ForLoopTable, col: int):
+    """The condition as written, with the header lines and the text on either
+    side. Read the loop's own lines, as reordering does: labels collapse spaces,
+    even inside strings, and leave out parentheses around a whole condition."""
+    if not isinstance(col, int) or not 0 <= col < len(value.columns):
+        return None
+    column = value.columns[col]
+    if not column.cond or not column.path:
+        return None
+    chain, branch, _, first, _ = column.path[-1]
+    branches = _chain_branches(value, chain)
+    start = chain if branch == 0 else branches[branch - 1][4] + 1
+    for line in range(start, first + 1):
+        at = line - value.line
+        if not 0 <= at < len(value.source):
+            return None
+        match = re.match(r'\s*(if|elif)\b', value.source[at])
+        if match:
+            break
+    else:
+        return None
+    source = '\n'.join(value.source[at:])
+    lines = source.splitlines(keepends=True)
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type != tokenize.OP or token.string != ':':
+                continue
+            end = sum(map(len, lines[:token.start[0] - 1])) + token.start[1]
+            raw = source[match.end():end]
+            condition = raw.strip()
+            if not condition or not _is_value(condition):
+                continue
+            left = match.end() + len(raw) - len(raw.lstrip())
+            right = end - (len(raw) - len(raw.rstrip()))
+            last = token.start[0]
+            return (line, line + last - 1, source[:left], condition,
+                    source[right:sum(map(len, lines[:last]))].rstrip('\n'))
+    except (tokenize.TokenError, IndentationError):
+        pass
+    return None
+
+
+def _condition_column(value: ForLoopTable, step):
+    """The branch's condition column, which also carries its editing state."""
+    return next((i for i, c in enumerate(value.columns)
+                 if c.cond and c.path[-1][:2] == step[:2]), None)
+
+
+def _condition_box(value: ForLoopTable, model, col: int, span_attrs: str):
+    return _render_box(model, select_all=True, keyword='if' if value.columns[col].path[-1][1] == 0 else 'elif',
+                       placeholder='Condition', tooltip="Written over this branch's condition", span_attrs=span_attrs)
+
+
+def _condition_edit_attrs(value: ForLoopTable, col):
+    if col is None or is_live_only() or _condition_source(value, col) is None:
+        return ''
+    return (f' snc-unfocused-clickable snc-mouse-down="{html.escape(repr(ColumnClick(col, value.columns[col].label)))}"'
+            f' data-tooltip="Double-click to edit"')
+
+
 def _chain_indent(value: ForLoopTable, chain: int) -> str:
     """The indentation of the chain's `if` line, which its `elif`s and its
     `else` line up with: its first condition's."""
@@ -1048,11 +1115,15 @@ def _render_fold_header(value: ForLoopTable, model, col: int, folds: dict, span_
     """A folded chain's header: its first and last branch, and its ▾."""
     chain = value.columns[col].path[folds[col]][0]
     label = _fold_label(value, chain)
+    col = _condition_column(value, _chain_branches(value, chain)[0]) if len(_conditional(value, chain)) == 1 else None
+    if not is_live_only() and col is not None and model.get('editing_column') == col:
+        return _condition_box(value, model, col, span_attrs)
+    edit_attrs = _condition_edit_attrs(value, col)
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-col for-loop-fold-header{classes}"{span_attrs}'
             f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">'
-            f'<span class="col-name">{html.escape(label)}</span>{_render_chain_trigger(value, model, chain)}'
+            f'<span class="col-name"{edit_attrs}>{html.escape(label)}</span>{_render_chain_trigger(value, model, chain)}'
             f'{resize}</span></th>')
 
 
@@ -1174,17 +1245,23 @@ def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: s
                 keyword: str = '') -> str:
     """The box code is typed in: a new column's, one being edited, a starting
     value, the name of a list a column is collected into, or -- after its
-    `keyword`, `if` or `elif` -- a new branch's condition."""
+    `keyword`, `if` or `elif` -- a branch's condition. Multiline conditions
+    use the same box with a textarea, so the browser keeps their newlines."""
     input_event = "lambda e: ColumnInput(value=e.get('value', ''))"
     select = ' snc-select-all' if select_all else ''
     lead = f'<span class="for-loop-box-keyword">{html.escape(keyword)}</span>' if keyword else ''
+    text = model.get('column_input', '')
+    multiline = bool(keyword and '\n' in text)
+    field = 'textarea' if multiline else 'input'
+    value_attr = '' if multiline else f' value="{html.escape(text)}"'
+    field_attrs = f' rows="{text.count(chr(10)) + 1}"' if multiline else ' type="text"'
+    ending = f'>{html.escape(text)}</textarea>' if multiline else ' />'
     return (f'<{tag}{span_attrs}><span class="snc-dropdown-trigger{" for-loop-branch-box" if keyword else ""}">'
-            f'{lead}<input type="text" class="col-input" autofocus{select} snc-unfocused-clickable spellcheck="false" '
+            f'{lead}<{field}{field_attrs} class="col-input" autofocus{select} snc-unfocused-clickable spellcheck="false" '
             f'snc-input="{html.escape(input_event)}" '
-            f'snc-blur="{html.escape(repr(ColumnInputBlur()))}" '
-            f'value="{html.escape(model.get("column_input", ""))}" '
+            f'snc-blur="{html.escape(repr(ColumnInputBlur()))}"{value_attr} '
             f'placeholder="{html.escape(placeholder)}" '
-            f'data-tooltip="{html.escape(tooltip)}" /></span></{tag}>')
+            f'data-tooltip="{html.escape(tooltip)}"{ending}</span></{tag}>')
 
 
 def _render_label(column: ForLoopColumn) -> str:
@@ -2308,6 +2385,10 @@ def _render_branch_header(value: ForLoopTable, model, step, span_attrs: str = ''
     its tooltip how many of the iterations drawn took it, and ending, as a
     column's header does, with the ▾ that opens its menu."""
     chain, branch, header = step[:3]
+    col = _condition_column(value, step)
+    if not is_live_only() and col is not None and model.get('editing_column') == col:
+        return _condition_box(value, model, col, span_attrs)
+    edit_attrs = _condition_edit_attrs(value, col)
     n = len(value.rows)
     taken = sum(branch_ran(value, i, chain) == branch for i in range(n))
     tip = f' data-tooltip="Taken in {taken} of {n} iteration{"" if n == 1 else "s"}"' if n else ''
@@ -2328,7 +2409,7 @@ def _render_branch_header(value: ForLoopTable, model, step, span_attrs: str = ''
             elif drag.get('over') == branch:
                 classes += ' col-drag-before' if drag['from'] > branch else ' col-drag-after'
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-branch-header{classes}"{span_attrs}{tip}'
-            f'{drag_attrs}><span class="col-header-inner">{handle}<span class="col-name">{html.escape(header)}</span>'
+            f'{drag_attrs}><span class="col-header-inner">{handle}<span class="col-name"{edit_attrs}>{html.escape(header)}</span>'
             f'{_render_chain_trigger(value, model, chain, branch)}</span></th>')
 
 
@@ -2814,7 +2895,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     return ''.join(strs)
 
 
-def needs_values(event, model) -> bool:
+def needs_values(event, model, value=None) -> bool:
     """Whether replay needs the finished table's recorded values.
 
     Menus, typing and edits based only on source still work if the loop never
@@ -2829,6 +2910,9 @@ def needs_values(event, model) -> bool:
         return False
     model = model or {}
     if not (model.get('adding_column') or model.get('editing_column') is not None):
+        return False
+    col = model.get('editing_column')
+    if value is not None and isinstance(col, int) and _condition_source(value, col) is not None:
         return False
     try:
         body = ast.parse(model.get('column_input', '').strip()).body
@@ -3177,6 +3261,10 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         case ColumnClick(col=col, label=label):
             if double_click and SUBCOL_SEP in label and label in _view_labels(value, model):
                 return (_opened(model, 'editing_column', label, label.rsplit(SUBCOL_SEP, 1)[1]), [])
+            if double_click and not is_live_only():
+                condition = _condition_source(value, col)
+                if condition is not None and value.columns[col].label == label:
+                    return (_opened(model, 'editing_column', col, condition[3]), [])
             if double_click and _statement_span(value, col, label) is not None:
                 return (_opened(model, 'editing_column', col, label), [])
         case InitCellClick(col=col, label=label):
@@ -3335,6 +3423,16 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
                      'col_search': {k: v for k, v in (model.get('col_search') or {}).items()
                                     if k != label and not k.startswith(label + SUBCOL_SEP)}}
         return ({**_closed(model), 'subcols': subs}, [])
+    col = model.get('editing_column')
+    condition = _condition_source(value, col)
+    if condition is not None:
+        text = model.get('column_input', '').strip()
+        if not _is_value(text):
+            return (model, [])
+        first, last, prefix, old, suffix = condition
+        if text == old or is_live_only():
+            return (_closed(model), [])
+        return (_closed(model), [ReplaceLines(first, last, prefix + text + suffix)])
     if model.get('editing_init') is not None:
         return _write_init(model, value)
     if model.get('collecting_column') is not None:
