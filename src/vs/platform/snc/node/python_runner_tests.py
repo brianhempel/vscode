@@ -2776,6 +2776,47 @@ class TestForLoopTable(unittest.TestCase):
         _, tables = self._run(self.SRC)
         self.assertEqual([t.init_values for t in tables], [(NO_VALUE, 0)] * 2)
 
+    def test_large_cells_bound_recording_work_before_repr_or_deepcopy(self):
+        from visualizer_utils import NO_VALUE
+        big = list(range(20000))
+        for value in (big, [big, big], {'nested': big}):
+            with self.subTest(kind=type(value)), \
+                    _mock.patch.object(python_runner, '_copy_of') as copy_value, \
+                    _mock.patch.object(python_runner, 'truncate_repr') as repr_value:
+                text, snapshot = python_runner._for_table_snapshot(value)
+                self.assertIs(snapshot, NO_VALUE)
+                self.assertIn('too large to record', text)
+                self.assertLess(len(text), 200)
+                copy_value.assert_not_called()
+                repr_value.assert_not_called()
+
+    def test_large_accumulators_do_not_reach_deepcopy_on_any_iteration(self):
+        from visualizer_utils import NO_VALUE
+        original = python_runner._copy_of
+        for n in (60, 200):
+            with _mock.patch.object(python_runner, '_copy_of', wraps=original) as copied:
+                _, tables = self._run(
+                    f"big = list(range(20000))\nacc = []\nfor i in range({n}):\n    acc.append(big)\n")
+            self.assertEqual(len(tables[-1].rows), n)
+            self.assertTrue(all(row[1] is NO_VALUE for row in tables[-1].values))
+            self.assertTrue(all('too large to record' in row[1] for row in tables[-1].rows))
+            # Scalar loop targets and the empty init only; never the growing acc.
+            self.assertEqual(copied.call_count, n + 1)
+
+    def test_nested_mutation_never_rewrites_an_earlier_snapshot(self):
+        _, tables = self._run(
+            "inner = {'items': [0]}\n"
+            "acc = [inner, inner]\n"
+            "for i in range(3):\n"
+            "    inner['items'][0] = i\n"
+            "    recorded = acc\n")
+        t = tables[-1]
+        col = self._labels(t).index('recorded = acc')
+        snapshots = [row[col] for row in t.values]
+        self.assertEqual([v[0]['items'] for v in snapshots], [[0], [1], [2]])
+        self.assertTrue(all(v[0] is v[1] for v in snapshots))
+        self.assertIsNot(snapshots[0][0], snapshots[1][0])
+
     def test_values_play_no_part_in_comparing_tables(self):
         """A value's == can raise or answer elementwise (a numpy array), so
         the tables compare by their reprs alone."""

@@ -98,7 +98,9 @@ the runner copied, so a loop still running has none to search.
 press focuses it (then routed its events, as a ChildEvent keyed by row and
 column), nested so a table in one draws as its repr, and with nowhere to save
 to -- a loop's line has no config for a cell's to go in. Only the page of rows
-being drawn is visualized. Subcolumns, in a column's menu, spreads its values'
+being drawn is visualized. A value exceeding the runner’s snapshot budget
+shows a labeled preview instead; it has no recorded value for interactions.
+Subcolumns, in a column's menu, spreads its values'
 fields into columns of their own under its header, as a table's does: a view,
 so nothing is written. Each is a full column: its own search, sort, tally,
 compute answers and Subcolumns menu, and its expression edited on a
@@ -218,7 +220,7 @@ from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_
                                _tally, _tally_count_op,
                                _tally_count_op_label, _tally_extreme, _tally_lists, _tally_rows, _tally_selection,
                                _tally_literal, _tally_shown, _tally_sort, _tally_sort_label)
-from visualizer_utils import (CHILD_SOURCE_BINDER, EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, AddImports, ChildEvent,
+from visualizer_utils import (CHILD_SOURCE_BINDER, EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, FOR_TABLE_TOO_LARGE, AddImports, ChildEvent,
                               ForLoopColumn, ForLoopTable, InsertLines, Phantom, ReplaceLines, aggregate_handled_keys,
                               call_with_supported_kwargs, child_nesting_kwargs, error_html, eval_dollar_expr,
                               is_live_only, is_new_code, nest_generated_expr, py_exp_attrs,
@@ -2377,7 +2379,8 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
     except Exception as e:
         return f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>{error_html(e)}</td>'
     if cell is NO_VALUE:
-        return _render_cell(model, leaf, None, classes)
+        omitted = text if sub is None and text and text.startswith(FOR_TABLE_TOO_LARGE) else None
+        return _render_cell(model, leaf, omitted, classes)
     if get_visualizer is None:
         return _render_cell(model, leaf, text if sub is None else truncate_repr(cell, 120), classes)
     key = _cell_key(i, label, sub)

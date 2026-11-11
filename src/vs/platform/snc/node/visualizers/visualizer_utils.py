@@ -67,6 +67,10 @@ for _icon in _ICON_NAMES:
 # Shared HTML helpers
 # =============================================================================
 
+# A loop cell omitted by the runner's snapshot budget (not a Python literal).
+FOR_TABLE_TOO_LARGE = '[value too large to record] '
+
+
 def truncate_str(s, max_len):
     """Truncate a string, showing beginning + … + end if too long."""
     if len(s) <= max_len:

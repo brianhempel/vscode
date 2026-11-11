@@ -1201,6 +1201,13 @@ class TestCellsAreVisualized(unittest.TestCase):
                          [html.escape(repr(f'{i}\x00{label}')) for i in (0, 1) for label in ('element', 'count += 1')])
         self.assertIn('<b class="fake">1:0:small</b>', out)
 
+    def test_an_oversized_cell_shows_why_its_value_is_unavailable(self):
+        text = '[value too large to record] [[0, 1, ...]]'
+        t = table(rows=(('1', text),), values=((1, NO_VALUE),))
+        out = visualize(t, {}, cells_of)
+        self.assertIn(text, out)
+        self.assertEqual(FakeCell.drawn, [1])
+
     def test_a_press_focuses_a_cell_and_later_events_reach_it(self):
         key = '1\x00count += 1'
         model, _ = update(child(key, 'Bump()'), None, {}, table(), cells_of)
