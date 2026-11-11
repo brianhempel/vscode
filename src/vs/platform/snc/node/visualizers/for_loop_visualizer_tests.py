@@ -1299,6 +1299,104 @@ class TestSubcolumns(unittest.TestCase):
     def setUp(self):
         visualizer_utils.set_live_only(False)
 
+    def test_subheader_has_its_own_view_menu(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"]}, 'col_menu': leaf}
+        out = visualize(people(), model, cells_of)
+        self.assertIn(html.escape(repr(ColumnMenuToggle(label=leaf))), out)
+        options = dict(menu_options(out))
+        for name in ('Subcolumns', 'Sort', 'Compute'):
+            self.assertTrue(options[name])
+        for name in ('Remove', 'Insert Left', 'Insert Right', 'Change Type'):
+            self.assertNotIn(name, options)
+
+    def test_subcolumn_search_sort_tally_and_compute(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"]}, 'col_menu': leaf,
+                 'sort': {'label': leaf, 'direction': 'desc'},
+                 'col_search': {leaf: {'text': '4', 'op': '>'}}}
+        out = visualize(people(), model)
+        self.assertEqual([r[0] for r in iteration_rows(out)], ['1', '0'])
+        self.assertIn('row-match', out)
+        self.assertIn(html.escape(repr(TallyItemToggle(label=leaf, literal='3'))), out)
+        model, _ = update(click(ComputeToggle(label=leaf, template='sum($)')), None, model, people())
+        self.assertEqual(model['computes'][leaf], ['sum($)'])
+        self.assertIn('col-agg-value">8', visualize(people(), model))
+
+    def test_nested_subcolumns_are_full_columns(self):
+        parent = "person\x01$['name']"
+        model = {'subcols': {'person': ["$['name']"], parent: ['$.upper()']}}
+        out = visualize(people(), model)
+        self.assertEqual(header_labels(out), ['itr', 'person', "$['name']", '$.upper()'])
+        self.assertEqual([r[1] for r in iteration_rows(out)], ["'ANN'", "'BO'"])
+        self.assertIn(html.escape(repr(ColumnMenuToggle(label=parent + '\x01$.upper()'))), out)
+
+    def test_pick_parent_and_subcolumn_extracts_their_subjects(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"]}, 'tool': 'pick'}
+        out = visualize(people(), model)
+        for label in ('person', leaf):
+            self.assertIn(html.escape(repr(PickToggle(label=label))), out)
+            picked, _ = update(click(PickToggle(label=label)), None, model, people())
+            _, commands = update(click(ActionButtonClick(action='extract')), None, picked, people())
+            subject = 'person' if label == 'person' else "person['age']"
+            self.assertIn('matching.append(' + subject + ')', repr(commands))
+
+    def test_subcolumn_resize_is_kept(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"]}}
+        model, _ = update(click(ColumnResize(label=leaf, width=123)), None, model, people())
+        self.assertEqual(model['widths'][leaf], 123)
+
+    def test_subcolumn_header_edits_its_expression_as_a_view(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']", "$['name']"]}}
+        model, _ = update({'pythonEventStr': repr(ColumnClick(col=leaf, label=leaf)),
+                           'eventJSON': {'detail': 2}}, None, model, people())
+        self.assertEqual(model['column_input'], "$['age']")
+        model, _ = update(click(ColumnInput(value="$['age'] * 2")), None, model, people())
+        model, commands = update(key('Enter'), None, model, people())
+        self.assertEqual(model['subcols']['person'], ["$['age'] * 2", "$['name']"])
+        self.assertEqual(commands, [])
+
+    def test_hiding_a_subcolumn_removes_it_from_its_parent(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']", "$['name']"]}}
+        model, commands = update(click(ColumnToggle(label=leaf)), None, model, people())
+        self.assertEqual(model['subcols']['person'], ["$['name']"])
+        self.assertEqual(commands, [])
+
+    def test_edit_on_blur_keeps_nested_columns_and_answers(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"], leaf: ['$ + 1']},
+                 'computes': {leaf: ['sum($)']}}
+        model, _ = update(click(ColumnClick(col=leaf, label=leaf), detail=2), None, model, people())
+        model, _ = update(click(ColumnInput(value="$['age'] * 2")), None, model, people())
+        model, commands = update(click(ColumnInputBlur()), None, model, people())
+        renamed = "person\x01$['age'] * 2"
+        self.assertEqual(model['subcols'][renamed], ['$ + 1'])
+        self.assertEqual(model['computes'][renamed], ['sum($)'])
+        self.assertEqual(commands, [])
+
+    def test_nested_parent_compute_answers_are_under_that_parent(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"], leaf: ['$ + 1']},
+                 'computes': {leaf: ['sum($)']}}
+        out = visualize(people(), model)
+        self.assertIn('col-agg-value">8', out)
+        self.assertEqual(out.count('<tfoot'), 1)
+
+    def test_extract_composes_expression_precedence(self):
+        leaf = "person\x01$['age'] + 1"
+        nested = leaf + '\x01$ * 2'
+        model = {'subcols': {'person': ["$['age'] + 1"], leaf: ['$ * 2']},
+                 'tool': 'pick', 'picked': [nested]}
+        _, commands = update(click(ActionButtonClick(action='extract')), None, model, people())
+        code = commands[0].lines[-1][1]
+        scope = {'person': {'age': 3}, 'matching': []}
+        exec(code.strip(), scope)
+        self.assertEqual(scope['matching'], [8])
+
     def test_the_submenu_offers_the_fields_the_values_have(self):
         out = visualize(people(), {'col_menu': 'person', 'submenu': 'subcols'}, cells_of)
         self.assertIn(('Subcolumns', True), menu_options(out))
