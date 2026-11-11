@@ -1337,7 +1337,7 @@ class TestCellCode(unittest.TestCase):
 
     def test_a_button_writes_its_code_beside_the_column_against_the_name_it_shows(self):
         self.assertEqual(
-            [self.wrote(key, self.PRESS, [Phantom(self.FINDALL)]) for key in ('1\x00count += 1', '0\x00element')],
+            [self.wrote(key, self.PRESS, [self.FINDALL]) for key in ('1\x00count += 1', '0\x00element')],
             [([(None, CHILD_SOURCE_BINDER)],
               [AddImports(('import re',)), InsertLines(((3, "    count_strings = re.findall(r'a', count)"),))]),
              ([(None, CHILD_SOURCE_BINDER)],
@@ -1351,12 +1351,11 @@ class TestCellCode(unittest.TestCase):
         name, _, written = cmds[0].lines[0][1].strip().partition(' = ')
         self.assertEqual((name, written.endswith('re.finditer(r"a", element)]'), 'for element in' in written),
                          ('element_indices', True, False))
-        _, cmds = self.wrote('1\x00count += 1', self.PRESS, [Phantom(self.FINDALL)], t)
+        _, cmds = self.wrote('1\x00count += 1', self.PRESS, [self.FINDALL], t)
         self.assertEqual(cmds[1].lines[0][1].split(' = ')[0].strip(), 'count_strings2')
 
     def test_a_preview_from_anything_but_a_button_writes_nothing(self):
-        # A drag over the string previews what it would write, which a table
-        # draws as a column to commit; a loop has no such column to draw.
+        # A drag previews a column without writing code.
         self.assertEqual(self.wrote('1\x00count += 1', 'MouseUp(2)', [Phantom(self.FINDALL)])[1], [])
 
     def test_real_string_buttons_write_expressions_and_loop_blocks(self):
@@ -1368,8 +1367,12 @@ class TestCellCode(unittest.TestCase):
                 model = {'focused_child': key}
                 model, _ = update(child(key, "SearchBoxInput(value=\"r'a'\")", 'input'),
                                   None, model, t, lambda v: string_visualizer)
-                _, commands = update(child(key, f"ActionButtonClick(action={action!r}, copy=False)", 'mousedown'),
-                                     None, model, t, lambda v: string_visualizer)
+                model, commands = update(child(key, f"ActionButtonClick(action={action!r}, copy=False)", 'mousedown'),
+                                         None, model, t, lambda v: string_visualizer)
+                if action == 'match_strings':
+                    from table_visualizer import PhantomColumnCommit
+                    self.assertEqual(commands, [])
+                    model, commands = update(click(PhantomColumnCommit()), None, model, t)
                 lines = [text for c in commands if isinstance(c, InsertLines) for _, text in c.lines]
                 self.assertTrue(lines)
                 source = 'for element in ["apple"]:\n    pass\n' + '\n'.join(lines)
@@ -1398,7 +1401,7 @@ class TestCellCode(unittest.TestCase):
         # A condition's cell is its truth, not a name the body can read.
         t = table(columns=(bound('element'), statement('x > 1', 3, cond=True, path=((3, 0, 'if x > 1', 3, 4),))),
                   rows=(('1', 'False'), ('2', 'True')), values=((1, False), (2, True)))
-        self.assertEqual(self.wrote('1\x00x > 1', self.PRESS, [Phantom(self.FINDALL)], t), ([None], []))
+        self.assertEqual(self.wrote('1\x00x > 1', self.PRESS, [self.FINDALL], t), ([None], []))
 
     def test_a_press_off_the_cells_puts_the_focused_one_away(self):
         container = r'<div class="visualizer-container[^>]*>'
@@ -1407,6 +1410,155 @@ class TestCellCode(unittest.TestCase):
         self.assertEqual(held, [False, True])
         model, _ = update(click(DeselectChildren()), None, {'focused_child': '0\x00element'}, table(), cells_of)
         self.assertIsNone(model['focused_child'])
+
+
+class TestCellPhantoms(unittest.TestCase):
+    def preview(self, t=None, key='0\x00element', model=None, code=None):
+        class Preview(FakeCell):
+            @staticmethod
+            def update(event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                return model, [Phantom(code or ('', 'int(_snc_cell_)'))]
+        t = t or table(values=(('12', 1), ('bad', 2)))
+        return update(child(key, 'Preview()'), None,
+                      model or {'focused_child': key}, t, lambda v: Preview)
+
+    def test_preview_draws_after_source_with_errors_and_commits_once(self):
+        from table_visualizer import PhantomColumnCommit
+        t = table(values=(('12', 1), ('bad', 2)))
+        model, cmds = self.preview(t)
+        self.assertEqual(cmds, [])
+        out = visualize(t, model)
+        self.assertIn('col-header phantom', out)
+        self.assertIn('Click to keep this column', out)
+        cells = re.findall(r'<td[^>]*class="phantom"[^>]*>(.*?)</td>', out, re.S)
+        self.assertEqual(len(cells), 2)
+        self.assertIn('12', cells[0])
+        self.assertIn('ValueError', cells[1])
+        model, cmds = update(click(PhantomColumnCommit()), None, model, t)
+        self.assertEqual(cmds, [InsertLines(((2, '    result = int(element)'),))])
+        self.assertNotIn('col-header phantom', visualize(t, model))
+        self.assertEqual(update(click(PhantomColumnCommit()), None, model, t)[1], [])
+
+    def test_committed_code_matches_preview_and_uses_a_fresh_name(self):
+        from table_visualizer import PhantomColumnCommit
+        t = table(values=((12, 1), (23, 2)), defined=frozenset({'result', 'element'}))
+        model, _ = self.preview(t, code=('', '_snc_cell_ * 2'))
+        out = visualize(t, model)
+        self.assertEqual([text_of(c) for c in re.findall(r'<td[^>]*class="phantom"[^>]*>(.*?)</td>', out)], ['24', '46'])
+        _, cmds = update(click(PhantomColumnCommit()), None, model, t)
+        line = cmds[0].lines[0][1]
+        scope = {}
+        exec('answers = []\nfor element in [12, 23]:\n' + line + '\n    answers.append(result2)', scope)
+        self.assertEqual(scope['answers'], [24, 46])
+
+    def test_deselect_and_focus_change_clear_the_preview(self):
+        model, _ = self.preview()
+        model, _ = update(click(DeselectChildren()), None, model, table())
+        self.assertNotIn('col-header phantom', visualize(table(), model))
+        model, _ = self.preview()
+        model, _ = update(child('1\x00element', 'PinFocus()'), None, model, table(), cells_of)
+        self.assertNotIn('col-header phantom', visualize(table(), model))
+
+    def test_subcolumn_is_composed_and_no_subject_has_no_affordance(self):
+        from table_visualizer import PhantomColumnCommit
+        t = people()
+        key = "0\x00person\x01$['age']"
+        model, _ = self.preview(t, key, {'focused_child': key, 'subcols': {'person': ["$['age']"]}},
+                                ('', '_snc_cell_ * 2'))
+        self.assertIn('col-header phantom', visualize(t, model))
+        _, cmds = update(click(PhantomColumnCommit()), None, model, t)
+        self.assertIn("person['age']", cmds[0].lines[0][1])
+        t = table(columns=(ForLoopColumn('a, b = pair'), COUNT))
+        model, _ = self.preview(t, '0\x00a, b = pair')
+        self.assertNotIn('col-header phantom', visualize(t, model))
+
+    def test_real_string_previews_with_imports_and_button_still_previews(self):
+        import string_visualizer
+        from table_visualizer import PhantomColumnCommit
+        t = table(values=(('apple', 1), ('pear', 2)))
+        key = '0\x00element'
+        model, cmds = update(child(key, "SearchBoxInput(value=\"r'a'\")", 'input'), None,
+                             {'focused_child': key}, t, lambda v: string_visualizer)
+        self.assertEqual(cmds, [])
+        out = visualize(t, model, eval_in_scope=lambda c: eval(c, {}))
+        self.assertIn('col-header phantom', out)
+        self.assertNotIn('NameError', out)
+        _, cmds = update(click(PhantomColumnCommit()), None, model, t)
+        self.assertIn(AddImports(('import re',)), cmds)
+
+
+    def test_preview_only_evaluates_the_drawn_page_and_collapses_with_focus(self):
+        calls = []
+        t = table(rows=tuple((str(i), str(i)) for i in range(100)),
+                  values=tuple((i, i) for i in range(100)))
+        model, _ = self.preview(t, code=('', 'observe(_snc_cell_)'))
+        scope = {'observe': lambda v: calls.append(v) or v}
+        visualize(t, model, eval_in_scope=lambda c: eval(c, scope))
+        self.assertEqual(calls, list(range(50)) + [97, 98, 99])
+        self.assertNotIn('col-header phantom', visualize(t, model, small=True))
+
+    def test_commit_stays_inside_the_source_branch(self):
+        from table_visualizer import PhantomColumnCommit
+        t = table(columns=(bound('element'),
+                  statement('tag = str(element)', 4, 'tag', indent='        ', path=((3, 0, 'if element:', 3, 4),))),
+                  values=((1, '1'), (2, '2')),
+                  source=('for element in [1, 2]:', '    if element:', '        tag = str(element)'))
+        model, _ = self.preview(t, '0\x00tag = str(element)', code=('', '_snc_cell_.upper()'))
+        _, cmds = update(click(PhantomColumnCommit()), None, model, t)
+        self.assertEqual(cmds, [InsertLines(((4, '        result = tag.upper()'),))])
+
+    def test_a_real_string_drag_previews_and_release_keeps_it_until_deselected(self):
+        import string_visualizer
+        from string_visualizer_tests import make_mouse_down_event, make_mouse_move_event, make_mouse_up_event
+        t = table(values=(('apple', 1), ('pear', 2)))
+        key = '0\x00element'
+        model = {'focused_child': key}
+        for e in (make_mouse_down_event(0), make_mouse_move_event(1), make_mouse_up_event(1)):
+            e['pythonEventStr'] = repr(ChildEvent(key, e['pythonEventStr']))
+            model, commands = update(e, None, model, t, lambda v: string_visualizer)
+            self.assertEqual(commands, [])
+        self.assertIn('col-header phantom', visualize(t, model))
+        model, _ = update(click(DeselectChildren()), None, model, t)
+        self.assertNotIn('col-header phantom', visualize(t, model))
+
+    def test_runner_renders_preview_then_commits_on_the_finished_table_once(self):
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+        with patch.object(sys, 'path', [str(Path(__file__).resolve().parent.parent), *sys.path]):
+            import python_runner
+            from python_runner_tests import capture_stream_messages
+        from table_visualizer import PhantomColumnCommit
+        source = 'for word in ["apple", "pear"]:\n    rest = word\n'
+        initial = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                   '_source_expr_sig': None}
+        key = '0\x00rest = word'
+        events = [repr(ChildEvent(key, e)) for e in
+                  ['PinFocus()', 'SearchBoxInput(value="r\'a\'")']]
+        def run(model, expressions):
+            payload = json.dumps([{'line': 2, 'visIndex': 1, 'model': model,
+                'events': [{'id': i, 'pythonEventStr': e, 'eventJSON': {'type': 'mousedown'}}
+                           for i, e in enumerate(expressions)]}])
+            imports, body = python_runner.split_leading_imports(source)
+            with capture_stream_messages() as messages:
+                python_runner._execute_run(body, payload, 'd11', import_code=imports)
+            return [m['item'] for m in messages.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        tables = run(initial, events)
+        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1]])
+        self.assertIn('col-header phantom', tables[-1]['html'])
+        self.assertEqual(tables[-1].get('commands', []), [])
+        tables = run(tables[-1]['model'], [repr(PhantomColumnCommit()), repr(PhantomColumnCommit())])
+        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1]])
+        edits = [e for t in tables for c in t.get('commands', []) for e in c.get('edits', [])]
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0]['afterLine'], 2)
+        self.assertIn("result = re.findall", edits[0]['text'])
+        self.assertIn('rest', edits[0]['text'])
+        source = 'import re\n' + source + edits[0]['text'] + '\n'
+        tables = run(None, [])
+        self.assertIn('result = re.findall', html.unescape(tables[-1]['html']))
+        self.assertNotIn('col-header phantom', tables[-1]['html'])
+
 
 
 class TestSubcolumns(unittest.TestCase):

@@ -2697,14 +2697,15 @@ class TestForLoopTable(unittest.TestCase):
         key = '0\x00rest = word'
         events = ["PinFocus()", "SearchBoxInput(value=\"r'a'\")",
                   "ActionButtonClick(action='match_strings', copy=False)"]
+        from table_visualizer import PhantomColumnCommit
         payload = json.dumps([{'line': 2, 'visIndex': 1, 'model': model, 'events': [
-            {'id': i, 'pythonEventStr': repr(ChildEvent(key, event)), 'eventJSON': {'type': 'mousedown'}}
-            for i, event in enumerate(events)]}])
+            {'id': i, 'pythonEventStr': repr(PhantomColumnCommit()) if event is None else repr(ChildEvent(key, event)), 'eventJSON': {'type': 'mousedown'}}
+            for i, event in enumerate([*events, None])]}])
         import_code, body_code = split_leading_imports(source)
         with capture_stream_messages() as msgs:
             python_runner._execute_run(body_code, payload, 'run-1', import_code=import_code)
         tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
-        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1, 2]])
+        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1, 2, 3]])
         commands = tables[-1].get('commands', [])
         self.assertTrue(any('re.findall' in edit.get('text', '') and 'rest' in edit['text']
                             for c in commands for edit in c.get('edits', [])))

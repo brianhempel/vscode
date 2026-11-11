@@ -106,7 +106,13 @@ the runner copied, so a loop still running has none to search.
 press focuses it (then routed its events, as a ChildEvent keyed by row and
 column), nested so a table in one draws as its repr, and with nowhere to save
 to -- a loop's line has no config for a cell's to go in. Only the page of rows
-being drawn is visualized. A value exceeding the runner’s snapshot budget
+being drawn is visualized. A child's preview is a phantom column, as a
+table's is, after its source column (after the parent for a sub-column).
+A press on its header or a cell keeps it as `result = ...` (`result2`, ...)
+beside the source's statement, in its branch; a bound name writes at the top
+of the body. Moving focus to another cell or pressing elsewhere puts it away.
+A column with no subject has no expression to write, so has no preview.
+A value exceeding the runner’s snapshot budget
 shows a labeled preview instead; it has no recorded value for interactions.
 Subcolumns, in a column's menu, spreads its values'
 fields into columns of their own under its header, as a table's does: a view,
@@ -235,7 +241,9 @@ from table_visualizer import (PickToggle, _build_pick_expr, _pick_bands_by_colum
                                _search_context_for, _get_matching_indices, _search_as_predicate,
                                _UNEVALUABLE, decompose_search, compose_column_searches,
                                COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_TYPES, NO_THING,
-                               DeselectChildren, MAX_SPLAT_DEPTH, _rename_column_children,
+                               DeselectChildren, PhantomColumnCommit, _phantom, _drop_phantom, _set_phantom,
+                               _drawn_columns, _phantom_scope, _render_column_header, _reads_field,
+                               MAX_SPLAT_DEPTH, _rename_column_children,
                                ComputeHoleInput, ComputeExprInput, ComputeExprKeyDown,
                                ComputeToggle as TableComputeToggle, _agg_holes, _agg_set_hole,
                                _agg_is_row, _agg_child_key, _parse_agg_child_key,
@@ -254,7 +262,7 @@ from visualizer_utils import (CHILD_SOURCE_BINDER, EXPANDED_PANE_MAX_HEIGHT, ICO
                               call_with_supported_kwargs, child_nesting_kwargs, error_html, eval_dollar_expr,
                               replace_dollars_in_py_exp,
                               is_live_only, is_new_code, nest_generated_expr, py_exp_attrs,
-                              render_tool_toolbar, route_child_event, truncate_repr, with_pass_body, opens_block, wrap_child_prefix,
+                              imports_for_code, render_tool_toolbar, route_child_event, truncate_repr, with_pass_body, opens_block, wrap_child_prefix,
                               wrap_child_suffix)
 
 
@@ -1476,36 +1484,22 @@ def _has_cell(value: ForLoopTable, key: str) -> bool:
 def _cell_name(value: ForLoopTable, key: str) -> Optional[str]:
     """The name a cell's value goes by in the loop's body: its column's
     subject, which the body can read after the statement that set it. None
-    for a condition, whose cell is its truth, and for a sub-column's field."""
+    for a condition, whose cell is its truth."""
     label, _, sub = key.split(CELL_KEY_SEP, 1)[1].partition(SUBCOL_SEP)
     column = next((c for c in value.columns if c.label == label), None)
-    if column is None or sub or column.cond or column.placeholder or not column.subject:
+    if column is None or column.cond or column.placeholder or not column.subject:
         return None
-    return column.subject
-
-
-# What a press on one of a cell's action buttons is called, however deep the
-# cell's own visualizer nests it.
-ACTION_PRESS = 'ActionButtonClick('
+    return _view_column(value, _leaf_label(label, sub or None)).subject
 
 
 def _cell_commands(value: ForLoopTable, msg: ChildEvent, name: Optional[str], commands: List[Any]) -> List[Any]:
     """What a cell's visualizer asked for, as the loop writes it. Code is a
     line beside the statement that made the value, reading the column's name
     -- as the line box writes one beside a column -- with its imports. A
-    preview (Phantom), which a table draws as a column to commit, is only
-    written when a button made it: a drag previews on every move, and the loop
-    has no column to draw one in. A cell with no name writes nothing."""
-    inner = msg.py_ev_str
-    while inner.startswith('ChildEvent('):
-        inner = eval(inner).py_ev_str
-    pressed = inner.startswith(ACTION_PRESS)
+    preview is taken by the table before this, as a table's is. A cell with
+    no name writes nothing."""
     out: List[Any] = []
     for command in commands:
-        if isinstance(command, Phantom):
-            if not pressed:
-                continue
-            command = command.new_code
         if not is_new_code(command):
             # Text for the clipboard: pasted into the body, it reads the name.
             text = getattr(command, 'text', None)
@@ -1523,6 +1517,51 @@ def _cell_commands(value: ForLoopTable, msg: ChildEvent, name: Optional[str], co
             out.append(AddImports(tuple(imports)))
         out.append(_written_beside(value, _column_named(value, msg.child_key), statement))
     return out
+
+
+def _preview_cell(model, value, msg, code):
+    """Keep a table's phantom on its source leaf; its dollars read the
+    recorded parent column, just as a plain table sub-column's do."""
+    had = _phantom(model.get('columns'))
+    columns = {c.label: {'cols': _subcolumn_tree(model, c.label)} for c in value.columns}
+    model['columns'] = columns
+    leaf = msg.child_key.split(CELL_KEY_SEP, 1)[1]
+    _, *subs = leaf.split(SUBCOL_SEP)
+    parent = '$'
+    for sub in subs:
+        parent = _compose_sub(sub, parent)
+    expr = nest_generated_expr(code[1], parent)
+    key = _set_phantom(model, leaf, expr)
+    if key is not None and (had is None or had[0] != leaf):
+        model['_scroll_to_cell'] = key
+
+
+def _preview_for(model, column):
+    found = _phantom(model.get('columns'))
+    return found if found and found[0].split(SUBCOL_SEP)[0] == column.label else None
+
+
+def _render_phantom(value, model, i, col, get_visualizer, eval_in_scope):
+    expr = _preview_for(model, value.columns[col])[1]
+    attrs = (f' class="phantom" data-col="{repr(html.escape(expr))}" '
+             f'snc-mouse-down="{html.escape(repr(PhantomColumnCommit()))}"')
+    drawn = ''
+    try:
+        cell = _cell_value(value, i, col, None)
+        if cell is not NO_VALUE and not cell_skipped(value, i, col):
+            cell = eval_dollar_expr(expr, cell, _phantom_scope(eval_in_scope or (lambda code: eval(code)), expr))
+            if get_visualizer is None:
+                drawn = f'<span class="snc-code">{html.escape(truncate_repr(cell, 120))}</span>'
+            else:
+                vis = get_visualizer(cell)
+                nesting = child_nesting_kwargs({'_config_persist': False}, expr, vis.init_model)
+                cm = call_with_supported_kwargs(vis.init_model, cell, get_visualizer,
+                                                eval_in_scope=eval_in_scope, **nesting)
+                drawn = call_with_supported_kwargs(vis.visualize, cell, cm, get_visualizer,
+                                                   eval_in_scope=eval_in_scope, small=True, var_and_exp=None)
+    except Exception as e:
+        drawn = '' if _reads_field(expr) else error_html(e)
+    return f'<td{attrs}>{drawn}</td>'
 
 
 def _against(code: str, name: str) -> str:
@@ -2266,7 +2305,8 @@ def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, e
     """The answers kept under the table, a row per level, as a table's: each
     column's answers stacked in the catalog's order."""
     computes = model.get('computes') or {}
-    asked = [computes.get(_view_column(value, col).label) or [] for col in shown]
+    asked = [computes.get(value.columns[col].label if isinstance(col, int) else col) or []
+             for col in shown]
     levels = max((len(templates) for templates in asked), default=0)
     if not levels:
         return ''
@@ -2786,6 +2826,8 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
                 leaves.append((column.path, over + ancestors, ('sub', col, sub)))
         else:
             leaves.append((column.path, over, ('column', col)))
+        if _preview_for(model, column):
+            leaves.append((column.path, over, ('phantom', col)))
         if col == beside and insert_at['after']:
             leaves.append(box)
     # Every column it adds is code, so live-only leaves it out.
@@ -2830,6 +2872,10 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
                 return _render_fold_header(value, model, col, folds, span_attrs, classes)
             case ('sub', col, sub):
                 return _render_subheader(value, model, value.columns[col].label, sub, span_attrs, classes, get_visualizer)
+            case ('phantom', col):
+                expr = _preview_for(model, value.columns[col])[1]
+                return _render_column_header(expr, {**model, 'columns': _drawn_columns(model['columns'])}, [],
+                                             span_attrs=span_attrs, extra_classes=classes)
             case ('box', kwargs):
                 return _render_box(model, span_attrs=span_attrs, **kwargs)
 
@@ -2864,6 +2910,8 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     if model is None:
         model = {}
     live_only = is_live_only()
+    if small or live_only:
+        _drop_phantom(model.get('columns'))
     rows, hidden_rows = _rows_to_draw(value, model)
     if not live_only:
         _open_pending_init(value, model)
@@ -2902,9 +2950,11 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     # Drawn whatever the columns are, so the table keeps its shape.
     strs.append('<tr class="for-loop-init-row"><td class="row-index">init</td>')
     col_edges = dict(zip(shown, _edge_list([_fold_path(value, col, folds) for col in shown])))
-    strs += [_render_fold_init(value, model, col, folds, live_only, col_edges[col]) if col in folds else
-             _render_init_cell(value, model, col, live_only, _span('colspan', spans.get(col, 1)), col_edges[col])
-             for col in shown]
+    for col in shown:
+        strs.append(_render_fold_init(value, model, col, folds, live_only, col_edges[col]) if col in folds else
+                    _render_init_cell(value, model, col, live_only, _span('colspan', spans.get(col, 1)), col_edges[col]))
+        if col not in folds and _preview_for(model, value.columns[col]):
+            strs.append('<td></td>')
     strs.append('</tr>')
     has_values = not value.running and len(value.values) == len(rows)
     gap = _hidden_page(len(rows), model)
@@ -2920,11 +2970,12 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         col_id = 'idx' if label is None else f'col_{pick_labels.index(label)}'
         return _table_pick_region(i, col_id, model, first_idx, len(rows), {})
     leaf_edges = _edge_list([_fold_path(value, col, folds) for col, _ in leaves])
+    phantom_count = sum(bool(_preview_for(model, value.columns[c])) for c in shown if c not in folds)
     for position, i in enumerate(order):
         row = rows[i]
         if gap is not None and gap[0] <= position < gap[1]:
             if position == gap[0]:
-                strs.append(_render_load_more_row(gap[1] - gap[0], len(leaves) + 1, small))
+                strs.append(_render_load_more_row(gap[1] - gap[0], len(leaves) + 1 + phantom_count, small))
             continue
         row_class = '' if not marked else (' class="row-match"' if i in marked else ' class="row-dim"')
         if pick_here:
@@ -2944,6 +2995,8 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             if pick_here:
                 cell = cell[:-len('</td>')] + overlay(i, _leaf_label(value.columns[col].label, sub)) + '</td>'
             strs.append(cell)
+            if sub == (subcols.get(col) or [None])[-1] and _preview_for(model, value.columns[col]):
+                strs.append(_render_phantom(drawn_table, model, i, col, get_visualizer, eval_in_scope) if has_values else '<td></td>')
         strs.append('</tr>')
     strs.append('</tbody>')
     agg_rows = []
@@ -2958,6 +3011,10 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             if not columns or columns[-1] != label:
                 columns.append(label)
             widths[label] = widths.get(label, 0) + 1
+            if sub == (subcols.get(col) or [None])[-1] and _preview_for(model, value.columns[col]):
+                phantom_label = _preview_for(model, value.columns[col])[1]
+                columns.append(phantom_label)
+                widths[phantom_label] = 1
         computes = {label: templates for label, templates in (model.get('computes') or {}).items()
                     if label.count(SUBCOL_SEP) == level}
         agg_model = {**model, 'computes': computes}
@@ -2992,7 +3049,7 @@ def needs_values(event, model, value=None) -> bool:
     distinguish an immutable result from a mutation.
     """
     text = str(event.get('pythonEventStr', ''))
-    if text.startswith(('ChildEvent(', 'RowActionClick(', 'TallyItemToggle(',
+    if text.startswith(('ChildEvent(', 'PhantomColumnCommit(', 'RowActionClick(', 'TallyItemToggle(',
                         'TallySelectAll(', 'TallySelectNone(')):
         return True
     if text != 'ColumnKeyDown()' or (event.get('eventJSON') or {}).get('key') not in ('Enter', 'Tab'):
@@ -3106,6 +3163,7 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
     except Exception:
         return (model, [])
     model = dict(model or {})
+    model.pop('_scroll_to_cell', None)
     if isinstance(msg, ChildEvent) and _parse_agg_child_key(msg.child_key) is not None:
         col, expr, _ = _parse_agg_child_key(msg.child_key)
         if expr not in (model.get('computes') or {}).get(col, []) or col not in _view_labels(value, model):
@@ -3124,6 +3182,7 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         # A cell's own visualizer: the first press focuses it, as a table's.
         # Its value is bound to a name for it, as a table's cells are, so the
         # code it makes comes back to be written against the column's.
+        focus_before = model.get('focused_child')
         name = _cell_name(value, msg.child_key)
         # Block actions cannot be preview columns. Give the child a named
         # source for that press so it emits the block, which we place in the
@@ -3144,10 +3203,35 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             child_model = (model.get('children') or {}).get(msg.child_key)
             if isinstance(child_model, dict):
                 child_model['linked_action'] = None
-        return (model, _cell_commands(value, msg, name, commands))
+        if model.get('focused_child') != focus_before:
+            _drop_phantom(model.get('columns'))
+        filtered = []
+        for command in commands:
+            if isinstance(command, Phantom):
+                if name:
+                    _preview_cell(model, value, msg, command.new_code)
+            else:
+                if is_new_code(command):
+                    _drop_phantom(model.get('columns'))
+                filtered.append(command)
+        return (model, _cell_commands(value, msg, name, filtered))
     double_click = event_json.get('detail', 1) >= 2
     match msg:
+        case PhantomColumnCommit():
+            found = _phantom(model.get('columns'))
+            _drop_phantom(model.get('columns'))
+            if found is None:
+                return (model, [])
+            leaf, expr = found
+            column = next((c for c in value.columns if c.label == leaf.split(SUBCOL_SEP)[0]), None)
+            if column is None or not column.subject or column.cond or column.placeholder:
+                return (model, [])
+            code = replace_dollars_in_py_exp(expr, [CHILD_SOURCE_BINDER]).replace(
+                f'({CHILD_SOURCE_BINDER})', CHILD_SOURCE_BINDER)
+            return (model, _cell_commands(value, ChildEvent(f'0{CELL_KEY_SEP}{column.label}', ''),
+                                          column.subject, [('result', code, imports_for_code(expr))]))
         case DeselectChildren():
+            _drop_phantom(model.get('columns'))
             return ({**model, 'focused_child': None}, [])
         case LoadMoreRows():
             return ({**model, 'shown_rows': model.get('shown_rows', ROWS_PER_PAGE) + ROWS_PER_PAGE}, [])
