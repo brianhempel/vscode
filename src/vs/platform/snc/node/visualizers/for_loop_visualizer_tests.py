@@ -971,7 +971,8 @@ class TestSearch(unittest.TestCase):
     def test_typing_a_condition_over_the_loops_names_marks_what_it_matches(self):
         model, cmds = update(typed_into('lambda e: SearchBoxInput', visualize(scores(), {}), 'score > 5'), None,
                              {}, scores())
-        self.assertEqual((model, cmds), ({'search': 'score > 5'}, []))
+        self.assertEqual(model['search'], 'score > 5')
+        self.assertEqual(cmds, [])
         out = visualize(scores(), model)
         self.assertEqual(row_classes(out), ['row-dim', 'row-match', 'row-dim', 'row-match', 'row-dim'])
         self.assertIn('Count: 2', out)
@@ -991,6 +992,52 @@ class TestSearch(unittest.TestCase):
         for search in ('score > 100', 'score >', 'nope == 1'):
             with self.subTest(search=search):
                 self.assertEqual(set(row_classes(visualize(scores(), {'search': search}))), {''})
+
+    def test_table_search_forms_select_iterations(self):
+        from for_loop_visualizer import _matches
+        for search, expected in (('$ > 5', [1, 3]), ('> 5', [1, 3]),
+                                 ('2:5', [2, 3, 4]), ('2', [2]),
+                                 ('"ab"', []), ('no_such_name', []),
+                                 ('$i % 2 == 0', [0, 2, 4]),
+                                 ('(lambda x: x > 5)', [1, 3])):
+            with self.subTest(search=search):
+                self.assertEqual(_matches(scores(), {'search': search}), expected)
+                self.assertEqual(_matches(scores(), {'search': search, 'first_match': True}), expected[:1])
+
+    def test_predicates_read_the_loop_item_and_unpacking_as_a_tuple(self):
+        from for_loop_visualizer import _matches
+        words = table(columns=(bound('word'),), targets=('word',),
+                      values=(('ab',), ('12',), ('cd',)))
+        self.assertEqual(_matches(words, {'search': 'str.isalpha'}), [0, 2])
+        pairs = table(columns=(bound('a'), bound('b')), targets=('a', 'b'),
+                      values=((1, 2), (3, 1)))
+        self.assertEqual(_matches(pairs, {'search': '$[0] < $[1]'}), [0])
+
+    def test_main_search_fills_columns_and_column_edits_recompose_it(self):
+        model, _ = update(click(SearchBoxInput(value='score > 5')), None, {}, scores())
+        self.assertEqual(model['col_search']['score']['text'], '5')
+        model, _ = update(click(ColumnSearchInput(label='score', value='8')), None, model, scores())
+        self.assertEqual(model['search'], 'score > 8')
+        model, _ = update(click(SearchBoxInput(value='$ > 5')), None, model, scores())
+        self.assertEqual(model['col_search']['score']['text'], '5')
+        model, _ = update(click(SearchBoxInput(value='score >')), None, model, scores())
+        self.assertFalse(model['col_search'])
+
+    def test_predicates_use_program_scope_and_per_iteration_names(self):
+        from for_loop_visualizer import _matches
+        scope = {'passes': lambda x: x > 5, 'threshold': 5, 'score': 2}
+        evaluate = lambda code: eval(code, scope)
+        self.assertEqual(_matches(scores(), {'search': 'passes'}, evaluate), [1, 3])
+        self.assertEqual(_matches(scores(), {'search': 'score > threshold'}, evaluate), [1, 3])
+        self.assertEqual(_matches(scores(), {'search': '$ in $$'}, evaluate), list(range(5)))
+
+    def test_column_edits_keep_unclaimed_main_search_terms(self):
+        model, _ = update(click(SearchBoxInput(value='score > 5 and high > 0')), None, {}, scores())
+        model, _ = update(click(ColumnSearchInput(label='score', value='8')), None, model, scores())
+        self.assertEqual(model['search'], 'score > 8 and high > 0')
+        model, _ = update(click(SearchBoxInput(value='score > 5 and $i > 1')), None, model, scores())
+        model, _ = update(click(ColumnSearchInput(label='score', value='8')), None, model, scores())
+        self.assertEqual(model['search'], 'score > 8 and $i > 1')
 
     def test_an_empty_box_is_no_search(self):
         model, _ = update({'pythonEventStr': repr(SearchBoxInput(value='')), 'eventJSON': {}}, None,
@@ -1027,7 +1074,8 @@ class TestColumnSearch(unittest.TestCase):
         model, _ = update(click(ColumnSearchOpSelect(label='score', op='>=')), None, model, scores())
         self.assertEqual(row_classes(visualize(scores(), model)),
                          ['row-dim', 'row-match', 'row-match', 'row-match', 'row-dim'])
-        model['search'] = 'score == 1'
+        # A model saved before searches were synchronized still composes.
+        model = {'search': 'score == 1', 'col_search': model['col_search']}
         model, _ = update(click(ColumnSearchComposeSelect(label='score', compose='or')), None, model, scores())
         self.assertEqual(row_classes(visualize(scores(), model)),
                          ['row-dim', 'row-match', 'row-match', 'row-match', 'row-match'])
@@ -1585,7 +1633,49 @@ class TestActionButtons(unittest.TestCase):
         model = {'search': 'score > 2', 'col_search': {'high += score > 5': {'compose': 'and', 'op': '>=',
                                                                             'text': '1', 'exclude': False}}}
         _, cmds = update(click(ActionButtonClick(action='count')), None, model, scores())
-        self.assertEqual(cmds[0].lines[1], (3, '    if (score > 2) and (high >= (1)):\n        n_matching += 1'))
+        self.assertEqual(cmds[0].lines[1], (3, '    if high >= 1 and score > 2:\n        n_matching += 1'))
+
+    def test_new_search_forms_write_executable_loop_conditions(self):
+        # Apply every command to actual source, then run it: row positions
+        # must count iterations even when Filter continues at the top.
+        source = ['high = 0', 'for score in [1, 9, 4, 9, 2]:', '    high += score > 5']
+        for search, selected in (('$ > 5', [9, 9]), ('2:5', [4, 9, 2]),
+                                 ('2', [4]), ('(lambda x: x > 5)', [9, 9])):
+            for action in ('count', 'extract', 'filter', 'any', 'all'):
+                with self.subTest(search=search, action=action):
+                    _, commands = update(click(ActionButtonClick(action=action)), None,
+                                         {'search': search}, scores())
+                    self.assertTrue(commands)
+                    lines = list(source)
+                    if action == 'filter':
+                        lines.append('    kept.append(score)')
+                    inserts = [entry for command in commands for entry in command.lines]
+                    for after, text in sorted(inserts, key=lambda entry: entry[0], reverse=True):
+                        lines[after:after] = text.splitlines()
+                    scope = {'kept': []}
+                    exec('\n'.join(lines), scope)
+                    expected = {'count': ('n_matching', len(selected)),
+                                'extract': ('matching', selected), 'filter': ('kept', selected),
+                                'any': ('any_matching', bool(selected)),
+                                'all': ('all_matching', len(selected) == 5)}
+                    name, answer = expected[action]
+                    self.assertEqual(scope[name], answer)
+
+    def test_collection_scope_cannot_be_written_into_a_loop(self):
+        for action in ('count', 'extract', 'filter', 'any', 'all'):
+            self.assertEqual(update(click(ActionButtonClick(action=action)), None,
+                                    {'search': '$ in $$'}, scores())[1], [])
+
+    def test_item_predicate_codegen_uses_bound_names(self):
+        from for_loop_visualizer import _condition
+        words = table(columns=(bound('word'),), targets=('word',))
+        self.assertEqual(_condition(words, {'search': 'str.isalpha'}), 'str.isalpha(word)')
+        pairs = table(columns=(bound('a'), bound('b')), targets=('a', 'b'))
+        self.assertEqual(_condition(pairs, {'search': '$[0] < $[1]'}), '(a, b)[0] < (a, b)[1]')
+
+    def test_forms_without_loop_code_disable_the_buttons(self):
+        for search in ('$ in $$', '[1, 2]:4', '[(0, 2), (3, 4)]', 'start:5'):
+            self.assertTrue(all(not enabled for _, enabled in self.buttons({'search': search})))
 
     def test_a_search_that_is_not_python_writes_nothing(self):
         self.assertEqual(update(click(ActionButtonClick(action='count')), None, {'search': 'score >'}, scores())[1],

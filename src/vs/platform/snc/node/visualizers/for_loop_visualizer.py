@@ -84,13 +84,18 @@ away by a click anywhere else. What it does to a loop is write loop code:
   none.
 
 **Searching, sorting and tallying are views, as a table's are.** The footer's
-search box takes a condition over the loop's names (`score > 5`), each row's
-values bound to them; the iterations it holds for are marked and the rest
-dimmed, and 1st keeps only the first. A column's menu opens with a search row
+search box takes a table's search -- dollars, row indices and slices, values
+and predicate functions -- with $ reading the names the loop binds (a tuple
+of several), and $i the iteration number. A condition over the loop's names
+(`score > 5`) still reads each row's values bound to them; the iterations it
+holds for are marked and the rest
+dimmed, and 1st keeps only the first. The box and column search rows fill
+each other in as a table's do. A column's menu opens with a search row
 of its own, its value compared against what is typed, composed with the
 searches before it; its tally, at the menu's foot, is the table's -- ticking
 values writes them into that row as a table's does. Sort draws the iterations
-in a column's order, still numbered by when they ran. None of it writes code:
+in a column's order, still numbered by when they ran. Changing the search
+writes no code:
 a loop's iterations are not a list to filter, and all of it reads the values
 the runner copied, so a loop still running has none to search.
 
@@ -111,7 +116,10 @@ derived value has no statement to remove, insert beside or change the type of.
 **What a table writes about its rows, a loop writes as loop code.** The
 footer's buttons -- Count, Extract, Filter, Any, All -- turn the search into
 a name set above the loop and a line at the end of its body building it up
-(Filter: a `continue` at the top); under the pick tool, Extract collects the
+(Filter: a `continue` at the top); an index search adds a counter at the
+top of the body, before any continue. A search on the whole collection ($$),
+or a broadcast slice or collection of ranges, has no loop code form, so its
+buttons are disabled; under the pick tool, Extract collects the
 picked columns. An iteration's ▾ writes `if score == 9: continue` or `break`
 at the top of the body, or its cells as a dict after the loop. A header hands
 over the name its column shows. Not the table's chain link: what a loop's
@@ -205,7 +213,9 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
-from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_TYPES, NO_THING,
+from table_visualizer import (_search_context_for, _get_matching_indices, _search_as_predicate,
+                               _UNEVALUABLE, decompose_search, compose_column_searches,
+                               COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_TYPES, NO_THING,
                                DeselectChildren, MAX_SPLAT_DEPTH, _rename_column_children,
                                ComputeHoleInput, ComputeExprInput, ComputeExprKeyDown,
                                ComputeToggle as TableComputeToggle, _agg_holes, _agg_set_hole,
@@ -223,6 +233,7 @@ from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_
 from visualizer_utils import (CHILD_SOURCE_BINDER, EXPANDED_PANE_MAX_HEIGHT, ICONS, NO_VALUE, FOR_TABLE_TOO_LARGE, AddImports, ChildEvent,
                               ForLoopColumn, ForLoopTable, InsertLines, Phantom, ReplaceLines, aggregate_handled_keys,
                               call_with_supported_kwargs, child_nesting_kwargs, error_html, eval_dollar_expr,
+                              replace_dollars_in_py_exp,
                               is_live_only, is_new_code, nest_generated_expr, py_exp_attrs,
                               render_tool_toolbar, route_child_event, truncate_repr, with_pass_body, opens_block, wrap_child_prefix,
                               wrap_child_suffix)
@@ -1219,7 +1230,7 @@ def _write_selection(model, label: str, literals, exclude: bool) -> dict:
 
 
 def _eval(code: str, names: dict):
-    return eval(code, {'math': math}, names)
+    return eval(code, {'math': math, **names})
 
 
 def _row_names(value: ForLoopTable, row: Tuple[Any, ...]) -> dict:
@@ -1229,21 +1240,14 @@ def _row_names(value: ForLoopTable, row: Tuple[Any, ...]) -> dict:
             if column.subject and cell is not NO_VALUE}
 
 
-def _holds(code: str, names: dict) -> bool:
+def _holds(code: str, names: dict, eval_in_scope=None) -> bool:
     try:
+        if eval_in_scope is not None:
+            names = {k: v for k, v in names.items() if k.isidentifier() and not keyword.iskeyword(k)}
+            return bool(eval_in_scope(f'(lambda {", ".join(names)}: {code})')(**names))
         return bool(_eval(code, names))
     except Exception:
         return False
-
-
-def _column_holds(search: dict, cell, names: dict) -> bool:
-    """Whether a column's search holds for its value `cell`: compared with
-    what was typed, or -- with no comparison -- what was typed, `$` being it."""
-    if cell is NO_VALUE:
-        return False
-    text, op = search['text'].strip(), search['op']
-    code = f'_v {op} ({text})' if op else text.replace('$', '_v')
-    return _holds(code, {**names, '_v': cell})
 
 
 def _active_searches(value: ForLoopTable, model) -> List[Tuple[str, dict]]:
@@ -1251,32 +1255,68 @@ def _active_searches(value: ForLoopTable, model) -> List[Tuple[str, dict]]:
             if _column_search(model, label)['text'].strip()]
 
 
-def _matches(value: ForLoopTable, model) -> Optional[List[int]]:
-    """The iterations every search holds for, the footer's then each column's
-    in turn, composed as each says; None when nothing is being searched for.
-    Read off the values, so a loop still running has none to search."""
-    search = (model.get('search') or '').strip()
-    columns = _active_searches(value, model)
-    if not search and not columns:
+def _search_columns(value, model):
+    """The table parser's expression keys paired with the loop's column labels."""
+    return {column.subject: label for label in _view_labels(value, model)
+            if (column := _view_column(value, label)).subject}
+
+
+def _search_adapter(value, model):
+    columns = _search_columns(value, model)
+    return columns, {expr: _column_search(model, label) for expr, label in columns.items()}
+
+
+def _search_text(value, model):
+    # Older models have independent column searches. New edits keep the main
+    # box and the rows in step, with the table's leftovers preserving hand code.
+    if 'search_leftovers' in model:
+        return model.get('search')
+    columns, searches = _search_adapter(value, model)
+    return compose_column_searches(list(columns), searches, _search_eval,
+                                   [{'text': model['search']}] if model.get('search') else None)
+
+
+def _search_eval(code):
+    return _eval(code, {})
+
+
+def _search_context(value, model, eval_in_scope=None):
+    search = _search_text(value, model)
+    return _search_context_for({'search': search}, source_expr='_snc_iterations',
+                               eval_in_scope=eval_in_scope or _search_eval) if search else None
+
+
+def _predicate(value, search, index, collection=None, eval_in_scope=None):
+    try:
+        val = (eval_in_scope or _search_eval)(search)
+    except Exception:
+        val = _UNEVALUABLE
+    return replace_dollars_in_py_exp(_search_as_predicate(search, val),
+                                    [_items(value)] + ([collection] if collection else []),
+                                    index_exp=index)
+
+
+def _matches(value: ForLoopTable, model, eval_in_scope=None) -> Optional[List[int]]:
+    """Read the table's search forms against iterations, with raw loop names
+    still bound to the values that iteration left."""
+    search = _search_text(value, model)
+    if not search:
         return None
-    matched = []
-    for i, row in enumerate(value.values):
-        names = _row_names(value, row)
-        held = _holds(search, names) if search else None
-        for col, column_search in columns:
+    context = _search_context(value, model, eval_in_scope)
+    if context and not context.get('is_predicate'):
+        matched = _get_matching_indices(search, list(value.values), eval_in_scope or _search_eval)
+    else:
+        index = _unique_name(value, '_iteration')
+        collection = _unique_name(value, '_iterations')
+        code = _predicate(value, search, index, collection, eval_in_scope)
+        items = []
+        for row in value.values:
             try:
-                cell = _value_at(value, i, col)
+                items.append(_eval(_items(value), _row_names(value, row)))
             except Exception:
-                cell = NO_VALUE
-            this = _column_holds(column_search, cell, names)
-            if held is None:
-                held = this
-            elif column_search['compose'] == 'or':
-                held = held or this
-            else:
-                held = held and this
-        if held:
-            matched.append(i)
+                items.append(NO_VALUE)
+        matched = [i for i, row in enumerate(value.values)
+                   if _holds(code, {**_row_names(value, row), index: i, collection: items}, eval_in_scope)]
     return matched[:1] if model.get('first_match') else matched
 
 
@@ -1457,32 +1497,38 @@ def _subcol_candidates(value: ForLoopTable, col: int, get_visualizer) -> List[st
 # The tools of the corner's toolbar: a table's Normal and Pick.
 TOOLS = _TOOL_TOOLBAR_TOOLS
 
-def _condition(value: ForLoopTable, model) -> Optional[str]:
+def _condition(value: ForLoopTable, model, eval_in_scope=None) -> Optional[str]:
     """The search, as the condition loop code would test: the footer's, and
     each column's in turn, composed as it says. '' when nothing is searched for;
     None when it can't be written -- a search that isn't Python, or one on a
     column with no name to compare."""
-    parts = []
-    search = (model.get('search') or '').strip()
-    if search:
-        if not _is_value(search):
+    search = _search_text(value, model)
+    if not search:
+        return ''
+    context = _search_context(value, model, eval_in_scope)
+    if not context:
+        return None
+    index = _unique_name(value, '_iteration')
+    if context.get('is_slice'):
+        # The table clamps slices to the recorded row range. An iteration
+        # counter is already nonnegative and the loop supplies the upper bound.
+        start, stop = context['slice_start'], context['slice_stop']
+        try:
+            if any(part and type(ast.literal_eval(part)) is not int for part in (start, stop)):
+                return None
+        except Exception:
             return None
-        parts.append(('and', search))
-    for col, column_search in _active_searches(value, model):
-        subject = _view_column(value, col).subject
-        if not subject:
-            return None
-        text, op = column_search['text'].strip(), column_search['op']
-        code = f'{subject} {op} ({text})' if op else text.replace('$', subject)
-        if not _is_value(code):
-            return None
-        parts.append((column_search['compose'], code))
-    if len(parts) == 1:
-        return parts[0][1]
-    condition = ''
-    for compose, code in parts:
-        condition = f'({code})' if not condition else f'{condition} {compose} ({code})'
-    return condition
+        return f'{start} <= {index}' + (f' < {stop}' if stop else '') if start else (
+            f'{index} < {stop}' if stop else 'True')
+    if context.get('is_index'):
+        return f'{index} == ({context["index_expr"]})'
+    if context.get('is_multi_index'):
+        return f'{index} in ({context["indices_expr"]})'
+    if not context.get('is_predicate'):
+        # Broadcast slices and collections of ranges have no loop code form.
+        return None
+    code = _predicate(value, search, index, eval_in_scope=eval_in_scope)
+    return code if _is_value(code) else None
 
 
 def _items(value: ForLoopTable, subjects: Optional[List[str]] = None) -> str:
@@ -1501,11 +1547,28 @@ def _guarded(value: ForLoopTable, condition: str, step: str, negate: bool = Fals
     return f'{indent}if {test}:\n{indent}    {step}'
 
 
-def _action_code(value: ForLoopTable, model, action: str) -> List[Any]:
+def _action_code(value: ForLoopTable, model, action: str, eval_in_scope=None) -> List[Any]:
+    commands = _action_code_without_index(value, model, action, eval_in_scope)
+    condition = _condition(value, model, eval_in_scope)
+    index = _unique_name(value, '_iteration')
+    if commands and condition and index in {n.id for n in ast.walk(ast.parse(condition, mode='eval'))
+                                                            if isinstance(n, ast.Name)}:
+        # The displayed itr is runner metadata, not a name in the program.
+        # Count at the top, so continue (including Filter's) still counts it.
+        init = (value.line - 1, f'{value.indent}{index} = -1')
+        step = (value.body_lines[0] - 1, f'{value.body_indent}{index} += 1')
+        commands = [InsertLines(tuple(
+            (after, '\n'.join(text for at, text in (init, step, *command.lines) if at == after))
+            for after in dict.fromkeys(at for at, _ in (init, step, *command.lines))))
+                    for command in commands]
+    return commands
+
+
+def _action_code_without_index(value: ForLoopTable, model, action: str, eval_in_scope=None) -> List[Any]:
     """What a footer button writes: a name above the loop and a line at the
     end of its body that builds it up over the iterations the search holds for
     -- or, for Filter, a line at the top skipping the rest."""
-    condition = _condition(value, model)
+    condition = _condition(value, model, eval_in_scope)
     if condition is None or (not condition and action in ('filter', 'any', 'all')):
         return []
     picked = [_view_column(value, label).subject for label in model.get('picked') or []
@@ -1841,11 +1904,11 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
     return f'<div class="col-tally"{dwell}>{filter_box}{controls}{body}</div>'
 
 
-def _render_action_buttons(value: ForLoopTable, model, count: int) -> str:
+def _render_action_buttons(value: ForLoopTable, model, count: int, eval_in_scope=None) -> str:
     """The footer's buttons, as a table's: each writes what it names about the
     iterations the search holds for. Those that need a search to say anything
     are dimmed without one, and all of them while it isn't Python."""
-    condition = _condition(value, model)
+    condition = _condition(value, model, eval_in_scope)
     buttons = []
     for action, label, title, needs_search in (
             ('count', f'Count: {count}', 'Count of matches', False),
@@ -1860,7 +1923,7 @@ def _render_action_buttons(value: ForLoopTable, model, count: int) -> str:
     return ''.join(buttons)
 
 
-def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_rows: int, hidden_rows: int) -> str:
+def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_rows: int, hidden_rows: int, eval_in_scope=None) -> str:
     """A focused table's footer, as a table's: the search box and its 1st,
     how many iterations matched, and a tab counting every one the loop ran."""
     input_event = "lambda e: SearchBoxInput(value=e.get('value', ''))"
@@ -1872,13 +1935,13 @@ def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_r
             f'<div class="search-div-row"><div class="search-replace-container"><div class="search-box-wrapper">'
             f'<input type="text" tabindex="0" snc-input="{html.escape(input_event)}" '
             f'value="{html.escape(model.get("search") or "")}" placeholder="Search" '
-            f'data-tooltip="{html.escape(f"A condition over {names}" if names else "A condition")}" '
+            f'data-tooltip="Search iterations: $, $i, slices, predicates, or a condition over {html.escape(names)}" '
             f'spellcheck="false" class="search-box" />'
             f'<span class="search-toggles-container">'
             f'<span class="search-button {"active" if first else "inactive"}" data-tooltip="First match only"'
             f'{_press(FirstMatchToggle())}>{ICONS["match-first"]}</span></span>'
             f'</div></div></div>'
-            f'<div class="search-div-row"><div class="action-buttons">{_render_action_buttons(value, model, count)}'
+            f'<div class="search-div-row"><div class="action-buttons">{_render_action_buttons(value, model, count, eval_in_scope)}'
             f'</div></div>'
             f'<div class="auxiliary-attributes"><div class="tiny-len">{ran} iteration{"" if ran == 1 else "s"}</div>'
             f'</div></div>')
@@ -2683,7 +2746,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     strs.append('</tr>')
     has_values = not value.running and len(value.values) == len(rows)
     gap = _hidden_page(len(rows), model)
-    matches = None if small or live_only and not model.get('search') else _matches(value, model)
+    matches = None if small or live_only and not model.get('search') else _matches(value, model, eval_in_scope)
     marked = set(matches) if matches else set()
     order = _draw_order(value, model, len(rows))
     drawn = [p for p in range(len(order)) if gap is None or not gap[0] <= p < gap[1]]
@@ -2743,7 +2806,7 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         noun = 'iteration' if hidden_rows == 1 else 'iterations'
         strs.append(f'<div class="for-loop-note">{hidden_rows} more {noun}</div>')
     if not small and not live_only:
-        strs.append(_render_footer(value, model, matches, len(rows), hidden_rows))
+        strs.append(_render_footer(value, model, matches, len(rows), hidden_rows, eval_in_scope))
     strs.append('</div>')
     # What the editor stops from reaching itself while a key is pressed in the
     # table: its own, and whatever its cells' visualizers answer.
@@ -2780,7 +2843,23 @@ def needs_values(event, model) -> bool:
 
 def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
            eval_in_scope=None) -> Tuple[Any, List[Any]]:
+    original_model = model or {}
     model, commands = _update(event, var_and_exp, model, value, get_visualizer, eval_in_scope)
+    event_text = (event or {}).get('pythonEventStr', '')
+    if event_text.startswith('SearchBoxInput('):
+        columns = _search_columns(value, model)
+        search = replace_dollars_in_py_exp(model.get('search') or '', [_items(value)])
+        searches, leftovers = decompose_search(search, list(columns), eval_in_scope)
+        previous = model.get('col_search') or {}
+        model = {**model, 'col_search': {
+            columns[expr]: {**row, 'exclude': bool((previous.get(columns[expr]) or {}).get('exclude'))}
+            for expr, row in searches.items()}, 'search_leftovers': leftovers or None}
+    elif model.get('col_search') != (original_model.get('col_search')):
+        columns, searches = _search_adapter(value, model)
+        leftovers = original_model.get('search_leftovers') if 'search_leftovers' in original_model else (
+            [{'text': original_model['search']}] if original_model.get('search') else None)
+        search = compose_column_searches(list(columns), searches, eval_in_scope, leftovers)
+        model = {**model, 'search': search, 'search_leftovers': leftovers}
     return _over_lone_pass(value, model, commands)
 
 
@@ -3123,7 +3202,7 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         case ColumnInput(value=typed) if _box_open(model):
             return ({**model, 'column_input': typed}, [])
         case ActionButtonClick(action=action) if not is_live_only():
-            code = _action_code(value, model, action)
+            code = _action_code(value, model, action, eval_in_scope)
             if code:
                 return (model, code)
         case RowMenuToggle(row=row):
