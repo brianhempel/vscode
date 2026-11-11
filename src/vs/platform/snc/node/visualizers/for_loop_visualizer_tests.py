@@ -1449,16 +1449,14 @@ class TestSubcolumns(unittest.TestCase):
         self.assertEqual([r[1] for r in iteration_rows(out)], ["'ANN'", "'BO'"])
         self.assertIn(html.escape(repr(ColumnMenuToggle(label=parent + '\x01$.upper()'))), out)
 
-    def test_pick_parent_and_subcolumn_extracts_their_subjects(self):
+    def test_pick_subcolumn_extracts_its_subject(self):
         leaf = "person\x01$['age']"
         model = {'subcols': {'person': ["$['age']"]}, 'tool': 'pick'}
         out = visualize(people(), model)
-        for label in ('person', leaf):
-            self.assertIn(html.escape(repr(PickToggle(label=label))), out)
-            picked, _ = update(click(PickToggle(label=label)), None, model, people())
-            _, commands = update(click(ActionButtonClick(action='extract')), None, picked, people())
-            subject = 'person' if label == 'person' else "person['age']"
-            self.assertIn('matching.append(' + subject + ')', repr(commands))
+        self.assertIn(html.escape(repr(PickToggle(region_id='all_col_0'))), out)
+        picked, _ = update(click(PickToggle(region_id='all_col_0')), None, model, people())
+        _, commands = update(click(ActionButtonClick(action='extract')), None, picked, people())
+        self.assertIn("matching.append(person['age'])", repr(commands))
 
     def test_subcolumn_resize_is_kept(self):
         leaf = "person\x01$['age']"
@@ -1508,7 +1506,7 @@ class TestSubcolumns(unittest.TestCase):
         leaf = "person\x01$['age'] + 1"
         nested = leaf + '\x01$ * 2'
         model = {'subcols': {'person': ["$['age'] + 1"], leaf: ['$ * 2']},
-                 'tool': 'pick', 'picked': [nested]}
+                 'tool': 'pick', 'picked': ['all_col_0']}
         _, commands = update(click(ActionButtonClick(action='extract')), None, model, people())
         code = commands[0].lines[-1][1]
         scope = {'person': {'age': 3}, 'matching': []}
@@ -1719,7 +1717,7 @@ class TestRowMenu(unittest.TestCase):
 
 class TestPickTool(unittest.TestCase):
     """The toolbar in a focused table's corner, as a table's: Pick marks
-    whole columns, and Extract then collects what they show."""
+    bands and the index, and writes what the ordinary table would extract."""
 
     def setUp(self):
         visualizer_utils.set_live_only(False)
@@ -1737,15 +1735,84 @@ class TestPickTool(unittest.TestCase):
         model, _ = update(click(ToolSelect(tool='pick')), None, {}, scores())
         out = visualize(scores(), model)
         self.assertIn('pick-tool-selected', out)
-        self.assertEqual(out.count(html.escape(repr(PickToggle(label='score')))), 5)
-        model, _ = update(click(PickToggle(label='score')), None, model, scores())
-        self.assertEqual(model['picked'], ['score'])
+        self.assertEqual(out.count(html.escape(repr(PickToggle(region_id='all_col_0')))), 5)
+        model, _ = update(click(PickToggle(region_id='all_col_0')), None, model, scores())
+        self.assertEqual(model['picked'], ['all_col_0'])
         self.assertIn('pick-region pick-band-all pick-region-first selected', visualize(scores(), model))
 
     def test_extract_collects_the_picked_columns(self):
-        model = {'tool': 'pick', 'picked': ['score', 'high += score > 5']}
+        model = {'tool': 'pick', 'picked': ['all_col_0', 'all_col_1']}
         _, cmds = update(click(ActionButtonClick(action='extract')), None, model, scores())
         self.assertEqual(cmds, [InsertLines(((1, 'matching = []'), (3, '    matching.append((score, high))')))])
+
+    def test_bands_and_index_follow_the_first_match(self):
+        out = visualize(scores(), {'tool': 'pick', 'search': 'score > 5'})
+        for region in ('pre_idx', 'match_idx', 'post_idx', 'pre_col_0', 'match_col_0', 'post_col_0'):
+            self.assertIn('data-pick-region="' + region + '"', out)
+        self.assertNotIn('data-pick-region=', visualize(scores(), {'tool': 'pick', 'search': 'score > 99'}))
+
+    def test_pick_expression_and_session_reset(self):
+        model, _ = update(click(PickToggle(region_id='all_idx')), None, {'tool': 'pick'}, scores())
+        self.assertEqual(model['picked'], ['all_idx'])
+        self.assertTrue(model['pick_expr'])
+        model, _ = update(click(ToolSelect(tool='normal')), None, model, scores())
+        self.assertIsNone(model['picked'])
+        self.assertIsNone(model['pick_expr'])
+
+    def test_search_transitions_reset_bands_but_edits_keep_them(self):
+        model = {'tool': 'pick', 'picked': ['all_col_0'], 'pick_expr': 'old'}
+        model, _ = update(click(ColumnSearchInput(label='score', value='9')), None, model, scores())
+        self.assertIsNone(model['picked'])
+        model = {**model, 'picked': ['match_col_0']}
+        model, _ = update(click(SearchBoxInput(value='score > 5')), None, model, scores())
+        self.assertEqual(model['picked'], ['match_col_0'])
+
+    def test_pick_action_availability_mirrors_the_table(self):
+        for search in ('', 'score > 5'):
+            model = {'tool': 'pick', 'search': search, 'picked': ['all_idx' if not search else 'match_idx']}
+            for action in ('count', 'any', 'all', 'extract', 'filter'):
+                _, commands = update(click(ActionButtonClick(action=action)), None, model, scores())
+                self.assertEqual(bool(commands), action == ('filter' if search else 'extract'))
+
+    def test_pick_writing_declines_bodies_that_can_skip_its_step(self):
+        for exit_line in ('if score == 9: continue', 'if score == 9: break'):
+            t = replace(scores(), source=('for score in [1, 9, 4, 9, 2]:', '    ' + exit_line))
+            self.assertEqual(update(click(ActionButtonClick(action='filter')), None,
+                                    {'tool': 'pick', 'search': 'score > 5', 'picked': ['pre_idx']}, t)[1], [])
+
+    def test_pick_writing_declines_an_in_place_column(self):
+        t = replace(scores(), columns=(bound('score'), replace(scores().columns[1], in_place=True)))
+        self.assertEqual(update(click(ActionButtonClick(action='extract')), None,
+                                {'tool': 'pick', 'picked': ['all_col_1']}, t)[1], [])
+
+    def test_generated_picks_execute_like_the_ordinary_table(self):
+        from table_visualizer import _build_pick_expr, pick_filter_expr
+        source = ['high = 0', 'for score in [1, 9, 4, 9, 2]:', '    high += score > 5']
+        rows = [{'score': x, 'high': h} for x, h in zip([1, 9, 4, 9, 2], [0, 1, 1, 2, 2])]
+        columns = ["$['score']", "$['high']"]
+        picks = [['all_idx'], ['all_col_0', 'all_idx'], ['match_idx'], ['pre_col_0'],
+                 ['post_col_0'], ['pre_col_0', 'match_col_0'], ['match_col_0', 'post_col_0'],
+                 ['pre_col_0', 'post_col_0'], ['pre_col_0', 'match_col_0', 'post_col_0'],
+                 ['pre_idx', 'pre_col_0'], ['pre_col_0', 'post_col_1', 'match_idx']]
+        for picked in picks:
+            for search in (('',) if picked[0].startswith('all_') else ('score > 5', 'score > 99', '$i == 2')):
+                with self.subTest(picked=picked, search=search):
+                    model = {'tool': 'pick', 'picked': picked, 'search': search}
+                    _, commands = update(click(ActionButtonClick(action='filter' if search else 'extract')),
+                                         None, model, scores())
+                    self.assertTrue(commands)
+                    lines = list(source)
+                    for after, text in sorted([entry for cmd in commands for entry in cmd.lines], reverse=True):
+                        lines[after:after] = text.splitlines()
+                    scope = {}
+                    exec('\n'.join(lines), scope)
+                    expr = _build_pick_expr({**model, 'columns': columns}, 'rows')
+                    if search:
+                        pred = "item['score'] > 99" if '99' in search else ('i == 2' if '$i' in search else "item['score'] > 5")
+                        from visualizer_utils import replace_dollars_in_py_exp
+                        expr = pick_filter_expr({'source_expr': 'rows', 'pick_expr': replace_dollars_in_py_exp(expr, 'item', index_exp='i'),
+                                                 'predicate_expr': pred, 'needs_index': True})
+                    self.assertEqual(scope['matching'], eval(expr, {'rows': rows}))
 
 
 class TestEditColumn(unittest.TestCase):

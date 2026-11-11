@@ -122,8 +122,15 @@ a name set above the loop and a line at the end of its body building it up
 (Filter: a `continue` at the top); an index search adds a counter at the
 top of the body, before any continue. A search on the whole collection ($$),
 or a broadcast slice or collection of ranges, has no loop code form, so its
-buttons are disabled; under the pick tool, Extract collects the
-picked columns. An iteration's ▾ writes `if score == 9: continue` or `break`
+buttons are disabled. Pick draws a table's before/match/after bands around
+the first matching iteration, or whole columns with no search, including itr.
+Its picked region ids and dollar expression are a table's; Extract collects
+them with no search, and Filter builds the picked answer with one. Count,
+Any and All are off while picking, as a table's are. A pick on an in-place
+accumulator, or a body that can break, continue, return or raise past the
+step, leaves its writing buttons off rather than collecting the wrong cells.
+An iteration's ▾ writes
+`if score == 9: continue` or `break`
 at the top of the body, or its cells as a dict after the loop. A header hands
 over the name its column shows. Not the table's chain link: what a loop's
 buttons write lands in two places, and a link is one line under the
@@ -216,11 +223,16 @@ import io
 import keyword
 import math
 import re
+import textwrap
 import tokenize
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
-from table_visualizer import (_search_context_for, _get_matching_indices, _search_as_predicate,
+from table_visualizer import (PickToggle, _build_pick_expr, _pick_bands_by_column,
+                               _pick_shared_range, _parse_pick_region_id, PICK_BANDS,
+                               _pick_band_for_row,
+                               _render_pick_region as _table_pick_region,
+                               _search_context_for, _get_matching_indices, _search_as_predicate,
                                _UNEVALUABLE, decompose_search, compose_column_searches,
                                COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_TYPES, NO_THING,
                                DeselectChildren, MAX_SPLAT_DEPTH, _rename_column_children,
@@ -624,13 +636,6 @@ class AddElseClick:
     """Add Else, in the menu of the chain starting on line `chain`: write an
     `else` at its end."""
     chain: int
-
-
-@dataclass(frozen=True)
-class PickToggle:
-    """Under the pick tool, a press on the column labeled `label`: pick it,
-    or stop."""
-    label: str
 
 
 @dataclass(frozen=True)
@@ -1394,7 +1399,7 @@ def _matches(value: ForLoopTable, model, eval_in_scope=None) -> Optional[List[in
                 items.append(NO_VALUE)
         matched = [i for i, row in enumerate(value.values)
                    if _holds(code, {**_row_names(value, row), index: i, collection: items}, eval_in_scope)]
-    return matched[:1] if model.get('first_match') else matched
+    return matched[:1] if model.get('first_match') or model.get('tool') == 'pick' else matched
 
 
 def _draw_order(value: ForLoopTable, model, n_rows: int) -> List[int]:
@@ -1624,12 +1629,98 @@ def _guarded(value: ForLoopTable, condition: str, step: str, negate: bool = Fals
     return f'{indent}if {test}:\n{indent}    {step}'
 
 
+def _pick_columns(value, model):
+    """A table's drawn-column ids, with dollars reading a recorded row's names."""
+    shown = [i for i, column in enumerate(value.columns)
+             if column.label not in (model.get('hidden_columns') or [])]
+    shown, folds = _folds(value, model, shown)
+    subs = _subcols(model, value, [i for i in shown if i not in folds])
+    return [_leaf_label(value.columns[i].label, sub)
+            for i in shown if i not in folds for sub in (subs.get(i) or [None])
+            if _view_column(value, _leaf_label(value.columns[i].label, sub)).subject]
+
+
+def _pick_model(value, model):
+    return {**model, 'columns': [f'$[{label!r}]' for label in _pick_columns(value, model)]}
+
+
+def _pick_action_code(value, model, action, condition):
+    """A table's extraction, built as the iterations run rather than sliced
+    out of a list. Pre/post refer to the first matching iteration only."""
+    if action != ('filter' if condition else 'extract'):
+        return []
+    pm = _pick_model(value, model)
+    bands = _pick_bands_by_column(pm)
+    if not bands:
+        return []
+    labels = _pick_columns(value, model)
+    # Like Collect into List, never collect repeated references to an
+    # accumulator changed in place. A step at the body's end also cannot
+    # account for an iteration that leaves before it gets there.
+    for i, label in enumerate(labels):
+        column = _view_column(value, label)
+        if f'col_{i}' in bands and column.in_place:
+            return []
+    if value.source:
+        try:
+            body = ast.parse(textwrap.dedent('\n'.join(value.source)))
+        except SyntaxError:
+            return []
+        if any(isinstance(node, (ast.Break, ast.Continue, ast.Return, ast.Raise)) for node in ast.walk(body)):
+            return []
+    index = _unique_name(value, '_iteration')
+    subjects = {'idx': index, **{f'col_{i}': _view_column(value, label).subject
+                               for i, label in enumerate(labels)}}
+    # Use the table's decision about zipping columns over one shared range.
+    shared = _pick_shared_range(bands)
+    components = []
+    if len(bands) > 1 and shared is not None:
+        ids = [col for col in subjects if col in bands]
+        components.append((set(bands[ids[0]]), _items(value, [subjects[col] for col in ids])))
+    else:
+        for col in subjects:
+            chosen = bands.get(col, set())
+            if _pick_shared_range({col: chosen}) is not None:
+                components.append((chosen, subjects[col]))
+            else:
+                components.extend(({band}, subjects[col]) for band in PICK_BANDS if band in chosen)
+    if not components:
+        return []
+    name = _unique_name(value, 'matching')
+    if not condition:
+        # Without a search all selected columns cover the same run of rows.
+        item = _items(value, [subjects[col] for col in subjects if col in bands])
+        return [InsertLines(((value.line - 1, f'{value.indent}{name} = []'),
+                             (_body_end(value), f'{value.body_indent}{name}.append({item})')))]
+    reserved = value
+    def fresh(base):
+        nonlocal reserved
+        result = _unique_name(reserved, base)
+        reserved = replace(reserved, defined=reserved.defined | {result})
+        return result
+    found, band_name = fresh('_matched'), fresh('_band')
+    init = [f'{name} = None', f'{found} = False']
+    body = [f'if {found}:', f"    {band_name} = 'post'", f'elif {condition}:',
+            f'    {found} = True', f"    {band_name} = 'match'", 'else:', f"    {band_name} = 'pre'"]
+    answers = []
+    for chosen, subject in components:
+        part = fresh('_picked')
+        scalar = chosen == {'match'}
+        init.append(f'{part} = ' + ('None' if scalar else '[]'))
+        test = 'True' if 'all' in chosen else f'{band_name} in {tuple(b for b in PICK_BANDS if b in chosen)!r}'
+        body += [f'if {test}:', f'    {part} = {subject}' if scalar else f'    {part}.append({subject})']
+        answers.append(part)
+    body += [f'if {found}:', f'    {name} = {_items(value, answers)}']
+    return [InsertLines(((value.line - 1, '\n'.join(value.indent + line for line in init)),
+                         (_body_end(value), '\n'.join(value.body_indent + line for line in body))))]
+
+
 def _action_code(value: ForLoopTable, model, action: str, eval_in_scope=None) -> List[Any]:
     commands = _action_code_without_index(value, model, action, eval_in_scope)
-    condition = _condition(value, model, eval_in_scope)
     index = _unique_name(value, '_iteration')
-    if commands and condition and index in {n.id for n in ast.walk(ast.parse(condition, mode='eval'))
-                                                            if isinstance(n, ast.Name)}:
+    if commands and any(index in {node.id for node in ast.walk(ast.parse(textwrap.dedent(text)))
+                                     if isinstance(node, ast.Name)}
+                            for command in commands for _, text in command.lines):
         # The displayed itr is runner metadata, not a name in the program.
         # Count at the top, so continue (including Filter's) still counts it.
         init = (value.line - 1, f'{value.indent}{index} = -1')
@@ -1648,9 +1739,9 @@ def _action_code_without_index(value: ForLoopTable, model, action: str, eval_in_
     condition = _condition(value, model, eval_in_scope)
     if condition is None or (not condition and action in ('filter', 'any', 'all')):
         return []
-    picked = [_view_column(value, label).subject for label in model.get('picked') or []
-              if label in _view_labels(value, model) and _view_column(value, label).subject]
-    item = _items(value, picked if model.get('tool') == 'pick' else None)
+    if model.get('tool') == 'pick':
+        return _pick_action_code(value, model, action, condition)
+    item = _items(value)
     end = _body_end(value)
     above = value.line - 1
     if action == 'filter':
@@ -1733,16 +1824,6 @@ def _render_row_menu(value: ForLoopTable, model, i: int) -> str:
     open_class = ' open' if is_open else ''
     return (f'<span class="snc-dropdown-trigger row-menu-trigger{open_class}"><span class="row-menu{open_class}" '
             f'data-tooltip="Row actions"{_press(RowMenuToggle(row=i))}>▾</span>{panel}</span>')
-
-
-def _render_pick_region(model, label: str, position: int, n_drawn: int) -> str:
-    """One cell's piece of a picked column's outline, as a table draws its
-    regions: the ends round off the stack, the middles only draw its sides."""
-    edge = ('pick-region-only' if n_drawn == 1 else 'pick-region-first' if position == 0
-            else 'pick-region-last' if position == n_drawn - 1 else 'pick-region-mid')
-    selected = ' selected' if label in (model.get('picked') or []) else ''
-    return (f'<span class="pick-region pick-band-all {edge}{selected}" data-pick-region="{html.escape(label)}" '
-            f'snc-mouse-down="{html.escape(repr(PickToggle(label=label)))}"></span>')
 
 
 def _press(event) -> str:
@@ -1985,15 +2066,16 @@ def _render_action_buttons(value: ForLoopTable, model, count: int, eval_in_scope
     """The footer's buttons, as a table's: each writes what it names about the
     iterations the search holds for. Those that need a search to say anything
     are dimmed without one, and all of them while it isn't Python."""
-    condition = _condition(value, model, eval_in_scope)
     buttons = []
-    for action, label, title, needs_search in (
-            ('count', f'Count: {count}', 'Count of matches', False),
-            ('extract', 'Extract', 'Every matching iteration\'s names', False),
-            ('filter', 'Filter', 'Skip the iterations that don\'t match', True),
-            ('any', 'Any', 'Whether any iteration matches', True),
-            ('all', 'All', 'Whether every iteration matches', True)):
-        enabled = condition is not None and (bool(condition) or not needs_search)
+    for action, label, title in (
+            ('count', f'Count: {count}', 'Count of matches'),
+            ('extract', 'Extract', 'Every matching iteration\'s names'),
+            ('filter', 'Filter', 'Skip the iterations that don\'t match'),
+            ('any', 'Any', 'Whether any iteration matches'),
+            ('all', 'All', 'Whether every iteration matches')):
+        enabled = bool(_action_code(value, model, action, eval_in_scope))
+        if model.get('tool') == 'pick' and action == 'filter':
+            label, title = 'Find One', 'Extract the pick around the first match'
         press = _press(ActionButtonClick(action=action)) if enabled else ''
         buttons.append(f'<span class="action-button{"" if enabled else " dimmed"}" title="{html.escape(title)}"'
                        f'{press}><span class="text">{html.escape(label)}</span></span>')
@@ -2004,10 +2086,12 @@ def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_r
     """A focused table's footer, as a table's: the search box and its 1st,
     how many iterations matched, and a tab counting every one the loop ran."""
     input_event = "lambda e: SearchBoxInput(value=e.get('value', ''))"
-    first = bool(model.get('first_match'))
+    picking = model.get('tool') == 'pick'
+    first = bool(_search_text(value, model)) if picking else bool(model.get('first_match'))
     names = ', '.join(column.subject for column in value.columns if column.subject)
     count = n_rows if matches is None else len(matches)
     ran = n_rows + hidden_rows
+    first_tip = ('Pick uses the first match only' if first else 'Pick covers every row') if picking else 'First match only'
     return (f'<div class="search-div toolbar-anchor">'
             f'<div class="search-div-row"><div class="search-replace-container"><div class="search-box-wrapper">'
             f'<input type="text" tabindex="0" snc-input="{html.escape(input_event)}" '
@@ -2015,8 +2099,8 @@ def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_r
             f'data-tooltip="Search iterations: $, $i, slices, predicates, or a condition over {html.escape(names)}" '
             f'spellcheck="false" class="search-box" />'
             f'<span class="search-toggles-container">'
-            f'<span class="search-button {"active" if first else "inactive"}" data-tooltip="First match only"'
-            f'{_press(FirstMatchToggle())}>{ICONS["match-first"]}</span></span>'
+            f'<span class="search-button {"active" if first else "inactive"}" data-tooltip="{first_tip}"'
+            f'{_press(FirstMatchToggle()) if model.get('tool') != 'pick' else ''}>{ICONS["match-first"]}</span></span>'
             f'</div></div></div>'
             f'<div class="search-div-row"><div class="action-buttons">{_render_action_buttons(value, model, count, eval_in_scope)}'
             f'</div></div>'
@@ -2354,8 +2438,6 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                  f'{py_exp_attrs(column.subject) or ' draggable="false"'}>'
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
-    if model.get('tool') == 'pick' and (model.get('subcols') or {}).get(label):
-        inner += _render_pick_region(model, label, 0, 1)
     filtered = ' col-filtered' if _column_search(model, label)['text'].strip() else ''
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-col{filtered}{classes}"{span_attrs}'
             f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">{inner}{resize}</span></th>')
@@ -2371,12 +2453,11 @@ def _render_subheader(value, model, label: str, sub: str, span_attrs: str = '', 
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=leaf)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
     edit = html.escape(repr(ColumnClick(col=leaf, label=leaf)))
-    pick = (_render_pick_region(model, leaf, 0, 1) if model.get('tool') == 'pick' else '')
     return (f'<th class="snc-hover-hidden-parent col-header col-subheader{classes}"{span_attrs}'
             f'{_col_attrs(model, leaf, clip=False)}><span class="col-header-inner">'
             f'<span class="col-name" snc-unfocused-clickable snc-mouse-down="{edit}" '
             f'data-tooltip="Double-click to edit">{html.escape(sub.split(SUBCOL_SEP)[-1])}</span>'
-            f'{_render_menu_trigger(value, model, leaf, get_visualizer)}{resize}</span>{pick}</th>')
+            f'{_render_menu_trigger(value, model, leaf, get_visualizer)}{resize}</span></th>')
 
 
 def _render_branch_header(value: ForLoopTable, model, step, span_attrs: str = '', classes: str = '') -> str:
@@ -2830,7 +2911,14 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     matches = None if small or live_only and not model.get('search') else _matches(value, model, eval_in_scope)
     marked = set(matches) if matches else set()
     order = _draw_order(value, model, len(rows))
-    drawn = [p for p in range(len(order)) if gap is None or not gap[0] <= p < gap[1]]
+    first_idx = matches[0] if matches else None
+    pick_here = pick and (first_idx is not None or not _search_text(value, model))
+    pick_labels = _pick_columns(value, model)
+    def overlay(i, label=None):
+        if not pick_here or label is not None and label not in pick_labels:
+            return ''
+        col_id = 'idx' if label is None else f'col_{pick_labels.index(label)}'
+        return _table_pick_region(i, col_id, model, first_idx, len(rows), {})
     leaf_edges = _edge_list([_fold_path(value, col, folds) for col, _ in leaves])
     for position, i in enumerate(order):
         row = rows[i]
@@ -2839,21 +2927,22 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
                 strs.append(_render_load_more_row(gap[1] - gap[0], len(leaves) + 1, small))
             continue
         row_class = '' if not marked else (' class="row-match"' if i in marked else ' class="row-dim"')
+        if pick_here:
+            row_class = f' class="pick-row-{_pick_band_for_row(i, first_idx)}"'
         if small or live_only:
             strs.append(f'<tr{row_class}><td class="row-index">{i}</td>')
         else:
             # The number and its ▾ in a wrapper inside the cell, as a table's.
             strs.append(f'<tr{row_class}><td class="row-index"><div class="row-index-inner">{i}'
-                        f'{_render_row_menu(value, model, i)}</div></td>')
+                        f'{_render_row_menu(value, model, i) if not pick_here else ""}</div>{overlay(i)}</td>')
         for (col, sub), edges in zip(leaves, leaf_edges):
             if col in folds:
                 strs.append(_render_fold_cell(drawn_table, model, i, col, folds, edges))
                 continue
             cell = _render_leaf(drawn_table, model, i, col, sub, row[col] if col < len(row) else None, has_values,
                                 get_visualizer, eval_in_scope, small, edges)
-            if pick:
-                overlay = _render_pick_region(model, _leaf_label(value.columns[col].label, sub), drawn.index(position), len(drawn))
-                cell = cell[:-len('</td>')] + overlay + '</td>'
+            if pick_here:
+                cell = cell[:-len('</td>')] + overlay(i, _leaf_label(value.columns[col].label, sub)) + '</td>'
             strs.append(cell)
         strs.append('</tr>')
     strs.append('</tbody>')
@@ -2944,6 +3033,8 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             [{'text': original_model['search']}] if original_model.get('search') else None)
         search = compose_column_searches(list(columns), searches, eval_in_scope, leftovers)
         model = {**model, 'search': search, 'search_leftovers': leftovers}
+    if bool(_search_text(value, original_model)) != bool(_search_text(value, model)):
+        model = {**model, 'picked': None, 'pick_expr': None}
     return _over_lone_pass(value, model, commands)
 
 
@@ -3074,7 +3165,7 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             return ({**others, 'add_menu_open': False, 'col_menu': label if opening else None, 'submenu': None}, [])
         case SearchBoxInput(value=text):
             return ({**model, 'search': text or None}, [])
-        case FirstMatchToggle():
+        case FirstMatchToggle() if model.get('tool') != 'pick':
             return ({**model, 'first_match': not model.get('first_match')}, [])
         case ColumnSearchInput(label=label, value=text):
             return (_set_column_search(model, label, text=text), [])
@@ -3341,14 +3432,16 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             return ({**others, 'pending_branch': _pending_branch(value, end)},
                     [InsertLines(((end, _new_branch(value, _chain_indent(value, chain), 'else')),))])
         case ToolSelect(tool=tool) if tool in ('normal', 'pick'):
-            return ({**model, 'tool': tool}, [])
-        case PickToggle(label=label):
+            return ({**model, 'tool': tool, 'picked': None, 'pick_expr': None}, [])
+        case PickToggle(region_id=region_id) if model.get('tool') == 'pick':
             picked = list(model.get('picked') or [])
-            if label in picked:
-                picked.remove(label)
-            elif label in _view_labels(value, model):
-                picked.append(label)
-            return ({**model, 'picked': picked}, [])
+            if region_id in picked:
+                picked.remove(region_id)
+            elif _parse_pick_region_id(region_id):
+                picked.append(region_id)
+            result = {**model, 'picked': picked or None}
+            result['pick_expr'] = _build_pick_expr(_pick_model(value, result), '_iterations')
+            return (result, [])
         case ColumnKeyDown() if _box_open(model):
             key = event_json.get('key')
             if key in ('Enter', 'Tab'):
