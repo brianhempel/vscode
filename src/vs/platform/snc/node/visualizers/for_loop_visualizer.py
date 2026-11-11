@@ -117,7 +117,11 @@ starts has none of its own yet, and the finished one replaces it a moment
 later. Drawn empty, it would shrink and regrow the table on every run -- every
 key typed in its box -- and move everything under it with it. So a finished
 table leaves its rows in the model, and the running one draws them, matched to
-its columns by label.
+its columns by label. Events that need recorded values -- cells, row actions,
+tally selections, and submitting a bare method call -- wait for the finished
+table. Other controls update the running table and carry their model forward.
+After a value-dependent table action, queued controls wait with it to preserve
+their order. A run that never finishes leaves those events unanswered.
 
 **Focused by a click, as a table is.** The table only shows while the cursor
 is outside the loop, so a press on it pins focus to the table itself and the
@@ -2694,6 +2698,33 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     # table: its own, and whatever its cells' visualizers answer.
     model['handledKeys'] = aggregate_handled_keys(model.get('children') or {}, OWN_KEYS)
     return ''.join(strs)
+
+
+def needs_values(event, model) -> bool:
+    """Whether replay needs the finished table's recorded values.
+
+    Menus, typing and edits based only on source still work if the loop never
+    finishes. A bare method call needs its receiver's values so _named can
+    distinguish an immutable result from a mutation.
+    """
+    text = str(event.get('pythonEventStr', ''))
+    if text.startswith(('ChildEvent(', 'RowActionClick(', 'TallyItemToggle(',
+                        'TallySelectAll(', 'TallySelectNone(')):
+        return True
+    if text != 'ColumnKeyDown()' or (event.get('eventJSON') or {}).get('key') not in ('Enter', 'Tab'):
+        return False
+    model = model or {}
+    if not (model.get('adding_column') or model.get('editing_column') is not None):
+        return False
+    try:
+        body = ast.parse(model.get('column_input', '').strip()).body
+    except SyntaxError:
+        return False
+    if len(body) != 1 or not isinstance(body[0], ast.Expr):
+        return False
+    node = body[0].value
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name))
 
 
 def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,

@@ -2918,5 +2918,28 @@ class TestAPassOnlyHoldsTheBodysPlace(unittest.TestCase):
                          [InsertLines(((4, '    twice = element * 2'),))])
 
 
+class TestValueDependentEvents(unittest.TestCase):
+    def test_only_value_dependent_events_wait_for_the_finished_table(self):
+        import for_loop_visualizer as vis
+        for msg in (RowActionClick(0, 'skip'), TallySelectAll('x'), TallySelectNone('x'),
+                    TallyItemToggle('x', '1'), ChildEvent('0\x00x', 'PinFocus()')):
+            with self.subTest(msg=msg):
+                self.assertTrue(vis.needs_values(click(msg), {}))
+        for msg in (AddColumnClick(), ColumnMenuToggle('x'), ColumnInput('x.upper()'),
+                    ColumnToggle('x')):
+            with self.subTest(msg=msg):
+                self.assertFalse(vis.needs_values(click(msg), {}))
+
+    def test_method_submissions_need_values_but_other_box_events_do_not(self):
+        import for_loop_visualizer as vis
+        for key in ('Enter', 'Tab', 'Escape'):
+            for text in ('word.upper()', 'result = word.upper()', 'word * 2', 'broken('):
+                with self.subTest(key=key, text=text):
+                    self.assertEqual(vis.needs_values(
+                        {'pythonEventStr': 'ColumnKeyDown()', 'eventJSON': {'key': key}},
+                        {'adding_column': True, 'column_input': text}),
+                        key != 'Escape' and text == 'word.upper()')
+
+
 if __name__ == '__main__':
     unittest.main()

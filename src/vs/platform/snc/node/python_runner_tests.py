@@ -2579,6 +2579,87 @@ class TestForLoopTable(unittest.TestCase):
         self.assertEqual([(t['handledEventIds'], len(t.get('commands', []))) for t in tables],
                          [([1], 1), ([], 0)])
 
+    def _replay_table_events(self, source, events, model=None):
+        """Replay against a real loop, including its empty entry log."""
+        from visualizer_utils import ForLoopTable
+        cached = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                  '_source_expr_sig': None, **(model or {})}
+        payload = json.dumps([{'line': 2, 'visIndex': 1, 'model': cached, 'events': [
+            {'id': i, 'pythonEventStr': event, 'eventJSON': data}
+            for i, (event, data) in enumerate(events)]}])
+        imports, body = split_leading_imports(source)
+        with capture_stream_messages() as msgs:
+            python_runner._execute_run(body, payload, 'run-1', import_code=imports)
+        return [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+
+    def test_row_actions_use_the_finished_iterations(self):
+        for action, after, text in (
+                ('skip', 1, '    if score == 9: continue'),
+                ('stop', 1, '    if score == 9: break'),
+                ('extract', 2, "row_1 = {'score': 9, 'high': True}")):
+            with self.subTest(action=action):
+                tables = self._replay_table_events('for score in [3, 9, 4]:\n    high = score > 5\n',
+                    [(f"RowActionClick(row=1, action={action!r})", {})], {'row_menu': 1})
+                self.assertEqual(tables[0]['handledEventIds'], [])
+                self.assertEqual(tables[0].get('commands', []), [])
+                self.assertEqual(tables[1]['handledEventIds'], [0])
+                self.assertIsNone(tables[1]['model']['row_menu'])
+                self.assertEqual(tables[1]['commands'][0]['edits'], [{'type': 'insert', 'afterLine': after, 'text': text}])
+
+    def test_tally_all_and_ticks_use_the_recorded_order(self):
+        source = 'for score in [3, 9, 4, 9, 1]:\n    high = score > 5\n'
+        for events, expected in (
+                (["TallySelectAll(label='score')"], '[3, 9, 4, 1]'),
+                (["TallyItemToggle(label='score', literal='1')",
+                  "TallyItemToggle(label='score', literal='9')"], '[9, 1]'),
+                (["TallySelectAll(label='score')", "TallySelectNone(label='score')"], '')):
+            with self.subTest(events=events):
+                tables = self._replay_table_events(source, [(e, {}) for e in events], {'col_menu': 'score'})
+                self.assertEqual(tables[0]['handledEventIds'], [])
+                self.assertEqual(tables[1]['handledEventIds'], list(range(len(events))))
+                self.assertEqual(tables[1]['model']['col_search']['score']['text'], expected)
+                self.assertFalse(tables[1].get('commands'))
+
+    def test_add_column_names_an_immutable_method_result(self):
+        tables = self._replay_table_events('for word in ["apple", "pear"]:\n    rest = word\n', [
+            ('AddColumnClick()', {}), ("ColumnInput(value='word.upper()')", {}),
+            ('ColumnKeyDown()', {'key': 'Enter'})])
+        self.assertEqual([t['handledEventIds'] for t in tables], [[0, 1], [2]])
+        self.assertTrue(tables[0]['model']['adding_column'])
+        self.assertEqual(tables[0]['model']['column_input'], 'word.upper()')
+        self.assertFalse(tables[1]['model']['adding_column'])
+        self.assertEqual(tables[1]['commands'][0]['edits'],
+                         [{'type': 'insert', 'afterLine': 2, 'text': '    result = word.upper()'}])
+
+    def test_controls_after_a_deferred_submission_keep_their_order(self):
+        tables = self._replay_table_events('for word in ["apple"]:\n    rest = word\n', [
+            ('ColumnKeyDown()', {'key': 'Enter'}), ("ColumnInput(value='word.lower()')", {}),
+            ('AddColumnClick()', {})], {'adding_column': True, 'column_input': 'word.upper()'})
+        self.assertEqual([t['handledEventIds'] for t in tables], [[], [0, 1, 2]])
+        self.assertEqual(tables[1]['commands'][0]['edits'][0]['text'], '    result = word.upper()')
+        self.assertTrue(tables[1]['model']['adding_column'])
+        self.assertEqual(tables[1]['model']['column_input'], '')
+
+    def test_running_controls_carry_their_model_to_the_finished_render(self):
+        tables = self._replay_table_events('for word in ["apple"]:\n    rest = word\n', [
+            ("ColumnToggle(label='rest = word')", {}), ('AddColumnClick()', {}),
+            ("ColumnInput(value='word.upper()')", {})])
+        self.assertEqual([t['handledEventIds'] for t in tables], [[0, 1, 2], []])
+        for item in tables:
+            self.assertEqual(item['model']['hidden_columns'], ['rest = word'])
+            self.assertTrue(item['model']['adding_column'])
+            self.assertEqual(item['model']['column_input'], 'word.upper()')
+            self.assertIn('word.upper()', item['html'])
+
+    def test_running_table_controls_still_answer_when_the_body_raises(self):
+        tables = self._replay_table_events('for word in ["apple"]:\n    rest = 1 / 0\n', [
+            ('ColumnMenuToggle(label="word")', {}), ('AddColumnClick()', {}),
+            ('ColumnInput(value="word.upper()")', {})])
+        self.assertTrue(tables[0].get('forLoopRunning'))
+        self.assertEqual(tables[0]['handledEventIds'], [0, 1, 2])
+        self.assertTrue(tables[0]['model']['adding_column'])
+        self.assertEqual(tables[0]['model']['column_input'], 'word.upper()')
+
     def test_an_event_on_a_cell_waits_for_the_finished_table(self):
         # The table logged as the loop starts has no values for a cell's
         # visualizer to be handed; the one at the end does, and answers it --
@@ -2616,9 +2697,9 @@ class TestForLoopTable(unittest.TestCase):
         commands = tables[-1].get('commands', [])
         self.assertTrue(any('re.findall' in edit.get('text', '') and 'rest' in edit['text']
                             for c in commands for edit in c.get('edits', [])))
-        python_runner._held_cell_events[(2, 0)] = [{'id': 99}]
+        python_runner._held_loop_events[(2, 0)] = [{'id': 99}]
         python_runner._reset_run_state()
-        self.assertEqual(python_runner._held_cell_events, {})
+        self.assertEqual(python_runner._held_loop_events, {})
 
     def test_array_cell_loop_reaches_the_editor_as_an_insert(self):
         from visualizer_utils import ChildEvent, ForLoopTable

@@ -77,11 +77,11 @@ _loop_selections: Dict[int, int] = {}
 # run (inside a loop) replays its pending events on the first logging and
 # carries the resulting model through the rest.
 _run_models: Dict[Tuple[int, int], Tuple[str, Any]] = {}
-# Events for a loop table's cells, by (line, site), held off the table logged
-# as the loop starts -- which has no values to send them with -- for the
+# Value-dependent loop-table events, by (line, site), held off the table
+# logged as the loop starts -- which has no recorded values yet -- for the
 # finished one the same run logs at the end. A loop the run never finishes
 # leaves them unanswered, and the editor sends them again.
-_held_cell_events: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+_held_loop_events: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
 # id(frame) -> the table a running `for` loop is filling in, one row per
 # iteration (see loop_enter). Recorded before the pinned-iteration filter, so
 # the editor's table shows every iteration whichever one is inline.
@@ -666,12 +666,12 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         if carried is not None and carried[0] == fingerprint:
             # Logged already this run (an earlier iteration): its events were
             # replayed then, and the model they produced carries forward --
-            # all but a loop's cells', which the table logged as it started
-            # had no values to send them with (see _running_loop_table).
+            # all but the loop-table events that need recorded values (see
+            # _running_loop_table).
             model = carried[1]
             fingerprint_matches = False
             if not _running_loop_table(value):
-                replay = _held_cell_events.pop((line, site), [])
+                replay = _held_loop_events.pop((line, site), [])
         elif fingerprint_matches:
             model = cached_model
             if isinstance(model, dict):
@@ -689,11 +689,16 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         # changed the old events belong to a different visualizer.
         if fingerprint_matches and 'events' in item_model_and_events:
             replay = item_model_and_events['events']
-            if _running_loop_table(value):
-                _held_cell_events[(line, site)] = [ev for ev in replay if _is_cell_event(ev)]
-                replay = [ev for ev in replay if not _is_cell_event(ev)]
         if replay:
+            hold_tail = False
             for ev in replay:
+                if _running_loop_table(value) and (hold_tail or vis.needs_values(ev, model)):
+                    _held_loop_events.setdefault((line, site), []).append(ev)
+                    # Keep subsequent controls in order after a table action:
+                    # e.g. typing after Enter must not change what Enter writes.
+                    # Cells keep their existing independent routing.
+                    hold_tail = hold_tail or not _is_cell_event(ev)
+                    continue
                 # Snapshotted before the call: `update` may mutate in place.
                 entry: Dict[str, Any] = {'event': ev, 'modelBefore': _model_snapshot(model)}
                 updates.append(entry)
@@ -1075,12 +1080,12 @@ def runtime_globals() -> Dict[str, Any]:
 
 
 def _reset_run_state(loop_selections: Optional[Dict[str, int]] = None) -> None:
-    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models, _for_tables, _held_cell_events
+    global execution_step, _ctx_stack, _ctx_counts, _loop_selections, _run_models, _for_tables, _held_loop_events
     execution_step = 0
     _ctx_stack = []
     _ctx_counts = {}
     _run_models = {}
-    _held_cell_events = {}
+    _held_loop_events = {}
     _for_tables = {}
     _loop_selections = {}
     for k, v in (loop_selections or {}).items():
