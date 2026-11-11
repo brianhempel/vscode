@@ -879,7 +879,7 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
 
     A `for` also passes the static half of its ForLoopTable (see
     CodeTransformer.visit_For): `(end_line, site, indent, body_indent,
-    columns, targets, defined, body_lines, source)`, where `columns` is the (line,
+    columns, targets, defined, body_lines, source, program)`, where `columns` is the (line,
     site, fields) of each log site whose value is a column, `fields` its
     ForLoopColumn's, and `body_lines` the body's first and last. Rows are
     recorded only for a loop running under a path the editor is looking at;
@@ -897,7 +897,7 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
     prev = _ctx_counts.get(_count_key(id_line), {}).get(id_line, 0)
     frame = [id_line, prev - 1]
     if table is not None and _path_selected(_current_path()):
-        end_line, site, indent, body_indent, columns, targets, defined, body_lines, source = table
+        end_line, site, indent, body_indent, columns, targets, defined, body_lines, source, program = table
         for_columns = tuple(ForLoopColumn(*fields) for _, _, fields in columns)
         _for_tables[id(frame)] = {
             "frame": frame,
@@ -911,7 +911,7 @@ def loop_enter(id_line: int, table: Optional[Tuple[Any, ...]] = None) -> None:
                 line=id_line, end_line=end_line, indent=indent, body_indent=body_indent,
                 columns=for_columns, rows=(),
                 targets=tuple(targets), defined=frozenset(defined),
-                body_lines=body_lines, source=tuple(source), running=True,
+                body_lines=body_lines, source=tuple(source), program=program, running=True,
                 **_initial_values(for_columns, sys._getframe(1))),
         }
         log_value(end_line, _for_tables[id(frame)]["table"], site)
@@ -2048,7 +2048,8 @@ class CodeTransformer(ast.NodeTransformer):
                      tuple(columns), tuple(target_names),
                      tuple(sorted(getattr(node, '_snc_defined', ()))),
                      (node.body[0].lineno, node.body[-1].end_lineno or node.body[-1].lineno),
-                     tuple(self.source_code.split('\n')[node.lineno - 1:end_line]) if self.source_code else ())
+                     tuple(self.source_code.split('\n')[node.lineno - 1:end_line]) if self.source_code else (),
+                     self.source_code)
             return self._wrap_context(node.lineno, '_snc_loop_enter', [new_for], node,
                                       enter_kwargs={'table': ast.Constant(value=table, **self._loc(node))})
 

@@ -38,8 +38,13 @@ line written into it, by the box or anything else, goes over the pass.
 
 **A column is edited through its header.** Double-clicking a statement's
 header opens the same box over it, holding the statement; Enter writes what it
-then holds over the statement's lines. A name the loop binds has no statement
-of its own, so its header has nothing to edit. A branch's header opens the
+then holds over the statement's lines. A bound name's header opens on its
+name; Enter renames its binding and the reads it reaches, including after the
+loop until an unconditional rebinding. Shadowing parameters and comprehension
+targets keep their names; closures follow the rename. An ambiguous rebinding,
+prior binding, dynamic scope or a name already used leaves the box open.
+Edit Iterable in that name's menu opens the same box after `in`, and Enter
+replaces only the expression, keeping the rest of the header as written. A branch's header opens the
 same box with its keyword beside the condition as written in the source;
 Enter replaces only that condition, keeping its colon, comment and any body
 on the same line. An else has no condition to edit.
@@ -224,6 +229,7 @@ reaches it rather than being shown as a dataclass's fields.
 """
 
 import ast
+import builtins
 import html
 import io
 import keyword
@@ -305,6 +311,7 @@ class ColumnClick:
     drawn; a double-click opens the box over it."""
     col: int
     label: str
+    iterable: bool = False
 
 
 @dataclass(frozen=True)
@@ -954,6 +961,254 @@ def _branches_reordered(value: ForLoopTable, chain: int, moving: int, onto: int)
         piece[at] = re.sub(r'^(\s*)(?:if|elif)\b', lambda m: m.group(1) + keyword, piece[at], count=1)
         lines += piece
     return ReplaceLines(starts[conditional[0]], branches[conditional[-1]][4], '\n'.join(lines))
+
+
+def _bound_column(value, col, label=None):
+    return (isinstance(col, int) and 0 <= col < len(value.columns)
+            and value.columns[col].span is None and value.columns[col].label in value.targets
+            and (label is None or value.columns[col].label == label))
+
+
+def _loop_ast(value):
+    if not value.program:
+        return None
+    try:
+        tree = ast.parse(value.program)
+    except SyntaxError:
+        return None
+    loop = next((n for n in ast.walk(tree) if isinstance(n, ast.For) and n.lineno == value.line), None)
+    return (tree, loop) if loop is not None else None
+
+
+class _LocalBindings(ast.NodeVisitor):
+    """Bindings in one lexical scope, without walking its children's bodies."""
+    def __init__(self):
+        self.names = set()
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_FunctionDef(self, node):
+        self.names.add(node.name)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_ClassDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        pass
+
+    def visit_ListComp(self, node):
+        self.visit(node.generators[0].iter)
+
+    visit_SetComp = visit_ListComp
+    visit_DictComp = visit_ListComp
+    visit_GeneratorExp = visit_ListComp
+
+    def visit_Import(self, node):
+        self.names.update(a.asname or a.name.split('.')[0] for a in node.names)
+
+    def visit_ImportFrom(self, node):
+        self.names.update(a.asname or a.name for a in node.names)
+
+    def visit_ExceptHandler(self, node):
+        if node.name:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+
+def _bindings(nodes):
+    visitor = _LocalBindings()
+    for node in nodes:
+        visitor.visit(node)
+    return visitor.names
+
+
+class _BindingReads(ast.NodeVisitor):
+    """Exact Name nodes reached by the loop binding, crossing closures but
+    stopping at a child's local binding. Comprehension iterables are outside
+    the target's scope until its first generator has been entered."""
+    def __init__(self, name):
+        self.name = name
+        self.nodes = []
+        self.closure = False
+
+    def visit_Name(self, node):
+        if node.id == self.name:
+            self.nodes.append(node)
+
+    def _function(self, node):
+        for exp in [*node.args.defaults, *node.args.kw_defaults,
+                    *[a.annotation for a in ast.walk(node.args) if isinstance(a, ast.arg)],
+                    *getattr(node, 'decorator_list', []), getattr(node, 'returns', None)]:
+            if exp is not None:
+                self.visit(exp)
+        body = [node.body] if isinstance(node, ast.Lambda) else node.body
+        local = _bindings(body) | {a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg)}
+        if self.name not in local:
+            before = len(self.nodes)
+            for stmt in body:
+                self.visit(stmt)
+            self.closure |= len(self.nodes) != before
+
+    visit_FunctionDef = _function
+    visit_AsyncFunctionDef = _function
+    visit_Lambda = _function
+
+    def _comprehension(self, node):
+        self.visit(node.generators[0].iter)
+        if any(self.name in _bindings([g.target]) for g in node.generators):
+            return
+        for i, generator in enumerate(node.generators):
+            if i:
+                self.visit(generator.iter)
+            if self.name in _bindings([generator.target]):
+                return
+            for condition in generator.ifs:
+                self.visit(condition)
+        for exp in ([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]):
+            self.visit(exp)
+        if isinstance(node, ast.GeneratorExp):
+            self.closure = True
+
+    visit_ListComp = _comprehension
+    visit_SetComp = _comprehension
+    visit_DictComp = _comprehension
+    visit_GeneratorExp = _comprehension
+
+
+def _rename_nodes(tree, loop, old, new):
+    """Refuse uncertain lifetimes rather than silently splitting one binding.
+    A direct assignment after the loop ends its lifetime; a closure plus such
+    a rebinding is ambiguous because Python's closures read the later value.
+    """
+    scope = next((n for n in ast.walk(tree)
+                  if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)) and loop in n.body), None)
+    if scope is None:
+        return None
+    all_nodes = list(ast.walk(tree))
+    used = {n.id for n in all_nodes if isinstance(n, ast.Name)}
+    used |= {n.arg for n in all_nodes if isinstance(n, ast.arg)}
+    used |= {n.name for n in all_nodes if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    used |= {n.asname or n.name.split('.')[0] for n in all_nodes if isinstance(n, ast.alias)}
+    used |= set(dir(builtins))
+    if new in used:
+        return None
+    # These constructs require analysis beyond lexical Name positions, or
+    # can observe names dynamically. Leave their source alone.
+    if any(isinstance(n, (ast.Global, ast.Nonlocal, ast.ClassDef, ast.NamedExpr, ast.Match))
+           or bool(getattr(n, 'type_params', None))
+           or isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+           and n.func.id in ('exec', 'eval', 'locals', 'globals', 'vars') for n in all_nodes):
+        return None
+    index = scope.body.index(loop)
+    prior_reads = _BindingReads(old)
+    for stmt in scope.body[:index]:
+        prior_reads.visit(stmt)
+    if prior_reads.nodes:
+        return None
+    if old in _bindings(scope.body[:index]) or (isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and any(a.arg == old for a in ast.walk(scope.args) if isinstance(a, ast.arg))):
+        return None
+    if old in _bindings(loop.body + loop.orelse) or any(
+            isinstance(n, ast.Name) and n.id == old for n in ast.walk(loop.iter)):
+        return None
+    targets = [n for n in ast.walk(loop.target) if isinstance(n, ast.Name) and n.id == old]
+    if len(targets) != 1:
+        return None
+    reads = _BindingReads(old)
+    for stmt in loop.body + loop.orelse:
+        reads.visit(stmt)
+    for stmt in scope.body[index + 1:]:
+        if old in _bindings([stmt]):
+            if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id == old):
+                return None
+            reads.visit(stmt.value)
+            if reads.closure:
+                return None
+            break
+        reads.visit(stmt)
+    return targets + reads.nodes
+
+
+def _source_replacements(program, replacements):
+    """AST columns count UTF-8 bytes, including on lines containing Unicode."""
+    lines = program.encode('utf-8').split(b'\n')
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    edits = [(offsets[n.lineno - 1] + n.col_offset,
+              offsets[n.end_lineno - 1] + n.end_col_offset, text.encode('utf-8')) for n, text in replacements]
+    raw = program.encode('utf-8')
+    for start, end, text in sorted(set(edits), reverse=True):
+        raw = raw[:start] + text + raw[end:]
+    # One source-only command avoids overlapping line edits for a one-line loop.
+    first = min(n.lineno for n, _ in replacements)
+    last = max(n.end_lineno for n, _ in replacements)
+    tail = len(lines) - last
+    rewritten = raw.decode('utf-8').split('\n')
+    compile(raw.decode('utf-8'), '<loop header edit>', 'exec')
+    return ReplaceLines(first, last, '\n'.join(rewritten[first - 1:len(rewritten) - tail]))
+
+
+def _renamed_loop_model(model, old, new):
+    def rename(label):
+        return new + label[len(old):] if label == old or label.startswith(old + SUBCOL_SEP) else label
+    model = {**model, 'children': dict(model.get('children') or {})}
+    labels = _view_model_labels(model) | {k.split(CELL_KEY_SEP, 1)[1]
+                for k in model['children'] if CELL_KEY_SEP in k}
+    for label in [old, *(k for k in labels if k.startswith(old + SUBCOL_SEP))]:
+        _rename_column_children(model, label, rename(label))
+    for key in ('widths', 'col_search', 'computes', 'subcols'):
+        if key in model:
+            model[key] = {rename(k): v for k, v in model[key].items()}
+    if 'hidden_columns' in model:
+        model['hidden_columns'] = [rename(k) for k in model['hidden_columns']]
+    if model.get('sort'):
+        model['sort'] = {**model['sort'], 'label': rename(model['sort']['label'])}
+    if model.get('focused_child'):
+        row, sep, label = model['focused_child'].partition(CELL_KEY_SEP)
+        model['focused_child'] = row + sep + rename(label)
+    return model
+
+
+def _view_model_labels(model):
+    return set().union(*(set(model.get(k) or {}) for k in ('subcols', 'widths', 'col_search', 'computes')))
+
+
+def _write_loop_header(model, value):
+    header = _loop_ast(value)
+    if header is None or is_live_only():
+        return (model, [])
+    tree, loop = header
+    col = model['editing_column']
+    text = model.get('column_input', '').strip()
+    if isinstance(col, list):
+        if not _is_value(text):
+            return (model, [])
+        if text == ast.get_source_segment(value.program, loop.iter):
+            return (_closed(model), [])
+        try:
+            command = _source_replacements(value.program, [(loop.iter, text)])
+        except (SyntaxError, ValueError):
+            return (model, [])
+        return (_closed(model), [command])
+    old = value.columns[col].label
+    if text == old:
+        return (_closed(model), [])
+    if not text.isidentifier() or keyword.iskeyword(text) or text in value.defined:
+        return (model, [])
+    if ast.parse(text, mode='eval').body.id != text:
+        return (model, [])
+    nodes = _rename_nodes(tree, loop, old, text)
+    if nodes is None:
+        return (model, [])
+    try:
+        command = _source_replacements(value.program, [(n, text) for n in nodes])
+    except (SyntaxError, ValueError):
+        return (model, [])
+    return (_closed(_renamed_loop_model(model, old, text)), [command])
 
 
 def _condition_source(value: ForLoopTable, col: int):
@@ -1913,6 +2168,8 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
     # (row, whether a condition gets it too)
     rows = [
         (_render_search_row(model, label), True),
+        *([(_render_option(model, 'Edit Iterable', ColumnClick(col, label, iterable=True)), False)]
+          if label in value.targets and column.span is None else []),
         (_render_option(model, 'Remove', DeleteColumnClick(col=col, label=label)
                         if statement and not (column.placeholder and label == 'pass') else None,
                         '' if statement else 'A name the loop binds has no line to remove'), False),
@@ -1940,6 +2197,8 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
     if isinstance(col, str) and SUBCOL_SEP in col:
         rows = [
             (_render_search_row(model, label), True),
+        *([(_render_option(model, 'Edit Iterable', ColumnClick(col, label, iterable=True)), False)]
+          if label in value.targets and column.span is None else []),
             (_render_option(model, 'Hide', ColumnToggle(label=label)), True),
             (_render_submenu_row(model, 'subcols', 'Subcolumns', 'Spread this column across several',
                                  lambda: _render_subcol_panel(value, model, col, get_visualizer)), True),
@@ -2450,7 +2709,9 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
     condition; the whole of it is in its tooltip."""
     column = value.columns[col]
     label = column.label
-    if not live_only and column.span is not None and model.get('editing_column') == col:
+    if not live_only and model.get('editing_column') == [col, 'iterable']:
+        return _render_box(model, select_all=True, keyword='in', placeholder='Iterable', span_attrs=span_attrs)
+    if not live_only and model.get('editing_column') == col:
         if column.placeholder and label == 'pass':
             return _render_box(model, placeholder=_runs_when(column), tooltip="Written over this branch's pass",
                                span_attrs=span_attrs)
@@ -2465,7 +2726,9 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
     elif live_only:
         inner = _render_label(column)
     elif column.span is None:
-        inner = (f'<span class="col-name"{py_exp_attrs(column.subject)}>{_render_label(column)}</span>'
+        inner = (f'<span class="col-name" snc-unfocused-clickable '
+                 f'snc-mouse-down="{html.escape(repr(ColumnClick(col, label)))}" data-tooltip="Double-click to edit"'
+                 f'{py_exp_attrs(column.subject)}>{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
     else:
         edit = repr(ColumnClick(col=col, label=label))
@@ -3058,7 +3321,7 @@ def needs_values(event, model, value=None) -> bool:
     if not (model.get('adding_column') or model.get('editing_column') is not None):
         return False
     col = model.get('editing_column')
-    if value is not None and isinstance(col, int) and _condition_source(value, col) is not None:
+    if isinstance(col, list) or (value is not None and (_bound_column(value, col) or _condition_source(value, col) is not None)):
         return False
     try:
         body = ast.parse(model.get('column_input', '').strip()).body
@@ -3076,6 +3339,13 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
     original_model = model or {}
     model, commands = _update(event, var_and_exp, model, value, get_visualizer, eval_in_scope)
     event_text = (event or {}).get('pythonEventStr', '')
+    col = original_model.get('editing_column')
+    if commands and _bound_column(value, col):
+        old, new = value.columns[col].label, original_model['column_input'].strip()
+        # Search rows compose against the columns the source edit will return.
+        value = replace(value, columns=tuple(replace(c, label=new, subject=new) if i == col else c
+                                             for i, c in enumerate(value.columns)),
+                        targets=tuple(new if t == old else t for t in value.targets))
     if event_text.startswith('SearchBoxInput('):
         columns = _search_columns(value, model)
         search = replace_dollars_in_py_exp(model.get('search') or '', [_items(value)])
@@ -3433,7 +3703,15 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             return ({**model, 'hidden_columns': hidden}, [])
         case AddColumnClick():
             return (_opened(model, 'adding_column', True, ''), [])
-        case ColumnClick(col=col, label=label):
+        case ColumnClick(col=col, label=label, iterable=iterable):
+            if not is_live_only() and _bound_column(value, col, label):
+                if iterable:
+                    header = _loop_ast(value)
+                    if header is not None:
+                        return (_opened(model, 'editing_column', [col, 'iterable'],
+                                        ast.get_source_segment(value.program, header[1].iter)), [])
+                elif double_click:
+                    return (_opened(model, 'editing_column', col, label), [])
             if double_click and SUBCOL_SEP in label and label in _view_labels(value, model):
                 return (_opened(model, 'editing_column', label, label.rsplit(SUBCOL_SEP, 1)[1]), [])
             if double_click and not is_live_only():
@@ -3601,6 +3879,8 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
                                     if k != label and not k.startswith(label + SUBCOL_SEP)}}
         return ({**_closed(model), 'subcols': subs}, [])
     col = model.get('editing_column')
+    if isinstance(col, list) or _bound_column(value, col):
+        return _write_loop_header(model, value)
     condition = _condition_source(value, col)
     if condition is not None:
         text = model.get('column_input', '').strip()

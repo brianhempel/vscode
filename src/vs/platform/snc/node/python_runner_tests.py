@@ -2592,6 +2592,15 @@ class TestForLoopTable(unittest.TestCase):
             python_runner._execute_run(body, payload, 'run-1', import_code=imports)
         return [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
 
+    def test_loop_header_edits_are_answered_before_a_raising_body(self):
+        for iterable, text in ((False, 'item'), (True, '[2]')):
+            tables = self._replay_table_events('for word in [1]:\n    result = word / 0\nanswer = word', [
+                (f"ColumnClick(col=0, label='word', iterable={iterable!r})", {'detail': 2}),
+                (f'ColumnInput(value={text!r})', {}), ('ColumnKeyDown()', {'key': 'Enter'})])
+            self.assertEqual(tables[0]['handledEventIds'], [0, 1, 2])
+            self.assertTrue(tables[0]['commands'])
+            self.assertIn(text, tables[0]['commands'][0]['text'])
+
     def test_condition_edits_are_answered_at_loop_entry(self):
         tables = self._replay_table_events('for word in ["apple"]:\n    if word: continue\n', [
             ("ColumnClick(col=1, label='if word')", {'detail': 2}),

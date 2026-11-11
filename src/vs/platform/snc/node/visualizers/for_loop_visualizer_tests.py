@@ -13,6 +13,7 @@ Or use pytest with verbose output:
     python3 -m pytest src/vs/platform/snc/node/visualizers/for_loop_visualizer_tests.py -v
 """
 
+import ast
 import html
 import json
 import re
@@ -656,7 +657,7 @@ class TestColumnMenu(unittest.TestCase):
 
     def test_a_bound_name_has_no_line_to_remove_or_put_anything_before(self):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'element'})), [
-            ('Remove', False), ('Insert Left', False), ('Insert Right', True),
+            ('Edit Iterable', True), ('Remove', False), ('Insert Left', False), ('Insert Right', True),
             ('Subcolumns', True), ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
             ('Collect into List', True)])
 
@@ -1977,11 +1978,11 @@ class TestEditColumn(unittest.TestCase):
     def tearDown(self):
         visualizer_utils.set_live_only(False)
 
-    def test_a_statements_header_can_be_edited_and_a_bound_names_cannot(self):
+    def test_a_statements_header_can_be_edited_and_a_bound_names_can_too(self):
         cells = header_cells(visualize(table(), {}))
         self.assertEqual([events_in(c) for c in cells], [
             [],
-            [repr(ColumnMenuToggle(label='element'))],
+            [repr(ColumnClick(col=0, label='element')), repr(ColumnMenuToggle(label='element'))],
             [repr(ColumnClick(col=1, label='count += 1')), repr(ColumnMenuToggle(label='count += 1'))],
         ])
 
@@ -2032,7 +2033,7 @@ class TestEditColumn(unittest.TestCase):
     def test_ignores_a_column_the_table_no_longer_has(self):
         # The click was drawn against the code as it was; the loop has since
         # changed under it.
-        for msg in (ColumnClick(col=1, label='count += 5'), ColumnClick(col=0, label='element'),
+        for msg in (ColumnClick(col=1, label='count += 5'), ColumnClick(col=0, label='stale_name'),
                     ColumnClick(col=7, label='count += 1')):
             with self.subTest(msg=msg):
                 self.assertEqual(update(click(msg, detail=2), None, {}, table()), ({}, []))
@@ -3424,3 +3425,158 @@ class TestValueDependentEvents(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestLoopHeaderEdits(unittest.TestCase):
+    def loop(self, source, name='element'):
+        return plain(line=1, end_line=len(source.splitlines()), targets=(name,),
+                     columns=(bound(name),), source=tuple(source.splitlines()), program=source)
+
+    def rewrite(self, source, text, iterable=False, name='element'):
+        t = self.loop(source, name)
+        model, _ = update(click(ColumnClick(0, name, iterable=iterable), detail=2), None, {}, t)
+        self.assertEqual(model['column_input'],
+                         ast.get_source_segment(source, ast.parse(source).body[0].iter) if iterable else name)
+        model, _ = update(typed(text), None, model, t)
+        model, commands = update(key('Enter'), None, model, t)
+        lines = source.splitlines()
+        for command in sorted(commands, key=lambda c: c.first, reverse=True):
+            lines[command.first-1:command.last] = command.text.splitlines()
+        return model, '\n'.join(lines), commands
+
+    def test_rename_lexical_scopes_and_after_loop_reads(self):
+        source = """for element in [1, 2]:
+    result = (element, 'element', dict(element=1), (lambda element: element)(9),
+              (lambda: element)(), [element for element in [7]], [element + n for n in [1]])
+answer = (result, element)
+"""
+        model, rewritten, commands = self.rewrite(source, 'item')
+        self.assertIsNone(model['editing_column'])
+        self.assertTrue(commands)
+        self.assertIn('lambda element: element', rewritten)
+        self.assertIn('[element for element in [7]]', rewritten)
+        self.assertIn('[item + n for n in [1]]', rewritten)
+        self.assertIn("dict(element=1)", rewritten)
+        before, after = {}, {}
+        exec(source, before); exec(rewritten, after)
+        self.assertEqual(before['answer'], after['answer'])
+
+    def test_after_loop_stops_at_unconditional_rebinding(self):
+        source = 'for element in [2]:\n    result = element\nanswer = element\nelement = 10\nanswer += element'
+        _, rewritten, _ = self.rewrite(source, 'item')
+        self.assertIn('answer = item\nelement = 10\nanswer += element', rewritten)
+        before, after = {}, {}
+        exec(source, before); exec(rewritten, after)
+        self.assertEqual(before['answer'], after['answer'])
+
+    def test_refusals_keep_box_open(self):
+        for text in ('a b', 'class', 'result', 'len'):
+            source = 'for element in [2]:\n    result = len([element])'
+            model, rewritten, commands = self.rewrite(source, text)
+            self.assertEqual(commands, [])
+            self.assertEqual(model['editing_column'], 0)
+        for tail in ('\nif True: element = 4', '\ndef f(): return element\nelement = 3'):
+            source = 'for element in [2]:\n    result = element' + tail
+            self.assertEqual(self.rewrite(source, 'item')[2], [])
+
+    def test_nested_unpacking_and_attributes(self):
+        source = "for a, (b, c) in [(1, (2, 3))]:\n    answer = (b, obj.b) # b"
+        _, rewritten, _ = self.rewrite(source, 'item', name='b')
+        self.assertEqual(rewritten, "for a, (item, c) in [(1, (2, 3))]:\n    answer = (item, obj.b) # b")
+
+    def test_iterable_preserves_multiline_header_and_one_line_body(self):
+        source = 'for element in (\n    [1, 2]\n): answer = element # keep'
+        _, rewritten, commands = self.rewrite(source, '[3, 4]', iterable=True)
+        self.assertTrue(commands)
+        self.assertEqual(rewritten, 'for element in (\n    [3, 4]\n): answer = element # keep')
+        self.assertEqual(self.rewrite(source, 'x +', iterable=True)[2], [])
+
+    def test_bound_header_keeps_drag_menu_resize_and_edit_attributes(self):
+        t = self.loop('for element in [1]:\n    pass')
+        out = visualize(t, {})
+        for attr in ('snc-py-exps', 'snc-unfocused-clickable', 'Double-click to edit', 'snc-resize-col', 'ColumnMenuToggle'):
+            self.assertIn(attr, out)
+        model, _ = update(click(ColumnClick(0, 'element'), detail=2), None, {}, t)
+        self.assertIn('class="col-input"', visualize(t, model))
+
+    def test_view_state_follows_bound_name_and_subcolumns(self):
+        from for_loop_visualizer import SUBCOL_SEP
+        leaf = 'element' + SUBCOL_SEP + '$[0]'
+        t = self.loop('for element in [[2]]:\n    pass')
+        model = {**editing(0, 'item'), 'hidden_columns': ['element'],
+                 'widths': {leaf: 150}, 'sort': {'label': 'element', 'direction': 'asc'},
+                 'subcols': {'element': ['$[0]']}, 'computes': {'element': ['sum']},
+                 'col_search': {'element': {'text': '2', 'op': '=='}},
+                 'children': {'0\x00' + leaf: {'open': True}}}
+        model, commands = update(key('Enter'), None, model, t)
+        self.assertTrue(commands)
+        self.assertEqual(model['hidden_columns'], ['item'])
+        # Source edits clear transient Pick regions, as the table now does.
+        self.assertIsNone(model['picked'])
+        self.assertEqual(model['sort']['label'], 'item')
+        self.assertIn('item', model['col_search'])
+        self.assertIn('item', model['subcols'])
+        self.assertIn('item', model['computes'])
+        self.assertIn('0\x00item' + SUBCOL_SEP + '$[0]', model['children'])
+        self.assertIn('item', model['search'])
+
+    def test_prior_binding_dynamic_scope_and_body_rebinding_refuse(self):
+        for source, line in (
+                ('element = 1\nfor element in [2]:\n    pass', 2),
+                ('def f(): return element\nfor element in [2]:\n    result = f()', 2),
+                ('for element in [2]:\n    element += 1', 1),
+                ('for element in [2]:\n    result = locals()', 1)):
+            t = replace(self.loop(source), line=line)
+            self.assertEqual(update(key('Enter'), None, editing(0, 'item'), t)[1], [])
+
+    def test_function_scope_closures_defaults_and_shadowing(self):
+        source = '''def run():
+    for element in [2]:
+        def closed(): return element
+        def shadow(element): return element
+        def default(x=element): return x
+        answer = (closed(), shadow(9), default())
+    return answer, element
+answer = run()
+'''
+        t = replace(self.loop(source), line=2)
+        _, commands = update(key('Enter'), None, editing(0, 'item'), t)
+        self.assertTrue(commands)
+        lines = source.splitlines()
+        for command in commands:
+            lines[command.first-1:command.last] = command.text.splitlines()
+        rewritten = '\n'.join(lines)
+        self.assertIn('def shadow(element): return element', rewritten)
+        self.assertIn('def default(x=item)', rewritten)
+        before, after = {}, {}
+        exec(source, before); exec(rewritten, after)
+        self.assertEqual(before['answer'], after['answer'])
+
+    def test_comprehension_later_target_shadows_earlier_conditions(self):
+        source = 'for element in [2]:\n    answer = [element for n in [] if element for element in [3]]'
+        _, rewritten, commands = self.rewrite(source, 'item')
+        self.assertTrue(commands)
+        self.assertIn('[element for n in [] if element for element in [3]]', rewritten)
+
+    def test_iterable_method_call_is_source_only(self):
+        import for_loop_visualizer
+        t = self.loop('for element in [1]:\n    pass')
+        self.assertFalse(for_loop_visualizer.needs_values(key('Enter'),
+                         {'editing_column': [0, 'iterable'], 'column_input': 'xs.copy()'}, t))
+
+    def test_unicode_positions_and_invalid_identifier_bindings(self):
+        source = "for element in [2]:\n    answer = ('é', element) # element"
+        _, rewritten, _ = self.rewrite(source, 'élément')
+        self.assertIn("('é', élément) # element", rewritten)
+        before, after = {}, {}
+        exec(source, before); exec(rewritten, after)
+        self.assertEqual(before['answer'], after['answer'])
+        for invalid in ('__debug__', 'K'):
+            self.assertEqual(self.rewrite(source, invalid)[2], [])
+
+    def test_other_target_and_nested_capture_refuse(self):
+        for source, name in (
+                ('for element, item in [(1, 2)]:\n    pass', 'item'),
+                ('for element in [2]:\n    def f(item): return element', 'item'),
+                ('for element in [2]:\n    def f():\n        import math as item\n        return element', 'item')):
+            self.assertEqual(self.rewrite(source, name)[2], [])

@@ -1249,6 +1249,8 @@ class ForLoopTable:
     # what rewriting a stretch of its body -- reordering an `if`'s branches --
     # rebuilds it from.
     source: Tuple[str, ...] = dataclasses.field(default=(), compare=False, repr=False)
+    # Full source for lexical renames, including reads after the loop.
+    program: str = dataclasses.field(default="", compare=False, repr=False)
     # The values themselves, parallel to `rows` and `init`: each copied when
     # its statement ran (NO_VALUE where there is none to keep), for what has
     # to read a value rather than its repr -- searching, sorting, a cell's own
