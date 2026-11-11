@@ -3580,3 +3580,131 @@ answer = run()
                 ('for element in [2]:\n    def f(item): return element', 'item'),
                 ('for element in [2]:\n    def f():\n        import math as item\n        return element', 'item')):
             self.assertEqual(self.rewrite(source, name)[2], [])
+
+
+class TestReorderingStatements(unittest.TestCase):
+    def setUp(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from python_runner_tests import TestForLoopTable
+        self.runner = TestForLoopTable()
+        visualizer_utils.set_live_only(False)
+
+    def loop(self, source):
+        return self.runner._run(source)[1][0]
+
+    def move(self, source, moving, onto, expected):
+        from table_visualizer import ColumnDragStart, ColumnDragEnd
+        value = self.loop(source)
+        model, _ = update(click(ColumnDragStart(moving)), None, {}, value)
+        model, cmds = update(click(ColumnDragEnd(onto)), None, model, value)
+        self.assertIsNone(model.get('column_drag_from'))
+        self.assertEqual(len(cmds), 1)
+        command = cmds[0]
+        self.assertIsInstance(command, ReplaceLines)
+        lines = source.splitlines()
+        lines[command.first - 1:command.last] = command.text.splitlines()
+        rewritten = '\n'.join(lines) + '\n'
+        self.assertEqual(rewritten, expected)
+        compile(rewritten, '<reordered>', 'exec')
+
+    def test_same_block_up_and_down_with_comments_left_in_place(self):
+        first = 'for x in [1]:\n    a = x  # travels\n    # stays\n    b = x + 1\n'
+        second = 'for x in [1]:\n    # stays\n    b = x + 1\n    a = x  # travels\n'
+        self.move(first, 'a = x', 'b = x + 1', second)
+        self.move(second, 'a = x', 'b = x + 1',
+                  'for x in [1]:\n    # stays\n    a = x  # travels\n    b = x + 1\n')
+
+    def test_into_and_out_of_branch(self):
+        a = 'for x in [1]:\n    a = x\n    if x:\n        b = x + 1\n'
+        b = 'for x in [1]:\n    if x:\n        b = x + 1\n        a = x\n'
+        self.move(a, 'a = x', 'b = x + 1', b)
+        self.move(b, 'a = x', 'b = x + 1',
+                  'for x in [1]:\n    if x:\n        a = x\n        b = x + 1\n')
+        self.move('for x in [1]:\n    if x:\n        a = x\n    b = x + 1\n',
+                  'a = x', 'b = x + 1',
+                  'for x in [1]:\n    if x:\n        pass\n    b = x + 1\n    a = x\n')
+
+    def test_into_pass_only_branch_and_one_line_branches(self):
+        for body in ('    if x:\n        pass', '    if x: pass'):
+            self.move('for x in [1]:\n    a = x\n' + body + '\n',
+                      'a = x', 'pass', 'for x in [1]:\n    if x:\n        a = x\n')
+        self.move('for x in [1]:\n    if x: a = x\n    b = x + 1\n', 'a = x', 'b = x + 1',
+                  'for x in [1]:\n    if x:\n        pass\n    b = x + 1\n    a = x\n')
+        self.move('for x in [1]:\n    a = x\n    if x: b = x + 1\n', 'a = x', 'b = x + 1',
+                  'for x in [1]:\n    if x:\n        b = x + 1\n        a = x\n')
+
+    def test_multiline_and_tabs(self):
+        self.move('for x in [1]:\n\ta = (\n\t    x + 1  # travels\n\t)\n\tif x:\n\t\tb = x\n',
+                  'a = ( x + 1 # travels )', 'b = x',
+                  'for x in [1]:\n\tif x:\n\t\tb = x\n\t\ta = (\n\t\t    x + 1  # travels\n\t\t)\n')
+
+    def test_handle_events_and_drag_marks(self):
+        from table_visualizer import ColumnDragStart, ColumnDragOver, ColumnDragEnd
+        value = self.loop('for x in [1]:\n    a = x\n    b = x + 1\n')
+        out = visualize(value, {})
+        self.assertIn(repr(ColumnDragStart('a = x')), events_in(out))
+        self.assertNotIn(repr(ColumnDragStart('x')), events_in(out))
+        self.assertNotIn('snc-mouse-move=', out)
+        model, _ = update(click(ColumnDragStart('b = x + 1')), None, {}, value)
+        model, _ = update(moved(ColumnDragOver('a = x')), None, model, value)
+        heads = header_cells(visualize(value, model))
+        self.assertIn('col-drag-before', next(h for h in heads if 'for-loop-col-subject">a' in h))
+        self.assertIn('col-drag-source', next(h for h in heads if 'for-loop-col-subject">b' in h))
+        model, _ = update(moved(ColumnDragOver('a = x'), buttons=0), None, model, value)
+        self.assertIsNone(model.get('column_drag_from'))
+        self.assertEqual(update(click(ColumnDragEnd('a = x')), None, model, value)[1], [])
+
+    def test_refuses_shared_lines_and_live_only(self):
+        from table_visualizer import ColumnDragStart, ColumnDragEnd
+        for source in ('for x in [1]: a = x; b = x + 1\n',
+                       'for x in [1]:\n    a = x; b = x + 1\n'):
+            value = self.loop(source)
+            self.assertNotIn('ColumnDragStart', visualize(value, {}))
+            self.assertEqual(update(click(ColumnDragEnd('b = x + 1')), None,
+                                   {'column_drag_from': 'a = x'}, value)[1], [])
+        value = self.loop('for x in [1]:\n    a = x\n')
+        visualizer_utils.set_live_only(True)
+        try:
+            self.assertNotIn('ColumnDragStart', visualize(value, {}))
+        finally:
+            visualizer_utils.set_live_only(False)
+
+    def test_replay_is_answered_at_entry_even_when_body_raises(self):
+        events = [("ColumnDragStart(col='a = x / 0')", {}),
+                  ("ColumnDragEnd(col='b = x')", {})]
+        import python_runner
+        from python_runner_tests import capture_stream_messages
+        model = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
+                 '_source_expr_sig': None}
+        payload = json.dumps([{'line': 3, 'visIndex': 1, 'model': model, 'events': [
+            {'id': i, 'pythonEventStr': event, 'eventJSON': data}
+            for i, (event, data) in enumerate(events)]}])
+        imports, body = python_runner.split_leading_imports('for x in [1]:\n    a = x / 0\n    b = x\n')
+        with capture_stream_messages() as messages:
+            python_runner._execute_run(body, payload, 'd2', import_code=imports)
+        tables = [m['item'] for m in messages.all()
+                  if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        self.assertTrue(tables, messages.all())
+        self.assertEqual(tables[0]['handledEventIds'], [0, 1])
+        self.assertTrue(tables[0].get('commands'))
+
+    def test_between_elif_and_else_preserves_surrounding_source(self):
+        self.move('prefix = 1\nfor x in [1]:\n    if False:\n        c = x\n    elif x:\n        a = x\n    else:\n        b = x\nsuffix = 2\n',
+                  'a = x', 'b = x',
+                  'prefix = 1\nfor x in [1]:\n    if False:\n        c = x\n    elif x:\n        pass\n    else:\n        b = x\n        a = x\nsuffix = 2\n')
+
+    def test_multiline_string_contents_do_not_change_when_reindented(self):
+        self.move('for x in [1]:\n    a = """first\ncontents\n    last"""\n    if x:\n        b = x\n',
+                  'a = """first contents last"""', 'b = x',
+                  'for x in [1]:\n    if x:\n        b = x\n        a = """first\ncontents\n    last"""\n')
+
+    def test_invalid_targets_self_drop_and_ambiguous_labels_do_nothing(self):
+        from table_visualizer import ColumnDragStart, ColumnDragEnd
+        value = self.loop('for x in [1]:\n    a = x\n    if x:\n        b = x\n')
+        for target in ('x', 'if x', 'a = x', 'missing'):
+            model, _ = update(click(ColumnDragStart('a = x')), None, {}, value)
+            self.assertEqual(update(click(ColumnDragEnd(target)), None, model, value)[1], [])
+        value = self.loop('for x in [1]:\n    a = x\n    a = x\n')
+        self.assertNotIn('ColumnDragStart', visualize(value, {}))

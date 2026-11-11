@@ -169,7 +169,16 @@ keyboard as it opens, for the same reason.
 
 **A page of rows at a time.** Fifty, then the last three, with a row between
 that loads the next fifty -- a table's paging. Columns drag wider by their
-header's right edge, the width kept by label in the model.
+header's right edge, the width kept by label in the model. A statement's
+⣿ moves its source lines onto another statement, before it from later and
+after it from earlier, as a table's column does. Its AST line span moves
+verbatim, including inline comments and comments inside it; adjacent comment
+lines stay. Moving into or out of a branch reindents the lines, opens a
+one-line branch out first, and leaves a pass in an emptied body or replaces
+one holding the destination's place. Bound names, conditions, subcolumns,
+phantoms and folded chains have no statement handle. Statements sharing a
+physical line, one-line loops and repeated labels have none either: each
+handle has to name one statement.
 
 **An `if` is a group of columns.** Each branch of a chain heads the columns
 in it -- its condition, its statements, the chains inside it -- a header row
@@ -240,7 +249,7 @@ import tokenize
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
-from table_visualizer import (PickToggle, _build_pick_expr, _pick_bands_by_column,
+from table_visualizer import (ColumnDragStart, ColumnDragOver, ColumnDragEnd, PickToggle, _build_pick_expr, _pick_bands_by_column,
                                _pick_shared_range, _parse_pick_region_id, PICK_BANDS,
                                _pick_band_for_row,
                                _render_pick_region as _table_pick_region,
@@ -923,6 +932,96 @@ def _chain_else(value: ForLoopTable, chain: int) -> Optional[int]:
     """The index of the chain's `else`, or None while it has none. Every
     branch has a column -- an empty one its `pass` -- so one isn't missed."""
     return next((b for b, step in _chain_branches(value, chain).items() if step[2] == 'else'), None)
+
+
+def _draggable_statement(value: ForLoopTable, label: Optional[str]) -> Optional[ForLoopColumn]:
+    """A column with a whole, unshared statement in the loop's source."""
+    matches = [c for c in value.columns if c.label == label]
+    column = matches[0] if len(matches) == 1 else None
+    if column is None or column.span is None or column.cond or not value.source:
+        return None
+    first, last = column.span
+    if first <= value.line or last > value.end_line:
+        return None
+    one = _one_liner(value, column)
+    text = one[3] if one else '\n'.join(value.source[first - value.line:last - value.line + 1])
+    try:
+        body = ast.parse(text).body if one else ast.parse('if True:\n' + text).body[0].body
+        # Shared physical lines have no independent line edit. A compound
+        # placeholder is not a statement column to move as a unit.
+        if len(body) != 1 or hasattr(body[0], 'body'):
+            return None
+        if any(t.type == tokenize.OP and t.string == ';'
+               for t in tokenize.generate_tokens(io.StringIO(text).readline)):
+            return None
+    except (SyntaxError, tokenize.TokenError, IndentationError):
+        return None
+    return column
+
+
+def _statement_reordered(value: ForLoopTable, moving: Optional[str], onto: str) -> Optional[ReplaceLines]:
+    """Move exact statement lines, before from the right, after from the left."""
+    source, target = _draggable_statement(value, moving), _draggable_statement(value, onto)
+    if source is None or target is None or source is target:
+        return None
+    first, last = source.span
+    start, end = target.span
+    if not (last < start or end < first):
+        return None
+    before = first > start
+    one = _one_liner(value, source)
+    target_one = _one_liner(value, target)
+    old_indent = _indent(value, source)
+    new_indent = _indent(value, target)
+    unit = value.body_indent[len(value.indent):]
+    if target_one:
+        new_indent = target_one[1] + unit
+    piece = (one[3].split('\n') if one else
+             list(value.source[first - value.line:last - value.line + 1]))
+    if one:
+        piece = [old_indent + line for line in piece]
+    # Continuation lines inside a multiline string are its value, not its
+    # block indentation. Reindenting those would change the user's string.
+    protected = set()
+    for token in tokenize.generate_tokens(io.StringIO('\n'.join(piece)).readline):
+        if token.type == tokenize.STRING and token.end[0] > token.start[0]:
+            protected.update(range(token.start[0] + 1, token.end[0] + 1))
+    piece = [line if n in protected or not line.strip() else
+             new_indent + line[len(old_indent):] if line.startswith(old_indent) else line
+             for n, line in enumerate(piece, 1)]
+    block = source.path[-1][3:5] if source.path else value.body_lines
+    leaving = first == block[0] and last == block[1]
+    removed = [old_indent + 'pass'] if leaving else []
+    if one:
+        removed = _opened_out(value, one, ['pass']).text.split('\n')
+    target_block = target.path[-1][3:5] if target.path else value.body_lines
+    replace_pass = target.label == 'pass' and target.span == tuple(target_block)
+    if target_one:
+        existing = [] if replace_pass else [new_indent + target_one[3]]
+        inserted = piece + existing if before else existing + piece
+        destination = [target_one[1] + target_one[2] + ':'] + inserted
+        edits = [(first, last, removed), (start, end, destination)]
+    elif replace_pass:
+        edits = [(first, last, removed), (start, end, piece)]
+    else:
+        at = start if before else end + 1
+        edits = [(first, last, removed), (at, at - 1, piece)]
+    lines = list(value.source)
+    for a, b, text in sorted(edits, reverse=True):
+        lines[a - value.line:b - value.line + 1] = text
+    # One replacement keeps original coordinates stable, as branch dragging
+    # does. Validate in the complete program's scope (return/nonlocal included).
+    if value.program:
+        program = value.program.split('\n')
+        program[value.line - 1:value.end_line] = lines
+        try:
+            compile('\n'.join(program), '<reordered loop>', 'exec')
+        except (SyntaxError, ValueError):
+            return None
+    low = min(first, start)
+    high = max(last, end)
+    tail = value.end_line - high
+    return ReplaceLines(low, high, '\n'.join(lines[low - value.line:len(lines) - tail]))
 
 
 def _conditional(value: ForLoopTable, chain: int) -> List[int]:
@@ -2741,9 +2840,24 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                  f'{py_exp_attrs(column.subject) or ' draggable="false"'}>'
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
+    handle, drag_attrs = '', ''
+    if not live_only and _draggable_statement(value, label) is not None:
+        handle = (f'<span snc-mouse-down="{html.escape(repr(ColumnDragStart(col=label)))}" '
+                  f'snc-unfocused-clickable draggable="false" data-tooltip="Drag to reorder" '
+                  f'class="col-handle col-drag-handle">⣿</span>')
+        drag_attrs = f' snc-mouse-up="{html.escape(repr(ColumnDragEnd(col=label)))}"'
+        dragging = model.get('column_drag_from')
+        if dragging is not None:
+            drag_attrs += f' snc-mouse-move="{html.escape(repr(ColumnDragOver(col=label)))}"'
+            if dragging == label:
+                classes += ' col-drag-source'
+            elif model.get('column_drag_over') == label:
+                origin = _draggable_statement(value, dragging)
+                if origin is not None:
+                    classes += ' col-drag-before' if origin.span[0] > column.span[0] else ' col-drag-after'
     filtered = ' col-filtered' if _column_search(model, label)['text'].strip() else ''
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-col{filtered}{classes}"{span_attrs}'
-            f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">{inner}{resize}</span></th>')
+            f'{_col_attrs(model, label, clip=False)}{drag_attrs}><span class="col-header-inner">{handle}{inner}{resize}</span></th>')
 
 
 def _render_subheader(value, model, label: str, sub: str, span_attrs: str = '', classes: str = '',
@@ -3762,6 +3876,18 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             opening = model.get('chain_menu') != [chain, branch]
             return ({**_menus_closed(model), 'add_menu_open': False,
                      'chain_menu': [chain, branch] if opening else None}, [])
+        case ColumnDragStart(col=label) if not is_live_only():
+            if _draggable_statement(value, label) is not None:
+                return ({**_menus_closed(model), 'column_drag_from': label, 'column_drag_over': label}, [])
+        case ColumnDragOver(col=label) if model.get('column_drag_from') is not None:
+            if event_json.get('buttons', 0) == 0:
+                return ({**model, 'column_drag_from': None, 'column_drag_over': None}, [])
+            if _draggable_statement(value, label) is not None:
+                return ({**model, 'column_drag_over': label}, [])
+        case ColumnDragEnd(col=label):
+            moved = (_statement_reordered(value, model.get('column_drag_from'), label)
+                     if not is_live_only() else None)
+            return ({**model, 'column_drag_from': None, 'column_drag_over': None}, [moved] if moved else [])
         case BranchDragStart(chain=chain, branch=branch) if branch != 0 \
                 and branch in _conditional(value, chain) and not is_live_only():
             return ({**_menus_closed(model), 'branch_drag': {'chain': chain, 'from': branch, 'over': branch}}, [])
