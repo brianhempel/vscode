@@ -2464,14 +2464,16 @@ class TestForLoopTable(unittest.TestCase):
                 return False
 
         import_code, body_code = split_leading_imports(source_code)
-        saved = python_runner._visualizers
-        python_runner._visualizers = lambda: [Recorder, *saved()]
+        saved = python_runner._visualizers, python_runner._source_code
+        python_runner._visualizers = lambda: [Recorder, *saved[0]()]
+        # What a real run holds: the source its #%click comments are read from.
+        python_runner._source_code = source_code
         try:
             with capture_stream_messages() as msgs:
                 python_runner._execute_run(body_code, '', 'run-1', import_code=import_code,
                                            loop_selections=loop_selections)
         finally:
-            python_runner._visualizers = saved
+            python_runner._visualizers, python_runner._source_code = saved
         return msgs, tables
 
     @staticmethod
@@ -2588,9 +2590,97 @@ class TestForLoopTable(unittest.TestCase):
             {'id': i, 'pythonEventStr': event, 'eventJSON': data}
             for i, (event, data) in enumerate(events)]}])
         imports, body = split_leading_imports(source)
-        with capture_stream_messages() as msgs:
-            python_runner._execute_run(body, payload, 'run-1', import_code=imports)
+        saved = python_runner._source_code
+        python_runner._source_code = source
+        try:
+            with capture_stream_messages() as msgs:
+                python_runner._execute_run(body, payload, 'run-1', import_code=imports)
+        finally:
+            python_runner._source_code = saved
         return [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+
+    def test_a_view_change_rewrites_the_comment_on_the_loops_header_once(self):
+        # The table is logged on the loop's last line, twice; its view is
+        # saved on its header, the one line every edit the table makes to
+        # the body leaves where it is.
+        tables = self._replay_table_events('for word in ["apple"]:\n    rest = word\n',
+                                           [("ColumnToggle(label='rest = word')", {})])
+        self.assertEqual([t.get('commands', []) for t in tables], [[{
+            'type': 'SetConfigComment',
+            'comment': '#%click [{"expr": "rest = word", "hidden": true}]',
+            'line': 1, 'triggerLine': 2, 'triggerVisIndex': 1}], []])
+        self.assertEqual(tables[1]['model']['_config_sig'],
+                         config_sig([{'expr': 'rest = word', 'hidden': True}]))
+
+    def test_the_view_saved_on_the_header_is_a_fresh_models(self):
+        source = ('for word in ["apple"]:  #%click [{"expr": "rest = word", "hidden": true, "width": 90}]\n'
+                  '    rest = word\n')
+        msgs, _ = self._run(source)
+        tables = [m['item'] for m in msgs.all() if m.get('type') == 'item' and 'forLoopLine' in m['item']]
+        self.assertEqual([(t.get('forLoopRunning', False), t['model']['hidden_columns'], t['model']['widths'],
+                           t.get('commands', [])) for t in tables],
+                         [(True, ['rest = word'], {'rest = word': 90}, []),
+                          (False, ['rest = word'], {'rest = word': 90}, [])])
+        # Hidden in the running table and the finished one alike.
+        self.assertTrue(all('>rest = word<' not in t['html'].split('</thead>')[0] for t in tables))
+
+    def test_code_the_table_writes_keeps_the_comment_on_the_header(self):
+        source = 'for word in ["apple"]:  #%click [{"expr": "word", "width": 90}]\n    rest = word\n'
+        tables = self._replay_table_events(source, [
+            ("ColumnClick(col=0, label='word', iterable=True)", {'detail': 2}),
+            ("ColumnInput(value='[\"pear\"]')", {}), ('ColumnKeyDown()', {'key': 'Enter'})])
+        self.assertEqual(tables[0]['commands'], [{
+            'type': 'ReplaceLines', 'first': 1, 'last': 1,
+            'text': 'for word in ["pear"]:  #%click [{"expr": "word", "width": 90}]',
+            'triggerLine': 2, 'triggerVisIndex': 1}])
+        # A rename moves the view saved under the old name to the new one.
+        tables = self._replay_table_events(source, [
+            ("ColumnClick(col=0, label='word')", {'detail': 2}),
+            ("ColumnInput(value='item')", {}), ('ColumnKeyDown()', {'key': 'Enter'})],
+            {'widths': {'word': 90}})
+        self.assertEqual([(c['type'], c.get('text', c.get('comment')), c.get('line')) for c in tables[0]['commands']], [
+            ('ReplaceLines', 'for item in ["apple"]:  #%click [{"expr": "word", "width": 90}]\n    rest = item', None),
+            ('SetConfigComment', '#%click [{"expr": "item", "width": 90}]', 1)])
+        # A line written into the body leaves the header alone.
+        tables = self._replay_table_events(source, [
+            ('AddColumnClick()', {}), ("ColumnInput(value='n = 1')", {}), ('ColumnKeyDown()', {'key': 'Enter'})])
+        self.assertEqual([c['type'] for t in tables for c in t.get('commands', [])], ['NewCode'])
+
+    def test_the_headers_own_values_read_their_columns_saved_config(self):
+        # The names the loop binds are logged on its header too: each is a
+        # column of the table, so it reads (and saves) its config where the
+        # table's cells in that column do, under the column's slot.
+        seen = []
+
+        class Recorder:
+            @staticmethod
+            def can_visualize(value):
+                return isinstance(value, str)
+
+            @staticmethod
+            def init_model(value, get_visualizer, slots_config=None, config_path=None, persist=True):
+                seen.append((slots_config, config_path, persist))
+                return {}
+
+            @staticmethod
+            def visualize(value, model, get_visualizer):
+                return ''
+
+        source = ('for word in ["apple"]:  #%click [{"expr": "word", "children": ["$.a"]}, "rest = word"]\n'
+                  '    rest = word\n')
+        import_code, body_code = split_leading_imports(source)
+        saved = python_runner._visualizers, python_runner._source_code
+        python_runner._visualizers = lambda: [Recorder, *saved[0]()]
+        python_runner._source_code = source
+        try:
+            with capture_stream_messages():
+                python_runner._execute_run(body_code, '', 'run-1', import_code=import_code)
+        finally:
+            python_runner._visualizers, python_runner._source_code = saved
+        # The header's `word`, the body's `rest`, then the finished table's
+        # cells: `word`'s under the same slot as the header's.
+        self.assertEqual(seen, [(['$.a'], ['word'], True), (None, [], True),
+                                (['$.a'], ['word'], True), (None, ['rest = word'], True)])
 
     def test_loop_header_edits_are_answered_before_a_raising_body(self):
         for iterable, text in ((False, 'item'), (True, '[2]')):

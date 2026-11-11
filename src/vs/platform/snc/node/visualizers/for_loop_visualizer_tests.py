@@ -1272,7 +1272,7 @@ class TestCellsAreVisualized(unittest.TestCase):
                         cells_of)
         self.assertEqual(body_rows(out)[1], ['0', '7', '8'])
 
-    def test_a_cell_is_nested_with_nowhere_to_save_and_a_focused_ones_model_is_kept(self):
+    def test_a_cell_is_nested_under_its_column_and_a_focused_ones_model_is_kept(self):
         seen = []
 
         class Nested(FakeCell):
@@ -1284,7 +1284,7 @@ class TestCellsAreVisualized(unittest.TestCase):
 
         model = {'focused_child': '0\x00element'}
         visualize(table(), model, lambda v: Nested)
-        self.assertEqual(seen[0], (['element'], False))
+        self.assertEqual(seen[0], (['element'], True))
         self.assertEqual(list(model['children']), ['0\x00element'])
 
     def test_an_event_for_a_cell_the_table_lacks_goes_nowhere(self):
@@ -3827,3 +3827,195 @@ class TestRowExpansionParity(unittest.TestCase):
         model = update(click(UnsplatColumnClick(col=target)), None, model, self.lists())[0]
         self.assertFalse(loop._has_splats(model))
         self.assertNotIn(target, model['subcols'])
+
+
+def saving_from(slots):
+    """Install `slots` as the line's config, as the runner does before it
+    reaches the table: what the header's #%click comment held."""
+    visualizer_utils.set_line_config(slots)
+
+
+def saved():
+    """(slots, dirty): what the line's config holds now, and whether the
+    table saved anything -- as the runner collects it after the table."""
+    return visualizer_utils.take_line_config()
+
+
+class TestSavedView(unittest.TestCase):
+    """What a table keeps in its line's #%click comment, a loop's table keeps
+    in its header's: a slot per column whose view the user changed, keyed by
+    the column's label, in the table's shape -- `width`, `computes`, and
+    `cols` for its sub-columns -- with `hidden` and `folded` for what only a
+    loop has. What a table doesn't save (its search, sort, paging, menus,
+    expand bar), a loop's doesn't either."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+        saving_from(None)
+
+    def tearDown(self):
+        saving_from(None)
+
+    def test_hiding_a_column_saves_it_on_its_slot(self):
+        update(click(ColumnToggle(label='count += 1')), None, {}, table())
+        self.assertEqual(saved(), ([{'expr': 'count += 1', 'hidden': True}], True))
+
+    def test_what_a_table_does_not_save_saves_nothing(self):
+        from table_visualizer import ExpandToggle
+        for msg in (AddMenuToggle(), ColumnMenuToggle(label='element'), SortToggle(label='element', direction='asc'),
+                    SearchBoxInput(value='1'), ColumnSearchInput(label='element', value='1'), FirstMatchToggle(),
+                    ExpandToggle(), LoadMoreRows(), AddColumnClick(), ToolSelect(tool='pick')):
+            with self.subTest(msg=msg):
+                saving_from(None)
+                update(click(msg), None, {}, table())
+                self.assertEqual(saved(), (None, False))
+
+    def test_widths_computes_and_sub_columns_save_in_the_tables_shape(self):
+        from for_loop_visualizer import SUBCOL_SEP
+        age, name = f"person{SUBCOL_SEP}$['age']", f"person{SUBCOL_SEP}$['name']"
+        model = {'widths': {age: 80}, 'computes': {age: ['sum($)']},
+                 'subcols': {'person': ["$['age']", "$['name']"], name: ['$.upper()']}}
+        update(click(ColumnResize(width=130.4, label='person')), None, model, people())
+        self.assertEqual(saved(), ([{'expr': 'person', 'width': 130, 'cols': [
+            {'expr': "$['age']", 'width': 80, 'computes': ['sum($)']},
+            {'expr': "$['name']", 'cols': ['$.upper()']}]}], True))
+
+    def test_spreading_lists_saves_the_star_among_the_sub_columns(self):
+        from table_visualizer import SplatColumnClick
+        lists = plain(rows=(('[1, 2]', '2'), ('[]', '4')), values=(([1, 2], 2), ([], 4)))
+        update(click(SplatColumnClick(col='element')), None, {}, lists)
+        self.assertEqual(saved(), ([{'expr': 'element', 'cols': ['*$']}], True))
+
+    def test_a_folded_chain_saves_on_its_ifs_condition(self):
+        from for_loop_visualizer import ChainToggle
+        update(click(ChainToggle(chain=3)), None, {}, branched())
+        self.assertEqual(saved(), ([{'expr': 'if x % 2 == 0', 'folded': True}], True))
+
+    def test_a_fresh_model_is_the_saved_view(self):
+        from for_loop_visualizer import SUBCOL_SEP
+        star = f'x{SUBCOL_SEP}*$'
+        model = init_model(branched(), slots_config=[
+            {'expr': 'x', 'hidden': True, 'width': 90, 'cols': [{'expr': '*$', 'width': 40, 'cols': ['$.real']}]},
+            {'expr': 'if x % 2 == 0', 'folded': True},
+            {'expr': "tag = 'even'", 'computes': ['len($)'], 'cols': ['$.upper()'],
+             'children': [{'expr': '$.a'}]}], config_path=[])
+        self.assertEqual({k: model.get(k) for k in ('hidden_columns', 'widths', 'computes', 'subcols', 'chains',
+                                                     '_slot_children', '_config_path', '_config_persist')}, {
+            'hidden_columns': ['x'],
+            'widths': {'x': 90, star: 40},
+            'computes': {"tag = 'even'": ['len($)']},
+            'subcols': {'x': ['*$'], star: ['$.real'], "tag = 'even'": ['$.upper()']},
+            'chains': {'3': False},
+            '_slot_children': {"tag = 'even'": [{'expr': '$.a'}]},
+            '_config_path': [],
+            '_config_persist': True,
+        })
+        self.assertEqual(header_labels(visualize(branched(), model))[:2], ['itr', 'if x % 2 == 0 … else'])
+
+    def test_what_is_saved_is_what_a_fresh_model_restores(self):
+        from for_loop_visualizer import ChainToggle, SUBCOL_SEP
+        leaf = f"tag = 'even'{SUBCOL_SEP}$.upper()"
+        model = {'hidden_columns': ['x'], 'widths': {leaf: 60}, 'computes': {'total += x': ['sum($)']},
+                 'subcols': {"tag = 'even'": ['$.upper()']}}
+        model, _ = update(click(ChainToggle(chain=3)), None, model, branched())
+        slots, _ = saved()
+        restored = init_model(branched(), slots_config=slots)
+        self.assertEqual({k: restored.get(k) for k in ('hidden_columns', 'widths', 'computes', 'subcols', 'chains')},
+                         {k: model.get(k) for k in ('hidden_columns', 'widths', 'computes', 'subcols', 'chains')})
+
+    def test_a_saved_config_that_no_longer_fits_is_ignored(self):
+        for slots in ('garbage', {'expr': 'x'}, [1, None, ['x'], {'nope': 1}, {'expr': 3, 'hidden': True},
+                                                  {'expr': 'gone', 'hidden': True, 'width': 50},
+                                                  {'expr': 'elif x > 4', 'folded': True},
+                                                  {'expr': 'x', 'width': 'wide', 'computes': 'sum', 'cols': 'x',
+                                                   'hidden': 'yes', 'children': 'no'},
+                                                  {'expr': 'if x % 2 == 0', 'folded': 'yes'},
+                                                  {'expr': ['x'], 'children': [1]},
+                                                  {'expr': 'x', 'cols': [{'expr': ['y']}]},
+                                                  {'expr': "tag = 'even'", 'cols': [7, {'width': 3}]}]):
+            with self.subTest(slots=slots):
+                model = init_model(branched(), slots_config=slots)
+                self.assertEqual({k: model[k] for k in ('hidden_columns', 'widths', 'computes', 'subcols', 'chains')
+                                  if model.get(k)}, {})
+                self.assertIn('for-loop-visualizer', visualize(branched(), model))
+
+    def test_labels_gone_are_pruned_on_the_next_save_and_a_cells_config_kept(self):
+        saving_from([{'expr': 'gone', 'hidden': True}, {'expr': 'element', 'children': [{'expr': '$.a'}]},
+                     5, {'expr': ['x'], 'children': [1]}])
+        update(click(ColumnToggle(label='count += 1')), None, {'hidden_columns': ['gone'], 'widths': {'gone': 4}},
+               table())
+        self.assertEqual(saved(), ([{'expr': 'element', 'children': [{'expr': '$.a'}]},
+                                    {'expr': 'count += 1', 'hidden': True}], True))
+
+    def test_editing_a_statement_through_its_header_moves_its_view_to_the_new_label(self):
+        model = {**editing(1, 'count += 2'), 'widths': {'count += 1': 120}, 'computes': {'count += 1': ['sum($)']}}
+        model, commands = update(key('Enter'), None, model, table())
+        self.assertEqual(commands, [ReplaceLines(3, 3, '    count += 2')])
+        self.assertEqual((model['widths'], model['computes']), ({'count += 2': 120}, {'count += 2': ['sum($)']}))
+        self.assertEqual(saved(), ([{'expr': 'count += 2', 'width': 120, 'computes': ['sum($)']}], True))
+
+    def test_changing_a_columns_type_moves_its_view_to_the_new_label(self):
+        model, commands = update(click(ConvertToggle(col=1, label='twice = element * 2', to='int')), None,
+                                 {'widths': {'twice = element * 2': 70}}, plain())
+        self.assertEqual(commands, [ReplaceLines(2, 2, '    twice = int(element * 2)')])
+        self.assertEqual(model['widths'], {'twice = int(element * 2)': 70})
+        self.assertEqual(saved(), ([{'expr': 'twice = int(element * 2)', 'width': 70}], True))
+
+    def test_renaming_a_bound_name_moves_its_saved_view(self):
+        source = 'for element in [1, 2]:\n    twice = element\n'
+        t = plain(columns=(bound('element'),), source=tuple(source.splitlines()), program=source, end_line=2)
+        _, commands = update(key('Enter'), None, {**editing(0, 'item'), 'widths': {'element': 70}}, t)
+        self.assertTrue(commands)
+        self.assertEqual(saved(), ([{'expr': 'item', 'width': 70}], True))
+
+    def test_editing_a_condition_moves_its_chains_fold(self):
+        t = branched(source=BRANCHED_SOURCE, program='\n'.join(('total = 0',) + BRANCHED_SOURCE))
+        model = {**editing(1, 'x % 3 == 0'), 'chains': {'3': False}}
+        _, commands = update(key('Enter'), None, model, t)
+        self.assertEqual(commands, [ReplaceLines(3, 3, '    if x % 3 == 0:')])
+        self.assertEqual(saved(), ([{'expr': 'if x % 3 == 0', 'folded': True}], True))
+
+    def test_the_header_of_a_loop_with_a_saved_view_is_rewritten_around_it(self):
+        source = 'for element in [1, 2]:  #%click [{"expr": "element", "width": 70}]\n    twice = element\n'
+        t = plain(columns=(bound('element'),), source=tuple(source.splitlines()), program=source, end_line=2)
+        model, _ = update(click(ColumnClick(0, 'element', iterable=True), detail=2), None, {}, t)
+        self.assertEqual(model['column_input'], '[1, 2]')
+        model, _ = update(typed('[3]'), None, model, t)
+        _, commands = update(key('Enter'), None, model, t)
+        self.assertEqual(commands, [ReplaceLines(1, 1, 'for element in [3]:  #%click [{"expr": "element", "width": 70}]')])
+        _, commands = update(key('Enter'), None, editing(0, 'item'), t)
+        self.assertEqual(commands[0].text.split('\n')[0],
+                         'for item in [1, 2]:  #%click [{"expr": "element", "width": 70}]')
+
+    def test_a_cell_saves_its_own_config_under_its_column_as_a_tables_cell_does(self):
+        seen = []
+
+        class Saving(FakeCell):
+            @staticmethod
+            def init_model(value, get_visualizer=None, eval_in_scope=None, slots_config=None, config_path=None,
+                           persist=True):
+                seen.append((slots_config, config_path, persist))
+                return {'bumps': 0, 'path': config_path}
+
+            @staticmethod
+            def update(event, var_and_exp, model, value, get_visualizer=None, eval_in_scope=None):
+                visualizer_utils.save_slots_at_path(model['path'], ['$.b'])
+                return (model, [])
+
+        model = init_model(table(), slots_config=[{'expr': 'element', 'children': [{'expr': '$.a'}]}])
+        model['hidden_columns'] = ['count += 1']  # hidden by the running table, earlier this run
+        model['focused_child'] = '0\x00element'
+        visualize(table(), model, lambda v: Saving)
+        saving_from([{'expr': 'element', 'children': [{'expr': '$.a'}]}])
+        update(child('0\x00element', 'Save()', 'keydown'), None, model, table(), lambda v: Saving)
+        self.assertEqual(seen[0], ([{'expr': '$.a'}], ['element'], True))
+        # The cell's save, and the column hidden earlier in the run: both.
+        self.assertEqual(saved(), ([{'expr': 'element', 'children': [{'expr': '$.b'}]},
+                                    {'expr': 'count += 1', 'hidden': True}], True))
+
+    def test_show_all_held_for_the_finished_table_saves_once_it_is_answered(self):
+        model = {'held_subcol_all': [['person', True]]}
+        visualize(people(), model, cells_of)
+        self.assertEqual(saved(), ([{'expr': 'person', 'cols': ["$['name']", "$['age']"]}], True))
+        visualize(people(), model, cells_of)
+        self.assertEqual(saved(), (None, False))

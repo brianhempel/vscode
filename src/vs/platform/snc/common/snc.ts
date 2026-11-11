@@ -188,7 +188,9 @@ export type SNCCommand =
 	// comment text; null removes it. The editor finds the existing comment by
 	// the rule the runner reads it with -- trailing on the trigger line
 	// itself -- and replaces it, or appends one at the end of the line.
-	| { type: 'SetConfigComment'; comment: string | null; triggerLine: number; triggerVisIndex: number }
+	// `line`, when present, is the line the comment is on instead: a loop's
+	// table is logged on the loop's last line and saved on its header.
+	| { type: 'SetConfigComment'; comment: string | null; line?: number; triggerLine: number; triggerVisIndex: number }
 	// The backend supplies expression intent; the editor's linked range remains
 	// authoritative for the concrete assignment target. On semantic action
 	// changes, suggested_var_name requests a safe editor-side rename.

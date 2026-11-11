@@ -7107,8 +7107,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 
 	/**
 	 * Rewrite (or write, or remove) the trailing `#%click` comment on the
-	 * visualizer's line. Replacing in place rather than appending makes a
-	 * repeated command -- an event replayed across two runs -- harmless.
+	 * visualizer's line -- a loop's table's on the loop's header. Replacing in
+	 * place rather than appending makes a repeated command -- an event
+	 * replayed across two runs -- harmless.
 	 */
 	private handleSetConfigComment(command: Extract<SNCCommand, { type: 'SetConfigComment' }>): void {
 		const model = this.editor.getModel();
@@ -7120,7 +7121,9 @@ export class SNCController extends Disposable implements IEditorContribution {
 		// the line as it stands, not as Python was told about it. Left as
 		// reported when the run had nothing to say about the line -- there is
 		// nothing better to go on, and it is right whenever nothing moved.
-		const boundLine = this.reportedLineNow.get(command.triggerLine) ?? command.triggerLine;
+		// A loop's table names its header, where its comment is.
+		const reportedLine = command.line ?? command.triggerLine;
+		const boundLine = this.reportedLineNow.get(reportedLine) ?? reportedLine;
 		if (boundLine < 1 || boundLine > model.getLineCount()) {
 			// The file has moved on since the visualizer's line was reported.
 			return;
@@ -8079,6 +8082,10 @@ export class SNCController extends Disposable implements IEditorContribution {
 		this.reportedLineNow.clear();
 		for (const visItem of this.visualizationItems) {
 			this.reportedLineNow.set(visItem.line, visItem.line);
+			// A loop's table saves its view on the loop's header.
+			if (visItem.forLoopLine !== undefined) {
+				this.reportedLineNow.set(visItem.forLoopLine, visItem.forLoopLine);
+			}
 		}
 		// No widget has been reached yet, so the run can be handed events
 		// for any of them (see the gate above). A warm worker taking this run

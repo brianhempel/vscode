@@ -414,8 +414,12 @@ class SetConfigComment:
     `comment` is the whole comment text; None removes it. The editor finds the
     existing comment by the same rule the runner reads it with -- trailing on
     the line itself -- and replaces it, or appends one at the end of the line.
+
+    `line` is the line the comment is on when it isn't the trigger line: a
+    loop's table is logged on the loop's last line and saved on its header.
     """
     comment: Optional[str]
+    line: Optional[int] = None
 
 
 def _json_safe(value: Any) -> Any:
@@ -505,6 +509,9 @@ def _commands_to_dicts(commands: List[Any], line: int, idx_in_line: int,
                 if hasattr(cmd, '__dataclass_fields__'):
                     for field_name in cmd.__dataclass_fields__:
                         cmd_dict[field_name] = getattr(cmd, field_name)
+                if isinstance(cmd, SetConfigComment) and cmd.line is None:
+                    # The comment is on the trigger line itself.
+                    del cmd_dict["line"]
                 cmd_dict["triggerLine"] = line
                 cmd_dict["triggerVisIndex"] = idx_in_line
             cmd_dicts.append(cmd_dict)
@@ -628,9 +635,26 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
     # What the line's `#%click` comment holds is this visualizer's saved config
     # (columns, fields, ...). It is installed for the visualizer to read while
     # it runs, and collected afterwards to see whether it saved anything.
-    line_slots = parse_config_comment(_source_code, line)
+    #
+    # A loop's table is the exception: logged on the loop's last line, it is
+    # saved on its header (see for_loop_visualizer's "Saved view"). What else
+    # is logged on that header -- the names the loop binds -- is a column of
+    # the table, so it reads and saves its config under the column's slot,
+    # where the table's cells in that column do; anything else there has none.
+    config_line = value.line if isinstance(value, ForLoopTable) else line
+    line_slots = parse_config_comment(_source_code, config_line)
     line_config_sig = config_sig(line_slots)
     set_line_config(line_slots)
+    nesting: Dict[str, Any] = {'slots_config': line_slots, 'config_path': []}
+    loop_column = None if isinstance(value, ForLoopTable) else _loop_header_column(line, site)
+    if loop_column is not None:
+        # Read as parse_slots reads a slot's `children`, but a slot written
+        # by hand into something it can't take is passed over, not raised.
+        children = next((slot['children'] for slot in line_slots or []
+                         if isinstance(slot, dict) and slot.get('expr') == loop_column
+                         and isinstance(slot.get('children'), list) and slot['children']), None)
+        nesting = ({'slots_config': children, 'config_path': [loop_column]}
+                   if loop_column else {'slots_config': None, 'config_path': [], 'persist': False})
 
     # Take everything the editor has queued up to this instant, not just what
     # existed when the run launched. A visualizer the user is interacting with
@@ -685,8 +709,7 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
             model = call_with_supported_kwargs(vis.init_model, value, get_visualizer,
                                                eval_in_scope=eval_in_scope,
                                                var_and_exp=var_and_exp,
-                                               slots_config=line_slots,
-                                               config_path=[])
+                                               **nesting)
 
         # Only replay events when the cached model was reused; if the type
         # changed the old events belong to a different visualizer.
@@ -767,8 +790,12 @@ def log_value(line: int, value: Any, site: int = 0, eval_in_scope=None, var_and_
         commands = [c for c in commands if type(c).__name__ == 'CopyToClipboard']
     if config_dirty:
         commands.append(SetConfigComment(
-            format_config_comment(line_slots) if line_slots is not None else None))
-    if isinstance(model, dict):
+            format_config_comment(line_slots) if line_slots is not None else None,
+            config_line if config_line != line else None))
+    # A model carried from an earlier logging this run (a loop's) already
+    # says what any save it made there will leave the comment holding, which
+    # the source this run read hasn't caught up with yet.
+    if isinstance(model, dict) and (config_dirty or '_config_sig' not in model):
         model['_config_sig'] = config_sig(line_slots)
 
     # Convert commands to wire dicts before streaming them.
@@ -818,6 +845,18 @@ def _running_loop_table(value: Any) -> bool:
     """Whether `value` is the table a `for` logs as it starts (see
     loop_enter), whose cells have no values yet."""
     return isinstance(value, ForLoopTable) and value.running
+
+
+def _loop_header_column(line: int, site: int) -> Optional[str]:
+    """For a value logged on the header of a `for` whose table is recording
+    (see loop_enter): the label of the table's column it is -- a name the
+    loop binds, or a statement of a one-line body -- or '' when it is none
+    of the table's columns. None anywhere else."""
+    for table in _for_tables.values():
+        if table["table"].line == line:
+            col = table["columns"].get((line, site))
+            return table["table"].columns[col].label if col is not None else ''
+    return None
 
 
 def _is_cell_event(event: Dict[str, Any]) -> bool:

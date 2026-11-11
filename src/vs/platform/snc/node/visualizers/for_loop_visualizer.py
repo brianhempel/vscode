@@ -124,8 +124,9 @@ the runner copied, so a loop still running has none to search.
 
 **A cell is its value's own visualizer**, as a table's is: small until a
 press focuses it (then routed its events, as a ChildEvent keyed by row and
-column), nested so a table in one draws as its repr, and with nowhere to save
-to -- a loop's line has no config for a cell's to go in. Only the page of rows
+column), nested so a table in one draws as its repr, and saving its own
+config under its column's slot in the header's comment (see below), as a
+table's cell does under its column's. Only the page of rows
 being drawn is visualized. A child's preview is a phantom column, as a
 table's is, after its source column (after the parent for a sub-column).
 A press on its header or a cell keeps it as `result = ...` (`result2`, ...)
@@ -187,7 +188,8 @@ keyboard as it opens, for the same reason.
 
 **A page of rows at a time.** Fifty, then the last three, with a row between
 that loads the next fifty -- a table's paging. Columns drag wider by their
-header's right edge, the width kept by label in the model. A statement's
+header's right edge, the width kept by label in the model and saved on the
+header (see below). A statement's
 ⣿ moves its source lines onto another statement, before it from later and
 after it from earlier, as a table's column does. Its AST line span moves
 verbatim, including inline comments and comments inside it; adjacent comment
@@ -231,8 +233,25 @@ starts unfolded and one inside a branch folded, so nesting costs a header
 row only when asked for. A folded header can edit its condition when the
 chain has just one conditional branch; several conditions have no one to edit.
 Folding is a view, kept by the chain's line in the
-model, so it works live-only too. A folded chain's init cell is where each
-accumulator in it starts.
+model and saved on its `if`'s slot on the header, so it works live-only too.
+A folded chain's init cell is where each accumulator in it starts.
+
+**Its view is saved on the loop's header**, in the `#%click` comment a
+table saves its own in (see "Saved view" below): what a table saves -- a
+column's width, its compute answers, its sub-columns with their stars, a
+cell's own visualizer's config -- and, as a loop's own, the columns hidden
+and the chains folded or unfolded. Not on the line the table is logged on:
+the last line of the body is wherever the table last wrote a line, and the
+header is where none of its writing goes, so it stays put; a rename or Edit
+Iterable rewrites the header around the comment. The names the loop binds,
+logged on the header too, are the table's columns, and read and save their
+config under their column's slot, as its cells do. A save goes out once,
+from whichever of the two tables answered what changed the view; the rows
+of last time are not part of it. A line written over through the table --
+its box, Change Type, a rename, a condition -- takes its view to the label
+it comes back under; one edited in the editor leaves its view behind, and
+the next save drops it. A table opened fresh -- a reload, or a body whose
+last line moved -- opens on the saved view, passing over what no longer fits.
 
 **Branches are written from the table.** Add If, in the (+) menu, opens a box
 reading `if [condition]` at the end of the header row; Enter writes the `if`
@@ -269,7 +288,8 @@ from typing import Any, List, Optional, Tuple
 
 from table_visualizer import (SplatColumnClick, UnsplatColumnClick, ExpandToggle,
                               _rows as _table_rows, _rows_are_lists, _split_splat,
-                              _default_columns)
+                              _default_columns, _slots_from_columns, _sub_columns_from_entries,
+                              _config_from_slot, save_columns_config)
 from visualizer_utils import ENABLE_AUTO_EXPAND, render_expand_toggle, py_exp_attrs
 
 from table_visualizer import (ColumnDragStart, ColumnDragOver, ColumnDragEnd, PickToggle, _build_pick_expr, _pick_bands_by_column,
@@ -299,7 +319,8 @@ from visualizer_utils import (CHILD_SOURCE_BINDER, EXPANDED_PANE_MAX_HEIGHT, ICO
                               ForLoopColumn, ForLoopTable, InsertLines, Phantom, ReplaceLines, aggregate_handled_keys,
                               call_with_supported_kwargs, child_nesting_kwargs, error_html, eval_dollar_expr,
                               replace_dollars_in_py_exp,
-                              is_live_only, is_new_code, nest_generated_expr, py_exp_attrs,
+                              is_live_only, is_new_code, nest_generated_expr, parse_slots, peek_line_config,
+                              py_exp_attrs,
                               imports_for_code, render_tool_toolbar, route_child_event, truncate_repr, with_pass_body, opens_block, wrap_child_prefix,
                               wrap_child_suffix)
 
@@ -726,8 +747,140 @@ def can_visualize(value):
     return isinstance(value, ForLoopTable)
 
 
-def init_model(value, get_visualizer=None):
-    return {}
+def init_model(value, get_visualizer=None, slots_config=None, config_path=None, persist=True):
+    """`slots_config`, `config_path` and `persist` are the nesting parameters
+    a table's init_model takes (see child_nesting_kwargs). At the root the
+    runner passes the slots saved on the loop's header, and the model opens
+    on that view. A slot that no longer fits -- a label the loop doesn't
+    have, a key of the wrong type -- is passed over."""
+    slots = _readable_slots(slots_config)
+    return {'_config_path': list(config_path or []), '_config_persist': persist,
+            '_slot_children': parse_slots(slots)[1], **_view_from_slots(value, slots)}
+
+
+# === Saved view (the header's #%click comment) ===
+#
+# A table's view is saved in its line's #%click comment; a loop's table is
+# logged on its last line, which every line the table writes at the end of
+# the body moves, so its view is saved on its header instead, which nothing
+# the table writes into the body moves. The slots are the table's: one per
+# column, keyed by its label, with `width`, `computes`, and `cols` -- the
+# sub-columns, stars and all, in the table's column-map shape -- and
+# `children`, a cell's own visualizer's. Two keys are a loop's own, since a
+# table has neither: `hidden`, because a loop's columns are its code and
+# one left out of the comment is a line the comment hasn't seen rather than
+# one taken off, and `folded`, kept on the slot of a chain's `if`. A column
+# with nothing saved has no slot. What a table keeps only in its model --
+# search, sort, paging, menus, the expand bar -- a loop's keeps there too.
+
+
+def _chain_heads(value: ForLoopTable) -> dict:
+    """Each `if` chain's first condition's label, to the line it starts on."""
+    return {c.label: c.path[-1][0] for c in value.columns if c.cond and c.path and c.path[-1][1] == 0}
+
+
+def _readable_slots(slots) -> list:
+    """The slots of a saved list that name a column at all: a hand-edited
+    comment is a real input, and the table's readers take it on trust."""
+    return [slot for slot in slots if isinstance(slot, str)
+            or isinstance(slot, dict) and isinstance(slot.get('expr'), str)] if isinstance(slots, list) else []
+
+
+def _view_from_slots(value: ForLoopTable, slots) -> dict:
+    """The model keys a saved slot list opens the table on."""
+    labels = {c.label for c in value.columns}
+    heads = _chain_heads(value)
+    view = {'hidden_columns': [], 'widths': {}, 'computes': {}, 'subcols': {}, 'chains': {}}
+
+    def load(label, config):
+        if 'width' in config:
+            view['widths'][label] = config['width']
+        if config.get('computes'):
+            view['computes'][label] = config['computes']
+        if config.get('cols'):
+            view['subcols'][label] = list(config['cols'])
+            for sub, sub_config in config['cols'].items():
+                load(_leaf_label(label, sub), sub_config)
+
+    for entry in slots:
+        if not isinstance(entry, dict) or entry.get('expr') not in labels:
+            continue
+        label = entry['expr']
+        if entry.get('hidden') is True and label not in view['hidden_columns']:
+            view['hidden_columns'].append(label)
+        if isinstance(entry.get('folded'), bool) and label in heads:
+            view['chains'][str(heads[label])] = not entry['folded']
+        config = _config_from_slot(entry)
+        if isinstance(entry.get('cols'), list):
+            try:
+                config['cols'] = _sub_columns_from_entries(entry['cols'], 1)
+            except Exception:
+                pass  # sub-columns written into something they can't be
+        load(label, config)
+    return {key: kept for key, kept in view.items() if kept}
+
+
+def _view_slots(value: ForLoopTable, model, stored) -> list:
+    """The model's view as the slots it is saved as, a column's sub-columns
+    in the table's shape (see _slots_from_columns). Labels the loop no longer
+    has are left out, so a save drops them; a column whose only config is
+    its cells' (in `stored`, the slots saved now) keeps a bare slot, so the
+    save keeps that config."""
+    stored_children = parse_slots(_readable_slots(stored))[1]
+    widths, computes, subcols = (model.get(k) or {} for k in ('widths', 'computes', 'subcols'))
+    hidden = set(model.get('hidden_columns') or [])
+    folded = {label: not (model.get('chains') or {})[str(chain)] for label, chain in _chain_heads(value).items()
+              if (model.get('chains') or {}).get(str(chain)) is not None}
+
+    def config(label, depth=0):
+        found = {}
+        if label in widths:
+            found['width'] = widths[label]
+        if computes.get(label):
+            found['computes'] = computes[label]
+        if subcols.get(label) and depth < MAX_SPLAT_DEPTH:
+            found['cols'] = {sub: config(_leaf_label(label, sub), depth + 1) for sub in subcols[label]}
+        return found
+
+    columns = {}
+    for column in value.columns:
+        columns.setdefault(column.label, config(column.label))
+    slots = []
+    for slot in _slots_from_columns(columns):
+        label = slot if isinstance(slot, str) else slot['expr']
+        own = {**({'hidden': True} if label in hidden else {}),
+               **({'folded': folded[label]} if label in folded else {})}
+        if own:
+            slot = {**({'expr': slot} if isinstance(slot, str) else slot), **own}
+        elif isinstance(slot, str) and label not in stored_children:
+            continue
+        slots.append(slot)
+    return slots
+
+
+def _without_children(slots) -> list:
+    """Slots as the table's own keys state them, its cells' configs aside."""
+    return [{k: v for k, v in ({'expr': slot} if isinstance(slot, str) else slot).items() if k != 'children'}
+            for slot in slots or [] if isinstance(slot, (str, dict))]
+
+
+def _stored(model):
+    """The slots saved for the table now, as the runner installed them."""
+    return peek_line_config(model.get('_config_path'))
+
+
+def _save_view(value: ForLoopTable, model, before: list, stored_before) -> None:
+    """Save the view, as a table saves its columns, when it is not the one
+    `before` says was there: once per change, whichever of the loop's two
+    tables answered it. A cell's visualizer saving its own config saves on
+    the slots as the runner read them, before this run's changes, so the
+    table's own keys are stated again with it."""
+    if not model.get('_config_persist', True):
+        return
+    stored = _stored(model)
+    slots = _view_slots(value, model, stored)
+    if slots != before or (stored != stored_before and _without_children(stored) != _without_children(slots)):
+        save_columns_config(model.get('_config_path') or [], slots)
 
 
 def _column(value: ForLoopTable, col: int, label: str) -> Optional[ForLoopColumn]:
@@ -3131,9 +3284,9 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
         child_model = (model.get('children') or {}).get(key)
         if child_model is None:
             # Nested, as a table's cells are -- so a table in one draws as its
-            # repr until pressed -- and with nowhere to save to: a loop's line
-            # has no config of its own for a cell's to go in.
-            nesting = child_nesting_kwargs({'_config_persist': False}, leaf, vis.init_model)
+            # repr until pressed -- and saving its own config under its
+            # column's slot in the header's comment, as a table's cell does.
+            nesting = child_nesting_kwargs(model, leaf, vis.init_model)
             child_model = call_with_supported_kwargs(vis.init_model, cell, get_visualizer,
                                                      eval_in_scope=eval_in_scope, **nesting)
             if model.get('focused_child') == key:
@@ -3393,7 +3546,11 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     if not live_only:
         _open_pending_init(value, model)
         _open_pending_branch(value, model)
-    _answer_held_subcol_all(value, model, get_visualizer)
+    if model.get('held_subcol_all') and not value.running:
+        stored = _stored(model)
+        before = _view_slots(value, model, stored)
+        _answer_held_subcol_all(value, model, get_visualizer)
+        _save_view(value, model, before, stored)
     key_handler = '' if live_only else f' snc-key-down="{html.escape(repr(ColumnKeyDown()))}"'
     if model.get('focused_child') and not live_only:
         # A press anywhere a cell's visualizer, a header or a menu doesn't
@@ -3566,6 +3723,8 @@ def needs_values(event, model, value=None) -> bool:
 def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
            eval_in_scope=None) -> Tuple[Any, List[Any]]:
     original_model = model or {}
+    stored_before = _stored(original_model)
+    saved_before = _view_slots(value, original_model, stored_before)
     model, commands = _update(event, var_and_exp, model, value, get_visualizer, eval_in_scope)
     event_text = (event or {}).get('pythonEventStr', '')
     col = original_model.get('editing_column')
@@ -3575,6 +3734,15 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         value = replace(value, columns=tuple(replace(c, label=new, subject=new) if i == col else c
                                              for i, c in enumerate(value.columns)),
                         targets=tuple(new if t == old else t for t in value.targets))
+    else:
+        relabeled = _relabeled(event, original_model, value, commands)
+        if relabeled is not None:
+            # A line written over through the table comes back under a new
+            # label: its view goes with it, as a renamed name's does.
+            col, new = relabeled
+            model = _renamed_loop_model(model, value.columns[col].label, new)
+            value = replace(value, columns=tuple(replace(c, label=new) if i == col else c
+                                                 for i, c in enumerate(value.columns)))
     if event_text.startswith('SearchBoxInput('):
         columns = _search_columns(value, model)
         search = replace_dollars_in_py_exp(model.get('search') or '', [_items(value)])
@@ -3591,7 +3759,37 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         model = {**model, 'search': search, 'search_leftovers': leftovers}
     if bool(_search_text(value, original_model)) != bool(_search_text(value, model)):
         model = {**model, 'picked': None, 'pick_expr': None}
-    return _over_lone_pass(value, model, commands)
+    model, commands = _over_lone_pass(value, model, commands)
+    _save_view(value, model, saved_before, stored_before)
+    return (model, commands)
+
+
+def _relabeled(event, model, value: ForLoopTable, commands) -> Optional[Tuple[int, str]]:
+    """(col, label) when what `event` wrote is column `col`'s own line,
+    written over through the table -- its box, Change Type -- and the label
+    it will come back under. The label is the runner's: the statement with
+    its whitespace collapsed, and a condition's after its keyword."""
+    if not commands or not isinstance(event, dict):
+        return None
+    text = str(event.get('pythonEventStr', ''))
+    col = model.get('editing_column')
+    if text == repr(ColumnKeyDown()) and isinstance(col, int) and 0 <= col < len(value.columns):
+        column = value.columns[col]
+        typed = (model.get('column_input') or '').strip()
+        if _condition_source(value, col) is not None:
+            return (col, f"{'if' if column.path[-1][1] == 0 else 'elif'} {' '.join(typed.split())}")
+        if _statement_span(value, col, column.label) is not None:
+            return (col, ' '.join(_named(value, typed).split()))
+        return None
+    if text.startswith('ConvertToggle('):
+        try:
+            msg = eval(text, globals())
+        except Exception:
+            return None
+        written = next((c for c in commands if isinstance(c, ReplaceLines)), None)
+        if _column(value, msg.col, msg.label) is not None and written is not None and written.text:
+            return (msg.col, ' '.join(written.text.split()))
+    return None
 
 
 def _lone_pass(value: ForLoopTable) -> Optional[int]:

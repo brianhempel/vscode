@@ -225,6 +225,11 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 #
 #     people = [{'name': 'Alice'}, ...]  #%click [{"expr": "$['name']"}, {"expr": "$['age']"}]
 #
+# A loop's table is the one value saved elsewhere: it is logged on the loop's
+# last line and saved on the loop's header, where the names the loop binds
+# read their config under their column's slot (see for_loop_visualizer's
+# "Saved view").
+#
 # The comment starts at the first `#%click` that opens the line or follows
 # whitespace, and runs to the end of the line. Nothing is shared across lines:
 # two lists of dicts on two lines each have their own comment (or none).
@@ -239,8 +244,9 @@ def render_expand_toggle(expanded: bool, event: str, *, small: bool = False) -> 
 #
 # The visualizer that owns a level may keep more on a slot than its expr --
 # the table's `width`, `cols` and `computes` (see table_visualizer's "COLUMN
-# CONFIGURATION") -- and every save of that level states all of them, so a
-# key it stops stating is gone. `children` is the one key that outlives a
+# CONFIGURATION"), and a loop's table `hidden` and `folded` besides -- and
+# every save of that level states all of them, so a key it stops stating is
+# gone. `children` is the one key that outlives a
 # save that doesn't mention it: it is the nested visualizer's, not the
 # caller's, and the caller knows nothing about it.
 #
