@@ -35,7 +35,8 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
 from visualizer_utils import (CHILD_SOURCE_BINDER, NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable,
                               InsertLines, Phantom, ReplaceLines)
 from string_visualizer import CopyToClipboard
-from table_visualizer import DeselectChildren
+from table_visualizer import (DeselectChildren, ComputeHoleInput, ComputeExprInput,
+                              _agg_child_key, ROW_AGGS, HISTOGRAM_AGG)
 
 
 def bound(name):
@@ -797,7 +798,7 @@ class TestColumnMenu(unittest.TestCase):
         self.assertEqual((model['computes'], cmds), ({'total += twice': ['sum($)']}, []))
         foot = re.search(r'<tfoot class="col-agg-rows">(.*?)</tfoot>', visualize(two_lines(), model)).group(1)
         cells = [text_of(c) for c in re.findall(r'<td[^>]*>.*?</td>', foot)]
-        self.assertEqual(cells, ['', '', '', 'Sum8'])
+        self.assertEqual(cells, ['', '', '', 'Sum✕8'])
         model, _ = update(click(ComputeToggle(label='total += twice', template='sum($)')), None, model, two_lines())
         self.assertEqual(model['computes'], {'total += twice': []})
         self.assertNotIn('<tfoot', visualize(two_lines(), model))
@@ -811,6 +812,68 @@ class TestColumnMenu(unittest.TestCase):
         model, _ = update(key('Enter'), None, model, two_lines())
         self.assertEqual(model['computes'], {'twice = element * 2': ['max($) - min($)']})
         self.assertIn('max($) - min($)', visualize(two_lines(), model))
+
+    def test_compute_holes_and_labels_edit_in_place_even_with_stale_events(self):
+        expr = 'np.percentile($, {{10}})'
+        model = {'computes': {'element': [expr, 'sum($)']}}
+        for previous, text in [('10', '2'), ('2', '25')]:
+            model, commands = update(click(ComputeHoleInput('element', expr, 0, text, previous)),
+                                     None, model, table())
+            self.assertEqual(commands, [])
+        self.assertEqual(model['computes']['element'], ['sum($)', 'np.percentile($, {{25}})'])
+        out = visualize(table(), {**model, 'col_menu': 'element', 'submenu': 'compute'})
+        self.assertIn('col-compute-hole search-box', out)
+        self.assertIn('col-agg-hole', out)
+        self.assertIn('value="25"', out)
+        model, _ = update(click(ComputeExprInput('element', 'sum($)', 'max($) - min($)')),
+                          None, model, table())
+        out = visualize(table(), model)
+        self.assertIn('col-agg-label col-agg-expr', out)
+        self.assertIn('col-agg-x snc-hover-hidden', out)
+        model, _ = update(click(ComputeExprInput('element', 'max($) - min($)', '')),
+                          None, model, table())
+        self.assertEqual(model['computes']['element'], ['np.percentile($, {{25}})'])
+
+    def test_histogram_hole_can_be_edited_before_checking(self):
+        model, _ = update(click(ComputeHoleInput('element', HISTOGRAM_AGG, 0, '2')),
+                          None, {}, table())
+        self.assertEqual(model['computes']['element'], [HISTOGRAM_AGG.replace('{{10}}', '{{2}}')])
+        self.assertIn('col-agg-hist', visualize(table(), model, cells_of))
+
+    def test_compute_answers_are_children_and_route_their_events(self):
+        model = {'computes': {'element': ['sum($)']}}
+        out = visualize(table(), model, cells_of)
+        child = _agg_child_key('element', 'sum($)', 'element')
+        child_event = {'pythonEventStr': repr(ChildEvent(child, 'Bump()')), 'eventJSON': {'type': 'mousedown'}}
+        self.assertIn('<b class="fake">3:0:small</b>', out)
+        model, _ = update(child_event, None, model, table(), cells_of)
+        model, _ = update(child_event, None, model, table(), cells_of)
+        out = visualize(table(), model, cells_of)
+        self.assertIn('<b class="fake">3:1:big</b>', out)
+        remove = html.unescape(re.search(r'class="col-agg-x[^>]*snc-mouse-down="([^"]+)"', out).group(1))
+        model, commands = update({'pythonEventStr': remove, 'eventJSON': {}}, None, model, table(), cells_of)
+        self.assertEqual(commands, [])
+        self.assertEqual(model['computes']['element'], [])
+        self.assertNotIn(child, model['children'])
+
+    def test_min_max_item_return_bound_item_including_subcolumns(self):
+        leaf = "person\x01$['age']"
+        model = {'subcols': {'person': ["$['age']"]}, 'computes': {leaf: list(ROW_AGGS)}}
+        out = visualize(people(), model, cells_of)
+        self.assertIn("{'name': 'Ann', 'age': 3}:0:small", out)
+        self.assertIn("{'name': 'Bo', 'age': 5}:0:small", out)
+        model, _ = update(click(ComputeHoleInput(leaf, 'np.percentile($, {{10}})', 0, '50')),
+                          None, model, people())
+        self.assertIn('np.percentile($, {{50}})', model['computes'][leaf])
+        model, _ = update(click(ComputeExprInput(leaf, '', 'sum($)')),
+                          None, model, people())
+        self.assertIn('sum($)', model['computes'][leaf])
+        t = table(columns=(bound('i'), bound('element'), COUNT), targets=('i', 'element'),
+                  rows=(('0', '7', '1'), ('1', '3', '2')),
+                  values=((0, 7, 1), (1, 3, 2)), init=(None, None, '0'))
+        out = visualize(t, {'computes': {'element': list(ROW_AGGS)}}, cells_of)
+        self.assertIn('(1, 3):0:small', out)
+        self.assertIn('(0, 7):0:small', out)
 
     def test_unique_and_tally_write_what_collects_them(self):
         _, cmds = update(click(ComputeCodeClick(col=1, label='twice = element * 2', kind='unique')), None, {},

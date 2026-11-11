@@ -72,7 +72,11 @@ away by a click anywhere else. What it does to a loop is write loop code:
 - Compute previews the table's catalog of answers off the column's values, and
   a tick keeps one under the table, as a table's does. Sum, Min and Max, and
   the Unique and Tally rows, also write what builds the answer up as the loop
-  runs: a name set above it, and a line at the end of its body.
+  runs: a name set above it, and a line at the end of its body. The boxes in
+  an answer's question are editable in the menu and under the table, as a
+  table's are; each answer has its own visualizer, a label to edit and a ✕
+  to take it away. Min Item and Max Item answer with the names the loop binds
+  -- a tuple of several -- as Group By's item does.
 - Collect into List opens the box on a name for the list, and Enter writes
   `name = []` above the loop and `name.append(subject)` at the end of its
   body, which comes back as a column of its own, starting from []. A column
@@ -199,8 +203,15 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
-from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, COMPUTE_AGGS, CONVERT_TYPES, NO_THING,
+from table_visualizer import (COLUMN_SEARCH_COMPOSE, COLUMN_SEARCH_OPS, CONVERT_TYPES, NO_THING,
                                DeselectChildren, MAX_SPLAT_DEPTH, _rename_column_children,
+                               ComputeHoleInput, ComputeExprInput, ComputeExprKeyDown,
+                               ComputeToggle as TableComputeToggle, _agg_holes, _agg_set_hole,
+                               _agg_is_row, _agg_child_key, _parse_agg_child_key,
+                               _agg_label_html, _agg_remove_x_html, _render_agg_answer,
+                               _compute_rows, _compute_free_rows, _compute_expr_event,
+                               _compute_hole_event, _agg_hole_tooltip,
+                               _box_name, _ordered_computes, _drop_agg_children,
                                TALLY_COUNT_EXTREME_OPS, TALLY_COUNT_OPS, TALLY_SORTS, _TALLY_NOTES,
                                _TOOL_TOOLBAR_TOOLS, _agg_answer_html,
                                _agg_value, _compose_sub, _leaf_columns, _column_search_value_label, _get_all_possible_columns, _in_tally_order,
@@ -1934,12 +1945,36 @@ def _column_values(value: ForLoopTable, col: int) -> Optional[list]:
     return values
 
 
-def _answer(template: str, values: Optional[list]):
-    return NO_THING if values is None else _agg_value(template, values)
+def _answer(template: str, value: ForLoopTable, col, eval_in_scope=None):
+    """Ask the table's question, with an iteration's bound item as its row.
+
+    A pair keeps each item's column value alongside it: a statement can be
+    missing in some iterations, and two equal items can have different values.
+    """
+    values = _column_values(value, col)
+    if values is None:
+        return NO_THING
+    pairs = []
+    for i, row in enumerate(value.values):
+        try:
+            cell = _value_at(value, i, col)
+            names = _row_names(value, row)
+            item = eval(_items(value), {}, names)
+        except Exception:
+            continue
+        if cell is not NO_VALUE:
+            pairs.append((item, cell))
+    if _agg_is_row(template):
+        answer = _agg_value(template, values, eval_in_scope, pairs, '$[1]')
+        return answer[0] if answer is not NO_THING else NO_THING
+    return _agg_value(template, values, eval_in_scope, [item for item, _ in pairs])
 
 
-def _compute_label(template: str) -> str:
-    return next((name for name, t in COMPUTE_AGGS if t == template), template)
+def _set_computes(model, col, exprs):
+    computes = dict(model.get('computes') or {})
+    computes[col] = _ordered_computes(exprs)
+    model['computes'] = computes
+    _drop_agg_children(model, col, set(computes[col]))
 
 
 def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
@@ -1949,20 +1984,25 @@ def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
     at the foot to write another."""
     column = _view_column(value, col)
     label = column.label
-    values = _column_values(value, col)
     kept = (model.get('computes') or {}).get(label, [])
-    catalog = {t for _, t in COMPUTE_AGGS}
+    catalog_model = {'columns': {label: {'computes': kept}}}
 
     def answer_row(name: str, template: str, classes: str = '') -> str:
-        answer = _answer(template, values)
+        answer = _answer(template, value, col)
         checked = template in kept
         inert = answer is NO_THING and not checked
         press = '' if inert else _press(ComputeToggle(label=label, template=template))
         preview = '' if answer is NO_THING else _agg_answer_html(template, answer)
+        holes = ''.join(
+            f'<input type="text" class="col-compute-hole search-box" '
+            f'snc-input="{html.escape(_compute_hole_event(label, template, i))}" '
+            f'{_agg_hole_tooltip(template)}'
+            f'value="{html.escape(text)}" spellcheck="false" />'
+            for i, text in enumerate(_agg_holes(template)))
         return (f'<div class="col-compute-row{classes}{" checked" if checked else ""}{" unselectable" if inert else ""}">'
                 f'<span class="col-compute-toggle"{press}>{_check(checked, disabled=inert)}'
                 f'<span class="col-compute-name">{html.escape(name)}</span>'
-                f'<span class="col-compute-preview">{preview}</span></span></div>')
+                f'{holes}<span class="col-compute-preview">{preview}</span></span></div>')
 
     def code_button(kind: str, inner: str, tooltip: str, aside: bool) -> str:
         press = '' if not column.subject else _press(ComputeCodeClick(col=col, label=label, kind=kind))
@@ -1971,7 +2011,7 @@ def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
                 f'<span class="col-compute-toggle"{press} data-tooltip="{html.escape(tooltip)}">{inner}</span></div>')
 
     rows = []
-    for name, template in COMPUTE_AGGS:
+    for name, template, _ in _compute_rows(catalog_model, label):
         row = answer_row(name, template)
         if template in COMPUTE_CODE_KINDS:
             row = (f'<div class="col-convert-wrapper">{row}'
@@ -1982,21 +2022,23 @@ def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
                          f'Write what builds this up as the loop runs', False)
              for name, kind in COMPUTE_CODE_ROWS]
     rows.append('<div class="col-compute-sep"></div>')
-    rows += [answer_row(template, template, ' col-compute-free') for template in kept if template not in catalog]
-    free = (model.get('compute_free') or {})
-    text = free.get('text', '') if free.get('label') == label else ''
-    input_event = f"lambda e: ComputeFreeInput(label={label!r}, value=e.get('value', ''))"
-    rows.append(f'<div class="col-compute-row col-compute-free">'
-                f'<input type="text" class="col-compute-expr search-box" snc-unfocused-clickable spellcheck="false" '
-                f'snc-input="{html.escape(input_event)}" snc-key-down="{html.escape(repr(ColumnKeyDown()))}" '
-                f'value="{html.escape(text)}" placeholder="Expr" '
-                f'data-tooltip="$ is every value of this column" /></div>')
+    for template in _compute_free_rows(catalog_model, label):
+        checked = template in kept
+        toggle = _press(ComputeToggle(label=label, template=template)) if template else ''
+        rows.append(f'<div class="col-compute-row col-compute-free">'
+                    f'<span class="col-compute-toggle"{toggle}>{_check(checked)}</span>'
+                    f'<input type="text" class="col-compute-expr search-box" spellcheck="false" '
+                    f'snc-input="{html.escape(_compute_expr_event(label, template))}" '
+                    f'snc-key-down="{html.escape(repr(ComputeExprKeyDown()))}" '
+                    f'value="{html.escape(template)}" placeholder="Expr" '
+                    f'data-tooltip="$ is every value of this column; $$ is the iterations’ items" /></div>')
     return _submenu('compute', rows)
 
 
-def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, edges=None) -> str:
+def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, edges=None,
+                     get_visualizer=None, eval_in_scope=None) -> str:
     """The answers kept under the table, a row per level, as a table's: each
-    column's answers stacked in the order they were ticked."""
+    column's answers stacked in the catalog's order."""
     computes = model.get('computes') or {}
     asked = [computes.get(_view_column(value, col).label) or [] for col in shown]
     levels = max((len(templates) for templates in asked), default=0)
@@ -2012,11 +2054,14 @@ def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, e
                 cells.append(f'<td class="col-agg-blank{edge}"{span}></td>')
                 continue
             template = templates[level]
-            answer = _answer(template, _column_values(value, col))
-            text = '' if answer is NO_THING else _agg_answer_html(template, answer)
-            cells.append(f'<td class="col-agg-cell{edge}"{span}{_col_attrs(model, _view_column(value, col).label)}>'
-                         f'<div class="col-agg"><span class="col-agg-label">{html.escape(_compute_label(template))}'
-                         f'</span><div class="col-agg-value">{text}</div></div></td>')
+            label = _view_column(value, col).label
+            answer = _answer(template, value, col, eval_in_scope)
+            key = _agg_child_key(label, template, label)
+            text = (_render_agg_answer(template, answer, key, None, model, get_visualizer, eval_in_scope)
+                    if get_visualizer else '' if answer is NO_THING else _agg_answer_html(template, answer))
+            cells.append(f'<td class="col-agg-cell snc-hover-hidden-parent{edge}"{span}{_col_attrs(model, _view_column(value, col).label)}>'
+                         f'<div class="col-agg">{_agg_label_html(template, label, level)}'
+                         f'{_agg_remove_x_html(template, label)}<div class="col-agg-value">{text}</div></div></td>')
         rows.append(f'<tr class="col-agg-row"><td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
@@ -2679,7 +2724,10 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
             widths[label] = widths.get(label, 0) + 1
         computes = {label: templates for label, templates in (model.get('computes') or {}).items()
                     if label.count(SUBCOL_SEP) == level}
-        rendered = _render_agg_rows(value, {**model, 'computes': computes}, columns, widths)
+        agg_model = {**model, 'computes': computes}
+        agg_model['children'] = model.setdefault('children', {})
+        rendered = _render_agg_rows(value, agg_model, columns, widths,
+                                    get_visualizer=get_visualizer, eval_in_scope=eval_in_scope)
         if rendered:
             agg_rows.append(rendered.removeprefix('<tfoot class="col-agg-rows">').removesuffix('</tfoot>'))
     if agg_rows:
@@ -2791,11 +2839,25 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         return (model, [])
     event_json = event.get('eventJSON') or {}
     try:
-        make_event = eval(event['pythonEventStr'])
+        # Shared answer chrome emits the ordinary table's event shape. Older
+        # loop checkboxes still name their column as label/template.
+        event_scope = globals()
+        if event['pythonEventStr'].startswith('ComputeToggle(col='):
+            event_scope = {**event_scope, 'ComputeToggle': TableComputeToggle}
+        make_event = eval(event['pythonEventStr'], event_scope)
         msg = make_event(event_json) if callable(make_event) else make_event
     except Exception:
         return (model, [])
     model = dict(model or {})
+    if isinstance(msg, ChildEvent) and _parse_agg_child_key(msg.child_key) is not None:
+        col, expr, _ = _parse_agg_child_key(msg.child_key)
+        if expr not in (model.get('computes') or {}).get(col, []) or col not in _view_labels(value, model):
+            return (model, [])
+        answer = _answer(expr, value, col, eval_in_scope)
+        if answer is NO_THING:
+            return (model, [])
+        return route_child_event(event, model, value, lambda key: answer,
+                                 get_visualizer, None, eval_in_scope)
     if isinstance(msg, ChildEvent):
         # The runner holds a cell's events off the table logged as the loop
         # starts, which has no values, for the finished one; a cell this table
@@ -2945,7 +3007,32 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 name = _unique_name(value, f'{column.subject}_{to}')
                 line = f'{_indent(value, column)}{name} = {to}({column.subject})'
                 return (_menus_closed(model), [InsertLines(((_beside(value, column, True), line),))])
-        case ComputeToggle(label=label, template=template):
+        case ComputeHoleInput(col=label, expr=expr, hole=hole, value=text, previous=previous) if label in _view_labels(value, model):
+            kept = list((model.get('computes') or {}).get(label, []))
+            before = _agg_set_hole(expr, hole, previous) if previous is not None else expr
+            was = _box_name(kept, expr, before)
+            edited = _agg_set_hole(was or expr, hole, text)
+            if was is not None:
+                kept[kept.index(was)] = edited
+            else:
+                kept.append(edited)
+            _set_computes(model, label, kept)
+            return (model, [])
+        case ComputeExprInput(col=label, expr=expr, value=text, previous=previous) if label in _view_labels(value, model):
+            kept = list((model.get('computes') or {}).get(label, []))
+            was = _box_name(kept, expr, previous)
+            if was is not None:
+                kept[kept.index(was)] = text
+            else:
+                kept.append(text)
+            _set_computes(model, label, kept)
+            return (model, [])
+        case ComputeExprKeyDown():
+            if event_json.get('key') == 'Enter':
+                return (_menus_closed(model), [])
+            if event_json.get('key') == 'Escape':
+                return ({**model, 'submenu': None}, [])
+        case ComputeToggle(label=label, template=template) | TableComputeToggle(col=label, expr=template):
             computes = dict(model.get('computes') or {})
             kept = list(computes.get(label, []))
             if template in kept:
@@ -2954,8 +3041,8 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 kept.append(template)
             else:
                 return (model, [])
-            computes[label] = kept
-            return ({**model, 'computes': computes}, [])
+            _set_computes(model, label, kept)
+            return (model, [])
         case ComputeFreeInput(label=label, value=text):
             return ({**model, 'compute_free': {'label': label, 'text': text}}, [])
         case ColumnKeyDown() if not _box_open(model) and model.get('col_menu') and event_json.get('key') == 'Escape' \
