@@ -91,6 +91,21 @@ away by a click anywhere else. What it does to a loop is write loop code:
   that changes its name in place has one object in every row, so it offers
   none.
 
+**Lists spread down as a table's do.** Expand list items into rows, in the
+column's menu, spreads its elements into rows; Collapse lists to single cells
+puts them back. The table's row model supplies dotted child keys, zipped and
+padded lists, and span starts at every depth. Subcolumns reads the elements,
+and each iteration stays together through paging, sorting and searching.
+The loop keeps the stars among its subcolumns, whose tree is the table's
+column-map shape. Like the table, only lists spread, to MAX_SPLAT_DEPTH.
+An element column cannot sort or search iterations or tick a tally value.
+Its compute answers still read the elements; it has no name in the loop's
+body, so code-writing compute buttons and cell previews are off there.
+The footer's writing buttons and Pick are off while lists are spread: their
+loop code builds answers per iteration, not per element. Tally values and
+counts drag out as literals. There is no iteration-list expression in the
+user's program to drag a live Counter or count query out against.
+
 **Searching, sorting and tallying are views, as a table's are.** The footer's
 search box takes a table's search -- dollars, row indices and slices, values
 and predicate functions -- with $ reading the names the loop binds (a tuple
@@ -162,7 +177,10 @@ their order. A run that never finishes leaves those events unanswered.
 is outside the loop, so a press on it pins focus to the table itself and the
 editor keeps the loop collapsed (see collapsedForLoops in snc.ts); the cursor
 going into the loop's code is what opens it. Focused, it is drawn as a focused
-table is -- a taller pane, and the rest of a table's chrome. Unfocused, the
+table is -- a taller pane, and the rest of a table's chrome. Its expanded
+flag and expand bar are a table's too: ENABLE_AUTO_EXPAND currently opens
+focused panes automatically and hides the bar; with it off, the bar lifts
+the ceiling even in the unfocused preview. Unfocused, the
 (+), the headers, the init cells and the menus still work without spending
 the press on focus: they are snc-unfocused-clickable. The box takes the
 keyboard as it opens, for the same reason.
@@ -248,6 +266,11 @@ import textwrap
 import tokenize
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
+
+from table_visualizer import (SplatColumnClick, UnsplatColumnClick, ExpandToggle,
+                              _rows as _table_rows, _rows_are_lists, _split_splat,
+                              _default_columns)
+from visualizer_utils import ENABLE_AUTO_EXPAND, render_expand_toggle, py_exp_attrs
 
 from table_visualizer import (ColumnDragStart, ColumnDragOver, ColumnDragEnd, PickToggle, _build_pick_expr, _pick_bands_by_column,
                                _pick_shared_range, _parse_pick_region_id, PICK_BANDS,
@@ -726,6 +749,9 @@ def _view_column(value: ForLoopTable, col) -> ForLoopColumn:
         return column
     subject = column.subject
     for part in parts:
+        if _split_splat(part)[0]:
+            subject = None
+            break
         subject = _compose_sub(part, subject) if subject else None
     return ForLoopColumn(col, subject=subject)
 
@@ -1771,7 +1797,7 @@ def _draw_order(value: ForLoopTable, model, n_rows: int) -> List[int]:
     order = list(range(n_rows))
     sort = model.get('sort') or {}
     labels = _view_labels(value, model)
-    if not sort or sort.get('label') not in labels or len(value.values) != n_rows:
+    if _splat_depth(sort.get('label', '')) or not sort or sort.get('label') not in labels or len(value.values) != n_rows:
         return order
     col = sort['label']
     def sort_value(i):
@@ -1787,6 +1813,50 @@ def _draw_order(value: ForLoopTable, model, n_rows: int) -> List[int]:
     except Exception:
         have = sorted(have, key=lambda i: repr(sort_value(i)), reverse=reverse)
     return have + lacking
+
+
+def _row_columns(value, model):
+    # The table's expander reads each star in the scope of the enclosing
+    # star. Fold plain ancestors into that expression before handing it over.
+    columns = {}
+    def walk(label, expression, into, depth=0):
+        if depth >= MAX_SPLAT_DEPTH:
+            return
+        for sub in (model.get('subcols') or {}).get(label) or []:
+            splat, inner = _split_splat(sub)
+            composed = _compose_sub(inner, expression)
+            target = into
+            if splat:
+                target = into.setdefault('*' + composed, {}).setdefault('cols', {})
+            walk(_leaf_label(label, sub), '$' if splat else composed, target, depth + 1)
+    for i, c in enumerate(value.columns):
+        walk(c.label, f'$[{i}]', columns)
+    return columns
+
+
+def _expanded_rows(value, model):
+    return _table_rows(value.values, _row_columns(value, model))
+
+
+def _splat_depth(label):
+    return sum(_split_splat(part)[0] for part in label.split(SUBCOL_SEP))
+
+
+def _has_splats(model):
+    return any(_split_splat(sub)[0] for subs in (model.get('subcols') or {}).values() for sub in subs)
+
+
+def _render_restar(value, model, col):
+    label = _view_column(value, col).label
+    subs = (model.get('subcols') or {}).get(label) or []
+    splat = _split_splat(label.split(SUBCOL_SEP)[-1])[0]
+    if splat or subs == ['*$']:
+        event, text = UnsplatColumnClick(col=label), 'Collapse lists to single cells'
+    elif label.count(SUBCOL_SEP) < MAX_SPLAT_DEPTH and _rows_are_lists(_column_values(value, col, model)):
+        event, text = SplatColumnClick(col=label), 'Expand list items into rows'
+    else:
+        return ''
+    return _render_option(model, text, event).replace('snc-dropdown-option"', 'snc-dropdown-option col-expand-rows"')
 
 
 def _subcols(model, value: ForLoopTable, shown: List[int]) -> dict:
@@ -1808,12 +1878,20 @@ def _cell_value(value: ForLoopTable, i: int, col: int, sub: Optional[str], eval_
     """What one cell holds: the value its statement left in iteration `i`, or
     -- under a sub-column -- that read through the sub-column's expression.
     NO_VALUE where there is none; a sub-column that won't read raises."""
-    row = value.values[i] if i < len(value.values) else ()
+    positions = str(i).split('.')
+    index = int(positions[0])
+    row = value.values[index] if index < len(value.values) else ()
     cell = row[col] if col < len(row) else NO_VALUE
     if cell is NO_VALUE or sub is None:
         return cell
+    depth = 0
     for expr in sub.split(SUBCOL_SEP):
-        cell = eval_dollar_expr(expr, cell, eval_in_scope)
+        splat, inner = _split_splat(expr)
+        cell = eval_dollar_expr(inner, cell, eval_in_scope)
+        if splat:
+            depth += 1
+            pos = int(positions[depth]) if depth < len(positions) else 0
+            cell = cell[pos] if isinstance(cell, list) and pos < len(cell) else None
     return cell
 
 
@@ -1822,7 +1900,7 @@ def _child_value(value: ForLoopTable, key: str, eval_in_scope=None):
     i, leaf = key.split(CELL_KEY_SEP, 1)
     label, _, sub = leaf.partition(SUBCOL_SEP)
     col = next(n for n, column in enumerate(value.columns) if column.label == label)
-    return _cell_value(value, int(i), col, sub or None, eval_in_scope)
+    return _cell_value(value, i, col, sub or None, eval_in_scope)
 
 
 def _has_cell(value: ForLoopTable, key: str) -> bool:
@@ -1831,7 +1909,8 @@ def _has_cell(value: ForLoopTable, key: str) -> bool:
     i, leaf = key.split(CELL_KEY_SEP, 1)
     label = leaf.partition(SUBCOL_SEP)[0]
     col = next((n for n, column in enumerate(value.columns) if column.label == label), None)
-    row = value.values[int(i)] if i.isdigit() and int(i) < len(value.values) else ()
+    root = i.split('.')[0]
+    row = value.values[int(root)] if root.isdigit() and int(root) < len(value.values) else ()
     return col is not None and col < len(row) and row[col] is not NO_VALUE
 
 
@@ -1946,7 +2025,7 @@ def _show_or_hide_all(model, value: ForLoopTable, label: str, show: bool, get_vi
     if col is None:
         return model
     subs = dict(model.get('subcols') or {})
-    candidates = _subcol_candidates(value, col, get_visualizer)
+    candidates = _subcol_candidates(value, col, get_visualizer, model)
     kept = [expr for expr in subs.get(label) or [] if expr not in candidates]
     subs[label] = (kept + candidates) if show else kept
     return {**model, 'subcols': subs}
@@ -1961,9 +2040,9 @@ def _answer_held_subcol_all(value: ForLoopTable, model, get_visualizer) -> None:
         model['subcols'] = _show_or_hide_all(model, value, label, show, get_visualizer).get('subcols')
 
 
-def _subcol_candidates(value: ForLoopTable, col: int, get_visualizer) -> List[str]:
+def _subcol_candidates(value: ForLoopTable, col: int, get_visualizer, model=None) -> List[str]:
     """The fields a column's values have, as a table's Subcolumns finds them."""
-    values = _column_values(value, col)
+    values = _column_values(value, col, model)
     if get_visualizer is None or not values:
         return []
     return _get_all_possible_columns(values, get_visualizer) or []
@@ -2109,6 +2188,8 @@ def _pick_action_code(value, model, action, condition):
 
 
 def _action_code(value: ForLoopTable, model, action: str, eval_in_scope=None) -> List[Any]:
+    if _has_splats(model):
+        return []
     commands = _action_code_without_index(value, model, action, eval_in_scope)
     index = _unique_name(value, '_iteration')
     if commands and any(index in {node.id for node in ast.walk(ast.parse(textwrap.dedent(text)))
@@ -2263,10 +2344,13 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
     which writes at the top of its branch."""
     column = _view_column(value, col)
     label = column.label
+    if (model.get('subcols') or {}).get(label) == ['*$']:
+        return _render_column_menu(value, model, _leaf_label(label, '*$'), get_visualizer)
     statement = column.span is not None
     # (row, whether a condition gets it too)
     rows = [
-        (_render_search_row(model, label), True),
+        (_render_search_row(model, label) if not _splat_depth(label) else '', True),
+        (_render_restar(value, model, col), True),
         *([(_render_option(model, 'Edit Iterable', ColumnClick(col, label, iterable=True)), False)]
           if label in value.targets and column.span is None else []),
         (_render_option(model, 'Remove', DeleteColumnClick(col=col, label=label)
@@ -2279,7 +2363,7 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
         (_render_submenu_row(model, 'subcols', 'Subcolumns', 'Spread this column across several',
                              lambda: _render_subcol_panel(value, model, col, get_visualizer)), False),
         (_render_submenu_row(model, 'sort', 'Sort', 'Draw the iterations in this column\'s order',
-                             lambda: _render_sort_panel(model, label)), True),
+                             lambda: '' if _splat_depth(label) else _render_sort_panel(model, label)), True),
         (_render_option(model, 'Group By', GroupByClick(col=col, label=label) if column.subject else None,
                         f'Every iteration, grouped by {column.subject}' if column.subject else ''), False),
         (_render_submenu_row(model, 'convert', 'Change Type', "Read this column's values as another type",
@@ -2295,14 +2379,15 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
     ]
     if isinstance(col, str) and SUBCOL_SEP in col:
         rows = [
-            (_render_search_row(model, label), True),
+            (_render_search_row(model, label) if not _splat_depth(label) else '', True),
+        (_render_restar(value, model, col), True),
         *([(_render_option(model, 'Edit Iterable', ColumnClick(col, label, iterable=True)), False)]
           if label in value.targets and column.span is None else []),
             (_render_option(model, 'Hide', ColumnToggle(label=label)), True),
             (_render_submenu_row(model, 'subcols', 'Subcolumns', 'Spread this column across several',
                                  lambda: _render_subcol_panel(value, model, col, get_visualizer)), True),
             (_render_submenu_row(model, 'sort', 'Sort', "Draw the iterations in this column's order",
-                                 lambda: _render_sort_panel(model, label)), True),
+                                 lambda: '' if _splat_depth(label) else _render_sort_panel(model, label)), True),
             (_render_submenu_row(model, 'compute', 'Compute', 'Summarize this column',
                                  lambda: _render_compute_panel(value, model, col)), True),
             (_render_tally(value, model, col), True),
@@ -2355,7 +2440,7 @@ def _render_subcol_panel(value: ForLoopTable, model, col: int, get_visualizer=No
     the sub-columns of the user's own and a box to write another."""
     label = _view_column(value, col).label
     subs = (model.get('subcols') or {}).get(label) or []
-    candidates = _subcol_candidates(value, col, get_visualizer)
+    candidates = _subcol_candidates(value, col, get_visualizer, model)
 
     def row(text: str, event, checked: Optional[bool]) -> str:
         check = '<span class="col-compute-nocheck"></span>' if checked is None else _check(checked)
@@ -2397,7 +2482,7 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
     table's tally: ticked to search for them, narrowed by what they read as
     or how often they occur, and listed in the order picked."""
     label = _view_column(value, col).label
-    values = _column_values(value, col)
+    values = _column_values(value, col, model)
     tally = _tally(values) if values is not None else None
     dwell = _dwell(model, owns=TALLY_CHIPS)
     if tally is None:
@@ -2412,16 +2497,16 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
         if not _tally_lists(model, text, count, extreme):
             continue
         shown = html.escape(text if len(text) <= 60 else text[:59] + '…')
-        if literal is None:
+        if literal is None or _splat_depth(label):
             items.append(f'<div class="col-tally-row unselectable">{_check(False, disabled=True)}'
-                         f'<span class="col-tally-item snc-code">{shown}</span>'
-                         f'<span class="col-tally-count">{count}</span></div>')
+                         f'<span class="col-tally-item snc-code"{py_exp_attrs(literal)}>{shown}</span>'
+                         f'<span class="col-tally-count"{py_exp_attrs(str(count), align="right")}>{count}</span></div>')
             continue
         checked = literal in selected
         items.append(f'<div class="col-tally-row{" checked" if checked else ""}"'
                      f'{_press(TallyItemToggle(label=label, literal=literal))}>{_check(checked)}'
-                     f'<span class="col-tally-item snc-code">{shown}</span>'
-                     f'<span class="col-tally-count">{count}</span></div>')
+                     f'<span class="col-tally-item snc-code"{py_exp_attrs(literal)}>{shown}</span>'
+                     f'<span class="col-tally-count"{py_exp_attrs(str(count), align="right")}>{count}</span></div>')
     filter_event = f"lambda e: TallyFilterInput(label={label!r}, value=e.get('value', ''))"
     count_event = f"lambda e: TallyCountFilterInput(label={label!r}, value=e.get('value', ''))"
     count_op = _tally_count_op(model)
@@ -2448,6 +2533,8 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
                 f'{_press(TallyExcludeToggle(label=label))}>Exclude</span>'
                 f'<div class="col-tally-sort-box"><div class="col-tally-sort-icon">{ICONS["sort"]}</div>{sort}</div>'
                 f'</div>')
+    if _splat_depth(label):
+        controls = sort
     body = (f'<div class="col-tally-list-header"><span class="col-tally-item-header">Tally</span>'
             f'<span class="col-tally-count-header">Counts {count_box}</span></div>')
     body += (f'<div class="col-tally-list">{"".join(items)}</div>' if items
@@ -2552,15 +2639,22 @@ def _value_at(value: ForLoopTable, i: int, col):
     return _cell_value(value, i, index, sub or None)
 
 
-def _column_values(value: ForLoopTable, col: int) -> Optional[list]:
+def _column_values(value: ForLoopTable, col: int, model=None) -> Optional[list]:
     """Every value column `col` had, in order, skipping the iterations that
     never got to it; None while the loop runs and there are none yet."""
     if not value.values:
         return None
     values = []
-    for i in range(len(value.values)):
+    label = _view_column(value, col).label
+    depth = _splat_depth(label)
+    seen = set()
+    for row in _expanded_rows(value, model or {}):
+        group = '.'.join(row.key.split('.')[:depth + 1])
+        if group in seen:
+            continue
+        seen.add(group)
         try:
-            cell = _value_at(value, i, col)
+            cell = _value_at(value, row.key, col)
         except Exception:
             continue
         if cell is not NO_VALUE:
@@ -2568,20 +2662,26 @@ def _column_values(value: ForLoopTable, col: int) -> Optional[list]:
     return values
 
 
-def _answer(template: str, value: ForLoopTable, col, eval_in_scope=None):
+def _answer(template: str, value: ForLoopTable, col, eval_in_scope=None, model=None):
     """Ask the table's question, with an iteration's bound item as its row.
 
     A pair keeps each item's column value alongside it: a statement can be
     missing in some iterations, and two equal items can have different values.
     """
-    values = _column_values(value, col)
+    values = _column_values(value, col, model)
     if values is None:
         return NO_THING
     pairs = []
-    for i, row in enumerate(value.values):
+    depth = _splat_depth(_view_column(value, col).label)
+    seen = set()
+    for row in _expanded_rows(value, model or {}):
+        group = '.'.join(row.key.split('.')[:depth + 1])
+        if group in seen:
+            continue
+        seen.add(group)
         try:
-            cell = _value_at(value, i, col)
-            names = _row_names(value, row)
+            cell = _value_at(value, row.key, col)
+            names = _row_names(value, row.item)
             item = eval(_items(value), {}, names)
         except Exception:
             continue
@@ -2611,7 +2711,7 @@ def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
     catalog_model = {'columns': {label: {'computes': kept}}}
 
     def answer_row(name: str, template: str, classes: str = '') -> str:
-        answer = _answer(template, value, col)
+        answer = _answer(template, value, col, model=model)
         checked = template in kept
         inert = answer is NO_THING and not checked
         press = '' if inert else _press(ComputeToggle(label=label, template=template))
@@ -2679,7 +2779,7 @@ def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, e
                 continue
             template = templates[level]
             label = _view_column(value, col).label
-            answer = _answer(template, value, col, eval_in_scope)
+            answer = _answer(template, value, col, eval_in_scope, model)
             key = _agg_child_key(label, template, label)
             text = (_render_agg_answer(template, answer, key, None, model, get_visualizer, eval_in_scope)
                     if get_visualizer else '' if answer is NO_THING else _agg_answer_html(template, answer))
@@ -3004,7 +3104,7 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
     column = value.columns[col]
     label = column.label
     leaf = _leaf_label(label, sub)
-    if column.path and cell_skipped(value, i, col):
+    if column.path and cell_skipped(value, int(str(i).split('.')[0]), col):
         return (f'<td class="list-table-cell for-loop-skipped{classes}"{_col_attrs(model, leaf)} '
                 f'data-tooltip="This iteration took another branch"></td>')
     if column.placeholder:
@@ -3013,7 +3113,7 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
                 if label in ('continue', 'break') else '')
         return f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>{said}</td>'
     if column.cond and text is not None:
-        classes += ' for-loop-cond-true' if _truthy(value, i, col) else ' for-loop-cond-false'
+        classes += ' for-loop-cond-true' if _truthy(value, int(str(i).split('.')[0]), col) else ' for-loop-cond-false'
     if not has_values:
         return _render_cell(model, leaf, text if sub is None else None, classes)
     try:
@@ -3300,10 +3400,12 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         # take puts the focused cell away, as a table's does.
         key_handler += f' snc-mouse-down="{html.escape(repr(DeselectChildren()))}"'
     small_class = ' small' if small else ''
-    max_height = SMALL_MAX_HEIGHT if small else EXPANDED_PANE_MAX_HEIGHT
-    pick = model.get('tool') == 'pick' and not small and not live_only
+    can_expand = not ENABLE_AUTO_EXPAND
+    expanded = bool(model.get('expanded') or model.get('focused_child') or (not small if ENABLE_AUTO_EXPAND else False))
+    max_height = EXPANDED_PANE_MAX_HEIGHT if expanded else SMALL_MAX_HEIGHT
+    pick = model.get('tool') == 'pick' and not small and not live_only and not _has_splats(model)
     tool_class = '' if small else f' {"pick" if pick else "normal"}-tool-selected'
-    strs = [f'<div class="visualizer-container list-visualizer for-loop-visualizer{small_class}{tool_class}"'
+    strs = [f'<div class="visualizer-container list-visualizer for-loop-visualizer{small_class}{tool_class}{' is-expandable' if can_expand else ''}"'
             f'{key_handler}>',
             '<div class="snc-tool-and-visualizer">']
     if not small and not live_only:
@@ -3348,32 +3450,43 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
         return _table_pick_region(i, col_id, model, first_idx, len(rows), {})
     leaf_edges = _edge_list([_fold_path(value, col, folds) for col, _ in leaves])
     phantom_count = sum(bool(_preview_for(model, value.columns[c])) for c in shown if c not in folds)
-    for position, i in enumerate(order):
+    expanded_rows = _expanded_rows(value, model) if has_values else _table_rows(rows)
+    by_iteration = {}
+    for expanded_row in expanded_rows:
+        by_iteration.setdefault(expanded_row.index, []).append(expanded_row)
+    for position, expanded_row in ((position, r) for position, i in enumerate(order) for r in by_iteration.get(i, [])):
+        i = expanded_row.index
         row = rows[i]
         if gap is not None and gap[0] <= position < gap[1]:
-            if position == gap[0]:
+            if position == gap[0] and expanded_row.span_start:
                 strs.append(_render_load_more_row(gap[1] - gap[0], len(leaves) + 1 + phantom_count, small))
             continue
         row_class = '' if not marked else (' class="row-match"' if i in marked else ' class="row-dim"')
         if pick_here:
             row_class = f' class="pick-row-{_pick_band_for_row(i, first_idx)}"'
+        number = expanded_row.key
         if small or live_only:
-            strs.append(f'<tr{row_class}><td class="row-index">{i}</td>')
+            strs.append(f'<tr{row_class}><td class="row-index">{number}</td>')
         else:
             # The number and its ▾ in a wrapper inside the cell, as a table's.
-            strs.append(f'<tr{row_class}><td class="row-index"><div class="row-index-inner">{i}'
-                        f'{_render_row_menu(value, model, i) if not pick_here else ""}</div>{overlay(i)}</td>')
+            strs.append(f'<tr{row_class}><td class="row-index"><div class="row-index-inner">{number}'
+                        f'{_render_row_menu(value, model, i) if not pick_here and expanded_row.span_start else ""}</div>{overlay(i)}</td>')
         for (col, sub), edges in zip(leaves, leaf_edges):
-            if col in folds:
-                strs.append(_render_fold_cell(drawn_table, model, i, col, folds, edges))
+            depth = _splat_depth(sub or '')
+            if not expanded_row.starts_at(depth):
                 continue
-            cell = _render_leaf(drawn_table, model, i, col, sub, row[col] if col < len(row) else None, has_values,
+            span = _span('rowspan', expanded_row.span_at(depth))
+            if col in folds:
+                strs.append(_render_fold_cell(drawn_table, model, i, col, folds, edges).replace('<td ', f'<td{span} ', 1))
+                continue
+            cell = _render_leaf(drawn_table, model, expanded_row.key, col, sub, row[col] if col < len(row) else None, has_values,
                                 get_visualizer, eval_in_scope, small, edges)
+            cell = cell.replace('<td ', f'<td{span} ', 1)
             if pick_here:
                 cell = cell[:-len('</td>')] + overlay(i, _leaf_label(value.columns[col].label, sub)) + '</td>'
             strs.append(cell)
             if sub == (subcols.get(col) or [None])[-1] and _preview_for(model, value.columns[col]):
-                strs.append(_render_phantom(drawn_table, model, i, col, get_visualizer, eval_in_scope) if has_values else '<td></td>')
+                strs.append((_render_phantom(drawn_table, model, i, col, get_visualizer, eval_in_scope) if has_values else '<td></td>').replace('<td', f'<td{span}', 1))
         strs.append('</tr>')
     strs.append('</tbody>')
     agg_rows = []
@@ -3403,6 +3516,8 @@ def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False,
     if agg_rows:
         strs.append(f'<tfoot class="col-agg-rows">{"".join(agg_rows)}</tfoot>')
     strs.append('</table></div>')
+    if can_expand:
+        strs.append('<div class="expand-and-len">' + render_expand_toggle(expanded, repr(ExpandToggle()), small=small) + '</div>')
     if not live_only:
         strs.append(_render_add_bar(value, model))
     strs.append('</div>')
@@ -3427,7 +3542,7 @@ def needs_values(event, model, value=None) -> bool:
     """
     text = str(event.get('pythonEventStr', ''))
     if text.startswith(('ChildEvent(', 'PhantomColumnCommit(', 'RowActionClick(', 'TallyItemToggle(',
-                        'TallySelectAll(', 'TallySelectNone(')):
+                        'TallySelectAll(', 'TallySelectNone(', 'SplatColumnClick(')):
         return True
     if text != 'ColumnKeyDown()' or (event.get('eventJSON') or {}).get('key') not in ('Enter', 'Tab'):
         return False
@@ -3548,11 +3663,59 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         return (model, [])
     model = dict(model or {})
     model.pop('_scroll_to_cell', None)
+    if isinstance(msg, ExpandToggle):
+        return ({**model, 'expanded': not model.get('expanded', False)}, [])
+    if isinstance(msg, (SplatColumnClick, UnsplatColumnClick)):
+        label = msg.col
+        parent, _, expr = label.rpartition(SUBCOL_SEP)
+        if isinstance(msg, UnsplatColumnClick) and expr == '*$' and (model.get('subcols') or {}).get(parent) == ['*$']:
+            label = parent
+        if label not in _view_labels(value, model):
+            return (model, [])
+        subs = {k: list(v) for k, v in (model.get('subcols') or {}).items()}
+        if isinstance(msg, SplatColumnClick):
+            if (model.get('subcols') or {}).get(label) == ['*$']:
+                return (model, [])
+            if label.count(SUBCOL_SEP) >= MAX_SPLAT_DEPTH or not _rows_are_lists(_column_values(value, label, model)):
+                return (model, [])
+            if SUBCOL_SEP not in label:
+                subs[label] = ['*$']
+            else:
+                parent, _, expr = label.rpartition(SUBCOL_SEP)
+                if _split_splat(expr)[0]:
+                    return (model, [])
+                subs[parent] = ['*' + expr if s == expr else s for s in subs.get(parent, [])]
+                subs.pop(label, None)
+        elif subs.get(label) == ['*$']:
+            subs.pop(label, None)
+        elif SUBCOL_SEP in label and _split_splat(label.split(SUBCOL_SEP)[-1])[0]:
+            parent, _, expr = label.rpartition(SUBCOL_SEP)
+            subs[parent] = [_split_splat(expr)[1] if s == expr else s for s in subs.get(parent, [])]
+            subs.pop(label, None)
+        else:
+            return (model, [])
+        subs = {k: v for k, v in subs.items() if not k.startswith(label + SUBCOL_SEP)}
+        if isinstance(msg, SplatColumnClick):
+            target = (_leaf_label(label, '*$') if SUBCOL_SEP not in label else
+                      _leaf_label(parent, '*' + expr))
+            elements = [item for group in (_column_values(value, label, model) or [])
+                        if isinstance(group, list) for item in group]
+            defaults = _default_columns(elements, get_visualizer) if get_visualizer else ['$']
+            if defaults != ['$']:
+                subs[target] = defaults
+        _drop_phantom(model.get('columns'))
+        return ({**model, 'subcols': subs, 'col_menu': None, 'submenu': None,
+                 'focused_child': None, 'picked': None}, [])
+    if _has_splats(model) and (isinstance(msg, (ActionButtonClick, PickToggle)) or isinstance(msg, ToolSelect) and msg.tool == 'pick'):
+        return (model, [])
+    if isinstance(msg, (TallyItemToggle, TallySelectAll, TallySelectNone, TallyExcludeToggle,
+                        ColumnSearchInput, ColumnSearchOpSelect, ColumnSearchComposeSelect, SortToggle)) and _splat_depth(msg.label):
+        return (model, [])
     if isinstance(msg, ChildEvent) and _parse_agg_child_key(msg.child_key) is not None:
         col, expr, _ = _parse_agg_child_key(msg.child_key)
         if expr not in (model.get('computes') or {}).get(col, []) or col not in _view_labels(value, model):
             return (model, [])
-        answer = _answer(expr, value, col, eval_in_scope)
+        answer = _answer(expr, value, col, eval_in_scope, model)
         if answer is NO_THING:
             return (model, [])
         return route_child_event(event, model, value, lambda key: answer,
@@ -3561,13 +3724,14 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         # The runner holds a cell's events off the table logged as the loop
         # starts, which has no values, for the finished one; a cell this table
         # doesn't have -- the loop changed under the event -- is no one's.
-        if not _has_cell(value, msg.child_key):
+        row_key, leaf = msg.child_key.split(CELL_KEY_SEP, 1)
+        if leaf not in _view_labels(value, model) or row_key not in {r.key for r in _expanded_rows(value, model)} or not _has_cell(value, msg.child_key):
             return (model, [])
         # A cell's own visualizer: the first press focuses it, as a table's.
         # Its value is bound to a name for it, as a table's cells are, so the
         # code it makes comes back to be written against the column's.
         focus_before = model.get('focused_child')
-        name = _cell_name(value, msg.child_key)
+        name = None if _splat_depth(msg.child_key.split(CELL_KEY_SEP, 1)[1]) else _cell_name(value, msg.child_key)
         # Block actions cannot be preview columns. Give the child a named
         # source for that press so it emits the block, which we place in the
         # loop body ourselves, then discard its link to that generated line.
@@ -3955,7 +4119,7 @@ def _menus_closed(model):
 
 
 def _tally_rows_of(value: ForLoopTable, model, col: int):
-    tally = _tally(_column_values(value, col) or [])
+    tally = _tally(_column_values(value, col, model) or [])
     return _tally_rows(tally, model) if isinstance(tally, dict) else []
 
 

@@ -1152,8 +1152,8 @@ class TestTally(unittest.TestCase):
     @staticmethod
     def tally_rows(html_text):
         return [(text_of(item), int(count), ' checked' in cls) for cls, item, count in re.findall(
-            r'<div class="col-tally-row([^"]*)"[^>]*>.*?<span class="col-tally-item snc-code">(.*?)</span>'
-            r'<span class="col-tally-count">(\d+)</span>', col_menu_of(html_text), re.S)]
+            r'<div class="col-tally-row([^"]*)"[^>]*>.*?<span class="col-tally-item snc-code"[^>]*>(.*?)</span>'
+            r'<span class="col-tally-count"[^>]*>(\d+)</span>', col_menu_of(html_text), re.S)]
 
     def test_every_value_and_how_often(self):
         self.assertEqual(self.tally_rows(visualize(scores(), {'col_menu': 'score'})),
@@ -3708,3 +3708,122 @@ class TestReorderingStatements(unittest.TestCase):
             self.assertEqual(update(click(ColumnDragEnd(target)), None, model, value)[1], [])
         value = self.loop('for x in [1]:\n    a = x\n    a = x\n')
         self.assertNotIn('ColumnDragStart', visualize(value, {}))
+
+
+class TestRowExpansionParity(unittest.TestCase):
+    def lists(self):
+        return plain(rows=(('[1, 2]', '2'), ('[]', '4')), values=(([1, 2], 2), ([], 4)))
+
+    def splat(self):
+        from table_visualizer import SplatColumnClick
+        return update(click(SplatColumnClick(col='element')), None, {}, self.lists())[0]
+
+    def test_list_menu_and_splat_are_views(self):
+        from table_visualizer import SplatColumnClick
+        import for_loop_visualizer as loop
+        self.assertIn('Expand list items into rows', loop._render_column_menu(self.lists(), {}, 0))
+        model, commands = update(click(SplatColumnClick(col='element')), None, {}, self.lists())
+        self.assertEqual(commands, [])
+        drawn = visualize(self.lists(), model)
+        self.assertIn('rowspan="2"', drawn)
+        self.assertIn('0.1', drawn)
+        self.assertIn('for-loop-init-row', drawn)
+        self.assertIn('row-index-inner">1', drawn)
+
+    def test_child_keys_read_elements(self):
+        import for_loop_visualizer as loop
+        self.assertEqual(loop._child_value(self.lists(), '0.1' + loop.CELL_KEY_SEP + 'element' + loop.SUBCOL_SEP + '*$'), 2)
+
+    def test_unsplat_restores_single_cells(self):
+        from table_visualizer import UnsplatColumnClick
+        model, commands = update(click(UnsplatColumnClick(col='element')), None, self.splat(), self.lists())
+        self.assertEqual(commands, [])
+        self.assertNotIn('0.1', visualize(self.lists(), model))
+
+    def test_splatted_tally_counts_elements_and_cannot_filter(self):
+        import for_loop_visualizer as loop
+        drawn = loop._render_tally(self.lists(), self.splat(), 'element' + loop.SUBCOL_SEP + '*$')
+        self.assertIn('>1</span>', drawn)
+        self.assertIn('unselectable', drawn)
+        self.assertNotIn('TallyItemToggle', drawn)
+
+    def test_expand_event_and_current_auto_expand_policy(self):
+        from table_visualizer import ExpandToggle
+        model, commands = update(click(ExpandToggle()), None, {}, plain())
+        self.assertTrue(model['expanded'])
+        self.assertEqual(commands, [])
+        self.assertNotIn('class="expand-toggle', visualize(plain(), model))
+
+    def test_expand_bar_when_auto_expand_is_off(self):
+        from unittest.mock import patch
+        with patch('for_loop_visualizer.ENABLE_AUTO_EXPAND', False):
+            drawn = visualize(plain(), {})
+            self.assertIn('class="expand-toggle', drawn)
+
+    def test_tally_counts_drag_valid_expressions(self):
+        import for_loop_visualizer as loop
+        drawn = loop._render_tally(plain(), {}, 0)
+        self.assertIn('snc-py-exps=', drawn)
+        self.assertIn('draggable="true"', drawn)
+        self.assertNotIn('_snc_iterations', drawn)
+
+    def test_nested_splat_uses_table_spans_and_child_keys(self):
+        import for_loop_visualizer as loop
+        from table_visualizer import SplatColumnClick
+        value = self.lists()
+        value = replace(value, values=(([[1, 2], [3]], 2), ([], 4)))
+        model = update(click(SplatColumnClick(col='element')), None, {}, value)[0]
+        target = 'element' + loop.SUBCOL_SEP + '*$'
+        model = update(click(SubcolToggle(label=target, expr='$')), None, model, value)[0]
+        model = update(click(SplatColumnClick(col=target + loop.SUBCOL_SEP + '$')), None, model, value)[0]
+        rows = loop._expanded_rows(value, model)
+        self.assertEqual([r.key for r in rows], ['0.0.0', '0.0.1', '0.1.0', '1'])
+        self.assertEqual(rows[0].spans[:2], (3, 2))
+        self.assertEqual(loop._column_values(value, target + loop.SUBCOL_SEP + '*$', model), [1, 2, 3, None])
+
+    def test_element_subcolumns_default_to_fields(self):
+        import for_loop_visualizer as loop
+        from table_visualizer import SplatColumnClick
+        value = replace(self.lists(), values=(([{'n': 2}, {'n': 3}], 2), ([], 4)))
+        model = update(click(SplatColumnClick(col='element')), None, {}, value,
+                       get_visualizer=lambda v: type('Fields', (), {'get_fields': staticmethod(lambda v: ["$['n']"])})())[0]
+        self.assertIn("$['n']", model['subcols']['element' + loop.SUBCOL_SEP + '*$'])
+
+    def test_stale_splat_and_tally_clicks_do_not_change_the_view(self):
+        import for_loop_visualizer as loop
+        from table_visualizer import SplatColumnClick
+        model = self.splat()
+        self.assertEqual(update(click(SplatColumnClick(col='element')), None, model, self.lists())[0], model)
+        label = 'element' + loop.SUBCOL_SEP + '*$'
+        self.assertEqual(update(click(TallyItemToggle(label=label, literal='1')), None, model, self.lists())[0], model)
+
+    def test_splat_disables_loop_writing_footer(self):
+        out = visualize(self.lists(), self.splat())
+        self.assertNotIn('snc-mouse-down="ActionButtonClick(', out)
+
+    def test_compute_answers_flatten_elements(self):
+        import for_loop_visualizer as loop
+        self.assertEqual(loop._answer('len($)', self.lists(), 'element' + loop.SUBCOL_SEP + '*$', model=self.splat()), 3)
+
+    def test_paging_keeps_whole_iteration_groups(self):
+        value = replace(self.lists(), rows=tuple(('[1, 2]', '2') for _ in range(60)),
+                        values=tuple(([1, 2], 2) for _ in range(60)))
+        out = visualize(value, self.splat())
+        self.assertIn('49.1', out)
+        self.assertNotIn('50.0', out)
+        self.assertIn('57.1', out)
+
+    def test_root_splat_menu_reads_elements_and_unsplat_discards_their_fields(self):
+        import for_loop_visualizer as loop
+        from table_visualizer import UnsplatColumnClick
+        model = self.splat()
+        out = loop._render_column_menu(self.lists(), model, 0)
+        self.assertNotIn('TallyItemToggle', out)
+        self.assertIn('Collapse lists to single cells', out)
+        self.assertNotIn('[1, 2]', out)
+        self.assertIn('col-tally-row unselectable', out)
+        target = 'element' + loop.SUBCOL_SEP + '*$'
+        model['subcols'][target] = ["$['n']"]
+        model = update(click(UnsplatColumnClick(col=target)), None, model, self.lists())[0]
+        self.assertFalse(loop._has_splats(model))
+        self.assertNotIn(target, model['subcols'])
