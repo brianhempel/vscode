@@ -90,6 +90,12 @@ away by a click anywhere else. What it does to a loop is write loop code:
   body, which comes back as a column of its own, starting from []. A column
   that changes its name in place has one object in every row, so it offers
   none.
+- Join flies out the separators it can put between the column's values --
+  none, a newline, or one typed into its box, as it reads -- and picking one
+  opens the box on a name for the string. Enter writes `name_parts = []`
+  above the loop, `name_parts.append(subject)` where Collect into List would
+  (`str(subject)` unless every value was a string already), and
+  `name = sep.join(name_parts)` after the loop. It goes where Collect does.
 
 **Lists spread down as a table's do.** Expand list items into rows, in the
 column's menu, spreads its elements into rows; Collapse lists to single cells
@@ -118,9 +124,13 @@ of its own, its value compared against what is typed, composed with the
 searches before it; its tally, at the menu's foot, is the table's -- ticking
 values writes them into that row as a table's does. Sort draws the iterations
 in a column's order, still numbered by when they ran. Changing the search
-writes no code:
-a loop's iterations are not a list to filter, and all of it reads the values
-the runner copied, so a loop still running has none to search.
+writes no code: a loop's iterations are not a list to filter, and all of it
+reads the values the runner copied, so a loop still running has none to
+search. Enter in a column's search row is what writes it: the search, as the
+footer's buttons would test it, becomes `if condition:` at the end of the
+body holding a pass, which opens in the box once it is back, as Add If's
+does -- and the search, code now, is cleared. The tally's Filter is the
+footer's, beside the ticks that make the search it writes.
 
 **A cell is its value's own visualizer**, as a table's is: small until a
 press focuses it (then routed its events, as a ChildEvent keyed by row and
@@ -391,6 +401,32 @@ class CollectClick:
 
 
 @dataclass(frozen=True)
+class JoinClick:
+    """A separator in the Join submenu of column `col`, labeled `label` when
+    it was drawn: open the box naming the string its values are joined into,
+    with `sep` between them."""
+    col: int
+    label: str
+    sep: str
+
+
+@dataclass(frozen=True)
+class JoinSepInput:
+    """The Join submenu's own box, of the column labeled `label`, now holds
+    `value`: a separator, as it reads."""
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class JoinSepKeyDown:
+    """A key in the Join submenu's box: Enter picks what it holds as the
+    separator, as a separator listed above it is picked."""
+    col: int
+    label: str
+
+
+@dataclass(frozen=True)
 class ColumnResize:
     """The column labeled `label` was dragged to `width` pixels. The width
     comes first: the editor writes it over the `width=0` it was drawn with."""
@@ -521,6 +557,14 @@ class ColumnSearchComposeSelect:
     """How a column's search goes with the searches before it."""
     label: str
     compose: str
+
+
+@dataclass(frozen=True)
+class ColumnSearchKeyDown:
+    """A key in the search row atop the menu of the column labeled `label`:
+    Enter writes the search as an `if` at the end of the body, Escape walks
+    out of the menu a level at a time."""
+    label: str
 
 
 @dataclass(frozen=True)
@@ -1773,6 +1817,14 @@ BRANCH_BOX_KEYS = ('adding_if', 'adding_elif')
 # earlier Insert would have put the line.
 MENU_KEYS = ('add_menu_open', 'col_menu', 'submenu', 'insert_at', 'row_menu', 'chain_menu')
 
+# Join's separator, picked in its submenu (`join_free` being what its own box
+# holds) and kept while the box naming the string is open: the list box it
+# shares with Collect into List writes a join while one is in the model.
+JOIN_KEYS = ('join_sep', 'join_free')
+
+# The separators Join's submenu lists above its box for one of the user's own.
+JOIN_SEPARATORS = ('', '\n')
+
 
 def _box_open(model) -> bool:
     return bool(model.get('adding_column')) or any(model.get(k) is not None for k in BOX_KEYS[1:])
@@ -1781,7 +1833,7 @@ def _box_open(model) -> bool:
 def _opened(model, key: str, col, text: str):
     """The model with one box open -- `key`, on column `col` -- holding
     `text`, and the (+) menu put away."""
-    model = {k: v for k, v in model.items() if k not in MENU_KEYS + BRANCH_BOX_KEYS}
+    model = {k: v for k, v in model.items() if k not in MENU_KEYS + BRANCH_BOX_KEYS + JOIN_KEYS}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
             'collecting_column': None, 'grouping_column': None, key: col, 'column_input': text}
 
@@ -2364,8 +2416,12 @@ def _action_code_without_index(value: ForLoopTable, model, action: str, eval_in_
     end of its body that builds it up over the iterations the search holds for
     -- or, for Filter, a line at the top skipping the rest."""
     condition = _condition(value, model, eval_in_scope)
-    if condition is None or (not condition and action in ('filter', 'any', 'all')):
+    if condition is None or (not condition and action in ('filter', 'any', 'all', 'if')):
         return []
+    if action == 'if':
+        # A column's search row: the search as a branch of its own, holding a
+        # pass to be written over.
+        return [InsertLines(((_body_end(value), _new_branch(value, value.body_indent, f'if {condition}')),))]
     if model.get('tool') == 'pick':
         return _pick_action_code(value, model, action, condition)
     item = _items(value)
@@ -2527,6 +2583,10 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
                         if _collectable(value, col, label) is not None else None,
                         f'A list of every {column.subject}, built as the loop runs' if column.subject else ''),
          False),
+        (_render_submenu_row(model, 'join', 'Join', f'Every {column.subject} joined into one string',
+                             lambda: _render_join_panel(model, col, label))
+         if _collectable(value, col, label) is not None and not is_live_only()
+         else _render_option(model, 'Join', None), False),
         ('<div class="col-compute-sep"></div>', True),
         (_render_tally(value, model, col), True),
     ]
@@ -2553,6 +2613,26 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
             f'snc-dismiss="{html.escape(repr(ColumnMenuDismiss()))}">{shown}</div><!--/col-menu-->')
 
 
+def _render_join_panel(model, col: int, label: str) -> str:
+    """Join's submenu: a row per separator it lists, each written as the
+    string literal it will be, then a box for one of the user's own, typed as
+    it reads."""
+    rows = [f'<div class="col-compute-row col-join-row">'
+            f'<span class="col-compute-toggle"{_press(JoinClick(col=col, label=label, sep=sep))}>'
+            f'<span class="col-compute-name">{html.escape(repr(sep))}</span></span></div>'
+            for sep in JOIN_SEPARATORS]
+    free = model.get('join_free') or {}
+    text = free.get('text', '') if free.get('label') == label else ''
+    input_event = f"lambda e: JoinSepInput(label={label!r}, value=e.get('value', ''))"
+    rows.append(f'<div class="col-compute-row col-join-row col-join-free">'
+                f'<input type="text" class="col-compute-expr col-join-sep search-box" snc-unfocused-clickable spellcheck="false" '
+                f'snc-input="{html.escape(input_event)}" '
+                f'snc-key-down="{html.escape(repr(JoinSepKeyDown(col=col, label=label)))}" '
+                f'value="{html.escape(text)}" placeholder="Separator" '
+                f'data-tooltip="Typed as it reads. Enter picks it" /></div>')
+    return _submenu('join', rows)
+
+
 def _render_chip(model, chip: str, current: str, options, make_event, chip_class: str, tooltip: str = '',
                  label=_column_search_value_label) -> str:
     """One of the small drop-downs in a column's menu -- the search row's two,
@@ -2572,7 +2652,8 @@ def _render_chip(model, chip: str, current: str, options, make_event, chip_class
 def _render_search_row(model, label: str) -> str:
     """A column's search, atop its menu as a table's is: what its value is
     compared against, the comparison, and how it goes with the searches
-    before it. Escape in it walks out of the menu a level at a time."""
+    before it. Enter in it writes the search as an `if`; Escape walks out of
+    the menu a level at a time."""
     search = _column_search(model, label)
     op = _render_chip(model, 'op', search['op'], COLUMN_SEARCH_OPS,
                       lambda v: ColumnSearchOpSelect(label=label, op=v), 'col-search-op', 'Search Operation')
@@ -2582,9 +2663,10 @@ def _render_search_row(model, label: str) -> str:
     input_event = f"lambda e: ColumnSearchInput(label={label!r}, value=e.get('value', ''))"
     return (f'<div class="col-search-area"{_dwell(model, owns=SEARCH_CHIPS)}><div class="search-box-wrapper">'
             f'<input type="text" class="col-search-input search-box" snc-unfocused-clickable spellcheck="false" '
-            f'snc-input="{html.escape(input_event)}" snc-key-down="{html.escape(repr(ColumnKeyDown()))}" '
+            f'snc-input="{html.escape(input_event)}" '
+            f'snc-key-down="{html.escape(repr(ColumnSearchKeyDown(label=label)))}" '
             f'value="{html.escape(search["text"])}" placeholder="Search" '
-            f'data-tooltip="$ is this column\'s value" />'
+            f'data-tooltip="$ is this column\'s value. Enter writes the search as an if" />'
             f'<span class="col-search-chips-right">{op}{compose}</span></div></div>')
 
 
@@ -2684,6 +2766,7 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
                 f'<span class="col-tally-exclude{" checked" if exclude else ""}" '
                 f'data-tooltip="Search for everything but the selected values"'
                 f'{_press(TallyExcludeToggle(label=label))}>Exclude</span>'
+                f'{_render_tally_filter(value, model)}'
                 f'<div class="col-tally-sort-box"><div class="col-tally-sort-icon">{ICONS["sort"]}</div>{sort}</div>'
                 f'</div>')
     if _splat_depth(label):
@@ -2697,6 +2780,18 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
                   f'value="{html.escape(model.get("tally_filter") or "")}" placeholder="Search tally" '
                   f'data-tooltip="Show only values containing this text" spellcheck="false" /></div>')
     return f'<div class="col-tally"{dwell}>{filter_box}{controls}{body}</div>'
+
+
+def _render_tally_filter(value: ForLoopTable, model) -> str:
+    """Filter, beside the tally's selection: the footer's Filter, writing the
+    search the ticks made as a guard at the top of the body. Dimmed until
+    there is a search to write, and while picking, where the footer's is Find
+    One instead."""
+    writes = (model.get('tool') != 'pick' and not is_live_only()
+              and bool(_action_code(value, model, 'filter')))
+    press = _press(ActionButtonClick(action='filter')) if writes else ''
+    return (f'<span class="col-search-chip col-tally-filter-code{"" if writes else " dimmed"}" '
+            f'data-tooltip="Skip the iterations that don\'t match"{press}>Filter</span>')
 
 
 def _render_action_buttons(value: ForLoopTable, model, count: int, eval_in_scope=None) -> str:
@@ -3484,8 +3579,10 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
     collecting = model.get('collecting_column')
     if not live_only and collecting is not None and 0 <= collecting < len(value.columns):
         subject = value.columns[collecting].subject
-        leaves.append(((), [], ('box', {'select_all': True, 'placeholder': 'List name',
-                                        'tooltip': f'Every {subject}, collected into this list'})))
+        joins = model.get('join_sep') is not None
+        leaves.append(((), [], ('box', {'select_all': True, 'placeholder': 'String name' if joins else 'List name',
+                                        'tooltip': f'Every {subject}, joined into this string' if joins
+                                        else f'Every {subject}, collected into this list'})))
     grouping = model.get('grouping_column')
     if not live_only and grouping is not None and 0 <= grouping < len(value.columns):
         subject = value.columns[grouping].subject
@@ -3751,7 +3848,8 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         model = {**model, 'col_search': {
             columns[expr]: {**row, 'exclude': bool((previous.get(columns[expr]) or {}).get('exclude'))}
             for expr, row in searches.items()}, 'search_leftovers': leftovers or None}
-    elif model.get('col_search') != (original_model.get('col_search')):
+    elif model.get('col_search') != (original_model.get('col_search')) and not (
+            event_text.startswith('ColumnSearchKeyDown(') and commands):
         columns, searches = _search_adapter(value, model)
         leftovers = original_model.get('search_leftovers') if 'search_leftovers' in original_model else (
             [{'text': original_model['search']}] if original_model.get('search') else None)
@@ -4203,6 +4301,40 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             column = _collectable(value, col, label)
             if column is not None and not is_live_only():
                 return (_opened(model, 'collecting_column', col, _list_name(value, column.subject)), [])
+        case JoinClick(col=col, label=label, sep=sep):
+            column = _collectable(value, col, label)
+            if column is not None and not is_live_only():
+                name = _unique_name(value, f'{column.subject}_text')
+                return ({**_opened(model, 'collecting_column', col, name), 'join_sep': sep}, [])
+        case JoinSepInput(label=label, value=text):
+            return ({**model, 'join_free': {'label': label, 'text': text}}, [])
+        case JoinSepKeyDown(col=col, label=label):
+            key = event_json.get('key')
+            free = model.get('join_free') or {}
+            column = _collectable(value, col, label)
+            if key == 'Enter' and free.get('label') == label and free.get('text') and column is not None \
+                    and not is_live_only():
+                name = _unique_name(value, f'{column.subject}_text')
+                return ({**_opened(model, 'collecting_column', col, name), 'join_sep': free['text']}, [])
+            if key == 'Escape':
+                return ({**model, 'submenu': None, 'join_free': None}, [])
+        case ColumnSearchKeyDown() if event_json.get('key') == 'Enter':
+            code = [] if is_live_only() else _action_code(value, model, 'if', eval_in_scope)
+            if code:
+                # The branch's pass is the next thing to type, under whatever
+                # else went in before it: an iteration counter, for one.
+                end = _body_end(value)
+                pending = _pending_branch(value, end)
+                pending['line'] += sum(text.count('\n') + 1 for command in code
+                                       for at, text in command.lines if at < end)
+                # Written, the search is code: the rows stop being marked.
+                return ({**_menus_closed(model), 'col_search': {}, 'search': None, 'search_leftovers': None,
+                         'picked': None, 'pick_expr': None, 'pending_branch': pending}, code)
+        case ColumnSearchKeyDown() if event_json.get('key') == 'Escape':
+            # Out a level at a time, as a table's menu walks out.
+            if model.get('submenu'):
+                return ({**model, 'submenu': None}, [])
+            return (_menus_closed(model), [])
         case DeleteColumnClick(col=col, label=label):
             span = _statement_span(value, col, label)
             if span is not None and not is_live_only():
@@ -4304,7 +4436,7 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
 
 
 def _closed(model):
-    model = {k: v for k, v in model.items() if k not in ('insert_at',) + BRANCH_BOX_KEYS}
+    model = {k: v for k, v in model.items() if k not in ('insert_at',) + BRANCH_BOX_KEYS + JOIN_KEYS}
     return {**model, 'adding_column': False, 'editing_column': None, 'editing_init': None,
             'collecting_column': None, 'grouping_column': None, 'column_input': ''}
 
@@ -4380,6 +4512,8 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
         return (_closed(model), [ReplaceLines(first, last, prefix + text + suffix)])
     if model.get('editing_init') is not None:
         return _write_init(model, value)
+    if model.get('collecting_column') is not None and model.get('join_sep') is not None:
+        return _write_join(model, value)
     if model.get('collecting_column') is not None:
         return _write_collect(model, value)
     if model.get('grouping_column') is not None:
@@ -4524,3 +4658,26 @@ def _write_collect(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     after = value.body_lines[1] or value.end_line
     return (_closed(model), [InsertLines(((value.line - 1, f'{value.indent}{name} = []'),
                                           (after, f'{value.body_indent}{name}.append({column.subject})')))])
+
+
+def _write_join(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
+    """Enter in the box naming a string: a list of its parts above the loop,
+    the line appending to it where each iteration has the column's value, as
+    Collect into List writes them, and the string joined from them after the
+    loop. A value that isn't a string already is read as one."""
+    name = model.get('column_input', '').strip()
+    col = model['collecting_column']
+    column = value.columns[col] if 0 <= col < len(value.columns) else None
+    if not name or is_live_only() or column is None or _collectable(value, col, column.label) is None:
+        return (_closed(model), [])
+    if not name.isidentifier() or keyword.iskeyword(name) or name in value.defined:
+        # Left open, as typed: a name already in use would be overwritten.
+        return (model, [])
+    parts = _unique_name(replace(value, defined=value.defined | {name}), f'{column.subject}_parts')
+    values = _column_values(value, col)
+    piece = column.subject if values and all(isinstance(v, str) for v in values) else f'str({column.subject})'
+    after = value.body_lines[1] or value.end_line
+    step = f'{value.body_indent}{parts}.append({piece})'
+    joined = f'{value.indent}{name} = {model["join_sep"]!r}.join({parts})'
+    ends = ((after, f'{step}\n{joined}'),) if after == value.end_line else ((after, step), (value.end_line, joined))
+    return (_closed(model), [InsertLines(((value.line - 1, f'{value.indent}{parts} = []'), *ends))])

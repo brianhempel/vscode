@@ -1703,6 +1703,17 @@
 		background: none;
 	}
 
+	/* The tally's Filter, before the ticks make a search for it to write. */
+	.col-tally .col-search-chip.dimmed {
+		opacity: 0.4;
+		cursor: default;
+
+		&:hover {
+			color: var(--snc-text-muted);
+			background: none;
+		}
+	}
+
 	.col-search-chip-arrow {
 		display: none;
 		font-size: 17px;

@@ -32,7 +32,7 @@ from for_loop_visualizer import (AddColumnClick, AddMenuDismiss, AddMenuToggle, 
                                  TallyFilterInput, TallyItemToggle, TallySelectAll, TallySelectNone,
                                  TallySortSelect, SubcolExprInput, SubcolHideAll, SubcolShowAll, SubcolToggle,
                                  ActionButtonClick, PickToggle, RowActionClick, RowMenuToggle,
-                                 ToolSelect)
+                                 ToolSelect, ColumnSearchKeyDown, JoinClick, JoinSepInput, JoinSepKeyDown)
 from visualizer_utils import (CHILD_SOURCE_BINDER, NO_VALUE, AddImports, ChildEvent, ForLoopColumn, ForLoopTable,
                               InsertLines, Phantom, ReplaceLines)
 from string_visualizer import CopyToClipboard
@@ -653,13 +653,13 @@ class TestColumnMenu(unittest.TestCase):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'count += 1'})), [
             ('Remove', True), ('Insert Left', True), ('Insert Right', True),
             ('Subcolumns', True), ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
-            ('Collect into List', True)])
+            ('Collect into List', True), ('Join', True)])
 
     def test_a_bound_name_has_no_line_to_remove_or_put_anything_before(self):
         self.assertEqual(menu_options(visualize(table(), {'col_menu': 'element'})), [
             ('Edit Iterable', True), ('Remove', False), ('Insert Left', False), ('Insert Right', True),
             ('Subcolumns', True), ('Sort', True), ('Group By', True), ('Change Type', True), ('Compute', True),
-            ('Collect into List', True)])
+            ('Collect into List', True), ('Join', True)])
 
     def test_a_menu_works_without_the_table_being_focused(self):
         out = visualize(table(), {'col_menu': 'count += 1', 'submenu': 'compute'}, small=True)
@@ -1087,6 +1087,52 @@ class TestColumnSearch(unittest.TestCase):
         model, _ = update(key('Escape'), None, model, scores())
         self.assertIsNone(model['col_menu'])
 
+    @staticmethod
+    def search_key(name, label='score'):
+        """The event a key pressed in a column's search row sends."""
+        return {'pythonEventStr': repr(ColumnSearchKeyDown(label=label)), 'eventJSON': {'type': 'KeyDown', 'key': name}}
+
+    def test_the_search_row_sends_its_own_keys(self):
+        row = re.search(r'<input[^>]*class="col-search-input[^>]*>',
+                        col_menu_of(visualize(scores(), {'col_menu': 'score'}))).group(0)
+        self.assertIn(html.escape(repr(ColumnSearchKeyDown(label='score'))), row)
+
+    def test_enter_in_the_search_row_writes_an_if_at_the_end_of_the_body(self):
+        model = {'col_menu': 'score', 'col_search': {'score': {'compose': 'and', 'op': '>', 'text': '5',
+                                                               'exclude': False}}}
+        model, cmds = update(self.search_key('Enter'), None, model, scores())
+        self.assertEqual(cmds, [InsertLines(((3, '    if score > 5:\n        pass'),))])
+        # The search is code now: the rows stop being marked, the menu goes,
+        # and the branch's pass opens in the box once it is back.
+        self.assertEqual((model.get('col_menu'), model.get('pending_branch'), row_classes(visualize(scores(), model))),
+                         (None, {'line': 5, 'labels': ['score', 'high += score > 5']}, [''] * 5))
+
+    def test_the_if_tests_every_search_as_the_rows_are_marked(self):
+        model = {'col_menu': 'score', 'search': 'score > 2',
+                 'col_search': {'high += score > 5': {'compose': 'and', 'op': '>=', 'text': '1', 'exclude': False}}}
+        _, cmds = update(self.search_key('Enter'), None, model, scores())
+        self.assertEqual(cmds, [InsertLines(((3, '    if high >= 1 and score > 2:\n        pass'),))])
+
+    def test_an_index_search_counts_the_iterations_for_the_if(self):
+        model, cmds = update(self.search_key('Enter'), None, {'col_menu': 'score', 'search': '$i > 1'}, scores())
+        self.assertEqual(cmds, [InsertLines(((1, '_iteration = -1'), (2, '    _iteration += 1'),
+                                             (3, '    if _iteration > 1:\n        pass')))])
+        self.assertEqual(model['pending_branch']['line'], 7)
+
+    def test_with_nothing_searched_or_live_only_enter_writes_nothing(self):
+        searched = {'col_menu': 'score', 'search': 'score > 5'}
+        for live_only, model in ((False, {'col_menu': 'score'}), (True, searched)):
+            with self.subTest(live_only=live_only):
+                visualizer_utils.set_live_only(live_only)
+                model, cmds = update(self.search_key('Enter'), None, model, scores())
+                self.assertEqual((model['col_menu'], cmds), ('score', []))
+
+    def test_escape_in_the_search_row_walks_out_a_level_too(self):
+        model, _ = update(self.search_key('Escape'), None, {'col_menu': 'score', 'submenu': 'sort'}, scores())
+        self.assertEqual((model['col_menu'], model['submenu']), ('score', None))
+        model, _ = update(self.search_key('Escape'), None, model, scores())
+        self.assertIsNone(model['col_menu'])
+
     def test_a_filtered_columns_header_says_so(self):
         model = {'col_search': {'score': {'compose': 'and', 'op': '==', 'text': '9', 'exclude': False}}}
         self.assertIn('col-filtered', header_cells(visualize(scores(), model))[1])
@@ -1158,6 +1204,23 @@ class TestTally(unittest.TestCase):
     def test_every_value_and_how_often(self):
         self.assertEqual(self.tally_rows(visualize(scores(), {'col_menu': 'score'})),
                          [('3', 1, False), ('9', 2, False), ('4', 1, False), ('1', 1, False)])
+
+    @staticmethod
+    def filter_chip(html_text):
+        return re.search(r'<span class="col-search-chip col-tally-filter-code[^"]*"[^>]*>Filter</span>',
+                         col_menu_of(html_text)).group(0)
+
+    def test_filter_writes_the_ticked_values_as_a_guard_at_the_top_of_the_body(self):
+        model, _ = update(click(TallyItemToggle(label='score', literal='9')), None, {'col_menu': 'score'}, scores())
+        model, _ = update(click(TallyItemToggle(label='score', literal='1')), None, model, scores())
+        self.assertEqual(events_in(self.filter_chip(visualize(scores(), model))),
+                         [repr(ActionButtonClick(action='filter'))])
+        _, cmds = update(click(ActionButtonClick(action='filter')), None, model, scores())
+        self.assertEqual(cmds, [InsertLines(((2, '    if not (score in [9, 1]):\n        continue'),))])
+
+    def test_with_nothing_ticked_filter_is_dimmed(self):
+        chip = self.filter_chip(visualize(scores(), {'col_menu': 'score'}))
+        self.assertEqual(('dimmed' in chip, events_in(chip)), (True, []))
 
     def test_ticking_values_searches_for_them(self):
         model, _ = update(click(TallyItemToggle(label='score', literal='9')), None, {'col_menu': 'score'}, scores())
@@ -2919,6 +2982,103 @@ def chain_menu_of(html_text):
         return None
     return [(text_of(label), 'unselectable' not in cls)
             for cls, label in re.findall(r'<div class="(snc-dropdown-option[^"]*)"[^>]*>(.*?)</div>', found.group(0))]
+
+
+def joining(col, text, sep):
+    """The model while the box naming the string column `col` is joined into,
+    with `sep` between its values, is open holding `text`."""
+    return {**collecting(col, text), 'join_sep': sep}
+
+
+def word_loop():
+    """A loop whose values are strings already:
+
+        1  for word in ['a', 'b']:
+        2      upper = word.upper()
+    """
+    return table(line=1, end_line=2, columns=(bound('word'), statement('upper = word.upper()', 2, 'upper')),
+                 rows=(("'a'", "'A'"), ("'b'", "'B'")), values=(('a', 'A'), ('b', 'B')), targets=('word',),
+                 defined=frozenset({'word', 'upper'}), body_lines=(2, 2), init=(None, None))
+
+
+def join_key(name, col=0, label='word'):
+    """The event a key pressed in the Join submenu's separator box sends."""
+    return {'pythonEventStr': repr(JoinSepKeyDown(col=col, label=label)), 'eventJSON': {'type': 'KeyDown', 'key': name}}
+
+
+class TestJoin(unittest.TestCase):
+    """A column's menu joins the column into a string: its values collected
+    into a list as the loop runs, and joined after it with the separator
+    picked from Join's submenu -- none, a newline, or one typed."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def tearDown(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_the_menu_offers_join_wherever_it_offers_collect(self):
+        t = table(columns=(bound('element'), COUNT, statement('arr2.append(element)', 4, 'arr2', in_place=True,
+                                                              accumulator=True)),
+                  init=(None, '0', '[]'), values=())
+        for label, offered in (('element', True), ('count += 1', True), ('arr2.append(element)', False)):
+            with self.subTest(label=label):
+                self.assertIn(('Join', offered), menu_options(visualize(t, {'col_menu': label})))
+
+    def test_its_submenu_offers_no_separator_a_newline_or_one_typed(self):
+        panel = re.search(r'col-join-panel.*?<!--/submenu-->',
+                          col_menu_of(visualize(word_loop(), {'col_menu': 'word', 'submenu': 'join'})), re.S).group(0)
+        self.assertEqual(events_in(panel), [repr(JoinClick(col=0, label='word', sep='')),
+                                            repr(JoinClick(col=0, label='word', sep='\n'))])
+        self.assertEqual([text_of(name) for name in re.findall(r'<span class="col-compute-name">(.*?)</span>', panel)],
+                         ["''", "'\\n'"])
+        self.assertIn(html.escape(repr(JoinSepKeyDown(col=0, label='word'))), panel)
+        self.assertIn("lambda e: JoinSepInput(label='word'", html.unescape(panel))
+
+    def test_picking_a_separator_opens_a_box_naming_the_string(self):
+        model, cmds = update(click(JoinClick(col=0, label='word', sep='\n')), None,
+                             {'col_menu': 'word', 'submenu': 'join'}, word_loop())
+        self.assertEqual((model, cmds), (joining(0, 'word_text', '\n'), []))
+        box = re.search(r'<input[^>]*>', header_cells(visualize(word_loop(), model))[-1]).group(0)
+        self.assertIn('value="word_text"', box)
+        self.assertIn('placeholder="String name"', box)
+
+    def test_a_typed_separator_is_picked_with_enter(self):
+        menu = {'col_menu': 'word', 'submenu': 'join'}
+        typed = typed_into('lambda e: JoinSepInput', visualize(word_loop(), dict(menu)), ', ')
+        model, _ = update(typed, None, menu, word_loop())
+        model, cmds = update(join_key('Enter'), None, model, word_loop())
+        self.assertEqual((model, cmds), (joining(0, 'word_text', ', '), []))
+
+    def test_enter_writes_the_parts_above_their_append_in_the_body_and_the_join_after(self):
+        model, cmds = update(key('Enter'), None, joining(0, ' text ', '\n'), word_loop())
+        self.assertEqual(cmds, [InsertLines(((0, 'word_parts = []'),
+                                             (2, "    word_parts.append(word)\ntext = '\\n'.join(word_parts)")))])
+        self.assertEqual((model['collecting_column'], 'join_sep' in model), (None, False))
+
+    def test_values_that_are_not_strings_are_read_as_strings(self):
+        _, cmds = update(key('Enter'), None, joining(0, 'csv', ', '), table())
+        self.assertEqual(cmds, [InsertLines(((1, 'element_parts = []'),
+                                             (3, "    element_parts.append(str(element))\n"
+                                                 "csv = ', '.join(element_parts)")))])
+
+    def test_a_name_that_is_not_one_or_is_taken_is_not_written_and_the_box_stays(self):
+        for text in ('2x', 'for', 'a b', 'upper'):
+            with self.subTest(text=text):
+                self.assertEqual(update(key('Enter'), None, joining(0, text, ''), word_loop()),
+                                 (joining(0, text, ''), []))
+
+    def test_escape_and_collect_forget_the_separator(self):
+        model, cmds = update(key('Escape'), None, joining(0, 'text', ''), word_loop())
+        self.assertEqual(('join_sep' in model, cmds), (False, []))
+        model, _ = update(click(CollectClick(col=0, label='word')), None, joining(0, 'text', ''), word_loop())
+        self.assertEqual(model, collecting(0, 'words'))
+
+    def test_no_join_when_visualizers_are_live_only(self):
+        visualizer_utils.set_live_only(True)
+        out = html.unescape(visualize(word_loop(), {'col_menu': 'word', 'submenu': 'join'}))
+        self.assertNotIn('JoinClick', out)
+        self.assertEqual(update(click(JoinClick(col=0, label='word', sep='')), None, {}, word_loop())[1], [])
 
 
 class TestWritingIfBranches(unittest.TestCase):
