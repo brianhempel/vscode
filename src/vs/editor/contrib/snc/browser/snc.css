@@ -2478,6 +2478,18 @@
 	/* font-variant-numeric: tabular-nums; */
 }
 
+/* Under a loop's answer, or atop its compute menu, once the loop ran past the
+   rows it keeps: what the answer covers ("first 500 of 1200"). */
+.for-loop-visualizer .col-agg-partial,
+.for-loop-visualizer .col-compute-note {
+	color: var(--snc-text-muted);
+	font-size: 0.9em;
+}
+
+.for-loop-visualizer .col-compute-note {
+	padding: 2px 4px 4px;
+}
+
 /* A histogram answers with a pair of arrays, which no cell can read as text, so
    the cell draws the bars instead. Told its own size, since an SVG has no
    intrinsic one to take -- but free to be told a bigger one now that the foot
@@ -2811,6 +2823,38 @@
    beside its condition rather than pushing it away, as a column's does. */
 .for-loop-visualizer th.for-loop-branch-header .col-drag-handle {
 	margin-right: 0;
+}
+
+/* A loop's ⣿ is dragged by the editor alone (beginReorderDrag in snc.ts): it
+   promises the grab it delivers, and while one is held the pointer keeps
+   saying so wherever it goes, and no other header offers a handle of its
+   own -- only the one in hand is there to act on. */
+.for-loop-visualizer .col-drag-handle {
+	cursor: grab;
+}
+
+.snc-visualization-widget.snc-reordering,
+.snc-visualization-widget.snc-reordering * {
+	cursor: grabbing !important;
+}
+
+.for-loop-visualizer .list-table-is-dragging .col-header:not(.col-drag-source) .col-handle {
+	opacity: 0;
+	pointer-events: none;
+}
+
+/* Where a dragged loop column or branch would land: one line at the edge it
+   lands beside, from that header down through the rows, so it reads from the
+   body as well as the header. Drawn by snc.ts in the widget root's
+   coordinates, over the table, which never moves for it; the accent of the
+   table's own drop line. */
+.snc-visualization-widget > .snc-reorder-line {
+	position: absolute;
+	width: 2px;
+	border-radius: 1px;
+	background: var(--snc-string-color);
+	pointer-events: none;
+	z-index: 6;
 }
 
 /* A new branch's box reads as its line will: the keyword, then the

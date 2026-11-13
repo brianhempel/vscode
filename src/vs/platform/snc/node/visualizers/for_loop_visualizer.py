@@ -286,13 +286,16 @@ reaches it rather than being shown as a dataclass's fields.
 
 import ast
 import builtins
+import collections
 import html
 import io
+import json
 import keyword
 import math
 import re
 import textwrap
 import tokenize
+import types
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
@@ -302,7 +305,7 @@ from table_visualizer import (SplatColumnClick, UnsplatColumnClick, ExpandToggle
                               _config_from_slot, save_columns_config)
 from visualizer_utils import ENABLE_AUTO_EXPAND, render_expand_toggle, py_exp_attrs
 
-from table_visualizer import (ColumnDragStart, ColumnDragOver, ColumnDragEnd, PickToggle, _build_pick_expr, _pick_bands_by_column,
+from table_visualizer import (PickToggle, _build_pick_expr, _pick_bands_by_column,
                                _pick_shared_range, _parse_pick_region_id, PICK_BANDS,
                                _pick_band_for_row,
                                _render_pick_region as _table_pick_region,
@@ -708,27 +711,27 @@ class RemoveBranchClick:
 
 
 @dataclass(frozen=True)
-class BranchDragStart:
-    """A press on the ⣿ of an `elif` -- branch `branch` of the chain starting
-    on line `chain` -- to drag it to where it is tested."""
+class BranchDrop:
+    """An `elif` -- branch `branch` of the chain starting on line `chain` --
+    dragged by its ⣿ and let go on the `after` side of branch `onto`'s
+    header: it is tested there. The editor follows the drag itself (see
+    _reorder_handle), so this is the one event a drag sends."""
     chain: int
     branch: int
+    onto: int
+    after: bool
 
 
 @dataclass(frozen=True)
-class BranchDragOver:
-    """The mouse over a conditional branch's header while an `elif` is
-    dragged: where it would land."""
-    chain: int
-    branch: int
-
-
-@dataclass(frozen=True)
-class BranchDragEnd:
-    """The mouse let go over a branch's header: the dragged `elif` is tested
-    in its place."""
-    chain: int
-    branch: int
+class ColumnDrop:
+    """The statement column labeled `col`, dragged by its ⣿ and let go on the
+    `after` side of `onto`: another statement's column, by its label; a
+    condition, by its label, for the first line of its branch; or a whole `if`
+    chain, by its first line. The editor follows the drag itself (see
+    _reorder_handle), so this is the one event a drag sends."""
+    col: str
+    onto: Any
+    after: bool
 
 
 @dataclass(frozen=True)
@@ -779,6 +782,8 @@ SMALL_MAX_HEIGHT = 212
 # and a sub-column from the column it is spread out of.
 CELL_KEY_SEP = '\x00'
 SUBCOL_SEP = '\x01'
+# What tells apart columns whose lines read the same (see _distinct_labels).
+REPEAT_SEP = '\x02'
 
 # The keys the table answers itself, before any its cells' visualizers do.
 OWN_KEYS = ['Enter', 'Escape', 'Tab']
@@ -791,12 +796,35 @@ def can_visualize(value):
     return isinstance(value, ForLoopTable)
 
 
+def _distinct_labels(value: ForLoopTable) -> ForLoopTable:
+    """The table with no two columns under one label. A column is known by its
+    label -- its view, its events, its slot in the saved comment -- and two
+    lines of the body can read the same (`n += 1` twice). The second and on
+    are labeled `n += 1` REPEAT_SEP `2`, ..., which their headers and boxes
+    read without (see _text); the first keeps its own, so a view saved before
+    there was a second stays with it."""
+    seen = {}
+    columns = []
+    for column in value.columns:
+        seen[column.label] = seen.get(column.label, 0) + 1
+        repeat = seen[column.label]
+        columns.append(replace(column, label=f'{column.label}{REPEAT_SEP}{repeat}') if repeat > 1 else column)
+    return replace(value, columns=tuple(columns)) if len(seen) < len(value.columns) else value
+
+
+def _text(label: str) -> str:
+    """A column's label as its line reads: without what tells it apart from
+    another reading the same (see _distinct_labels)."""
+    return label.partition(REPEAT_SEP)[0]
+
+
 def init_model(value, get_visualizer=None, slots_config=None, config_path=None, persist=True):
     """`slots_config`, `config_path` and `persist` are the nesting parameters
     a table's init_model takes (see child_nesting_kwargs). At the root the
     runner passes the slots saved on the loop's header, and the model opens
     on that view. A slot that no longer fits -- a label the loop doesn't
     have, a key of the wrong type -- is passed over."""
+    value = _distinct_labels(value)
     slots = _readable_slots(slots_config)
     return {'_config_path': list(config_path or []), '_config_persist': persist,
             '_slot_children': parse_slots(slots)[1], **_view_from_slots(value, slots)}
@@ -1182,23 +1210,72 @@ def _draggable_statement(value: ForLoopTable, label: Optional[str]) -> Optional[
     return column
 
 
-def _statement_reordered(value: ForLoopTable, moving: Optional[str], onto: str) -> Optional[ReplaceLines]:
-    """Move exact statement lines, before from the right, after from the left."""
-    source, target = _draggable_statement(value, moving), _draggable_statement(value, onto)
-    if source is None or target is None or source is target:
+def _statement_reordered(value: ForLoopTable, moving: Optional[str], onto: Any,
+                         after: bool) -> Optional[ReplaceLines]:
+    """Move exact statement lines to the `after` side of `onto`: a statement
+    column, by its label; a condition, by its label, which is its branch's
+    first line whichever side; or the `if` chain starting on line `onto`,
+    which is beside the whole chain -- out of it, if that is where the
+    statement was. None when nothing would move."""
+    source = _draggable_statement(value, moving)
+    if source is None:
+        return None
+    cond = _condition_named(value, onto)
+    if cond is not None:
+        onto, after = _branch_first(value, cond), False
+    if isinstance(onto, int) and not isinstance(onto, bool):
+        return _beside_chain(value, source, onto, after)
+    target = _draggable_statement(value, onto)
+    if target is None or source is target:
         return None
     first, last = source.span
     start, end = target.span
     if not (last < start or end < first):
         return None
-    before = first > start
-    one = _one_liner(value, source)
+    before = not after
     target_one = _one_liner(value, target)
-    old_indent = _indent(value, source)
     new_indent = _indent(value, target)
-    unit = value.body_indent[len(value.indent):]
     if target_one:
-        new_indent = target_one[1] + unit
+        new_indent = target_one[1] + value.body_indent[len(value.indent):]
+    piece, removed = _lifted(value, source, new_indent)
+    target_block = target.path[-1][3:5] if target.path else value.body_lines
+    replace_pass = _text(target.label) == 'pass' and target.span == tuple(target_block)
+    if target_one:
+        existing = [] if replace_pass else [new_indent + target_one[3]]
+        inserted = piece + existing if before else existing + piece
+        destination = [target_one[1] + target_one[2] + ':'] + inserted
+        edits = [(first, last, removed), (start, end, destination)]
+    elif replace_pass:
+        edits = [(first, last, removed), (start, end, piece)]
+    else:
+        at = start if before else end + 1
+        edits = [(first, last, removed), (at, at - 1, piece)]
+    return _with_edits(value, edits, min(first, start), max(last, end))
+
+
+def _condition_named(value: ForLoopTable, label: Any) -> Optional[ForLoopColumn]:
+    """The condition column labeled `label`, if there is just the one."""
+    matches = [c for c in value.columns if c.label == label]
+    return matches[0] if len(matches) == 1 and matches[0].cond else None
+
+
+def _branch_first(value: ForLoopTable, cond: ForLoopColumn) -> Any:
+    """What a statement dropped on `cond` is put before: the first column of
+    its branch's body -- a statement's label, or the first line of the chain
+    the body opens with."""
+    depth = len(cond.path)
+    for column in value.columns:
+        if column is not cond and not column.cond and column.path[:depth] == cond.path:
+            return column.path[depth][0] if len(column.path) > depth else column.label
+    return None
+
+
+def _lifted(value: ForLoopTable, source: ForLoopColumn, new_indent: str) -> Tuple[List[str], List[str]]:
+    """`source`'s lines indented to `new_indent`, and what is left where they
+    were: nothing, or a `pass` for a block it was all of."""
+    first, last = source.span
+    one = _one_liner(value, source)
+    old_indent = _indent(value, source)
     piece = (one[3].split('\n') if one else
              list(value.source[first - value.line:last - value.line + 1]))
     if one:
@@ -1213,27 +1290,39 @@ def _statement_reordered(value: ForLoopTable, moving: Optional[str], onto: str) 
              new_indent + line[len(old_indent):] if line.startswith(old_indent) else line
              for n, line in enumerate(piece, 1)]
     block = source.path[-1][3:5] if source.path else value.body_lines
-    leaving = first == block[0] and last == block[1]
-    removed = [old_indent + 'pass'] if leaving else []
+    removed = [old_indent + 'pass'] if first == block[0] and last == block[1] else []
     if one:
         removed = _opened_out(value, one, ['pass']).text.split('\n')
-    target_block = target.path[-1][3:5] if target.path else value.body_lines
-    replace_pass = target.label == 'pass' and target.span == tuple(target_block)
-    if target_one:
-        existing = [] if replace_pass else [new_indent + target_one[3]]
-        inserted = piece + existing if before else existing + piece
-        destination = [target_one[1] + target_one[2] + ':'] + inserted
-        edits = [(first, last, removed), (start, end, destination)]
-    elif replace_pass:
-        edits = [(first, last, removed), (start, end, piece)]
-    else:
-        at = start if before else end + 1
-        edits = [(first, last, removed), (at, at - 1, piece)]
+    return piece, removed
+
+
+def _beside_chain(value: ForLoopTable, source: ForLoopColumn, chain: int, after: bool) -> Optional[ReplaceLines]:
+    """`source`'s lines moved to just before the `if` chain starting on line
+    `chain`, or just after its last branch, at the chain's indentation."""
+    branches = _chain_branches(value, chain)
+    if not branches or not 0 <= chain - value.line < len(value.source):
+        return None
+    start, end = chain, max(step[4] for step in branches.values())
+    first, last = source.span
+    if not (last < start or end < first or start < first <= last <= end):
+        return None
+    header = value.source[chain - value.line]
+    piece, removed = _lifted(value, source, header[:len(header) - len(header.lstrip())])
+    at = end + 1 if after else start
+    return _with_edits(value, [(first, last, removed), (at, at - 1, piece)], min(first, start), max(last, end))
+
+
+def _with_edits(value: ForLoopTable, edits, low: int, high: int) -> Optional[ReplaceLines]:
+    """The loop's lines `low` to `high` with `edits` -- each (first, last,
+    lines) in the loop's own line numbers -- made, as one replacement: which
+    keeps the original coordinates stable, as branch dragging does. None when
+    they change nothing or would not compile in the complete program's scope
+    (return/nonlocal included)."""
     lines = list(value.source)
     for a, b, text in sorted(edits, reverse=True):
         lines[a - value.line:b - value.line + 1] = text
-    # One replacement keeps original coordinates stable, as branch dragging
-    # does. Validate in the complete program's scope (return/nonlocal included).
+    if lines == list(value.source):
+        return None
     if value.program:
         program = value.program.split('\n')
         program[value.line - 1:value.end_line] = lines
@@ -1241,8 +1330,6 @@ def _statement_reordered(value: ForLoopTable, moving: Optional[str], onto: str) 
             compile('\n'.join(program), '<reordered loop>', 'exec')
         except (SyntaxError, ValueError):
             return None
-    low = min(first, start)
-    high = max(last, end)
     tail = value.end_line - high
     return ReplaceLines(low, high, '\n'.join(lines[low - value.line:len(lines) - tail]))
 
@@ -1254,13 +1341,18 @@ def _conditional(value: ForLoopTable, chain: int) -> List[int]:
     return sorted(b for b in _chain_branches(value, chain) if b != otherwise)
 
 
-def _branches_reordered(value: ForLoopTable, chain: int, moving: int, onto: int) -> Optional[ReplaceLines]:
+def _branches_reordered(value: ForLoopTable, chain: int, moving: int, onto: int,
+                        after: bool) -> Optional[ReplaceLines]:
     """The chain's conditional branches rewritten with `moving`, an elif,
-    tested in `onto`'s place -- before it, coming from later, after it, from
-    earlier -- each with its own lines, and whichever ends up first the `if`.
-    None when nothing moves, or the loop's lines aren't to hand."""
+    tested on the `after` side of `onto` -- each with its own lines, and
+    whichever ends up first the `if`. None when nothing moves, or the loop's
+    lines aren't to hand."""
     branches, conditional = _chain_branches(value, chain), _conditional(value, chain)
     if moving == onto or moving == 0 or moving not in conditional or onto not in conditional:
+        return None
+    order = [b for b in conditional if b != moving]
+    order.insert(order.index(onto) + after, moving)
+    if order == conditional:
         return None
     # A branch runs from the line after the one before it ends: its header,
     # and whatever precedes that, go with it.
@@ -1271,8 +1363,6 @@ def _branches_reordered(value: ForLoopTable, chain: int, moving: int, onto: int)
         if lo < 0 or hi > len(value.source):
             return None
         pieces[b] = list(value.source[lo:hi])
-    order = [b for b in conditional if b != moving]
-    order.insert(conditional.index(onto), moving)
     lines = []
     for n, b in enumerate(order):
         piece = pieces[b]
@@ -1711,8 +1801,9 @@ def _render_fold_header(value: ForLoopTable, model, col: int, folds: dict, span_
     edit_attrs = _condition_edit_attrs(value, col)
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
+    items = {} if is_live_only() else {STATEMENTS: str(chain)}
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-col for-loop-fold-header{classes}"{span_attrs}'
-            f'{_col_attrs(model, label, clip=False)}><span class="col-header-inner">'
+            f'{_col_attrs(model, label, clip=False)}{_reorder_items(items)}><span class="col-header-inner">'
             f'<span class="col-name"{edit_attrs}>{html.escape(label)}</span>{_render_chain_trigger(value, model, chain)}'
             f'{resize}</span></th>')
 
@@ -1864,9 +1955,10 @@ def _render_box(model, tag: str = 'th', select_all: bool = False, placeholder: s
 
 def _render_label(column: ForLoopColumn) -> str:
     """The column's label, the part of it that is the value shown underlined."""
-    shown, rest = column.label[:column.underline], column.label[column.underline:]
+    text = _text(column.label)
+    shown, rest = text[:column.underline], text[column.underline:]
     if not shown:
-        return html.escape(column.label)
+        return html.escape(text)
     return f'<span class="for-loop-col-subject">{html.escape(shown)}</span>{html.escape(rest)}'
 
 
@@ -2563,7 +2655,7 @@ def _render_column_menu(value: ForLoopTable, model, col: int, get_visualizer=Non
         *([(_render_option(model, 'Edit Iterable', ColumnClick(col, label, iterable=True)), False)]
           if label in value.targets and column.span is None else []),
         (_render_option(model, 'Remove', DeleteColumnClick(col=col, label=label)
-                        if statement and not (column.placeholder and label == 'pass') else None,
+                        if statement and not (column.placeholder and _text(label) == 'pass') else None,
                         '' if statement else 'A name the loop binds has no line to remove'), False),
         (_render_option(model, 'Insert Left', InsertColumnClick(col=col, label=label, after=False)
                         if statement else None), False),
@@ -2771,7 +2863,9 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
                 f'</div>')
     if _splat_depth(label):
         controls = sort
-    body = (f'<div class="col-tally-list-header"><span class="col-tally-item-header">Tally</span>'
+    recorded = _recorded_of(value)
+    heading = f'Tally of the first {recorded[0]}' if recorded else 'Tally'
+    body = (f'<div class="col-tally-list-header"><span class="col-tally-item-header">{heading}</span>'
             f'<span class="col-tally-count-header">Counts {count_box}</span></div>')
     body += (f'<div class="col-tally-list">{"".join(items)}</div>' if items
              else '<div class="col-tally-note">No values match</div>')
@@ -2780,6 +2874,16 @@ def _render_tally(value: ForLoopTable, model, col: int) -> str:
                   f'value="{html.escape(model.get("tally_filter") or "")}" placeholder="Search tally" '
                   f'data-tooltip="Show only values containing this text" spellcheck="false" /></div>')
     return f'<div class="col-tally"{dwell}>{filter_box}{controls}{body}</div>'
+
+
+def _recorded_of(value: ForLoopTable) -> Optional[Tuple[int, int]]:
+    """(rows recorded, iterations run) when the loop ran past the rows the
+    runner keeps (MAX_FOR_TABLE_ROWS): every answer read off the rows -- a
+    count, a compute, a tally -- covers only the first of them. None when
+    every iteration has its row."""
+    if not value.hidden_rows:
+        return None
+    return (len(value.rows), len(value.rows) + value.hidden_rows)
 
 
 def _render_tally_filter(value: ForLoopTable, model) -> str:
@@ -2794,13 +2898,20 @@ def _render_tally_filter(value: ForLoopTable, model) -> str:
             f'data-tooltip="Skip the iterations that don\'t match"{press}>Filter</span>')
 
 
-def _render_action_buttons(value: ForLoopTable, model, count: int, eval_in_scope=None) -> str:
+def _render_action_buttons(value: ForLoopTable, model, count: int, eval_in_scope=None,
+                           recorded: Optional[Tuple[int, int]] = None) -> str:
     """The footer's buttons, as a table's: each writes what it names about the
     iterations the search holds for. Those that need a search to say anything
-    are dimmed without one, and all of them while it isn't Python."""
+    are dimmed without one, and all of them while it isn't Python. Past the
+    rows drawn -- `recorded`, (rows, iterations run), as _recorded_of reads
+    them -- the count is only of those, so at least that many match."""
     buttons = []
+    count_label, count_title = f'Count: {count}', 'Count of matches'
+    if recorded:
+        count_label = f'Count: {count}+'
+        count_title = f'Count of matches in the first {recorded[0]} of {recorded[1]} iterations'
     for action, label, title in (
-            ('count', f'Count: {count}', 'Count of matches'),
+            ('count', count_label, count_title),
             ('extract', 'Extract', 'Every matching iteration\'s names'),
             ('filter', 'Filter', 'Skip the iterations that don\'t match'),
             ('any', 'Any', 'Whether any iteration matches'),
@@ -2834,7 +2945,7 @@ def _render_footer(value: ForLoopTable, model, matches: Optional[List[int]], n_r
             f'<span class="search-button {"active" if first else "inactive"}" data-tooltip="{first_tip}"'
             f'{_press(FirstMatchToggle()) if model.get('tool') != 'pick' else ''}>{ICONS["match-first"]}</span></span>'
             f'</div></div></div>'
-            f'<div class="search-div-row"><div class="action-buttons">{_render_action_buttons(value, model, count, eval_in_scope)}'
+            f'<div class="search-div-row"><div class="action-buttons">{_render_action_buttons(value, model, count, eval_in_scope, (n_rows, ran) if hidden_rows else None)}'
             f'</div></div>'
             f'<div class="auxiliary-attributes"><div class="tiny-len">{ran} iteration{"" if ran == 1 else "s"}</div>'
             f'</div></div>')
@@ -2855,7 +2966,7 @@ def _render_convert_panel(value: ForLoopTable, col: int) -> str:
     """A box per type, ticked while the column's assignment reads its value as
     that type, and beside each a button writing a line that reads it so."""
     column = value.columns[col]
-    assignment = _plain_assignment(column.label) if column.span is not None else None
+    assignment = _plain_assignment(_text(column.label)) if column.span is not None else None
     current = _converted(assignment[1])[0] if assignment else None
     rows = []
     for to in CONVERT_TYPES:
@@ -2982,6 +3093,10 @@ def _render_compute_panel(value: ForLoopTable, model, col: int) -> str:
                 f'<span class="col-compute-toggle"{press} data-tooltip="{html.escape(tooltip)}">{inner}</span></div>')
 
     rows = []
+    recorded = _recorded_of(value)
+    if recorded:
+        rows.append(f'<div class="col-compute-note">Answers cover the first {recorded[0]} of {recorded[1]} '
+                    f'iterations</div>')
     for name, template, _ in _compute_rows(catalog_model, label):
         row = answer_row(name, template)
         if template in COMPUTE_CODE_KINDS:
@@ -3017,6 +3132,8 @@ def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, e
     if not levels:
         return ''
     rows = []
+    recorded = _recorded_of(value)
+    partial = f'<div class="col-agg-partial">first {recorded[0]} of {recorded[1]}</div>' if recorded else ''
     for level in range(levels):
         cells = []
         for col, templates in zip(shown, asked):
@@ -3033,7 +3150,7 @@ def _render_agg_rows(value: ForLoopTable, model, shown: List[int], spans=None, e
                     if get_visualizer else '' if answer is NO_THING else _agg_answer_html(template, answer))
             cells.append(f'<td class="col-agg-cell snc-hover-hidden-parent{edge}"{span}{_col_attrs(model, _view_column(value, col).label)}>'
                          f'<div class="col-agg">{_agg_label_html(template, label, level)}'
-                         f'{_agg_remove_x_html(template, label)}<div class="col-agg-value">{text}</div></div></td>')
+                         f'{_agg_remove_x_html(template, label)}<div class="col-agg-value">{text}</div>{partial}</div></td>')
         rows.append(f'<tr class="col-agg-row"><td class="row-index col-agg-blank"></td>{"".join(cells)}</tr>')
     return f'<tfoot class="col-agg-rows">{"".join(rows)}</tfoot>'
 
@@ -3077,13 +3194,26 @@ def _unique_name(value: ForLoopTable, base: str) -> str:
 # What a value of can't be changed by a method called on it.
 IMMUTABLE_TYPES = (str, bytes, int, float, complex, bool, tuple, frozenset, range, type(None))
 
+# The methods that change a built-in container in place: any other called on
+# one only reads it -- `seen.get(k)`, `xs.count(x)`.
+MUTATING_METHODS = (
+    (list, {'append', 'extend', 'insert', 'remove', 'pop', 'clear', 'sort', 'reverse'}),
+    (bytearray, {'append', 'extend', 'insert', 'remove', 'pop', 'clear', 'reverse'}),
+    (dict, {'update', 'setdefault', 'pop', 'popitem', 'clear'}),
+    (set, {'add', 'discard', 'remove', 'update', 'difference_update', 'intersection_update',
+           'symmetric_difference_update', 'pop', 'clear'}),
+    (collections.deque, {'append', 'appendleft', 'extend', 'extendleft', 'insert', 'remove', 'pop',
+                         'popleft', 'clear', 'rotate', 'reverse'}),
+)
 
-def _named(value: ForLoopTable, statement: str) -> str:
+
+def _named(value: ForLoopTable, statement: str, eval_in_scope=None) -> str:
     """`statement`, or `result = statement` when it is an expression alone: a
     column shows the value a line leaves in a name, and an expression alone
     leaves it nowhere. A method called on a name is a column already -- the
-    name after the call -- unless what the name holds can't change, as a
-    string can't; and a print is there for what it prints."""
+    name after the call -- unless the call can't change what the name holds:
+    a module's function, a class's, a string's method, a dict's `get`. And a
+    print is there for what it prints."""
     body = ast.parse(statement).body
     if len(body) != 1 or not isinstance(body[0], ast.Expr):
         return statement
@@ -3095,17 +3225,35 @@ def _named(value: ForLoopTable, statement: str) -> str:
         if isinstance(func, ast.Name) and func.id == 'print':
             return statement
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
-                and not _holds_immutable(value, func.value.id):
+                and _may_change(value, func.value.id, func.attr, eval_in_scope):
             return statement
     return f'{_unique_name(value, "result")} = {statement}'
 
 
-def _holds_immutable(value: ForLoopTable, name: str) -> bool:
-    """Whether every value the loop saw in `name` can't be changed in place
-    -- False when it saw none, as for a name set outside it."""
+def _may_change(value: ForLoopTable, name: str, method: str, eval_in_scope=None) -> bool:
+    """Whether calling `method` on `name` can change what it holds: what the
+    loop saw in it, or else what it holds in scope now. True when that is
+    nothing to go on -- a name the loop never set, and not in scope -- or an
+    object whose methods aren't known."""
     cols = [i for i, column in enumerate(value.columns) if column.subject == name]
     seen = [row[i] for row in value.values for i in cols if i < len(row) and row[i] is not NO_VALUE]
-    return bool(seen) and all(isinstance(cell, IMMUTABLE_TYPES) for cell in seen)
+    if not seen and eval_in_scope is not None:
+        try:
+            seen = [eval_in_scope(name)]
+        except Exception:
+            pass
+    if not seen:
+        return True
+    return any(_changed_by(held, method) for held in seen)
+
+
+def _changed_by(held, method: str) -> bool:
+    if isinstance(held, (IMMUTABLE_TYPES, type, types.ModuleType)):
+        return False
+    for kind, mutating in MUTATING_METHODS:
+        if isinstance(held, kind):
+            return method in mutating
+    return True
 
 
 def _beside(value: ForLoopTable, column: ForLoopColumn, after: bool) -> int:
@@ -3148,6 +3296,28 @@ def _col_attrs(model, label: str, clip: bool = True) -> str:
     return f' data-col="{html.escape(repr(label))}"{_width_style(model, label, clip)}'
 
 
+# What a statement's ⣿ drags among (see _reorder_handle): the other
+# statements, the conditions, and the `if` chains.
+STATEMENTS = 'statements'
+
+
+def _reorder_handle(group: str, drop: str, tooltip: str) -> str:
+    """The ⣿ a header is dragged by. The editor follows the drag itself -- the
+    drop line, the scrolling, Escape -- sending the program nothing, since
+    each event is a run of it, until the drop: then `drop`, with `{onto}`
+    filled in with what the header let go beside stands for to `group`, and
+    `{after}` with which side of it (see _reorder_items)."""
+    return (f'<span snc-reorder-handle="{html.escape(group)}" snc-reorder-drop="{html.escape(drop)}" '
+            f'draggable="false" data-tooltip="{tooltip}" class="col-handle col-drag-handle">⣿</span>')
+
+
+def _reorder_items(items: dict) -> str:
+    """The attribute saying what a header stands for to each kind of drag
+    that can land beside it: a Python literal, or one and the only side of it
+    a drop lands on."""
+    return f' snc-reorder-items="{html.escape(json.dumps(items))}"' if items else ''
+
+
 def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_attrs: str = '',
                    get_visualizer=None, classes: str = '') -> str:
     """A column's header, marked up as a table's: its label, then the ▾ and
@@ -3159,7 +3329,7 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
     if not live_only and model.get('editing_column') == [col, 'iterable']:
         return _render_box(model, select_all=True, keyword='in', placeholder='Iterable', span_attrs=span_attrs)
     if not live_only and model.get('editing_column') == col:
-        if column.placeholder and label == 'pass':
+        if column.placeholder and _text(label) == 'pass':
             return _render_box(model, placeholder=_runs_when(column), tooltip="Written over this branch's pass",
                                span_attrs=span_attrs)
         return _render_box(model, select_all=True, tooltip='Written over this line of the loop',
@@ -3167,7 +3337,7 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
     resize = (f'<span snc-resize-col="{html.escape(repr(ColumnResize(width=0, label=label)))}" '
               f'data-tooltip="Resize" class="col-handle col-resize-handle col-resize-right"></span>')
     if column.cond:
-        inner = f'<span class="col-name for-loop-cond-label" data-tooltip="{html.escape(label)}">cond</span>'
+        inner = f'<span class="col-name for-loop-cond-label" data-tooltip="{html.escape(_text(label))}">cond</span>'
         if not live_only:
             inner += _render_menu_trigger(value, model, col, get_visualizer)
     elif live_only:
@@ -3179,7 +3349,7 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
     else:
         edit = repr(ColumnClick(col=col, label=label))
-        tip = ("Double-click to write this branch's first line" if column.placeholder and label == 'pass'
+        tip = ("Double-click to write this branch's first line" if column.placeholder and _text(label) == 'pass'
                else 'Double-click to edit')
         if column.placeholder:
             classes += ' for-loop-placeholder'
@@ -3188,24 +3358,17 @@ def _render_header(value: ForLoopTable, model, col: int, live_only: bool, span_a
                  f'{py_exp_attrs(column.subject) or ' draggable="false"'}>'
                  f'{_render_label(column)}</span>'
                  f'{_render_menu_trigger(value, model, col, get_visualizer)}')
-    handle, drag_attrs = '', ''
+    handle, items = '', {}
     if not live_only and _draggable_statement(value, label) is not None:
-        handle = (f'<span snc-mouse-down="{html.escape(repr(ColumnDragStart(col=label)))}" '
-                  f'snc-unfocused-clickable draggable="false" data-tooltip="Drag to reorder" '
-                  f'class="col-handle col-drag-handle">⣿</span>')
-        drag_attrs = f' snc-mouse-up="{html.escape(repr(ColumnDragEnd(col=label)))}"'
-        dragging = model.get('column_drag_from')
-        if dragging is not None:
-            drag_attrs += f' snc-mouse-move="{html.escape(repr(ColumnDragOver(col=label)))}"'
-            if dragging == label:
-                classes += ' col-drag-source'
-            elif model.get('column_drag_over') == label:
-                origin = _draggable_statement(value, dragging)
-                if origin is not None:
-                    classes += ' col-drag-before' if origin.span[0] > column.span[0] else ' col-drag-after'
+        handle = _reorder_handle(STATEMENTS, f'ColumnDrop(col={label!r}, onto={{onto}}, after={{after}})',
+                                 'Drag to reorder')
+        items[STATEMENTS] = repr(label)
+    elif not live_only and column.cond:
+        # Either side of a condition is inside its branch: before its first line.
+        items[STATEMENTS] = {'value': repr(label), 'side': 'after'}
     filtered = ' col-filtered' if _column_search(model, label)['text'].strip() else ''
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-col{filtered}{classes}"{span_attrs}'
-            f'{_col_attrs(model, label, clip=False)}{drag_attrs}><span class="col-header-inner">{handle}{inner}{resize}</span></th>')
+            f'{_col_attrs(model, label, clip=False)}{_reorder_items(items)}><span class="col-header-inner">{handle}{inner}{resize}</span></th>')
 
 
 def _render_subheader(value, model, label: str, sub: str, span_attrs: str = '', classes: str = '',
@@ -3238,24 +3401,19 @@ def _render_branch_header(value: ForLoopTable, model, step, span_attrs: str = ''
     n = len(value.rows)
     taken = sum(branch_ran(value, i, chain) == branch for i in range(n))
     tip = f' data-tooltip="Taken in {taken} of {n} iteration{"" if n == 1 else "s"}"' if n else ''
-    conditional = _conditional(value, chain)
-    handle, drag_attrs = '', ''
-    if not is_live_only() and branch in conditional:
-        if branch != 0:
-            handle = (f'<span snc-mouse-down="{html.escape(repr(BranchDragStart(chain=chain, branch=branch)))}" '
-                      f'snc-unfocused-clickable draggable="false" data-tooltip="Drag to test it earlier or later" '
-                      f'class="col-handle col-drag-handle">⣿</span>')
-        drag = model.get('branch_drag') or {}
-        if drag.get('chain') == chain:
-            # Only mid-drag: each move over a header is a run of the program.
-            drag_attrs = (f' snc-mouse-move="{html.escape(repr(BranchDragOver(chain=chain, branch=branch)))}"'
-                          f' snc-mouse-up="{html.escape(repr(BranchDragEnd(chain=chain, branch=branch)))}"')
-            if drag.get('from') == branch:
-                classes += ' col-drag-source'
-            elif drag.get('over') == branch:
-                classes += ' col-drag-before' if drag['from'] > branch else ' col-drag-after'
+    handle, items = '', {}
+    if not is_live_only():
+        # Every branch's header stands for the whole chain to a statement
+        # dragged beside it: its lines go before or after the chain.
+        items[STATEMENTS] = str(chain)
+        if branch in _conditional(value, chain):
+            items[f'branches:{chain}'] = str(branch)
+            if branch != 0:
+                handle = _reorder_handle(f'branches:{chain}',
+                                         f'BranchDrop(chain={chain}, branch={branch}, onto={{onto}}, after={{after}})',
+                                         'Drag to test it earlier or later')
     return (f'<th class="snc-hover-hidden-parent col-header for-loop-branch-header{classes}"{span_attrs}{tip}'
-            f'{drag_attrs}><span class="col-header-inner">{handle}<span class="col-name"{edit_attrs}>{html.escape(header)}</span>'
+            f'{_reorder_items(items)}><span class="col-header-inner">{handle}<span class="col-name"{edit_attrs}>{html.escape(header)}</span>'
             f'{_render_chain_trigger(value, model, chain, branch)}</span></th>')
 
 
@@ -3311,7 +3469,7 @@ def _render_add_menu(value: ForLoopTable, model) -> str:
     sep = '<div class="col-compute-sep"></div>'
 
     def check_row(column: ForLoopColumn, depth: int = 0) -> str:
-        return _render_menu_row(column.label, ColumnToggle(label=column.label), column.label not in hidden,
+        return _render_menu_row(_text(column.label), ColumnToggle(label=column.label), column.label not in hidden,
                                 depth=depth)
 
     bound = [column for column in value.columns if not _of_body(column)]
@@ -3357,8 +3515,8 @@ def _render_leaf(value: ForLoopTable, model, i: int, col: int, sub: Optional[str
                 f'data-tooltip="This iteration took another branch"></td>')
     if column.placeholder:
         # No value; a continue or break says it is where the iteration ended.
-        said = (f'<span class="for-loop-placeholder-cell">{html.escape(label)}</span>'
-                if label in ('continue', 'break') else '')
+        said = (f'<span class="for-loop-placeholder-cell">{html.escape(_text(label))}</span>'
+                if _text(label) in ('continue', 'break') else '')
         return f'<td class="list-table-cell{classes}"{_col_attrs(model, leaf)}>{said}</td>'
     if column.cond and text is not None:
         classes += ' for-loop-cond-true' if _truthy(value, int(str(i).split('.')[0]), col) else ' for-loop-cond-false'
@@ -3462,9 +3620,12 @@ def _open_pending_init(value: ForLoopTable, model) -> None:
     if not pending:
         return
     labels = [column.label for column in value.columns]
-    if pending['label'] in labels:
+    # The column that wasn't there before: a line reading as one already
+    # there comes back under a label of its own (see _distinct_labels).
+    col = next((c for c, label in enumerate(labels)
+                if _text(label) == pending['label'] and label not in pending['labels']), None)
+    if col is not None:
         model.pop('pending_init')
-        col = labels.index(pending['label'])
         if value.columns[col].accumulator and _init_of(value, col) is None and not _box_open(model):
             model.update(_opened(model, 'editing_init', col, ''))
     elif not value.running and labels != pending['labels']:
@@ -3634,6 +3795,7 @@ def _render_header_rows(value: ForLoopTable, model, shown: List[int], subcols: d
 
 
 def visualize(value: ForLoopTable, model=None, get_visualizer=None, small=False, eval_in_scope=None):
+    value = _distinct_labels(value)
     if model is None:
         model = {}
     live_only = is_live_only()
@@ -3819,6 +3981,7 @@ def needs_values(event, model, value=None) -> bool:
 
 def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
            eval_in_scope=None) -> Tuple[Any, List[Any]]:
+    value = _distinct_labels(value)
     original_model = model or {}
     stored_before = _stored(original_model)
     saved_before = _view_slots(value, original_model, stored_before)
@@ -3832,7 +3995,7 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                                              for i, c in enumerate(value.columns)),
                         targets=tuple(new if t == old else t for t in value.targets))
     else:
-        relabeled = _relabeled(event, original_model, value, commands)
+        relabeled = _relabeled(event, original_model, value, commands, eval_in_scope)
         if relabeled is not None:
             # A line written over through the table comes back under a new
             # label: its view goes with it, as a renamed name's does.
@@ -3862,7 +4025,7 @@ def update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
     return (model, commands)
 
 
-def _relabeled(event, model, value: ForLoopTable, commands) -> Optional[Tuple[int, str]]:
+def _relabeled(event, model, value: ForLoopTable, commands, eval_in_scope=None) -> Optional[Tuple[int, str]]:
     """(col, label) when what `event` wrote is column `col`'s own line,
     written over through the table -- its box, Change Type -- and the label
     it will come back under. The label is the runner's: the statement with
@@ -3877,7 +4040,7 @@ def _relabeled(event, model, value: ForLoopTable, commands) -> Optional[Tuple[in
         if _condition_source(value, col) is not None:
             return (col, f"{'if' if column.path[-1][1] == 0 else 'elif'} {' '.join(typed.split())}")
         if _statement_span(value, col, column.label) is not None:
-            return (col, ' '.join(_named(value, typed).split()))
+            return (col, ' '.join(_named(value, typed, eval_in_scope).split()))
         return None
     if text.startswith('ConvertToggle('):
         try:
@@ -4250,7 +4413,8 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         case ComputeCodeClick(col=col, label=label, kind=kind):
             column = _view_column(value, label) if label in _view_labels(value, model) else None
             if column is not None and column.subject and not is_live_only():
-                code = _compute_code(value, column.subject, kind)
+                placement = next(c for c in value.columns if c.label == label.partition(SUBCOL_SEP)[0])
+                code = _compute_code(value, column.subject, kind, placement)
                 if code:
                     return (_menus_closed(model), code)
         case AddMenuDismiss():
@@ -4293,7 +4457,7 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
                 if condition is not None and value.columns[col].label == label:
                     return (_opened(model, 'editing_column', col, condition[3]), [])
             if double_click and _statement_span(value, col, label) is not None:
-                return (_opened(model, 'editing_column', col, label), [])
+                return (_opened(model, 'editing_column', col, _text(label)), [])
         case InitCellClick(col=col, label=label):
             if double_click and _accumulator(value, col, label) is not None and not is_live_only():
                 return (_opened(model, 'editing_init', col, _init_of(value, col) or ''), [])
@@ -4370,33 +4534,12 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
             opening = model.get('chain_menu') != [chain, branch]
             return ({**_menus_closed(model), 'add_menu_open': False,
                      'chain_menu': [chain, branch] if opening else None}, [])
-        case ColumnDragStart(col=label) if not is_live_only():
-            if _draggable_statement(value, label) is not None:
-                return ({**_menus_closed(model), 'column_drag_from': label, 'column_drag_over': label}, [])
-        case ColumnDragOver(col=label) if model.get('column_drag_from') is not None:
-            if event_json.get('buttons', 0) == 0:
-                return ({**model, 'column_drag_from': None, 'column_drag_over': None}, [])
-            if _draggable_statement(value, label) is not None:
-                return ({**model, 'column_drag_over': label}, [])
-        case ColumnDragEnd(col=label):
-            moved = (_statement_reordered(value, model.get('column_drag_from'), label)
-                     if not is_live_only() else None)
-            return ({**model, 'column_drag_from': None, 'column_drag_over': None}, [moved] if moved else [])
-        case BranchDragStart(chain=chain, branch=branch) if branch != 0 \
-                and branch in _conditional(value, chain) and not is_live_only():
-            return ({**_menus_closed(model), 'branch_drag': {'chain': chain, 'from': branch, 'over': branch}}, [])
-        case BranchDragOver(chain=chain, branch=branch) if model.get('branch_drag'):
-            if event_json.get('buttons', 0) == 0:
-                # Let go somewhere that isn't a header: the drag is over.
-                return ({**model, 'branch_drag': None}, [])
-            drag = model['branch_drag']
-            if drag['chain'] == chain and branch in _conditional(value, chain):
-                return ({**model, 'branch_drag': {**drag, 'over': branch}}, [])
-        case BranchDragEnd(chain=chain, branch=branch) if model.get('branch_drag'):
-            drag = model['branch_drag']
-            moved = (_branches_reordered(value, chain, drag['from'], branch)
-                     if drag['chain'] == chain and not is_live_only() else None)
-            return ({**model, 'branch_drag': None}, [moved] if moved else [])
+        case ColumnDrop(col=label, onto=onto, after=after):
+            moved = None if is_live_only() else _statement_reordered(value, label, onto, after)
+            return (_menus_closed(model), [moved] if moved else [])
+        case BranchDrop(chain=chain, branch=branch, onto=onto, after=after):
+            moved = None if is_live_only() else _branches_reordered(value, chain, branch, onto, after)
+            return (_menus_closed(model), [moved] if moved else [])
         case RemoveBranchClick(chain=chain, branch=branch) if branch in _chain_branches(value, chain) \
                 and not is_live_only():
             others = {k: v for k, v in model.items() if k != 'chain_menu'}
@@ -4427,11 +4570,11 @@ def _update(event, var_and_exp, model, value: ForLoopTable, get_visualizer=None,
         case ColumnKeyDown() if _box_open(model):
             key = event_json.get('key')
             if key in ('Enter', 'Tab'):
-                return _write_box(model, value)
+                return _write_box(model, value, eval_in_scope)
             if key == 'Escape':
                 return (_closed(model), [])
         case ColumnInputBlur() if _box_open(model):
-            return _write_box(model, value) if isinstance(model.get('editing_column'), str) else (_closed(model), [])
+            return _write_box(model, value, eval_in_scope) if isinstance(model.get('editing_column'), str) else (_closed(model), [])
     return (model, [])
 
 
@@ -4458,9 +4601,11 @@ def _tally_order(value: ForLoopTable, model, col: int) -> List[str]:
     return [literal for _text, _count, literal in _tally_rows_of(value, model, col) if literal is not None]
 
 
-def _compute_code(value: ForLoopTable, subject: str, kind: str) -> List[Any]:
+def _compute_code(value: ForLoopTable, subject: str, kind: str, placement: ForLoopColumn) -> List[Any]:
     """What builds an answer about `subject` up as the loop runs: a name set
-    above the loop, and a line at the end of its body adding to it."""
+    above the loop, and a line adding to it each iteration where `placement`
+    -- the column, or the one a sub-column is of -- has its value (see
+    _built_up)."""
     lines = {
         'unique': ('unique', 'set()', '{n}.add({s})'),
         'tally': ('tally', 'Counter()', '{n}[{s}] += 1'),
@@ -4472,12 +4617,27 @@ def _compute_code(value: ForLoopTable, subject: str, kind: str) -> List[Any]:
         return []
     prefix, start, step = lines
     name = _unique_name(value, re.sub(r'\W+', '_', f'{prefix}_{subject}').strip('_'))
-    insert = InsertLines(((value.line - 1, f'{value.indent}{name} = {start}'),
-                          (_body_end(value), f'{value.body_indent}{step.format(n=name, s=subject)}')))
-    return [AddImports(('from collections import Counter',)), insert] if kind == 'tally' else [insert]
+    written = _built_up(value, placement, f'{name} = {start}', step.format(n=name, s=subject))
+    return [AddImports(('from collections import Counter',)), *written] if kind == 'tally' else written
 
 
-def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
+def _built_up(value: ForLoopTable, column: ForLoopColumn, start: str, step: str) -> List[Any]:
+    """`start` above the loop, and `step` where each iteration has `column`'s
+    value: the end of the body, or, for a column in an `if` branch, right
+    after its statement there -- an iteration that skipped the branch has no
+    value of it, and the end of the body would read a name never set, or the
+    one an earlier iteration left. A branch on its `if`'s line opens out
+    first, before the line above the loop moves it."""
+    above = (value.line - 1, f'{value.indent}{start}')
+    if not column.path or column.cond:
+        return [InsertLines((above, (_body_end(value), f'{value.body_indent}{step}')))]
+    beside = _written_beside(value, column, step)
+    if isinstance(beside, InsertLines):
+        return [InsertLines((above, *beside.lines))]
+    return [beside, InsertLines((above,))]
+
+
+def _write_box(model, value: ForLoopTable, eval_in_scope=None) -> Tuple[Any, List[Any]]:
     """Enter in the box: write what it holds, as whatever the box is for."""
     if isinstance(model.get('editing_column'), str):
         label = model['editing_column']
@@ -4527,7 +4687,7 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     col = model.get('editing_column')
     if not statement or is_live_only():
         return (_closed(model), [])
-    statement = _named(value, statement)
+    statement = _named(value, statement, eval_in_scope)
     if col is None:
         after, indent = _body_end(value), value.body_indent
         insert_at = model.get('insert_at')
@@ -4541,14 +4701,14 @@ def _write_box(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
         if one is not None:
             # Beside a statement on its `if`'s line, or right of the condition
             # -- the top of the branch -- the branch opens out to take it.
-            if column.placeholder and column.label == 'pass':
+            if column.placeholder and _text(column.label) == 'pass':
                 lines = [statement]
             elif column.cond or not insert_at['after']:
                 lines = [statement, one[3]]
             else:
                 lines = [one[3], statement]
             return ({**_closed(model), 'pending_init': pending}, [_opened_out(value, one, lines)])
-        if column is not None and column.placeholder and column.label == 'pass':
+        if column is not None and column.placeholder and _text(column.label) == 'pass':
             # A new branch's pass was only holding its place.
             return ({**_closed(model), 'pending_init': pending},
                     [ReplaceLines(column.span[0], column.span[1], f'{indent}{statement}')])
@@ -4638,10 +4798,8 @@ def _write_group_by(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
         return (model, [])
     targets = value.targets or (column.subject,)
     item = targets[0] if len(targets) == 1 else f'({", ".join(targets)})'
-    return (_closed(model), [InsertLines(((value.line - 1, f'{value.indent}{name} = {{}}'),
-                                          (_body_end(value),
-                                           f'{value.body_indent}{name}.setdefault({column.subject}, [])'
-                                           f'.append({item})')))])
+    return (_closed(model), _built_up(value, column, f'{name} = {{}}',
+                                      f'{name}.setdefault({column.subject}, []).append({item})'))
 
 
 def _write_collect(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
@@ -4655,9 +4813,7 @@ def _write_collect(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:
     if not name.isidentifier() or keyword.iskeyword(name) or name in value.defined:
         # Left open, as typed: a name already in use would be overwritten.
         return (model, [])
-    after = value.body_lines[1] or value.end_line
-    return (_closed(model), [InsertLines(((value.line - 1, f'{value.indent}{name} = []'),
-                                          (after, f'{value.body_indent}{name}.append({column.subject})')))])
+    return (_closed(model), _built_up(value, column, f'{name} = []', f'{name}.append({column.subject})'))
 
 
 def _write_join(model, value: ForLoopTable) -> Tuple[Any, List[Any]]:

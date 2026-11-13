@@ -1,5 +1,5 @@
 import { registerEditorContribution, EditorContributionInstantiation, EditorAction, registerEditorAction, ServicesAccessor } from '../../../browser/editorExtensions.js';
-import { Disposable, DisposableMap, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap, DisposableStore, IDisposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { disposableTimeout } from '../../../../base/common/async.js';
 import { IEditorContribution, ScrollType } from '../../../common/editorCommon.js';
 import { ICodeEditor, IViewZone, IOverlayWidget, IOverlayWidgetPosition, IOverlayWidgetPositionCoordinates, OverlayWidgetPositionPreference, IEditorMouseEvent, MouseTargetType } from '../../../browser/editorBrowser.js';
@@ -264,6 +264,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 	// take the handle out from under the drag that was about to start. Read on
 	// mouseup, where a press that never became a drag is the click it was.
 	private unfocusedDragPress: MouseEvent | null = null;
+	// The drag of a ⣿ that reorders (snc-reorder-handle), while one is held:
+	// its listeners, drop line and marks. See beginReorderDrag.
+	private readonly reorderDrag = this._register(new MutableDisposable<DisposableStore>());
 	private actionTooltip: HTMLElement | null = null;
 	private actionTooltipBridge: HTMLElement | null = null;
 	private actionTooltipTimer: any = null;
@@ -412,6 +415,15 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 					ev.stopPropagation();
 					return;
 				}
+				// Likewise a press on a ⣿ that reorders: the drag is the
+				// editor's to run, focused or not (see beginReorderDrag).
+				const reorderHandle = targetEl?.closest<HTMLElement>('[snc-reorder-handle]');
+				if (reorderHandle && ev.button === 0) {
+					ev.preventDefault();
+					ev.stopPropagation();
+					this.beginReorderDrag(reorderHandle, ev);
+					return;
+				}
 			}
 			// Small-mode click-to-expand: intercept the first mousedown so the
 			// click pins focus to this line instead of dispatching a Python
@@ -459,6 +471,8 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_mouse_python_event('snc-mouse-down', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mousemove', (ev: MouseEvent) => {
+			// Mid-reorder, nothing under the pointer is the program's to hear.
+			if (this.reorderDrag.value) { return; }
 			if (ev.buttons !== 0) {
 				this.lastDragPointer = { x: ev.clientX, y: ev.clientY, buttons: ev.buttons };
 			}
@@ -468,6 +482,9 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this.dispatch_mouse_python_event('snc-mouse-move', ev);
 		}));
 		this._register(dom.addDisposableListener(this.domNode, 'mouseup', (ev: MouseEvent) => {
+			// A reorder's release is its drop, heard on the window (see
+			// beginReorderDrag), wherever it lands.
+			if (this.reorderDrag.value) { return; }
 			// The press came up where a drag would have taken it away instead
 			// (see mousedown), so it was a click after all: send what the press
 			// would have sent, from where the press was.
@@ -3334,6 +3351,164 @@ class VisualizationWidget extends Disposable implements IOverlayWidget {
 			this._register(dom.addDisposableListener(handle, 'pointerdown', beginResizing));
 			this._register(dom.addDisposableListener(handle, 'pointerup', stopResizing));
 		}
+	}
+
+	/**
+	 * Run the drag of a ⣿ that reorders, pressed with `press`, in the editor
+	 * alone. A drag the program followed cost a run of it for every header
+	 * the pointer crossed, so its drop line trailed the pointer, and a release
+	 * anywhere but a header was never heard. Here the program hears one event,
+	 * the drop.
+	 *
+	 * The handle names what it is dragged among (snc-reorder-handle) and the
+	 * event its drop sends (snc-reorder-drop), with `{onto}` and `{after}` to
+	 * fill in. A header it can land beside says what it stands for to that
+	 * kind of drag (snc-reorder-items): a Python literal, or `{value, side}`
+	 * when a drop on it lands on one side only. Headers standing for the same
+	 * thing -- the branches of one `if` chain -- are one place to land.
+	 *
+	 * Where it lands is read off where the headers are drawn, by the pointer's
+	 * x: on a header row, among that row's headers; anywhere else -- the body
+	 * rows, past the table's edge -- the innermost header over the pointer, or
+	 * else the nearest, outermost first. A release more than a little way off
+	 * the table, or Escape, puts the drag down with nothing sent.
+	 */
+	private beginReorderDrag(handle: HTMLElement, press: MouseEvent): void {
+		const group = handle.getAttribute('snc-reorder-handle') ?? '';
+		const drop = handle.getAttribute('snc-reorder-drop') ?? '';
+		if (!drop || !handle.closest('.list-table-scroll')) { return; }
+		const store = new DisposableStore();
+		this.reorderDrag.value = store;
+		const win = dom.getWindow(this.domNode);
+		// A run finishing mid-drag rebuilds the DOM: the handle is found again
+		// by its drop, which no other handle has.
+		const liveHandle = (): HTMLElement | null => handle.isConnected ? handle
+			: this.domNode.querySelector<HTMLElement>(`[snc-reorder-drop="${CSS.escape(drop)}"]`);
+		const line = dom.$('.snc-reorder-line');
+		let dragging = false;
+		let target: { value: string; after: boolean } | null = null;
+		store.add(toDisposable(() => {
+			line.remove();
+			for (const el of this.domNode.querySelectorAll('.list-table-is-dragging, .col-drag-source')) {
+				el.classList.remove('list-table-is-dragging', 'col-drag-source');
+			}
+			this.domNode.classList.remove('snc-reordering');
+		}));
+
+		const track = (x: number, y: number): void => {
+			const live = liveHandle();
+			const scope = live?.closest<HTMLElement>('.list-table-scroll');
+			const source = live?.closest<HTMLElement>('th');
+			if (!scope || !source) { target = null; line.remove(); return; }
+			scope.classList.add('list-table-is-dragging');
+			source.classList.add('col-drag-source');
+			this.domNode.classList.add('snc-reordering');
+			const bounds = scope.getBoundingClientRect();
+			// Near the table's left or right edge, it scrolls to what is past it.
+			const edge = 24;
+			if (x < bounds.left + edge) { scope.scrollLeft -= 12; }
+			else if (x > bounds.right - edge) { scope.scrollLeft += 12; }
+			const slack = 48;
+			const found = x < bounds.left - slack || x > bounds.right + slack || y < bounds.top - slack || y > bounds.bottom + slack
+				? null : this.reorderTargetAt(scope, source, group, x, y);
+			if (!found) { target = null; line.remove(); return; }
+			target = { value: found.value, after: found.after };
+			const host = this.domNode.getBoundingClientRect();
+			const at = Math.min(Math.max(found.after ? found.right : found.left, bounds.left), bounds.right);
+			line.style.left = `${at - host.left - 1}px`;
+			line.style.top = `${Math.max(found.top, bounds.top) - host.top}px`;
+			line.style.height = `${Math.max(0, bounds.bottom - Math.max(found.top, bounds.top))}px`;
+			if (!line.isConnected) { this.domNode.appendChild(line); }
+		};
+
+		store.add(dom.addDisposableListener(win, 'mousemove', (ev: MouseEvent) => {
+			// A press that hasn't moved is not yet a drag: a click on the ⣿
+			// does nothing, as it always has.
+			if (!dragging && Math.abs(ev.clientX - press.clientX) + Math.abs(ev.clientY - press.clientY) < 4) { return; }
+			dragging = true;
+			ev.preventDefault();
+			track(ev.clientX, ev.clientY);
+		}, true));
+		store.add(dom.addDisposableListener(win, 'mouseup', (ev: MouseEvent) => {
+			if (dragging) { track(ev.clientX, ev.clientY); }
+			const landed = dragging ? target : null;
+			const live = liveHandle();
+			this.reorderDrag.clear();
+			if (!landed || !live) { return; }
+			const replaceLast = (text: string, find: string, by: string): string => {
+				const at = text.lastIndexOf(find);
+				return at < 0 ? text : text.slice(0, at) + by + text.slice(at + find.length);
+			};
+			// {after} first: {onto}'s value may itself read `{after}`.
+			const event = replaceLast(replaceLast(drop, '{after}', landed.after ? 'True' : 'False'), '{onto}', landed.value);
+			// Its rect, not the release's target: that may be outside the widget.
+			this.onPointerEvent(this.wrapWithChildKeys(event, live.parentElement, this.domNode), ev, live.getBoundingClientRect());
+		}, true));
+		store.add(dom.addDisposableListener(win, 'keydown', (ev: KeyboardEvent) => {
+			if (ev.key === 'Escape') {
+				ev.preventDefault();
+				ev.stopPropagation();
+				this.reorderDrag.clear();
+			}
+		}, true));
+		store.add(dom.addDisposableListener(win, 'blur', () => this.reorderDrag.clear()));
+	}
+
+	/**
+	 * Where a reorder of `group`, dragged from the header `source`, would land
+	 * with the pointer at (x, y), in `scope`'s headers -- see beginReorderDrag
+	 * -- or null when that is where it already is.
+	 */
+	private reorderTargetAt(scope: HTMLElement, source: HTMLElement, group: string, x: number, y: number): { value: string; after: boolean; left: number; right: number; top: number } | null {
+		interface Place { value: string; side: string | undefined; left: number; right: number; top: number; bottom: number; isSource: boolean }
+		const places = new Map<string, Place>();
+		for (const el of scope.querySelectorAll<HTMLElement>('[snc-reorder-items]')) {
+			// A table nested in a cell has headers of its own.
+			if (el.closest('.list-table-scroll') !== scope) { continue; }
+			let item: unknown;
+			try {
+				item = (JSON.parse(el.getAttribute('snc-reorder-items') ?? '{}') as Record<string, unknown>)[group];
+			} catch {
+				continue;
+			}
+			const value = typeof item === 'string' ? item
+				: (item && typeof item === 'object' && typeof (item as { value?: unknown }).value === 'string') ? (item as { value: string }).value : undefined;
+			if (value === undefined) { continue; }
+			const side = typeof item === 'object' && item ? (item as { side?: string }).side : undefined;
+			const rect = el.getBoundingClientRect();
+			const place = places.get(value);
+			if (place) {
+				place.left = Math.min(place.left, rect.left);
+				place.right = Math.max(place.right, rect.right);
+				place.top = Math.min(place.top, rect.top);
+				place.bottom = Math.max(place.bottom, rect.bottom);
+				place.isSource ||= el === source;
+			} else {
+				places.set(value, { value, side, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, isSource: el === source });
+			}
+		}
+		const pick = (candidates: Place[]): Place | undefined => {
+			// The innermost over the pointer: the lowest-drawn header.
+			const over = candidates.filter(p => p.left <= x && x < p.right).sort((a, b) => b.bottom - a.bottom)[0];
+			if (over) { return over; }
+			let best: Place | undefined;
+			let bestDistance = Infinity;
+			for (const p of candidates) {
+				const distance = x < p.left ? p.left - x : x - p.right;
+				// Beside a chain and its first statement alike: the chain.
+				if (distance < bestDistance - 0.5 || (Math.abs(distance - bestDistance) <= 0.5 && best && p.top < best.top)) {
+					best = p;
+					bestDistance = distance;
+				}
+			}
+			return best;
+		};
+		const all = [...places.values()];
+		const inRow = all.filter(p => p.top <= y && y < p.bottom);
+		const found = pick(inRow.length ? inRow : all);
+		if (!found || found.isSource) { return null; }
+		const after = found.side === 'after' ? true : found.side === 'before' ? false : x > (found.left + found.right) / 2;
+		return { value: found.value, after, left: found.left, right: found.right, top: found.top };
 	}
 
 	/**

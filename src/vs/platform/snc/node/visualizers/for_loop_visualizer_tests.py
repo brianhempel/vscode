@@ -131,6 +131,18 @@ def header_cells(html_text):
     return re.findall(r'<th[^>]*>.*?</th>', re.search(r'<thead.*?</thead>', html_text).group(0))
 
 
+def reorder_handles(html_text):
+    """Each ⣿ the editor drags (see reorder_attrs): what it is dragged among,
+    and the event its drop sends, `{onto}` and `{after}` yet to fill in."""
+    return [(html.unescape(group), html.unescape(drop)) for group, drop in
+            re.findall(r'snc-reorder-handle="([^"]*)" snc-reorder-drop="([^"]*)"', html_text)]
+
+
+def reorder_items(html_text):
+    """What each header a drag can land beside is, to each kind of drag."""
+    return [json.loads(html.unescape(items)) for items in re.findall(r'snc-reorder-items="([^"]*)"', html_text)]
+
+
 def col_menu_of(html_text):
     """The open column menu's panel, submenus and all, or None while shut."""
     found = re.search(r'<div class="snc-dropdown-panel flyout col-menu-panel[^"]*".*?</div><!--/col-menu-->', html_text, re.S)
@@ -401,6 +413,30 @@ class TestAnExpressionAloneIsNamed(unittest.TestCase):
         for line in ('element.append(1)', 'arr2.append(element)', 'print(element)', 'total = element', '...'):
             with self.subTest(line=line):
                 _, cmds = update(key('Enter'), None, adding(line), t)
+                self.assertEqual(cmds, [InsertLines(((3, f'    {line}'),))])
+
+    def test_a_method_that_only_reads_what_it_is_called_on_is_named(self):
+        # Nothing about the name changes, so the column would show it as it
+        # was -- a module, a class, a string set before the loop, a list
+        # asked how many it holds -- and never what the call answered.
+        scope = {'math': __import__('math'), 'Fraction': __import__('fractions').Fraction,
+                 'prefix': 'ab', 'seen': {1: 'one'}, 'xs': [1, 2]}
+        t = table(columns=(bound('element'), COUNT, statement('xs.append(element)', 3, 'xs')),
+                  rows=(('1', '1', '[1]'), ('2', '2', '[1, 2]')), values=((1, 1, [1]), (2, 2, [1, 2])))
+        for line in ('math.sqrt(element)', 'Fraction.from_float(element)', 'prefix.upper()',
+                     'seen.get(element)', 'xs.count(element)'):
+            with self.subTest(line=line):
+                _, cmds = update(key('Enter'), None, adding(line), t, None, lambda code: eval(code, scope))
+                self.assertEqual(cmds, [InsertLines(((3, f'    result = {line}'),))])
+
+    def test_a_method_that_changes_what_it_is_called_on_is_left_as_written(self):
+        class Walker:
+            def step(self):
+                pass
+        scope = {'seen': {1: 'one'}, 'xs': [1, 2], 'walker': Walker()}
+        for line in ('seen.setdefault(element, 0)', 'xs.sort()', 'walker.step()', 'unknown.go()'):
+            with self.subTest(line=line):
+                _, cmds = update(key('Enter'), None, adding(line), table(), None, lambda code: eval(code, scope))
                 self.assertEqual(cmds, [InsertLines(((3, f'    {line}'),))])
 
     def test_editing_a_column_into_an_expression_names_it(self):
@@ -2939,6 +2975,154 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(update(key('Enter'), None, collecting(0, 'elements'), table())[1], [])
 
 
+def one_line_branch():
+    """A loop whose branch is written on its `if`'s line:
+
+        1  bigs = None
+        2  for x in [1, 5]:
+        3      if x > 1: big = x
+    """
+    branch = (3, 0, 'if x > 1', 3, 3)
+    return table(line=2, end_line=3, columns=(bound('x'), ForLoopColumn('if x > 1', path=(branch,), cond=True,
+                                                                        indent='    '),
+                                              statement('big = x', 3, 'big', path=(branch,), indent='    ')),
+                 rows=(('1', 'False', None), ('5', 'True', '5')), values=((1, False, NO_VALUE), (5, True, 5)),
+                 targets=('x',), defined=frozenset({'x', 'big', 'bigs'}), body_lines=(3, 3), init=(None,) * 3,
+                 source=('for x in [1, 5]:', '    if x > 1: big = x'))
+
+
+class TestWritingAboutABranchsColumn(unittest.TestCase):
+    """What Collect into List, Group By and Compute write each iteration about
+    a column in an `if` branch goes right after its statement, in its branch:
+    an iteration the branch didn't run has no value of the column to add, and
+    at the end of the body it would read a name never set, or the one an
+    earlier iteration left."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_collect_appends_in_the_branch(self):
+        _, cmds = update(key('Enter'), None, collecting(2, 'tags'), branched())
+        self.assertEqual(cmds, [InsertLines(((1, 'tags = []'), (4, '        tags.append(tag)')))])
+
+    def test_group_by_files_in_the_branch(self):
+        _, cmds = update(key('Enter'), None, grouping(4, 'by_tag'), branched())
+        self.assertEqual(cmds, [InsertLines(((1, 'by_tag = {}'), (6, '        by_tag.setdefault(tag, []).append(x)')))])
+
+    def test_compute_code_builds_up_in_the_branch(self):
+        _, cmds = update(click(ComputeCodeClick(col=5, label='total += x', kind='sum')), None, {}, branched())
+        self.assertEqual(cmds, [InsertLines(((1, 'sum_total = 0'), (8, '        sum_total += total')))])
+        _, cmds = update(click(ComputeCodeClick(col=2, label="tag = 'even'", kind='tally')), None, {}, branched())
+        self.assertEqual(cmds, [AddImports(('from collections import Counter',)),
+                                InsertLines(((1, 'tally_tag = Counter()'), (4, '        tally_tag[tag] += 1')))])
+
+    def test_a_one_line_branch_opens_out_to_take_it(self):
+        _, cmds = update(key('Enter'), None, collecting(2, 'all_big'), one_line_branch())
+        self.assertEqual(cmds, [ReplaceLines(3, 3, '    if x > 1:\n        big = x\n        all_big.append(big)'),
+                                InsertLines(((1, 'all_big = []'),))])
+
+
+class TestPastTheRecordedRows(unittest.TestCase):
+    """Past MAX_FOR_TABLE_ROWS the runner keeps no row, so every answer read
+    off the rows -- Count, a compute, a tally -- covers only the iterations
+    recorded, and says so."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def test_count_is_a_lower_bound(self):
+        out = visualize(table(hidden_rows=5), {})
+        self.assertIn('Count: 2+', out)
+        self.assertIn('Count of matches in the first 2 of 7 iterations', out)
+        self.assertIn('Count: 2<', visualize(table(), {}))
+
+    def test_a_kept_answer_says_what_it_covers(self):
+        out = visualize(table(hidden_rows=5), {'computes': {'count += 1': ['sum($)']}})
+        self.assertIn('<div class="col-agg-partial">first 2 of 7</div>', out)
+        self.assertNotIn('col-agg-partial', visualize(table(), {'computes': {'count += 1': ['sum($)']}}))
+
+    def test_the_compute_menu_and_tally_say_it_too(self):
+        model = {'col_menu': 'count += 1', 'submenu': 'compute'}
+        self.assertIn('Answers cover the first 2 of 7 iterations', visualize(table(hidden_rows=5), model))
+        self.assertNotIn('Answers cover', visualize(table(), model))
+        out = visualize(table(hidden_rows=5), {'col_menu': 'count += 1'})
+        self.assertIn('Tally of the first 2', out)
+
+
+def twice_counted():
+    """A loop counting twice, so two columns read the same:
+
+        1  n = 0
+        2  for x in [1, 2]:
+        3      n += 1
+        4      n += 1
+    """
+    return table(line=2, end_line=4, columns=(bound('x'), statement('n += 1', 3, 'n', accumulator=True,
+                                                                    init_span=(1, 1)),
+                                              statement('n += 1', 4, 'n', accumulator=True)),
+                 rows=(('1', '1', '2'), ('2', '3', '4')), values=((1, 1, 2), (2, 3, 4)), targets=('x',),
+                 defined=frozenset({'x', 'n'}), body_lines=(3, 4), init=(None, '0', None),
+                 source=('for x in [1, 2]:', '    n += 1', '    n += 1'))
+
+
+class TestColumnsThatReadTheSame(unittest.TestCase):
+    """Two lines of the body can read the same; their columns are still two,
+    each with its own view -- menu, hiding, width -- though both headers read
+    as the line does."""
+
+    def setUp(self):
+        visualizer_utils.set_live_only(False)
+
+    def second_header_events(self, model=None):
+        return events_in(header_cells(visualize(twice_counted(), model or {}))[3])
+
+    def test_both_headers_read_as_the_line(self):
+        self.assertEqual([h.lstrip('⣿') for h in header_labels(visualize(twice_counted(), {}))[1:]],
+                         ['x', 'n += 1', 'n += 1'])
+
+    def test_one_menu_opens(self):
+        toggle = next(e for e in self.second_header_events() if e.startswith('ColumnMenuToggle'))
+        model, _ = update({'pythonEventStr': toggle, 'eventJSON': {}}, None, {}, twice_counted())
+        self.assertEqual(visualize(twice_counted(), model).count('col-menu-panel'), 1)
+
+    def test_hiding_one_hides_only_it(self):
+        out = visualize(twice_counted(), {'add_menu_open': True})
+        toggles = [e for e in events_in(out) if e.startswith('ColumnToggle')]
+        model, _ = update({'pythonEventStr': toggles[-1], 'eventJSON': {}}, None, {'add_menu_open': True},
+                          twice_counted())
+        self.assertEqual([h.lstrip('⣿') for h in header_labels(visualize(twice_counted(), model))[1:]],
+                         ['x', 'n += 1'])
+
+    def test_editing_the_second_opens_on_its_line_and_writes_over_it(self):
+        edit = next(e for e in self.second_header_events() if e.startswith('ColumnClick'))
+        model, _ = update(click(eval(edit), detail=2), None, {}, twice_counted())
+        self.assertEqual(model['column_input'], 'n += 1')
+        model = {**model, 'column_input': 'n += 2'}
+        _, cmds = update(key('Enter'), None, model, twice_counted())
+        self.assertEqual(cmds, [ReplaceLines(4, 4, '    n += 2')])
+
+    def test_widths_save_on_each_ones_own_slot(self):
+        saving_from(None)
+        try:
+            resize = re.search(r'snc-resize-col="([^"]*)"', header_cells(visualize(twice_counted(), {}))[3]).group(1)
+            event = html.unescape(resize).replace('width=0', 'width=80')
+            model, _ = update({'pythonEventStr': event, 'eventJSON': {}}, None, {}, twice_counted())
+            slots, _ = saved()
+            self.assertEqual((list(model['widths'].values()), len(slots), slots[0]['expr'] != 'n += 1'),
+                             ([80], 1, True))
+        finally:
+            saving_from(None)
+
+    def test_a_line_added_reading_as_one_already_there_asks_where_it_starts(self):
+        one = table(line=2, end_line=3, columns=twice_counted().columns[:2], rows=(('1', '1'), ('2', '2')),
+                    values=((1, 1), (2, 2)), targets=('x',), defined=frozenset({'x', 'n'}), body_lines=(3, 3),
+                    init=(None, '0'))
+        model, _ = update(key('Enter'), None, adding('n += 1'), one)
+        added = replace(twice_counted(), init=(None, '0', None))
+        visualize(added, model)
+        self.assertEqual(model['editing_init'], 2)
+
+
 def no_else(**overrides):
     """branched()'s chain without its `else`: lines 1-6 of it."""
     fields = dict(columns=branched().columns[:5], end_line=6, body_lines=(3, 6),
@@ -3357,16 +3541,12 @@ def two_elifs(**overrides):
     return branched(**fields)
 
 
-def moved(msg, buttons=1):
-    """The event the mouse moving over what sends `msg` sends, a button held."""
-    return {'pythonEventStr': repr(msg), 'eventJSON': {'type': 'MouseMove', 'buttons': buttons}}
-
-
 class TestReorderingAnIfsBranches(unittest.TestCase):
     """An elif's header has a ⣿ to drag it by, as a table's column has: dropped
-    on another conditional branch of its chain -- the `if` or an `elif`, not
-    the `else`, which is always last -- it is tested in that one's place.
-    Whichever branch ends up first is the `if`."""
+    beside another conditional branch of its chain -- the `if` or an `elif`,
+    not the `else`, which is always last -- it is tested on that side of it.
+    Whichever branch ends up first is the `if`. The editor runs the drag (see
+    reorder_attrs); the program runs once, for the drop."""
 
     def setUp(self):
         visualizer_utils.set_live_only(False)
@@ -3374,66 +3554,51 @@ class TestReorderingAnIfsBranches(unittest.TestCase):
     def tearDown(self):
         visualizer_utils.set_live_only(False)
 
+    def drop(self, branch, onto, after, value=None):
+        from for_loop_visualizer import BranchDrop
+        return update(click(BranchDrop(chain=3, branch=branch, onto=onto, after=after)), None, {},
+                      value or two_elifs())
+
     def test_only_an_elif_has_a_handle(self):
-        from for_loop_visualizer import BranchDragStart
-        starts = [e for e in events_in(visualize(two_elifs(), {})) if e.startswith('BranchDragStart')]
-        self.assertEqual(starts, [repr(BranchDragStart(chain=3, branch=1)), repr(BranchDragStart(chain=3, branch=2))])
+        from for_loop_visualizer import BranchDrop
+        handles = reorder_handles(visualize(two_elifs(), {}))
+        self.assertEqual([h for h in handles if h[0] != 'statements'], [
+            ('branches:3', repr(BranchDrop(chain=3, branch=b, onto=0, after=False))
+             .replace('onto=0', 'onto={onto}').replace('after=False', 'after={after}'))
+            for b in (1, 2)])
 
-    def test_while_dragging_the_conditional_branches_are_where_it_can_go(self):
-        from for_loop_visualizer import BranchDragOver, BranchDragStart
-        model, cmds = update(click(BranchDragStart(chain=3, branch=2)), None, {}, two_elifs())
-        self.assertEqual((model.get('branch_drag'), cmds), ({'chain': 3, 'from': 2, 'over': 2}, []))
-        out = visualize(two_elifs(), model)
-        overs = re.findall(r'snc-mouse-move="([^"]*)"', out)
-        self.assertEqual([html.unescape(e) for e in overs],
-                         [repr(BranchDragOver(chain=3, branch=b)) for b in range(3)])
+    def test_the_conditional_branches_are_where_it_can_go(self):
+        self.assertEqual([items.get('branches:3') for items in reorder_items(visualize(two_elifs(), {}))
+                          if 'branches:3' in items], ['0', '1', '2'])
 
-    def test_dragging_over_a_branch_marks_where_it_lands(self):
-        from for_loop_visualizer import BranchDragOver
-        model = {'branch_drag': {'chain': 3, 'from': 2, 'over': 2}}
-        model, _ = update(moved(BranchDragOver(chain=3, branch=1)), None, model, two_elifs())
-        self.assertEqual(model['branch_drag'], {'chain': 3, 'from': 2, 'over': 1})
-        heads = header_cells(visualize(two_elifs(), model))
-        self.assertIn('col-drag-before', next(th for th in heads if 'elif b' in th))
-        self.assertIn('col-drag-source', next(th for th in heads if 'elif c' in th))
-
-    def test_the_mouse_up_somewhere_else_ends_the_drag(self):
-        from for_loop_visualizer import BranchDragOver
-        model = {'branch_drag': {'chain': 3, 'from': 2, 'over': 1}}
-        model, _ = update(moved(BranchDragOver(chain=3, branch=0), buttons=0), None, model, two_elifs())
-        self.assertIsNone(model.get('branch_drag'))
-
-    def test_dropping_an_elif_earlier_tests_it_first(self):
-        from for_loop_visualizer import BranchDragEnd
-        model = {'branch_drag': {'chain': 3, 'from': 2, 'over': 1}}
-        model, cmds = update(click(BranchDragEnd(chain=3, branch=1)), None, model, two_elifs())
-        self.assertEqual((model.get('branch_drag'), cmds), (None, [ReplaceLines(3, 8, '\n'.join((
-            '    if a:', '        p = 1', '    elif c:', '        p = 3', '    elif b:', '        p = 2')))]))
-
-    def test_dropping_an_elif_later_tests_it_after(self):
-        from for_loop_visualizer import BranchDragEnd
-        cmds = update(click(BranchDragEnd(chain=3, branch=2)), None,
-                      {'branch_drag': {'chain': 3, 'from': 1, 'over': 2}}, two_elifs())[1]
+    def test_dropping_an_elif_before_an_earlier_one_tests_it_first(self):
+        model, cmds = self.drop(2, 1, False)
         self.assertEqual(cmds, [ReplaceLines(3, 8, '\n'.join((
             '    if a:', '        p = 1', '    elif c:', '        p = 3', '    elif b:', '        p = 2')))])
 
-    def test_dropped_on_the_if_it_becomes_the_if(self):
-        from for_loop_visualizer import BranchDragEnd
-        cmds = update(click(BranchDragEnd(chain=3, branch=0)), None,
-                      {'branch_drag': {'chain': 3, 'from': 1, 'over': 0}}, branched(source=BRANCHED_SOURCE))[1]
+    def test_dropping_an_elif_after_a_later_one_tests_it_after(self):
+        self.assertEqual(self.drop(1, 2, True)[1], [ReplaceLines(3, 8, '\n'.join((
+            '    if a:', '        p = 1', '    elif c:', '        p = 3', '    elif b:', '        p = 2')))])
+
+    def test_the_side_it_is_dropped_on_is_where_it_goes(self):
+        # Beside the if, on its far side from where it came: second, not first.
+        self.assertEqual(self.drop(2, 0, True)[1], [ReplaceLines(3, 8, '\n'.join((
+            '    if a:', '        p = 1', '    elif c:', '        p = 3', '    elif b:', '        p = 2')))])
+
+    def test_dropped_before_the_if_it_becomes_the_if(self):
+        cmds = self.drop(1, 0, False, branched(source=BRANCHED_SOURCE))[1]
         self.assertEqual(cmds, [ReplaceLines(3, 6, '\n'.join((
             '    if x > 4:', "        tag = 'big'", '    elif x % 2 == 0:', "        tag = 'even'")))])
 
-    def test_dropped_on_itself_or_the_else_it_stays(self):
-        from for_loop_visualizer import BranchDragEnd
-        for over in (2, 3):
-            model, cmds = update(click(BranchDragEnd(chain=3, branch=over)), None,
-                                 {'branch_drag': {'chain': 3, 'from': 2, 'over': over}}, two_elifs())
-            self.assertEqual((model.get('branch_drag'), cmds), (None, []))
+    def test_dropped_where_it_already_is_on_itself_or_the_else_it_stays(self):
+        for onto, after in ((2, False), (2, True), (1, True), (3, False), (3, True)):
+            with self.subTest(onto=onto, after=after):
+                self.assertEqual(self.drop(2, onto, after)[1], [])
 
     def test_live_only_has_no_handle(self):
         visualizer_utils.set_live_only(True)
-        self.assertNotIn('BranchDragStart', visualize(two_elifs(), {}))
+        self.assertEqual(reorder_handles(visualize(two_elifs(), {})), [])
+        self.assertEqual(self.drop(2, 1, False)[1], [])
 
 
 GUARD = (2, 0, 'if x == 1', 2, 2)
@@ -3754,12 +3919,13 @@ class TestReorderingStatements(unittest.TestCase):
     def loop(self, source):
         return self.runner._run(source)[1][0]
 
-    def move(self, source, moving, onto, expected):
-        from table_visualizer import ColumnDragStart, ColumnDragEnd
+    def move(self, source, moving, onto, expected, after=True):
+        """`moving` dropped on the `after` side of `onto` -- a column's label,
+        or the first line of an `if` chain -- rewrites `source` as
+        `expected`."""
+        from for_loop_visualizer import ColumnDrop
         value = self.loop(source)
-        model, _ = update(click(ColumnDragStart(moving)), None, {}, value)
-        model, cmds = update(click(ColumnDragEnd(onto)), None, model, value)
-        self.assertIsNone(model.get('column_drag_from'))
+        cmds = update(click(ColumnDrop(moving, onto, after)), None, {}, value)[1]
         self.assertEqual(len(cmds), 1)
         command = cmds[0]
         self.assertIsInstance(command, ReplaceLines)
@@ -3774,14 +3940,14 @@ class TestReorderingStatements(unittest.TestCase):
         second = 'for x in [1]:\n    # stays\n    b = x + 1\n    a = x  # travels\n'
         self.move(first, 'a = x', 'b = x + 1', second)
         self.move(second, 'a = x', 'b = x + 1',
-                  'for x in [1]:\n    # stays\n    a = x  # travels\n    b = x + 1\n')
+                  'for x in [1]:\n    # stays\n    a = x  # travels\n    b = x + 1\n', after=False)
 
     def test_into_and_out_of_branch(self):
         a = 'for x in [1]:\n    a = x\n    if x:\n        b = x + 1\n'
         b = 'for x in [1]:\n    if x:\n        b = x + 1\n        a = x\n'
         self.move(a, 'a = x', 'b = x + 1', b)
         self.move(b, 'a = x', 'b = x + 1',
-                  'for x in [1]:\n    if x:\n        a = x\n        b = x + 1\n')
+                  'for x in [1]:\n    if x:\n        a = x\n        b = x + 1\n', after=False)
         self.move('for x in [1]:\n    if x:\n        a = x\n    b = x + 1\n',
                   'a = x', 'b = x + 1',
                   'for x in [1]:\n    if x:\n        pass\n    b = x + 1\n    a = x\n')
@@ -3800,40 +3966,77 @@ class TestReorderingStatements(unittest.TestCase):
                   'a = ( x + 1 # travels )', 'b = x',
                   'for x in [1]:\n\tif x:\n\t\tb = x\n\t\ta = (\n\t\t    x + 1  # travels\n\t\t)\n')
 
-    def test_handle_events_and_drag_marks(self):
-        from table_visualizer import ColumnDragStart, ColumnDragOver, ColumnDragEnd
-        value = self.loop('for x in [1]:\n    a = x\n    b = x + 1\n')
-        out = visualize(value, {})
-        self.assertIn(repr(ColumnDragStart('a = x')), events_in(out))
-        self.assertNotIn(repr(ColumnDragStart('x')), events_in(out))
+    def stays(self, source, moving, onto, after):
+        """What dropping `moving` on the `after` side of `onto` writes."""
+        from for_loop_visualizer import ColumnDrop
+        return update(click(ColumnDrop(moving, onto, after)), None, {}, self.loop(source))[1]
+
+    def test_each_statement_has_a_handle_and_is_a_place_to_land(self):
+        from for_loop_visualizer import ColumnDrop
+        out = visualize(self.loop('for x in [1]:\n    a = x\n    b = x + 1\n'), {})
+        template = (repr(ColumnDrop('a = x', 0, False))
+                    .replace('onto=0', 'onto={onto}').replace('after=False', 'after={after}'))
+        self.assertEqual(reorder_handles(out), [('statements', template),
+                                                ('statements', template.replace('a = x', 'b = x + 1'))])
+        # The name the loop binds has no line to move or to land beside.
+        self.assertEqual(reorder_items(out), [{'statements': repr('a = x')}, {'statements': repr('b = x + 1')}])
+        # The editor follows the drag: no move or release goes to the program.
         self.assertNotIn('snc-mouse-move=', out)
-        model, _ = update(click(ColumnDragStart('b = x + 1')), None, {}, value)
-        model, _ = update(moved(ColumnDragOver('a = x')), None, model, value)
-        heads = header_cells(visualize(value, model))
-        self.assertIn('col-drag-before', next(h for h in heads if 'for-loop-col-subject">a' in h))
-        self.assertIn('col-drag-source', next(h for h in heads if 'for-loop-col-subject">b' in h))
-        model, _ = update(moved(ColumnDragOver('a = x'), buttons=0), None, model, value)
-        self.assertIsNone(model.get('column_drag_from'))
-        self.assertEqual(update(click(ColumnDragEnd('a = x')), None, model, value)[1], [])
+        self.assertNotIn('snc-mouse-up=', out)
+
+    def test_an_if_is_a_place_to_land_as_a_whole_and_its_condition_opens_its_branch(self):
+        out = visualize(self.loop('for x in [1]:\n    a = x\n    if x:\n        b = x\n    else:\n        c = x\n'), {})
+        # Both branch headers stand for the chain (line 3); the condition for
+        # its branch's first line, whichever side of it the drop is on.
+        self.assertEqual(reorder_items(out), [
+            {'statements': repr('a = x')}, {'statements': '3', 'branches:3': '0'}, {'statements': '3'},
+            {'statements': {'value': repr('if x'), 'side': 'after'}},
+            {'statements': repr('b = x')}, {'statements': repr('c = x')}])
+
+    def test_dropped_beside_an_if_it_goes_outside_it(self):
+        self.move('for x in [1]:\n    if x:\n        b = x\n    else:\n        c = x\n    a = x\n', 'a = x', 2,
+                  'for x in [1]:\n    a = x\n    if x:\n        b = x\n    else:\n        c = x\n', after=False)
+        self.move('for x in [1]:\n    a = x\n    if x:\n        b = x\n    else:\n        c = x\n', 'a = x', 3,
+                  'for x in [1]:\n    if x:\n        b = x\n    else:\n        c = x\n    a = x\n')
+
+    def test_dropped_beside_its_own_if_it_comes_out_of_it(self):
+        self.move('for x in [1]:\n    if x:\n        a = x\n        b = x\n', 'a = x', 2,
+                  'for x in [1]:\n    if x:\n        b = x\n    a = x\n')
+        self.move('for x in [1]:\n    if x:\n        a = x\n', 'a = x', 2,
+                  'for x in [1]:\n    a = x\n    if x:\n        pass\n', after=False)
+
+    def test_dropped_beside_a_nested_if_it_takes_that_ifs_indentation(self):
+        self.move('for x in [1]:\n    if x:\n        if x > 1:\n            b = x\n    a = x\n', 'a = x', 3,
+                  'for x in [1]:\n    if x:\n        a = x\n        if x > 1:\n            b = x\n', after=False)
+
+    def test_dropped_on_a_condition_it_is_its_branchs_first_line(self):
+        for after in (False, True):
+            self.move('for x in [1]:\n    if x:\n        b = x\n    a = x\n', 'a = x', 'if x',
+                      'for x in [1]:\n    if x:\n        a = x\n        b = x\n', after=after)
+        self.move('for x in [1]:\n    if x:\n        if x > 1:\n            b = x\n    a = x\n', 'a = x', 'if x',
+                  'for x in [1]:\n    if x:\n        a = x\n        if x > 1:\n            b = x\n')
+
+    def test_dropped_where_it_already_is_it_stays(self):
+        source = 'for x in [1]:\n    a = x\n    b = x + 1\n'
+        self.assertEqual(self.stays(source, 'a = x', 'b = x + 1', False), [])
+        self.assertEqual(self.stays(source, 'b = x + 1', 'a = x', True), [])
 
     def test_refuses_shared_lines_and_live_only(self):
-        from table_visualizer import ColumnDragStart, ColumnDragEnd
         for source in ('for x in [1]: a = x; b = x + 1\n',
                        'for x in [1]:\n    a = x; b = x + 1\n'):
-            value = self.loop(source)
-            self.assertNotIn('ColumnDragStart', visualize(value, {}))
-            self.assertEqual(update(click(ColumnDragEnd('b = x + 1')), None,
-                                   {'column_drag_from': 'a = x'}, value)[1], [])
-        value = self.loop('for x in [1]:\n    a = x\n')
+            self.assertEqual(reorder_handles(visualize(self.loop(source), {})), [])
+            self.assertEqual(self.stays(source, 'a = x', 'b = x + 1', True), [])
+        from for_loop_visualizer import ColumnDrop
+        value = self.loop('for x in [1]:\n    a = x\n    b = x\n')
         visualizer_utils.set_live_only(True)
         try:
-            self.assertNotIn('ColumnDragStart', visualize(value, {}))
+            self.assertEqual(reorder_handles(visualize(value, {})), [])
+            self.assertEqual(update(click(ColumnDrop('a = x', 'b = x', True)), None, {}, value)[1], [])
         finally:
             visualizer_utils.set_live_only(False)
 
     def test_replay_is_answered_at_entry_even_when_body_raises(self):
-        events = [("ColumnDragStart(col='a = x / 0')", {}),
-                  ("ColumnDragEnd(col='b = x')", {})]
+        events = [("ColumnDrop(col='a = x / 0', onto='b = x', after=True)", {})]
         import python_runner
         from python_runner_tests import capture_stream_messages
         model = {'_type_fingerprint': python_runner._type_fingerprint(ForLoopTable(0, 0, '', '', (), ())),
@@ -3847,7 +4050,7 @@ class TestReorderingStatements(unittest.TestCase):
         tables = [m['item'] for m in messages.all()
                   if m.get('type') == 'item' and 'forLoopLine' in m['item']]
         self.assertTrue(tables, messages.all())
-        self.assertEqual(tables[0]['handledEventIds'], [0, 1])
+        self.assertEqual(tables[0]['handledEventIds'], [0])
         self.assertTrue(tables[0].get('commands'))
 
     def test_between_elif_and_else_preserves_surrounding_source(self):
@@ -3860,14 +4063,17 @@ class TestReorderingStatements(unittest.TestCase):
                   'a = """first contents last"""', 'b = x',
                   'for x in [1]:\n    if x:\n        b = x\n        a = """first\ncontents\n    last"""\n')
 
-    def test_invalid_targets_self_drop_and_ambiguous_labels_do_nothing(self):
-        from table_visualizer import ColumnDragStart, ColumnDragEnd
-        value = self.loop('for x in [1]:\n    a = x\n    if x:\n        b = x\n')
-        for target in ('x', 'if x', 'a = x', 'missing'):
-            model, _ = update(click(ColumnDragStart('a = x')), None, {}, value)
-            self.assertEqual(update(click(ColumnDragEnd(target)), None, model, value)[1], [])
-        value = self.loop('for x in [1]:\n    a = x\n    a = x\n')
-        self.assertNotIn('ColumnDragStart', visualize(value, {}))
+    def test_invalid_targets_and_self_drop_do_nothing(self):
+        source = 'for x in [1]:\n    a = x\n    if x:\n        b = x\n'
+        # A name the loop binds, itself, no column, a line that starts no chain.
+        for target in ('x', 'a = x', 'missing', 4, 99, None):
+            with self.subTest(target=target):
+                self.assertEqual(self.stays(source, 'a = x', target, True), [])
+
+    def test_a_line_reading_as_another_moves_on_its_own(self):
+        # Its column is labeled apart from the first's (see _distinct_labels).
+        self.move('for x in [1]:\n    a = x  # one\n    b = x\n    a = x  # two\n', 'a = x\x022', 'b = x',
+                  'for x in [1]:\n    a = x  # one\n    a = x  # two\n    b = x\n', after=False)
 
 
 class TestRowExpansionParity(unittest.TestCase):
